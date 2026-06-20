@@ -1,97 +1,92 @@
 # Session handoff
 
-Working notes so a fresh session can pick up cleanly. Delete when no longer
-useful. See `CLAUDE.md` for architecture and `SYNC.md` for the Replit sync.
+Working notes so a fresh session resumes cheaply. See `CLAUDE.md` (architecture)
+and `SYNC.md` (Replit sync). Live app: `phone-dashboard.replit.app` (Reserved VM,
+`python3 app.py`). **The owner trades REAL money manually off the alerts**, so
+reliability + honest data freshness matter more than new model features.
 
-## Project in one line
-Read-only paper monitor for Kalshi 15-minute crypto binaries. Predicts YES/NO at
-the 15m/10m/7m checkpoints, sends Telegram alerts, learns from settled results.
-Never places real orders. Runs on Replit; **GitHub `main` is the source of truth.**
+## 🔴 Immediate next step (where we stopped)
+The Repl is **still freezing**: `/api/health` shows `cycle_watchdog.slowest_stage =
+"run_cycle" ~18s`, `data_age_seconds ~18`, and `current_trade_decisions =
+{AVOID_INVALID_DATA: 7}` — cycles take ~18–20s so data never stays under the 3s
+freshness gate, so no predictions/alerts. The 54s stall (PR #10) is fixed; ~18s
+remains.
 
-## Current state
-- `main` is at the **PR #6 merge**. This session shipped PR #5 (checkpoint message)
-  and PR #6 (deploy-scanner cleanup); both merged.
-- Tests: `python3 -m pytest tests/ -q` → **327 passing, 4 skipped**.
-- ⚠️ `pytest` is NOT preinstalled in a fresh Claude cloud container — run
-  `pip install pytest -q` first.
+**Step 1 — diagnose the residual ~18s:** merge the dev branch
+`claude/beautiful-lamport-mrwnwm` @ `14f734c` (run_cycle sub-stage timing —
+tested, NOT yet merged, parked at owner's request). Then on the Repl: it
+auto-syncs via the relay (~20s) → **Stop ▸ Run** → read `/api/health` →
+`q15_v9_5.run_cycle_timing`. It breaks `run_cycle` into `parent_chain`,
+`v95_analysis`, `signal_store_reconcile`, `market_reconcile`, `total`, `other`.
+- If `market_reconcile` is still ~18s → the PR #10 budget isn't effective; tighten
+  `Q15_V95_RECONCILE_BUDGET_SECONDS` or add a per-ticker backoff.
+- If `parent_chain` dominates → the legacy v94 chain has its own slow settlement
+  path; that's the next target.
 
-## Git workflow (follow this)
-- Develop on branch **`claude/wizardly-fermat-fuxwxt`**, open a PR into `main`.
-- **Merge each PR once the suite is green** (owner asked Claude to merge after
-  tests pass). Each logical change = its own PR.
-- After merging, update the Replit deploy via `SYNC.md` (`git fetch ... main` →
-  `git reset --hard FETCH_HEAD`).
-- Set `git config user.email noreply@anthropic.com` / `user.name Claude` so commits
-  are "verified". Merge commits made via the GitHub API are committed by
-  `noreply@github.com` and will show "Unverified" — cosmetic, don't rewrite them.
-- ⚠️ The Replit Agent makes its own commits and will re-diverge from GitHub if it
-  edits code. Keep GitHub authoritative. Add/adjust a test with every behavior change.
+## Repo state
+- `main` @ `40a2f91` (PR #11). Dev branch `claude/beautiful-lamport-mrwnwm` @
+  `14f734c` (run_cycle timing, pushed, unmerged).
+- Tests: `python3 -m pytest tests/ -q` → **354 passed, 4 skipped**.
+  ⚠️ `pytest` is NOT preinstalled in a fresh container — `pip install pytest -q` first.
 
-## Replit deployment (runbook)
-Live app is a Replit **Deployment** at `phone-dashboard.replit.app`.
-- **Type: Reserved VM** (always-on). It runs a ~1s loop + sends Telegram alerts
-  around the clock, so Autoscale (sleeps when idle) is wrong. `app.py:852` reports
-  `reserved-vm` when `REPLIT_DEPLOYMENT` is set.
-- **Run command: `python3 app.py`** — binds `0.0.0.0:$PORT` (default 8000,
-  `app.py:908`). Set it in the Deployment config's "Run command" field, or in
-  `.replit` under `[deployment]` as `run = ["python3", "app.py"]`. The top-level
-  `run =` only drives the workspace Run button; deployments need their own.
-- **Build command: none** (Flask; deps install from `requirements.txt`).
-- `.replit` / `replit.nix` are NOT in the repo (Replit-managed), so the SYNC.md
-  `git reset --hard` never touches the deploy config.
-- **Security scan:** publishes were failing ~7s at the deploy security-scan step.
-  PR #6 removed the code-side trigger (literal `-----BEGIN ... PRIVATE KEY-----`
-  markers + a Telegram-token-shaped string in `.env.example` and two
-  `kalshi_auth.py` comments). If it STILL dies with "scan skipped: connection
-  lost", that's Replit infra, not our code → status.replit.com + Replit support
-  (build IDs seen: 3c97913b / f003d57e).
-- **Sync auth:** repo is private, so the SYNC.md fetch needs a fine-grained PAT
-  (Contents: Read): `git fetch https://YOUR_TOKEN@github.com/turneraontez-alt/tez.git main`.
+## Shipped this session (all merged to main)
+- **PR #8** — `sync.sh` (one-command Replit sync, no data loss); `spot_ws.py`
+  optional low-latency spot feed (Coinbase/OKX websockets, default-OFF
+  `Q15_SPOT_WS_ENABLED`, `get_spot` prefers fresh WS tick, per-asset REST
+  fallback); `cycle_watchdog.py` (times every refresh stage, flags slow cycles in
+  `/api/health.cycle_watchdog`); per-ticker Kalshi WS `websocket_book_ages`.
+- **PR #9** — docs: reframed `SYNC.md` around the **GitHub Relay** (see below);
+  `sync.sh` is now recovery-only.
+- **PR #10** — fixed the **54s freeze**: `ledger_v95.reconcile_pending_from_market`
+  did up to 12 sequential ~4.5s Kalshi `get_market` calls every 30s inside
+  `run_cycle`. Added a wall-clock budget `Q15_V95_RECONCILE_BUDGET_SECONDS`
+  (default 4s); leftover tickers retry next cycle.
+- **PR #11** — **watchdog pager**: `cycle_watchdog.alert_message` sends a Telegram
+  alert when a cycle exceeds `Q15_WATCHDOG_ALERT_SECONDS` (default 20s), with
+  warmup + cooldown guards. So a freeze pages instead of going silent.
 
-## Done this session
-- **PR #5 — checkpoint message shows market-implied prob.** `build_v95_message`
-  per-pick line reads e.g. `🥇 BNB YES — 71.2% vs mkt 51.5% · grade B · NORMAL`
-  (market prob for the selected side, inverted for NO, omitted when no quote).
-  Tests: `test_message_shows_market_implied_probability`,
-  `test_message_omits_market_implied_when_no_quote`.
-- **PR #6 — deploy secret-scanner cleanup.** Sanitized `.env.example` placeholders
-  and two `kalshi_auth.py` comments so they no longer match private-key / bot-token
-  secret rules. No behavior change (functional PEM substrings + regexes untouched).
-- (Prior) **#1 — market-price anchoring.** `analyse_v95` shrinks the model prob
-  toward the Kalshi market-implied prob, scaled by `data_quality × evidence_quality
-  × Q15_V95_MARKET_ANCHOR_STRENGTH` (default 1.0; set 0 to disable). Helpers
-  `_market_implied_yes`, `_market_anchored_probability`. `raw_yes` + structural
-  baseline untouched; challenger anchored identically.
+## Live runtime facts (from last /api/health)
+- Kalshi WS **on** (`KALSHI_WS_ENABLED` + keys set) → `mode: ws-primary`,
+  `websocket_book_ages` sub-second. Spot WS still OFF (`spot_ws.enabled=false`).
+- `telegram_status: configured_outbox`, delivery healthy. Telegram is NOT the
+  problem; the freeze is the prediction path (stale data → AVOID_INVALID_DATA).
+- `actionable_alerts:false`, `min_settled_for_actionable:30`, only ~3 settled —
+  strong ENTRY alerts are gated until ~30 markets settle (by design).
 
-## Next up — accuracy roadmap (highest leverage first)
-2. **Volatility model** — biggest lever at this horizon. Add intraday vol
-   seasonality, jump/gap detection, blend Deribit implied vol into
-   `_robust_volatility` (`checkpoint_v95.py`). Ship behind a default-OFF `Q15_*`
-   flag so it can't shift the FROZEN champion's live predictions until enabled.
-3. **Calibration** — isotonic as an alternative to Platt; time-decay weighting of
-   old results; plot the reliability curve on the dashboard. Lives in
-   `ledger_v95.calibrate` and the scoreboard.
-4. **Offline eval loop** — strengthen `q15_upgrade/oos_v9.py` into a real backtest
-   so model variants can be A/B'd before shipping.
-5. **Position sizing** — fractional Kelly on calibrated edge-after-costs. Deferred:
-   read-only paper monitor, so only relevant if it ever drives real money.
+## New env flags (all optional)
+`Q15_SPOT_WS_ENABLED` / `Q15_SPOT_WS_MAX_AGE_SECONDS` (3) ·
+`Q15_CYCLE_WATCHDOG_SECONDS` (10) · `Q15_WATCHDOG_ALERT_ENABLED` (on) /
+`_SECONDS` (20) / `_WARMUP_SECONDS` (60) / `_COOLDOWN_SECONDS` (600) ·
+`Q15_V95_RECONCILE_BUDGET_SECONDS` (4).
+
+## Workflow & sync
+- Develop on `claude/beautiful-lamport-mrwnwm` → PR into `main` → merge when green
+  (owner asked Claude to merge after tests pass). Commit identity:
+  `user.email noreply@anthropic.com`, `user.name Claude`.
+- **GitHub Relay** (`tools/github_relay.py`, runs on the Repl) auto-syncs `main`
+  ⇄ Repl every ~20s (merge-based, never force-push). So after a merge the Repl
+  gets code in ~20s — only **Stop ▸ Run** is needed to load it. ⚠️ It also pushes
+  Repl-side commits straight to `main`, bypassing PR review (that's how
+  `"Published your App"` / `"Saved progress"` commits appear on main). `./sync.sh`
+  is now a destructive recovery override only.
+
+## Roadmap remaining (owner-facing recommendation)
+1. **Prove the edge** (highest value): turn `q15_upgrade/oos_v9.py` into a real
+   backtest. The scoreboard is `3/3` — statistically meaningless. Don't size real
+   money until the edge is demonstrated. *(Owner was offered this next.)*
+3. **Trim cruft**: collapse the duplicated `q15_v9_1..v9_5` health blocks; retire
+   dead layers. Heavy ~7k-line frozen stack is hard to trust with money.
 
 ## Invariants — do not break
-- Read-only; nothing touches a real exchange order.
-- Production champion weights are FROZEN; only the shadow challenger learns;
-  promotion is manual + significance-tested. Gate model-behavior changes behind
-  default-OFF `Q15_*` flags.
-- Keep `V9.5 CHECK` in checkpoint message headers and the suppression markers
-  (`ENTRY RECOMMENDED` / `NO ENTRY YET`); keep the `Hourly Report —` header on the
-  canonical report (the reformatter-bypass keys on it).
-- Don't edit the frozen legacy chain (`checkpoint_v91..v94*`) unless changing base
-  behavior — `v95` subclasses it.
-- Keep `.env.example` free of strings that match secret scanners (no real
-  `-----BEGIN ... PRIVATE KEY-----` markers or `\d{8,10}:AA…` token shapes).
+- Read-only; nothing places a real exchange order (the human trades manually).
+- Champion weights FROZEN; only shadow challenger learns; promotion manual +
+  significance-tested. Gate model-behavior changes behind default-OFF `Q15_*` flags.
+- Keep `V9.5 CHECK` + `ENTRY RECOMMENDED`/`NO ENTRY YET` markers in checkpoint
+  messages; keep the `Hourly Report —` header. Keep `.env.example` free of real
+  secret-scanner patterns. Don't edit the frozen `checkpoint_v91..v94*` chain.
 
 ## Gotchas
-- Learning/scoreboard data is sparse until markets actually settle. Don't tune
-  anything (incl. anchor strength) on tiny samples — wait for the calibration
-  curve; the promotion gate is significance-tested for a reason.
-- The shared `MarketResultCache` (`market_cache.py`) caches only resolved markets;
-  all four settlement reconcilers go through it.
+- Data is sparse until markets settle — don't tune on tiny samples.
+- `MarketResultCache` (`market_cache.py`) caches only resolved markets; all four
+  settlement reconcilers go through it. Unresolved markets are re-fetched live
+  every cycle (the root of the reconcile-stall family of bugs).
