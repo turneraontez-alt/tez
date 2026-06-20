@@ -696,6 +696,18 @@ def extract_features(snapshot: Mapping[str, Any], now: float) -> dict[str, Any]:
 # Persistent bounded online learner
 # ---------------------------------------------------------------------------
 
+class _PersistentConnection(sqlite3.Connection):
+    """SQLite connection whose ``close()`` is a no-op so a single connection can
+    be reused across the store's many ``with closing(self._connect())`` call
+    sites. Re-opening the file every call is expensive on Replit's networked
+    ``data/`` disk (the dominant cost of the per-asset 15M learning reads); the
+    connection lives for the process lifetime and is serialized by the store's
+    lock. ``with conn:`` transactions still commit/roll back normally."""
+
+    def close(self) -> None:  # noqa: D401 - intentional no-op for connection reuse
+        pass
+
+
 class Adaptive15LearningStore:
     """SQLite-backed, version-scoped online learner for unique 15M contracts."""
 
@@ -716,6 +728,7 @@ class Adaptive15LearningStore:
         self._lock = threading.RLock()
         self._available = True
         self._last_error: str | None = None
+        self._shared_connection: sqlite3.Connection | None = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._initialize()
@@ -724,11 +737,22 @@ class Adaptive15LearningStore:
             self._last_error = f"{type(exc).__name__}: {exc}"
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=5.0)
+        # Reuse one persistent connection (close() is a no-op) instead of opening
+        # the SQLite file on every call — file open is the dominant cost on
+        # Replit's networked disk and this method is hit several times per asset
+        # per cycle. All runtime callers serialize via self._lock.
+        connection = self._shared_connection
+        if connection is not None:
+            return connection
+        connection = sqlite3.connect(
+            str(self.path), timeout=5.0, check_same_thread=False,
+            factory=_PersistentConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=5000")
+        self._shared_connection = connection
         return connection
 
     def _initialize(self) -> None:
