@@ -1062,6 +1062,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._last_checkpoint_v95 = "UNKNOWN"
         self._last_reconcile: dict[str, Any] = {}
         self._last_market_reconcile: dict[str, Any] = {}
+        self._run_cycle_timing: dict[str, Any] = {}
         self._last_reconcile_at = 0.0
         # Optional Kalshi client (set by the app) so predictions can be settled
         # directly from official results, not only via the signals table.
@@ -1077,12 +1078,16 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
 
     def run_cycle(self, snapshots: dict[str, dict], now: float, ws_health: Mapping[str, Any] | None,
                   focus_manager: Any, calibrated_edge: Any, notifier: Any) -> dict[str, dict]:
+        _rc_start = time.monotonic()
+        _t: dict[str, float] = {}
         deferred = _BufferedNotifier(notifier)
         assets = [_asset_name(key, value) for key, value in snapshots.items() if isinstance(value, Mapping)]
         self.market_data.schedule(assets, now)
         bridged_snapshots, bridge_status = _bridge_parent_inputs(self, snapshots, now)
         self._bridge_status = copy.deepcopy(bridge_status)
+        _t0 = time.monotonic()
         parent_output = super().run_cycle(bridged_snapshots, now, ws_health, focus_manager, calibrated_edge, deferred)
+        _t["parent_chain"] = round(time.monotonic() - _t0, 3)
         if not self.v95_enabled:
             deferred.flush(None)
             return parent_output
@@ -1091,6 +1096,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 {str(key): value for key, value in parent_output.items() if isinstance(value, Mapping)},
                 deferred.messages(),
             )
+            _t0 = time.monotonic()
             analyses: dict[str, dict[str, Any]] = {}
             output: dict[str, dict] = {}
             public_map: dict[str, dict[str, Any]] = {}
@@ -1156,17 +1162,22 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
 
+            _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
                 if self.signal_store is not None:
+                    _t0 = time.monotonic()
                     self._last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+                    _t["signal_store_reconcile"] = round(time.monotonic() - _t0, 3)
                     result_events = list(self._last_reconcile.get("result_events") or [])
                 # Settle any remaining closed markets directly from Kalshi, so
                 # predictions without a signals row still get graded.
                 get_market = getattr(self.kalshi_client, "get_market", None)
                 if callable(get_market):
+                    _t0 = time.monotonic()
                     self._last_market_reconcile = self.ledger.reconcile_pending_from_market(get_market, now)
+                    _t["market_reconcile"] = round(time.monotonic() - _t0, 3)
                     result_events = list(self._last_market_reconcile.get("result_events") or []) + result_events
             ledger_status = self.ledger.status()
             message = build_v95_message(checkpoint, analyses, ranking, ledger_status, result_events) if ranking else None
@@ -1202,6 +1213,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _LATEST_RANKING.clear(); _LATEST_RANKING.extend(copy.deepcopy(ranking))
                 _LATEST_LEDGER.clear(); _LATEST_LEDGER.update(copy.deepcopy(ledger_status))
                 _LATEST_CHECKPOINT = checkpoint
+            _t["total"] = round(time.monotonic() - _rc_start, 3)
+            _t["other"] = round(max(0.0, _t["total"] - sum(v for k, v in _t.items() if k != "total")), 3)
+            self._run_cycle_timing = _t
             return output
         except Exception as exc:
             self._errors += 1
@@ -1259,6 +1273,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         return {
             "version": VERSION, "enabled": self.v95_enabled, "read_only": True,
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
+            "run_cycle_timing": copy.deepcopy(self._run_cycle_timing),
             "last_checkpoint": self._last_checkpoint_v95,
             "telegram_sent": self._telegram_sent_v95,
             "telegram_failed": self._telegram_failed_v95,
