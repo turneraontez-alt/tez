@@ -276,12 +276,21 @@ class V95Tests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertEqual(self.ledger.status()["shadow_updates_by_checkpoint"]["10M"], 1)
 
-    def test_fifteen_minute_learning_is_disabled_by_default(self):
-        before = self.ledger.challenger_weights("15M")
+    def test_fifteen_minute_learning_enabled_by_default(self):
+        # 15M shadow learning now defaults ON (observational; champion stays
+        # frozen). The challenger is allowed to learn from a 15M resolution.
+        self.assertTrue(self.ledger.learning_enabled_by_checkpoint["15M"])
         self._record("T15", checkpoint="15M")
         self.ledger.resolve_ticker("T15", "NO", NOW+700)
-        after = self.ledger.challenger_weights("15M")
-        self.assertEqual(before, after)
+        self.assertTrue(self.ledger.status()["production_weights_frozen"])
+
+    def test_fifteen_minute_learning_can_be_disabled(self):
+        # Opt-out: with 15M learning off, a resolution leaves the challenger frozen.
+        self.ledger.learning_enabled_by_checkpoint["15M"] = False
+        before = self.ledger.challenger_weights("15M")
+        self._record("T15off", checkpoint="15M")
+        self.ledger.resolve_ticker("T15off", "NO", NOW+700)
+        self.assertEqual(before, self.ledger.challenger_weights("15M"))
         self.assertEqual(self.ledger.status()["shadow_updates_by_checkpoint"]["15M"], 0)
         self.assertTrue(self.ledger.status()["production_weights_frozen"])
 
@@ -333,7 +342,9 @@ class V95Tests(unittest.TestCase):
         status = self.ledger.status()
         self.assertEqual(status["primary_learning_checkpoint"], "10M")
         self.assertTrue(status["learning_enabled_by_checkpoint"]["10M"])
-        self.assertFalse(status["learning_enabled_by_checkpoint"]["15M"])
+        # 15M now learns too (observational); 7M stays off until its schema lands.
+        self.assertTrue(status["learning_enabled_by_checkpoint"]["15M"])
+        self.assertFalse(status["learning_enabled_by_checkpoint"]["7M"])
 
     def test_pattern_similarity_is_checkpoint_scoped(self):
         result = self.ledger.pattern_similarity({name: 0.1 for name in CHAMPION_WEIGHTS if name != "intercept"}, "YES", "10M")

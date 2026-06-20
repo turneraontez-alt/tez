@@ -59,7 +59,15 @@ class TestRegimeAwareAnchor(unittest.TestCase):
                   "Q15_V95_REGIME_ANCHOR_MIN_FACTOR"):
             os.environ.pop(k, None)
 
-    def test_disabled_by_default_is_identity(self):
+    def test_enabled_by_default_shrinks_in_noisy_regime(self):
+        # Default ON: a noisy regime (uncertainty above the 0.08 baseline) shrinks
+        # the anchor strength without any env var set.
+        strength, factor = _regime_anchor_strength(1.0, {"uncertainty": 0.20})
+        self.assertLess(factor, 1.0)
+        self.assertLess(strength, 1.0)
+
+    def test_can_be_disabled_back_to_identity(self):
+        os.environ["Q15_V95_REGIME_AWARE_ANCHOR"] = "false"
         strength, factor = _regime_anchor_strength(1.0, {"uncertainty": 0.20})
         self.assertEqual(strength, 1.0)
         self.assertEqual(factor, 1.0)

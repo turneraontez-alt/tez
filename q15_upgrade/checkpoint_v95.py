@@ -672,15 +672,14 @@ def _regime_anchor_strength(base_strength: float, regime: Mapping[str, Any]) -> 
 
     The model is noisiest in chaotic regimes (high volatility, exchange
     divergence, threshold pin) and most reliable in clean trends. When
-    ``Q15_V95_REGIME_AWARE_ANCHOR`` is enabled we shrink the model's allowed
+    ``Q15_V95_REGIME_AWARE_ANCHOR`` (default ON) we shrink the model's allowed
     deviation from the market as regime uncertainty rises above the NORMAL
     baseline (0.08), so a noisy regime is anchored harder to the (efficient)
-    market. Default-OFF: the returned factor is exactly 1.0 unless enabled, so
-    production behavior is unchanged until shadow-validated.
+    market. Set the flag to ``false`` to restore the identity factor of 1.0.
 
     Returns ``(effective_strength, factor)``.
     """
-    if not _env_bool("Q15_V95_REGIME_AWARE_ANCHOR", False):
+    if not _env_bool("Q15_V95_REGIME_AWARE_ANCHOR", True):
         return base_strength, 1.0
     baseline = 0.08
     uncertainty = float(regime.get("uncertainty", baseline) or baseline)
@@ -776,7 +775,7 @@ def analyse_v95(
     raw_yes, contributions = _timed(prof, "model_champion", _model_probability, structural, feature_values, feature_quality, CHAMPION_WEIGHTS, regime, data_quality)
     calibration = _timed(prof, "calibrate", ledger.calibrate, raw_yes, canonical.checkpoint, canonical.asset) if ledger else {"probability": raw_yes, "active": False, "reason": "ledger_unavailable"}
     shadow_calibrated_yes = _clamp(float(calibration["probability"]), 0.01, 0.99)
-    production_calibration_enabled = _env_bool("Q15_V95_PRODUCTION_CALIBRATION_ENABLED", False)
+    production_calibration_enabled = _env_bool("Q15_V95_PRODUCTION_CALIBRATION_ENABLED", True)
     model_yes = shadow_calibrated_yes if production_calibration_enabled and calibration.get("active") else raw_yes
     # Market-price anchoring: defer to the (efficient) Kalshi market unless the
     # model has earned the confidence to deviate. This is the bot's working prob.
@@ -805,9 +804,9 @@ def analyse_v95(
     # Evidence-coverage penalty: "insufficient evidence" must read as low
     # confidence, not as a clean neutral signal. Features that have no data
     # contribute nothing (quality 0), so a thin snapshot yields low coverage;
-    # when enabled, low coverage widens the conservative haircut toward 0.5.
-    # Default 0.0 -> no behavior change until tuned and shadow-validated.
-    coverage_penalty = _env_float("Q15_V95_EVIDENCE_COVERAGE_PENALTY", 0.0, 0.0, 0.20)
+    # low coverage widens the conservative haircut toward 0.5. Default 0.08
+    # (moderate); set to 0.0 to disable, up to 0.20 for a stronger thin-data haircut.
+    coverage_penalty = _env_float("Q15_V95_EVIDENCE_COVERAGE_PENALTY", 0.08, 0.0, 0.20)
     if coverage_penalty > 0.0:
         coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
         covered = sum(1 for q in feature_quality.values() if q >= coverage_floor)

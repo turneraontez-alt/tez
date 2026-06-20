@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 logger = logging.getLogger(__name__)
 
 VERSION = "q15-v9.5.1-ledger-v2-10m-primary"
-MODEL_VERSION = "q15-v9.5.1-champion-ensemble-10m-primary-v1"
+MODEL_VERSION = "q15-v9.5.2-champion-ensemble-10m-primary-v2"
 FEATURE_SCHEMA_VERSION = "q15-v9.5.1-canonical-snapshot-v1"
 READ_ONLY = True
 
@@ -199,7 +199,11 @@ class V95Ledger:
         # challenger weight tables to admit '7M' — see _initialize.
         self.learning_enabled_by_checkpoint = {
             "10M": _env_bool("Q15_V95_10M_SHADOW_LEARNING", legacy_enabled),
-            "15M": _env_bool("Q15_V95_15M_SHADOW_LEARNING", False),
+            "15M": _env_bool("Q15_V95_15M_SHADOW_LEARNING", True),
+            # 7M stays OFF by default: the challenger tables' CHECK constraint
+            # only admits '10M'/'15M', so enabling 7M learning raises an
+            # IntegrityError on every 7M resolution. Needs a schema migration to
+            # admit '7M' before it can be turned on (see _initialize).
             "7M": _env_bool("Q15_V95_7M_SHADOW_LEARNING", False),
         }
         self.learning_rate_by_checkpoint = {
