@@ -1254,13 +1254,12 @@ def _notification_identity(checkpoint: str, analyses: Mapping[str, Mapping[str, 
         token = _material_token(checkpoint, analyses, ranking)
         event_key = f"{VERSION}|{checkpoint}|W{int(now // 900)}|{token}"
     else:
-        top = ranking[0] if ranking else {}
-        ticker = str(top.get("ticker") or "UNKNOWN")
-        if ticker and ticker != "UNKNOWN":
-            event_key = f"{VERSION}|{checkpoint}|{ticker}"
-        else:
-            window = 900 if checkpoint == "15M" else 600
-            event_key = f"{VERSION}|{checkpoint}|UNKNOWN|{int(now // window)}"
+        # Legacy fallback (single-alert mode OFF): key on the 15-minute market
+        # window only — timestamp-seeded, not per-ticker. A per-ticker key churned
+        # whenever the top ticker flipped between cycles (most acutely UNKNOWN →
+        # real ticker as a stale book recovered), re-firing the same checkpoint;
+        # all assets share the XX:00/15/30/45 boundaries, so the window is stable.
+        event_key = f"{VERSION}|{checkpoint}|W{int(now // 900)}"
     has_entry = any(bool(analysis.get("entry_allowed")) for analysis in analyses.values())
     state = "ENTRY_RECOMMENDED" if has_entry else "WATCH"
     fingerprint = hashlib.sha256(json.dumps({

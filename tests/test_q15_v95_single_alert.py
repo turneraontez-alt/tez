@@ -47,12 +47,20 @@ class TestNotificationIdentity(unittest.TestCase):
         k_next, _, _ = _notification_identity("10M", _analyses(), _ranking(), NOW + 900.0)
         self.assertNotEqual(k_now, k_next)
 
-    def test_disabling_flag_restores_ticker_key(self):
+    def test_fallback_mode_is_window_stable_not_per_ticker(self):
+        # Legacy fallback (flag OFF) is now keyed on the market window, not the
+        # top ticker: a leader flip within a window no longer churns the key and
+        # re-fires. This closes the UNKNOWN -> real-ticker double-send.
         os.environ["Q15_V95_SINGLE_ALERT_PER_CHECKPOINT"] = "false"
         try:
-            k1, _, _ = _notification_identity("10M", _analyses(), _ranking("T-AAA"), NOW)
-            k2, _, _ = _notification_identity("10M", _analyses(), _ranking("T-BBB"), NOW)
-            self.assertNotEqual(k1, k2)  # legacy behaviour: per-ticker
+            k_unknown, _, _ = _notification_identity("10M", _analyses(), [], NOW)  # no ranking -> UNKNOWN
+            k_named, _, _ = _notification_identity("10M", _analyses(), _ranking("T-AAA"), NOW + 1.0)
+            k_other, _, _ = _notification_identity("10M", _analyses(), _ranking("T-BBB"), NOW + 2.0)
+            self.assertEqual(k_unknown, k_named)  # UNKNOWN -> named ticker: same window key
+            self.assertEqual(k_named, k_other)    # leader churn: still one key
+            # A new market window still mints a fresh key.
+            k_next, _, _ = _notification_identity("10M", _analyses(), _ranking("T-AAA"), NOW + 900.0)
+            self.assertNotEqual(k_named, k_next)
         finally:
             del os.environ["Q15_V95_SINGLE_ALERT_PER_CHECKPOINT"]
 

@@ -91,7 +91,10 @@ def _two_sided_p(t: float) -> float:
     Promotion only runs at n >= 50, where the normal approximation to Student's
     t is accurate enough for a screening gate (final calls remain manual)."""
     if not math.isfinite(t):
-        return 0.0
+        # A non-finite statistic (NaN, or ±inf from a degenerate zero-variance
+        # sample) carries no usable evidence of a real difference, so the
+        # conservative p-value is 1.0 — never treat it as maximal significance.
+        return 1.0
     return _clamp(2.0 * (1.0 - _normal_cdf(abs(t))), 0.0, 1.0)
 
 

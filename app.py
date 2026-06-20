@@ -240,6 +240,74 @@ def fetch_market_detail(ticker):
     return client.get_market(ticker)
 
 
+def _fetch_result_is_current(active, asset, result):
+    """True if a fetch result still belongs to the asset's currently-active market.
+
+    A request submitted before a market rolled over can land a cycle later with
+    the *prior* ticker. Ingesting it would reset the engine to a stale ticker, so
+    the loop drops any result whose asset is no longer active or whose ticker no
+    longer matches the active market.
+    """
+    market = active.get(asset)
+    return bool(market) and market.get("ticker") == result.get("ticker")
+
+
+def _resolve_cached_detail(detail_cache, asset, active_ticker):
+    """Last-good market detail (volume) for ``asset`` — only if it matches the
+    active ticker. Detail is cached per ticker so a rollover never reuses the
+    prior market's volume; on a ticker mismatch this returns None and the loop
+    falls back to the base market (volume 0) until fresh detail arrives.
+    """
+    cached = detail_cache.get(asset)
+    return cached[1] if (cached and cached[0] == active_ticker) else None
+
+
+def _harvest_and_submit(executor, inflight, active, now, deadline, submit_fn):
+    """Drive the per-asset concurrent fetch with at-most-one request in flight.
+
+    Harvests any previous-cycle requests that have finished, submits a fresh
+    request for each active asset not already in flight, then waits up to
+    ``deadline`` for *this* cycle's requests. A request that is still running at
+    the deadline stays in ``inflight`` and is harvested in a later cycle, so one
+    slow upstream cannot freeze the whole dashboard. Returns ``{asset: result}``
+    for everything that completed. ``inflight`` is mutated in place.
+    """
+    results = {}
+    # 1) harvest any previous-cycle requests that have since finished
+    for a in list(inflight.keys()):
+        f = inflight[a]
+        if f.done():
+            try:
+                results[a] = f.result()
+            except Exception as e:
+                logger.warning(f"fetch {a}: {e}")
+            del inflight[a]
+    # 2) submit a fresh request only for active assets not already in flight
+    futs = {}
+    for asset, market in active.items():
+        if asset in inflight:
+            continue
+        f = executor.submit(submit_fn, asset, market, now)
+        inflight[asset] = f
+        futs[f] = asset
+    # 3) wait up to the per-cycle deadline for THIS cycle's requests; slow ones
+    #    stay in flight and are harvested in a later cycle.
+    try:
+        for fut in as_completed(list(futs.keys()), timeout=deadline):
+            a = futs[fut]
+            try:
+                results[a] = fut.result()
+            except Exception as e:
+                logger.warning(f"fetch {a}: {e}")
+            finally:
+                # Remove successful futures too; otherwise stale results repeat.
+                inflight.pop(a, None)
+    except TimeoutError:
+        slow = [futs[f] for f in futs if futs[f] in inflight]
+        logger.warning(f"fetch deadline {deadline}s exceeded; deferring {slow}")
+    return results
+
+
 def refresh_loop(max_cycles=None):
     """The ~1s cycle that drives every subsystem.
 
@@ -304,45 +372,12 @@ def refresh_loop(max_cycles=None):
             # Per-asset in-flight tracking: at most one outstanding request per
             # asset, so a persistently slow upstream cannot pile work onto the
             # executor and starve other assets' fetches.
-            results = {}
-            # 1) harvest any previous-cycle requests that have since finished
-            for a in list(inflight.keys()):
-                f = inflight[a]
-                if f.done():
-                    try:
-                        results[a] = f.result()
-                    except Exception as e:
-                        logger.warning(f"fetch {a}: {e}")
-                    del inflight[a]
-            # 2) submit a fresh request only for active assets not already in flight
-            futs = {}
-            for asset, market in active.items():
-                if asset in inflight:
-                    continue
-                f = executor.submit(
-                    fetch_asset_raw, asset, market, now,
-                    engines[asset].last_trade_ts,
-                )
-                inflight[asset] = f
-                futs[f] = asset
-            # 3) wait up to the per-cycle deadline for THIS cycle's requests;
-            #    slow ones stay in flight and are harvested in a later cycle so
-            #    one upstream stall can't freeze the whole dashboard.
-            try:
-                for fut in as_completed(list(futs.keys()), timeout=FETCH_DEADLINE):
-                    a = futs[fut]
-                    try:
-                        results[a] = fut.result()
-                    except Exception as e:
-                        logger.warning(f"fetch {a}: {e}")
-                    finally:
-                        # Remove successful futures too; otherwise stale results repeat.
-                        inflight.pop(a, None)
-            except TimeoutError:
-                slow = [futs[f] for f in futs if futs[f] in inflight]
-                logger.warning(
-                    f"fetch deadline {FETCH_DEADLINE}s exceeded; deferring {slow}"
-                )
+            def _submit_fetch(asset, market, when):
+                return fetch_asset_raw(asset, market, when, engines[asset].last_trade_ts)
+
+            results = _harvest_and_submit(
+                executor, inflight, active, now, FETCH_DEADLINE, _submit_fetch
+            )
 
             # -- decoupled market-detail (volume) refresh, off the freshness path --
             # Kalshi REST get_market can take seconds; keeping it out of the
@@ -374,7 +409,7 @@ def refresh_loop(max_cycles=None):
                 # Drop late in-flight results whose market has rolled over or
                 # is no longer active (avoids resetting an engine to a stale
                 # ticker and keeps the snapshot loop's active[a] lookups safe).
-                if a not in active or active[a].get("ticker") != r.get("ticker"):
+                if not _fetch_result_is_current(active, a, r):
                     continue
                 eng = engines[a]
                 eng.ensure_market(r["ticker"])
@@ -396,8 +431,7 @@ def refresh_loop(max_cycles=None):
             # -- build snapshots --
             for a, (r, ob_parsed, ob_delta) in prelim.items():
                 eng = engines[a]
-                cached_detail = detail_cache.get(a)
-                detail = cached_detail[1] if (cached_detail and cached_detail[0] == active[a].get("ticker")) else None
+                detail = _resolve_cached_detail(detail_cache, a, active[a].get("ticker"))
                 market = {**active[a], **(detail or {})}
                 market["_volume"] = _parse_volume(market)
                 try:
@@ -916,8 +950,26 @@ def health():
         spot_ws_status = {"enabled": False}
 
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
+
+    # Surface learning-ledger health at the top level so "ledger down" (calibration
+    # silently falls back to identity) is visible without digging into
+    # q15_v9_5.ledger. Never let a ledger hiccup break the health route itself.
+    try:
+        ls = checkpoint_v95.ledger.status()
+        ledger_health = {
+            "available": bool(ls.get("available")),
+            "path": ls.get("path"),
+            "error": ls.get("error"),
+            "unique_predictions": ls.get("unique_predictions"),
+            "unique_resolved": ls.get("unique_resolved"),
+            "dropped_feature_rows": ls.get("dropped_feature_rows"),
+        }
+    except Exception as e:
+        ledger_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
+
     return jsonify({
         "status": "ok",
+        "ledger": ledger_health,
         "q15_v9_5": checkpoint_v95.health(),
         "q15_v9_1": checkpoint_v95.health(),
         "q15_v9_2": checkpoint_v95.health(),
