@@ -19,14 +19,28 @@ every cycle). On Replit's networked `data/` disk the file-open is the dominant
 cost. Now it reuses one persistent connection (`close()` no-op, `check_same_thread
 =False`, serialized by the existing `self._lock`). No query/value/model change.
 
-**To verify:** **Stop ▸ Run** on Replit (code is already on the dev branch / synced),
-then read `/api/health`:
-- `q15_v9_5.parent_chain_timing.unified_loop` should drop from ~33s toward ~0.
-- `cycle_watchdog.slowest_stage` / `data_age_seconds` should fall under the **3s**
-  freshness gate so `current_trade_decisions` stops being `{AVOID_INVALID_DATA: 7}`.
-- If a residual remains, `parent_chain_timing` now names the next-largest sub-stage
-  (`v94_own_work`, `v91_run_cycle`, `v91_pre_enrich`/`focus_update`/`calibrated_edge`/
-  `finalize_all`) — chase that one next.
+**Verified (redeploy 09:02):** the 15M-learner fix landed — `parent_chain` dropped
+~44s → **12.6s**, `unified_loop` folded into an 8s `v94_super_chain` bucket. BUT the
+cycle is still **~17.5s** (`run_cycle_timing.total`), so `data_age_seconds` ~38 stays
+over the 3s gate and `current_trade_decisions` is still `{AVOID_INVALID_DATA: 7}`.
+Remaining run_cycle buckets: `parent_chain` 12.6s (`v94_super_chain` 8.0s, `v91_pre_enrich`
+5.2s), `v95_analysis` 3.9s.
+
+**Shipped next (this session):** same persistent-connection fix applied to the **V9.5
+ledger** (`ledger_v95.py`, was the `v95_analysis` SQLite-open cost; 15 call sites, all
+already under `self._lock`) + `test_q15_v95_ledger_conn_reuse.py`. Tests: 358 passed.
+**Awaiting redeploy** to confirm `v95_analysis` drops.
+
+**Next candidate (NOT yet done — needs a decision):** the v94 context-candle cache in
+`checkpoint_v94.py` (`q15_v94_context.sqlite3`). `_cache_connection()` opens the file
+fresh, and `_persist_candles(asset,…)` calls it **per asset every cycle** (7 opens/cycle
++ INSERT/DELETE) — feeds the `v94_super_chain`/`v91_pre_enrich` buckets. Two cautions
+before editing: (1) it's the **frozen base chain** (CLAUDE.md: don't edit v91..v94*) —
+though perf-only connection reuse is no model/query change and adaptive15 was already
+edited the same way; (2) these cache connections are **NOT** uniformly under a lock
+(`_persist_candles` opens outside `_context_lock`), so a shared `check_same_thread=False`
+connection must be lock-guarded to stay thread-safe. Get a redeploy data point first
+(confirm `v95_analysis` dropped) before touching the base chain.
 
 ⚠️ Latent stalls of the same family (not yet triggered): the three OTHER settlement
 reconcilers (`performance.reconcile`, `window_focus.reconcile_settlements`,
