@@ -36,6 +36,7 @@ import sqlite3
 import statistics
 import threading
 import time
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
@@ -149,7 +150,12 @@ def _iso(value: float | None) -> str | None:
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+@lru_cache(maxsize=8192)
 def _normalize_key(value: Any) -> str:
+    # Pure + deterministic, run on every key of the full snapshot twice per
+    # asset per cycle over a small, highly-repetitive key vocabulary — so
+    # memoising the regex sub is a large, behaviour-identical win. (Snapshot
+    # keys are hashable, so caching is safe.)
     return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
 
 

@@ -68,17 +68,29 @@ for recently-closed-but-unsettled markets (common right after a restart, when a
 backlog of predictions awaits settlement) can no longer monopolise the refresh
 loop; leftover tickers retry next cycle. Tests: `test_q15_reconcile_budget.py`.
 
-🔬 DIAGNOSTIC for the residual ~50s spike: the live `run_cycle_timing` (53s,
-`parent_chain` 32s + `v95_analysis` 15s) and `parent_chain_timing` (fast) in the
-same dump were captured **non-atomically** (different cycles), so they couldn't
-be cross-read. v95 now latches `slowest_run_cycle` in `/api/health` — an atomic
-snapshot (run-cycle buckets + chain sub-stages + a new `v95_sub` breakdown of
-deepcopy/build/analyse/record) of the worst cycle ≥ `Q15_V95_SLOW_CYCLE_SECONDS`
-(default 10s). **Next slow dump: read `slowest_run_cycle` to pinpoint the spike**
-(neither `parent_chain` nor `v95_analysis` calls Kalshi, so the spike is compute
-or `data/` SQLite I/O — likely Replit networked-disk or CPU-throttle stalls; the
-`v95_sub` split will say which). Do NOT speculatively rewrite frozen v94 internals
-before this snapshot names the stage.
+🔬 DIAGNOSED + PARTLY OPTIMISED: the `slowest_run_cycle` atomic snapshot (in
+`/api/health`, latches the worst cycle ≥ `Q15_V95_SLOW_CYCLE_SECONDS`, default
+10s; includes run-cycle buckets + chain sub-stages + a `v95_sub` deepcopy/build/
+analyse/record split) pinned the residual cost to **`unified_loop` (v94
+`analyse_snapshot`) + `build_canonical_snapshot` (v95 `_canonical_candles`)** —
+genuine per-asset candle analysis, ~2× inflated during warmup, NOT a stall and
+NOT Kalshi. Steady-state was ~6s (74-min dump); warmup ~13s.
+
+Behaviour-IDENTICAL efficiency wins applied to that path (no flag — pure
+refactors, `test_q15_candle_efficiency.py`):
+- Candle rows are flat dicts of immutable floats, so `copy.deepcopy` → `dict()`
+  in `_candles()` (≈28 calls/cycle over the full history), the v95 canonical
+  `candles=tuple(...)`, and the deep-eval candle copy. Same isolation, far cheaper.
+- `_normalize_key` (regex sub run on EVERY snapshot key, twice/asset/cycle over a
+  tiny repetitive vocabulary) is now `@lru_cache`d — huge hit rate, identical out.
+
+What's LEFT is irreducible without risk: `_canonical_candles` must re-normalise
+(the SQLite-loaded cache rows lack `timestamp`/clamped hi-lo, so it's not a no-op)
+and `_walk` must scan the whole snapshot (candle lists can nest anywhere). A
+count-cap on the candle cache is NOT safe (could clip the previous-15m window the
+dual-window context needs, cadence-dependent). Remaining levers: raise
+`max_data_age_s` (owner risk call), or a default-OFF flagged fast `_canonical_candles`
+with an equivalence test (real effort).
 
 ## Repo state
 - Active dev branch `claude/festive-albattani-s1af1l` carries the whole arc and is

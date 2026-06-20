@@ -1003,7 +1003,9 @@ def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]
             cached = policy._candles(asset) if hasattr(policy, "_candles") else []
             candles = _canonical_candles(row, cached)
             if candles:
-                canonical_rows = copy.deepcopy(candles)
+                # Flat float candle dicts: dict() copies are equivalent to
+                # deepcopy but cheaper.
+                canonical_rows = [dict(c) for c in candles]
                 row["underlying_candles_5s"] = canonical_rows
                 row["spot_candles_5s"] = canonical_rows
                 row["candles_5s"] = canonical_rows
