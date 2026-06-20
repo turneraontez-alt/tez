@@ -6,41 +6,44 @@ and `SYNC.md` (Replit sync). Live app: `phone-dashboard.replit.app` (Reserved VM
 reliability + honest data freshness matter more than new model features.
 
 ## 🔴 Immediate next step (where we stopped)
-The Repl is **still freezing**: `/api/health` shows `cycle_watchdog.slowest_stage =
-"run_cycle" ~18s`, `data_age_seconds ~18`, and `current_trade_decisions =
-{AVOID_INVALID_DATA: 7}` — cycles take ~18–20s so data never stays under the 3s
-freshness gate, so no predictions/alerts. The 54s stall (PR #10) is fixed; ~18s
-remains.
+**Verify the `unified_loop` fix on the live Repl.** This session isolated and fixed
+the dominant stall; the only thing left is to confirm it on real hardware (the
+container can't reach `phone-dashboard.replit.app` — outbound is blocked here).
 
-**Step 1 — read the run_cycle sub-stage timing (instrumentation is now landed).**
-The sub-stage timer is on `claude/fervent-cannon-ufnnu4` (cherry-picked clean off
-the old parked `beautiful-lamport-mrwnwm`, which carried a stale HANDOFF.md). It
-splits `run_cycle` into `parent_chain`, `v95_analysis`, `signal_store_reconcile`,
-`market_reconcile`, `total`, `other`, surfaced at
-`/api/health → q15_v9_5.run_cycle_timing`. Merge that branch → relay syncs (~20s)
-→ **Stop ▸ Run** → read the breakdown. Decision tree (sharpened by a code read of
-the cycle this session — the non-suspects are already ruled out):
-- `market_reconcile` is already wall-clock-budgeted (PR #10, ~8s worst case), so it
-  should NOT be the ~18s. If it somehow is → lower `Q15_V95_RECONCILE_BUDGET_SECONDS`.
-- `market_data.schedule`/`snapshot` are non-blocking (background thread pool), so
-  they fall in `other`; a large `other` would point there or at `_bridge_parent_inputs`.
-- The legacy v94 `parent_chain` makes **no** `get_market` REST calls, so a slow
-  `parent_chain` is internal (orderbook/candle work or its own signal-store reads).
-- `signal_store_reconcile` hits Postgres — a slow query here is a strong candidate.
-- ⚠️ The three OTHER settlement reconcilers (`performance.reconcile`,
-  `window_focus.reconcile_settlements`, `learning.reconcile`) still bound only by
-  call-count (max 12), NOT wall-clock — the same pre-PR-#10 pattern that caused the
-  54s freeze. They run as their own watchdog stages (`perf`/`focus_settlement`/
-  `learning_reconcile`), so they're not the current `run_cycle` ~18s, but they're
-  latent stalls of the same family. If the watchdog ever names one of them, port the
-  PR-#10 wall-clock-budget pattern to it (leftover tickers already retry next cycle).
+Diagnostic arc this session: 54s (PR #10) → ~18s residual → profiled `run_cycle`
+into sub-stages (`parent_chain` ~44s dominates) → profiled `parent_chain` into
+chain sub-stages (`unified_loop` ~33s dominates) → **fixed**: the 15M learner
+(`Adaptive15LearningStore`) opened a fresh SQLite connection on every
+`weights()` / `pattern_adjustment()` / `record_prediction()` call (~3 × 7 assets ×
+every cycle). On Replit's networked `data/` disk the file-open is the dominant
+cost. Now it reuses one persistent connection (`close()` no-op, `check_same_thread
+=False`, serialized by the existing `self._lock`). No query/value/model change.
+
+**To verify:** **Stop ▸ Run** on Replit (code is already on the dev branch / synced),
+then read `/api/health`:
+- `q15_v9_5.parent_chain_timing.unified_loop` should drop from ~33s toward ~0.
+- `cycle_watchdog.slowest_stage` / `data_age_seconds` should fall under the **3s**
+  freshness gate so `current_trade_decisions` stops being `{AVOID_INVALID_DATA: 7}`.
+- If a residual remains, `parent_chain_timing` now names the next-largest sub-stage
+  (`v94_own_work`, `v91_run_cycle`, `v91_pre_enrich`/`focus_update`/`calibrated_edge`/
+  `finalize_all`) — chase that one next.
+
+⚠️ Latent stalls of the same family (not yet triggered): the three OTHER settlement
+reconcilers (`performance.reconcile`, `window_focus.reconcile_settlements`,
+`learning.reconcile`) are still bound only by call-count (max 12), NOT wall-clock —
+the pre-PR-#10 pattern that caused the 54s freeze. They run as their own watchdog
+stages (`perf`/`focus_settlement`/`learning_reconcile`). If the watchdog ever names
+one, port the PR-#10 wall-clock-budget pattern to it (leftover tickers retry next
+cycle).
 
 ## Repo state
-- `main` @ `0aaaf00` (PR #12, HANDOFF refresh). Active dev branch
-  `claude/fervent-cannon-ufnnu4`: run_cycle sub-stage timing (clean cherry-pick of
-  `14f734c`, minus its stale HANDOFF.md) + `test_q15_v95_run_cycle_timing.py`. The
-  old `claude/beautiful-lamport-mrwnwm` is superseded — don't merge it (stale HANDOFF).
-- Tests: `python3 -m pytest tests/ -q` → **354 passed, 4 skipped**.
+- Active dev branch `claude/festive-albattani-s1af1l` carries the whole arc and is
+  pushed/even with origin. NOTE: in this container `main` is only the initial 3
+  commits — the GitHub Relay / PR workflow described below is from the prior Replit
+  setup; here all development lives on the dev branch. Latest commits:
+  `parent_chain` sub-stage timing (`aeba348`) → SQLite connection reuse fix
+  (`a35a8e1`) + `test_q15_v94_adaptive15_conn_reuse.py`.
+- Tests: `python3 -m pytest tests/ -q` → **356 passed, 4 skipped**.
   ⚠️ `pytest` is NOT preinstalled in a fresh container — `pip install pytest -q` first.
 
 ## Shipped this session (all merged to main)
