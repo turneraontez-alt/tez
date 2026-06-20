@@ -49,16 +49,22 @@ def _git(args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def _head() -> str | None:
-    res = _git(["rev-parse", "HEAD"])
+def _branch_head() -> str | None:
+    # Read the local target branch explicitly (NOT HEAD) so we always mirror
+    # `main`, regardless of which branch happens to be checked out.
+    res = _git(["rev-parse", "--verify", f"refs/heads/{BRANCH}"])
     return res.stdout.strip() if res.returncode == 0 else None
 
 
 def _push(token: str) -> tuple[bool, str]:
     url = f"https://x-access-token:{token}@github.com/{REPO}.git"
     # -c credential.helper= disables any inherited helper; explicit URL means no
-    # remote-tracking refs or config are written locally.
-    res = _git(["-c", "credential.helper=", "push", url, f"HEAD:refs/heads/{BRANCH}"])
+    # remote-tracking refs or config are written locally. Push the local branch
+    # ref explicitly so we never accidentally publish a different checked-out HEAD.
+    res = _git([
+        "-c", "credential.helper=",
+        "push", url, f"refs/heads/{BRANCH}:refs/heads/{BRANCH}",
+    ])
     out = _mask((res.stdout + res.stderr).strip(), token)
     return res.returncode == 0, out
 
@@ -71,23 +77,34 @@ def main() -> int:
 
     _log(f"Watching local '{BRANCH}' -> github.com/{REPO} every {INTERVAL}s")
     last_pushed: str | None = None
+    diverged_at: str | None = None  # local head we last logged a divergence for
 
     while True:
         try:
-            head = _head()
-            if head and head != last_pushed:
+            head = _branch_head()
+            if not head:
+                if diverged_at != "__nobranch__":
+                    _log(f"local branch '{BRANCH}' not found; waiting.")
+                    diverged_at = "__nobranch__"
+            elif head != last_pushed:
                 ok, out = _push(token)
                 if ok:
                     last_pushed = head
+                    diverged_at = None
                     detail = "up to date" if "up-to-date" in out.lower() else "pushed"
                     _log(f"{detail} {head[:8]}")
                 elif "non-fast-forward" in out.lower() or "fetch first" in out.lower():
-                    _log(
-                        f"remote has diverged from local {head[:8]}; NOT forcing. "
-                        "Resolve manually, then the relay will resume. Detail: " + out
-                    )
-                    # back off so we don't spam the same failure every cycle
-                    last_pushed = head
+                    # Keep retrying every cycle (do NOT advance last_pushed) so the
+                    # relay resumes automatically once the remote becomes
+                    # fast-forwardable again. Log only once per distinct local head
+                    # to avoid spamming the same divergence message.
+                    if diverged_at != head:
+                        _log(
+                            f"remote has diverged from local {head[:8]}; NOT forcing. "
+                            "Will keep retrying; resolve the divergence to resume. "
+                            "Detail: " + out
+                        )
+                        diverged_at = head
                 else:
                     _log(f"push failed for {head[:8]}: {out}")
         except Exception as exc:  # never let the relay die on a transient error
