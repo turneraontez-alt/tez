@@ -19,6 +19,9 @@ NONACTIONABLE = [
     "⏳ <b>10M FINAL #1 — WAIT FOR PRICE — BTC YES</b>",
     "🕒 <b>15M EARLY #1 WATCH — ETH NO</b>",
     "👀 <b>WATCH — BTC YES</b>",
+    # Startup placeholder emitted before the first v9.5 cycle populates globals;
+    # re-opens on every restart, carries no decision -> mute under balanced.
+    "🟡 Q15 V9.5 STARTUP — canonical analysis is not ready; legacy report suppressed. Check /api/q15-v9-5/diagnostics.",
 ]
 
 ACTIONABLE = [

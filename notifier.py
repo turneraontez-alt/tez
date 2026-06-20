@@ -42,6 +42,12 @@ _ALERT_NONACTIONABLE_MARKERS = (
     "#1 WATCH",
     "WATCH —",
     "WATCH -",
+    # The "canonical analysis is not ready" placeholder emitted while the v9.5
+    # globals are still empty (the startup window re-opens on every restart). It
+    # carries no decision — pure noise to the user — so mute it under balanced.
+    # Still delivered under Q15_ALERT_LEVEL=all and always visible in
+    # /api/health + /api/q15-v9-5/diagnostics.
+    "V9.5 STARTUP",
 )
 _ALERT_LEVEL_DELIVER_ALL = {"all", "off", "none", "full", "verbose", "everything"}
 
