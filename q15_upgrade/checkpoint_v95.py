@@ -59,6 +59,22 @@ from .market_data_v95 import PublicMarketDataHub
 VERSION = "q15-v9.5.2-runtime-activation-data-bridge-v1"
 READ_ONLY = True
 
+# Coverage weights for evidence_quality: a feature-importance-ordered blend of
+# the per-feature qualities (sums to 1.0). Pinned by test_q15_v95_weights.py so
+# an accidental edit fails loudly instead of silently re-weighting confidence.
+# (absorption is excluded — it is derived from flow+momentum, so weighting its
+# quality here would double-count those two.)
+_EVIDENCE_QUALITY_WEIGHTS: dict[str, float] = {
+    "momentum": 0.25,
+    "flow": 0.16,
+    "book": 0.12,
+    "wick": 0.08,
+    "context": 0.12,
+    "threshold_interaction": 0.15,
+    "exchange_consensus": 0.08,
+    "derivatives": 0.04,
+}
+
 _LATEST_LOCK = threading.RLock()
 _LATEST_ANALYSES: dict[str, dict[str, Any]] = {}
 _LATEST_RANKING: list[dict[str, Any]] = []
@@ -651,6 +667,29 @@ def _market_implied_yes(snapshot: Mapping[str, Any]) -> float | None:
     return None
 
 
+def _regime_anchor_strength(base_strength: float, regime: Mapping[str, Any]) -> tuple[float, float]:
+    """Optionally scale the market-anchor strength by regime trustworthiness.
+
+    The model is noisiest in chaotic regimes (high volatility, exchange
+    divergence, threshold pin) and most reliable in clean trends. When
+    ``Q15_V95_REGIME_AWARE_ANCHOR`` is enabled we shrink the model's allowed
+    deviation from the market as regime uncertainty rises above the NORMAL
+    baseline (0.08), so a noisy regime is anchored harder to the (efficient)
+    market. Default-OFF: the returned factor is exactly 1.0 unless enabled, so
+    production behavior is unchanged until shadow-validated.
+
+    Returns ``(effective_strength, factor)``.
+    """
+    if not _env_bool("Q15_V95_REGIME_AWARE_ANCHOR", False):
+        return base_strength, 1.0
+    baseline = 0.08
+    uncertainty = float(regime.get("uncertainty", baseline) or baseline)
+    sensitivity = _env_float("Q15_V95_REGIME_ANCHOR_SENSITIVITY", 3.0, 0.0, 20.0)
+    floor = _env_float("Q15_V95_REGIME_ANCHOR_MIN_FACTOR", 0.40, 0.0, 1.0)
+    factor = _clamp(1.0 - sensitivity * max(0.0, uncertainty - baseline), floor, 1.0)
+    return base_strength * factor, factor
+
+
 def _market_anchored_probability(model_yes: float, market_yes: float | None,
                                  data_quality: float, evidence_quality: float,
                                  strength: float) -> tuple[float, dict[str, Any]]:
@@ -720,9 +759,16 @@ def analyse_v95(
         "exchange_consensus": exchange_q, "derivatives": derivatives_q,
         "absorption": absorption_q,
     }
+    # Evidence quality = how much of the model's evidence is actually backed by
+    # data, as a coverage-weighted blend of the per-feature qualities. The blend
+    # weights sum to 1.0 and track feature importance (momentum/threshold/flow
+    # lead; wick/derivatives trail) so that a missing high-value feature drags
+    # quality down more than a missing minor one. This feeds both the market
+    # anchor's model_trust and data_quality (-> temperature), so thin evidence
+    # automatically yields a more conservative, market-anchored probability.
+    # Weights are pinned by test_q15_v95_weights.py.
     evidence_quality = _clamp(
-        0.25 * momentum_q + 0.16 * flow_q + 0.12 * book_q + 0.08 * wick_q +
-        0.12 * context_q + 0.15 * threshold_q + 0.08 * exchange_q + 0.04 * derivatives_q,
+        sum(w * feature_quality[name] for name, w in _EVIDENCE_QUALITY_WEIGHTS.items()),
         0.0, 1.0,
     )
     data_quality = _clamp(0.70 * canonical.data_quality + 0.30 * evidence_quality, 0.0, 1.0)
@@ -735,10 +781,14 @@ def analyse_v95(
     # Market-price anchoring: defer to the (efficient) Kalshi market unless the
     # model has earned the confidence to deviate. This is the bot's working prob.
     market_implied_yes = _market_implied_yes(snapshot)
-    anchor_strength = _env_float("Q15_V95_MARKET_ANCHOR_STRENGTH", 1.0, 0.0, 1.0)
+    base_anchor_strength = _env_float("Q15_V95_MARKET_ANCHOR_STRENGTH", 1.0, 0.0, 1.0)
+    anchor_strength, anchor_regime_factor = _regime_anchor_strength(base_anchor_strength, regime)
     calibrated_yes, market_anchor = _market_anchored_probability(
         model_yes, market_implied_yes, data_quality, evidence_quality, anchor_strength
     )
+    if anchor_regime_factor != 1.0:
+        market_anchor["regime_factor"] = round(anchor_regime_factor, 4)
+        market_anchor["base_strength"] = base_anchor_strength
     challenger_weights = _timed(prof, "challenger_weights", ledger.challenger_weights, canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _timed(prof, "model_challenger", _model_probability, structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
@@ -752,6 +802,17 @@ def analyse_v95(
     uncertainty = 0.018 + (1.0 - data_quality) * 0.12 + float(regime.get("uncertainty", 0.08)) * 0.25
     divergence = _num(exchange_d.get("divergence_bps"), 0.0) or 0.0
     uncertainty += min(0.04, divergence / 1000.0)
+    # Evidence-coverage penalty: "insufficient evidence" must read as low
+    # confidence, not as a clean neutral signal. Features that have no data
+    # contribute nothing (quality 0), so a thin snapshot yields low coverage;
+    # when enabled, low coverage widens the conservative haircut toward 0.5.
+    # Default 0.0 -> no behavior change until tuned and shadow-validated.
+    coverage_penalty = _env_float("Q15_V95_EVIDENCE_COVERAGE_PENALTY", 0.0, 0.0, 0.20)
+    if coverage_penalty > 0.0:
+        coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
+        covered = sum(1 for q in feature_quality.values() if q >= coverage_floor)
+        coverage = covered / max(1, len(feature_quality))
+        uncertainty += coverage_penalty * (1.0 - coverage)
     conservative = _clamp(selected - uncertainty, 0.01, 0.99)
 
     quote = _selected_quote(snapshot, side)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -18,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 VERSION = "q15-v9.5.1-ledger-v2-10m-primary"
 MODEL_VERSION = "q15-v9.5.1-champion-ensemble-10m-primary-v1"
@@ -132,6 +135,20 @@ TRACKED_CHECKPOINTS = ("15M", "10M", "7M")
 LEARNING_CHECKPOINTS = ("10M", "15M")
 
 
+# Frozen champion logit weights. Each is the maximum logit swing a feature can
+# add to the structural base, applied as ``weight * value * quality`` where value
+# is in [-1, 1] and quality in [0, 1] (see _model_probability). The ranking
+# encodes the model's priors at these horizons:
+#   momentum (0.34)              — strongest single directional signal short-term.
+#   threshold_interaction (0.30) — distance/crossings vs the strike; second only
+#                                  to momentum because it is what actually settles.
+#   flow (0.26)                  — aggressive taker imbalance.
+#   absorption (0.20)            — flow that fails to move price (mean-reversion warning).
+#   book / context / exchange    — confirmation signals (0.18 each), weaker alone.
+#   wick (0.12), derivatives (0.10) — weakest / sparsest, kept low on purpose.
+# These are FROZEN: only the shadow challenger learns; changing them is a manual,
+# significance-tested promotion. test_q15_v95_weights.py pins these values so an
+# accidental edit fails loudly rather than silently shifting every prediction.
 CHAMPION_WEIGHTS: dict[str, float] = {
     "intercept": 0.0,
     "momentum": 0.34,
@@ -222,6 +239,10 @@ class V95Ledger:
         # Q15_V95_LEDGER_CACHE=false reverts to recompute-every-call.
         self._cache_enabled = _env_bool("Q15_V95_LEDGER_CACHE", True)
         self._data_version = 0
+        # Observability: rows silently dropped because their stored feature JSON
+        # was unparseable. Surfaced via stats() so a corrupt data pipeline shows
+        # up instead of quietly thinning calibration/learning inputs.
+        self._dropped_feature_rows = 0
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
@@ -699,6 +720,8 @@ class V95Ledger:
             try:
                 features = json.loads(str(row["feature_json"] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
+                self._dropped_feature_rows += 1
+                logger.warning("Unparseable feature_json for prediction_id=%s; skipping learning", prediction_id)
                 connection.execute("UPDATE predictions SET learning_applied=-3 WHERE prediction_id=?", (prediction_id,))
                 connection.commit()
                 return False
@@ -837,6 +860,7 @@ class V95Ledger:
                     try:
                         values = json.loads(str(row["feature_json"]))
                     except (TypeError, ValueError, json.JSONDecodeError):
+                        self._dropped_feature_rows += 1
                         continue
                     orientation = 1.0 if str(row["predicted_side"]).upper() == "YES" else -1.0
                     quality = _clamp(float(row["data_quality"] or 0.0), 0.10, 1.0)
@@ -939,7 +963,10 @@ class V95Ledger:
         else:
             # Penalized logistic regression y ~ intercept + slope*logit(raw_p).
             intercept, slope = 0.0, 1.0
+            converged = False
+            iterations = 0
             for _ in range(12):
+                iterations += 1
                 g0 = -0.20 * intercept
                 g1 = -0.20 * (slope - 1.0)
                 h00 = 0.20
@@ -964,9 +991,19 @@ class V95Ledger:
                 intercept = _clamp(intercept + d0, -0.75, 0.75)
                 slope = _clamp(slope + d1, 0.50, 1.50)
                 if abs(d0) + abs(d1) < 1e-6:
+                    converged = True
                     break
+            if not converged:
+                # Rare given regularization; surface it instead of silently
+                # shipping an unconverged calibrator.
+                logger.warning(
+                    "Platt calibration did not converge for checkpoint=%s scope=%s rows=%d "
+                    "after %d iterations (intercept=%.4f slope=%.4f)",
+                    checkpoint, scope, len(rows), iterations, intercept, slope,
+                )
             fit = {"active": True, "reason": "platt_current_version", "rows": len(rows),
-                   "intercept": intercept, "slope": slope, "scope": scope}
+                   "intercept": intercept, "slope": slope, "scope": scope,
+                   "converged": converged, "iterations": iterations}
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.
@@ -1277,6 +1314,7 @@ class V95Ledger:
             "shadow_learning_enabled": self.shadow_learning_enabled, "production_weights_frozen": True,
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,
+            "dropped_feature_rows": int(self._dropped_feature_rows),
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
         }
 

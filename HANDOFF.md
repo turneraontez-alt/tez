@@ -6,8 +6,39 @@ trades REAL money manually off the alerts**, so reliability + honest data
 freshness + honest accuracy measurement matter more than new model features.
 
 ⚠️ Fresh container: `pytest` and `websockets` are NOT preinstalled →
-`pip install pytest "websockets>=12.0" -q` first. Tests: `python3 -m pytest tests/ -q`
-→ **435 passed, 4 skipped**.
+`pip install pytest "websockets>=12.0" -q` first. The app-level tests also need
+`flask` (+ a working `cryptography`/`cffi`); without them those two files skip.
+Tests: `python3 -m pytest tests/ -q` → **464 passed, 4 skipped**.
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — review follow-ups (rating → ~8.5)
+Implemented the "how to raise the rating" list from the code review. Every
+model-behavior change is **default-OFF** behind a `Q15_*` flag (shadow-validate
+first) so production output is byte-identical until enabled.
+- **Loop + concurrency tests** (`tests/test_app_refresh_loop.py`,
+  `test_app_concurrent_routes.py`) — the biggest gap. Added a test-only seam:
+  `refresh_loop(max_cycles=…)` and `Q15_AUTOSTART_REFRESH=0` (skip autostart on
+  import). Tests drive a real cycle (no network), prove `ct.safe`/discovery
+  exception isolation, and hammer `/api/snapshot|summary` from many threads
+  against a writer to prove the `state_lock` contract (no deadlock / 500).
+- **Regime-aware market anchor** (`Q15_V95_REGIME_AWARE_ANCHOR`,
+  `_regime_anchor_strength` in `checkpoint_v95.py`): shrinks model deviation from
+  the market in noisy regimes (high-vol / divergence / pin), full deviation in
+  clean trends. Knobs `..._SENSITIVITY`, `..._MIN_FACTOR`.
+- **Evidence-coverage confidence penalty** (`Q15_V95_EVIDENCE_COVERAGE_PENALTY`):
+  thin evidence now widens the conservative haircut toward 0.5 instead of reading
+  as a clean neutral — the "no data ≠ neutral" fix.
+- **Pinned the frozen model constants**: `CHAMPION_WEIGHTS` and the new named
+  `_EVIDENCE_QUALITY_WEIGHTS` (was an inline literal) are documented and locked by
+  `tests/test_q15_v95_weights.py` so an accidental edit fails loudly.
+- **Public-feed circuit breaker** (`market_data_v95.py`,
+  `Q15_V95_PUBLIC_BREAKER_THRESHOLD`/`_COOLDOWN_SECONDS`, default 5/30s): per-asset
+  backoff after repeated all-source failures; `health()["breaker_open_assets"]`.
+- **Ledger observability**: Platt fit now logs non-convergence and returns
+  `converged`/`iterations`; unparseable `feature_json` rows increment
+  `dropped_feature_rows` (in ledger `stats()`) instead of vanishing silently.
+- Skipped from the list: full `Q15_*`→dataclass centralization (too large/risky
+  vs value for the frozen-adjacent engine; flagged as polish). The per-loop
+  executor item was a false positive — it's already created once before `while`.
 
 ## ✅ Shipped (branch `claude/read-handoff-e79js5`) — Telegram UX + alert dedup
 Verified live first: speedup (~4.5s → ~2.3–2.6s) and the checkpoint-label fix
