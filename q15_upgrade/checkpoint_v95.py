@@ -83,6 +83,58 @@ def _env_float(name: str, default: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+# --- Optional per-stage profiler for analyse_v95 -----------------------------
+# Default OFF (Q15_V95_PROFILE_FEATURES): when on, times each feature/model/
+# ledger stage inside analyse_v95 and accumulates totals so /api/health
+# ("q15_v9_5.feature_profile") names the real hotspot to optimise next. Read-only
+# and behaviour-neutral: when off, _timed just calls the function. Cumulative
+# across cycles since enabled; judge on avg_ms (calls is per-asset-per-cycle).
+_FEATURE_PROFILE_LOCK = threading.RLock()
+_FEATURE_PROFILE: dict[str, dict[str, float]] = {}
+
+
+def _feature_profile_enabled() -> bool:
+    return _env_bool("Q15_V95_PROFILE_FEATURES", False)
+
+
+def _record_feature_time(stage: str, seconds: float) -> None:
+    with _FEATURE_PROFILE_LOCK:
+        slot = _FEATURE_PROFILE.setdefault(stage, {"calls": 0.0, "total_s": 0.0})
+        slot["calls"] += 1.0
+        slot["total_s"] += seconds
+
+
+def _timed(enabled: bool, stage: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call ``fn`` and, when profiling is on, record its wall time under ``stage``.
+    When off this is a transparent passthrough (one bool check)."""
+    if not enabled:
+        return fn(*args, **kwargs)
+    start = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _record_feature_time(stage, time.monotonic() - start)
+
+
+def feature_profile_health() -> dict[str, Any]:
+    """Accumulated per-stage timing for analyse_v95, ranked by total time."""
+    with _FEATURE_PROFILE_LOCK:
+        stages = {
+            name: {
+                "calls": int(slot["calls"]),
+                "total_s": round(slot["total_s"], 4),
+                "avg_ms": round(1000.0 * slot["total_s"] / slot["calls"], 4) if slot["calls"] else 0.0,
+            }
+            for name, slot in sorted(_FEATURE_PROFILE.items(), key=lambda kv: kv[1]["total_s"], reverse=True)
+        }
+    return {"enabled": _feature_profile_enabled(), "stages": stages}
+
+
+def feature_profile_reset() -> None:
+    with _FEATURE_PROFILE_LOCK:
+        _FEATURE_PROFILE.clear()
+
+
 def _build_candles(
     snapshot: Mapping[str, Any],
     cached: Sequence[Mapping[str, Any]] | None,
@@ -641,20 +693,21 @@ def analyse_v95(
             "conservative_probability": None, "data_quality": canonical.data_quality,
             "evidence_quality": 0.0, "trade_quality": 0.0,
         }
-    volatility = _robust_volatility(canonical)
-    returns = _multi_horizon_returns(canonical)
-    structural = _structural_probability(canonical, volatility, returns)
-    momentum, momentum_q, momentum_d = _momentum_feature(returns, volatility, canonical)
-    flow, flow_q, flow_d = _flow_feature(snapshot, canonical)
-    book, book_q, book_d = _book_feature(snapshot, canonical)
-    wick_raw, wick_d = _wick_score(canonical.candles, canonical.yes_is_higher)
+    prof = _feature_profile_enabled()
+    volatility = _timed(prof, "volatility", _robust_volatility, canonical)
+    returns = _timed(prof, "returns", _multi_horizon_returns, canonical)
+    structural = _timed(prof, "structural", _structural_probability, canonical, volatility, returns)
+    momentum, momentum_q, momentum_d = _timed(prof, "momentum", _momentum_feature, returns, volatility, canonical)
+    flow, flow_q, flow_d = _timed(prof, "flow", _flow_feature, snapshot, canonical)
+    book, book_q, book_d = _timed(prof, "book", _book_feature, snapshot, canonical)
+    wick_raw, wick_d = _timed(prof, "wick", _wick_score, canonical.candles, canonical.yes_is_higher)
     wick = float(wick_raw or 0.0)
     wick_q = 0.0 if wick_raw is None else _clamp(len(canonical.candles) / 12.0, 0.0, 1.0)
-    context, context_q, context_d = _context_feature(canonical)
-    threshold, threshold_q, threshold_d = _threshold_interaction(canonical)
-    exchange, exchange_q, exchange_d = _exchange_consensus(canonical, returns)
-    derivatives, derivatives_q, derivatives_d = _derivatives_feature(canonical, momentum)
-    absorption, absorption_q, absorption_d = _absorption_feature(flow, flow_q, momentum, momentum_q)
+    context, context_q, context_d = _timed(prof, "context", _context_feature, canonical)
+    threshold, threshold_q, threshold_d = _timed(prof, "threshold", _threshold_interaction, canonical)
+    exchange, exchange_q, exchange_d = _timed(prof, "exchange", _exchange_consensus, canonical, returns)
+    derivatives, derivatives_q, derivatives_d = _timed(prof, "derivatives", _derivatives_feature, canonical, momentum)
+    absorption, absorption_q, absorption_d = _timed(prof, "absorption", _absorption_feature, flow, flow_q, momentum, momentum_q)
     feature_values = {
         "momentum": momentum, "flow": flow, "book": book, "wick": wick,
         "context": context, "threshold_interaction": threshold,
@@ -673,9 +726,9 @@ def analyse_v95(
         0.0, 1.0,
     )
     data_quality = _clamp(0.70 * canonical.data_quality + 0.30 * evidence_quality, 0.0, 1.0)
-    regime = _regime(canonical, volatility, returns, threshold_d, exchange_d)
-    raw_yes, contributions = _model_probability(structural, feature_values, feature_quality, CHAMPION_WEIGHTS, regime, data_quality)
-    calibration = ledger.calibrate(raw_yes, canonical.checkpoint, canonical.asset) if ledger else {"probability": raw_yes, "active": False, "reason": "ledger_unavailable"}
+    regime = _timed(prof, "regime", _regime, canonical, volatility, returns, threshold_d, exchange_d)
+    raw_yes, contributions = _timed(prof, "model_champion", _model_probability, structural, feature_values, feature_quality, CHAMPION_WEIGHTS, regime, data_quality)
+    calibration = _timed(prof, "calibrate", ledger.calibrate, raw_yes, canonical.checkpoint, canonical.asset) if ledger else {"probability": raw_yes, "active": False, "reason": "ledger_unavailable"}
     shadow_calibrated_yes = _clamp(float(calibration["probability"]), 0.01, 0.99)
     production_calibration_enabled = _env_bool("Q15_V95_PRODUCTION_CALIBRATION_ENABLED", False)
     model_yes = shadow_calibrated_yes if production_calibration_enabled and calibration.get("active") else raw_yes
@@ -686,10 +739,10 @@ def analyse_v95(
     calibrated_yes, market_anchor = _market_anchored_probability(
         model_yes, market_implied_yes, data_quality, evidence_quality, anchor_strength
     )
-    challenger_weights = ledger.challenger_weights(canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
-    challenger_yes, challenger_contributions = _model_probability(structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
+    challenger_weights = _timed(prof, "challenger_weights", ledger.challenger_weights, canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
+    challenger_yes, challenger_contributions = _timed(prof, "model_challenger", _model_probability, structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
-    pattern = ledger.pattern_similarity(feature_values, provisional_side, canonical.checkpoint) if ledger else {"active": False, "shadow_adjustment": 0.0}
+    pattern = _timed(prof, "pattern_similarity", ledger.pattern_similarity, feature_values, provisional_side, canonical.checkpoint) if ledger else {"active": False, "shadow_adjustment": 0.0}
     shadow_pattern_adjustment = float(pattern.get("shadow_adjustment") or 0.0)
     challenger_yes = _clamp(challenger_yes + (shadow_pattern_adjustment if provisional_side == "YES" else -shadow_pattern_adjustment), 0.01, 0.99)
     # Anchor the challenger identically so champion-vs-challenger compares weights, not anchoring.
@@ -1384,6 +1437,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
             "run_cycle_timing": copy.deepcopy(self._run_cycle_timing),
             "parent_chain_timing": copy.deepcopy(getattr(self, "_chain_timing", {})),
+            "feature_profile": feature_profile_health(),
             "slowest_run_cycle": copy.deepcopy(self._slowest_run_cycle),
             "last_checkpoint": self._last_checkpoint_v95,
             "telegram_sent": self._telegram_sent_v95,
