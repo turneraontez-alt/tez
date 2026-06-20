@@ -32,27 +32,33 @@ of which is **frozen v91 `pre_enrich`** Postgres round-trips.
    COMMIT round-trip app-wide (also makes the v91 write→read below visible across
    pooled connections without an explicit commit).
 5. **15M learner** (`checkpoint_v94_adaptive15.py`) — persistent SQLite connection.
-6. **v91 round-trip cut** (`checkpoint_v91.py`, owner-approved frozen-chain edit) —
-   `pre_enrich_all` was **6 Postgres round-trips/asset** (`insert_observation` +
-   `recent_observations` + `freeze_prediction` *with its read-back* + 2×
-   `get_prediction`). Now **4**: split the write (`write_prediction`) from the
-   read-back, and collapse the two per-checkpoint reads into ONE batched
-   `get_predictions_for(contract, asset, ("15M","10M"))`. No query *result*,
-   value, or model-behavior change — `frozen`/`fifteen`/`ten` are identical to
-   before (verified by `test_q15_v91_round_trips.py` + the unchanged v91–v94 suite).
+6. **Frozen-chain round-trip batching** (`checkpoint_v91/v92/v93.py`,
+   owner-approved). Per cycle (7 assets) this collapses per-asset Postgres chatter
+   into a handful of bulk statements — all byte-for-byte equivalent (multi-row
+   `VALUES … ON CONFLICT DO NOTHING` == N single inserts; OR-of-pairs read == N
+   per-pair reads; threaded value == the read it replaces):
+   - **v91 `pre_enrich_all`** — ONE `insert_observations` (was 7), ONE
+     `write_predictions` (was 7), ONE `get_predictions_for_pairs` (was 7, and was
+     itself a 6→4/asset cut earlier). Only the per-group rolling read
+     (`recent_observations`, per-asset `LIMIT` window) stays per-asset — left
+     un-batched on purpose (needs version-specific window-function SQL).
+   - **v92** — threads v91's already-read 15M prediction via
+     `snap["q15_v91_fifteen_prediction"]` instead of its own `get_prediction(15M)`
+     (−7 reads/cycle); batches the 7 `_record_decision` writes into ONE.
+   - **v93** — batches the 7 `_record_v93` writes into ONE.
+   - **v94** — already covered (only per-asset DB work is the context cache, now
+     on a persistent connection).
 Tests: `test_q15_v95_ledger_conn_reuse`, `test_q15_v94_context_cache_conn_reuse`,
-`test_q15_v94_gate_conn_reuse`, `test_db_autocommit`, `test_q15_v91_round_trips`.
+`test_q15_v94_gate_conn_reuse`, `test_db_autocommit`, `test_q15_v91_round_trips`
+(asserts bulk methods + multi-asset single-round-trip + pairs-read equivalence).
 
-**STILL OVER THE 3s GATE after all the above — remaining levers (owner's call):**
-- **Raise `Q15_*` `max_data_age_s`** from 3s to ~8s (env/config, no code) → a 6.2s
-  cycle produces predictions immediately. Tradeoff: alerts act on data up to ~8s
-  old. Behavior/risk decision for the owner (real money trades off these).
-- **More frozen-chain round-trip cuts** (same sign-off, MEASURE the v91 cut first):
-  bulk `insert_observation` (7 writes → 1 executemany/cycle); batch the per-asset
-  decision writes in v92/v93/v94 (`_record_decision`, ON CONFLICT no-ops that
-  still cost a round-trip each every cycle); thread v92's `get_prediction(15M)`
-  read into the v91 batched read via the snapshot.
-- Recommend: redeploy → measure the v91 cut, THEN decide gate-vs-more-surgery.
+**REMAINING LEVER if still over the 3s gate (owner's call):**
+- **Raise `Q15_*` `max_data_age_s`** from 3s to ~8s (env/config, no code) → the
+  cycle produces predictions even at ~6s. Tradeoff: alerts act on data up to ~8s
+  old — behavior/risk decision for the owner (real money trades off these).
+- Last code lever (riskiest, only if measured cycle is still just over): batch the
+  v91 `recent_observations` per-group read with a Postgres window function.
+- Recommend: redeploy → measure → if still over, flip `max_data_age_s` first.
 
 ⚠️ Latent stalls of the same family (not yet triggered): the three OTHER settlement
 reconcilers (`performance.reconcile`, `window_focus.reconcile_settlements`,

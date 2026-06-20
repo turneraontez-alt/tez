@@ -793,13 +793,13 @@ class CheckpointPolicyV93(CheckpointPolicyV92):
             output[asset] = snap
         return output
 
-    def _record_v93(self, asset: str, snapshot: Mapping[str, Any], now: float) -> None:
+    def _v93_values(self, asset: str, snapshot: Mapping[str, Any], now: float) -> tuple[Any, ...]:
         contract = str(snapshot.get("q15_v91_contract_key") or _contract_key(asset, snapshot))
         checkpoint = str(snapshot.get("q15_v91_checkpoint") or _checkpoint(snapshot))
         key = f"{contract}|{asset}|{checkpoint}|{VERSION}"
         wick = snapshot.get("q15_v93_wick") or {}
         flow = snapshot.get("q15_v93_flow") or {}
-        values = (
+        return (
             key,
             contract,
             asset,
@@ -817,22 +817,43 @@ class CheckpointPolicyV93(CheckpointPolicyV92):
             float(now),
             VERSION,
         )
+
+    def _record_v93(self, asset: str, snapshot: Mapping[str, Any], now: float) -> None:
+        self._record_v93_many([self._v93_values(asset, snapshot, now)])
+
+    def _record_v93_many(self, rows: Sequence[tuple[Any, ...]]) -> None:
+        """Insert many v93 decisions in one round-trip. Equivalent to N
+        _record_v93 calls (ON CONFLICT/OR IGNORE dedups per row)."""
+        rows = list(rows)
+        if not rows:
+            return
+        cols = (
+            "(decision_key,contract_key,asset,checkpoint,selected_side,wick_status,wick_score,"
+            "flow_status,flow_supportive_count,value_pass,checkpoint_relation,decision,"
+            "conservative_edge_cents,adjusted_required_edge_cents,created_at,model_version)"
+        )
         if self.persistence.pg:
+            one = "(" + ",".join(["%s"] * 16) + ")"
+            placeholders = ",".join([one] * len(rows))
+            flat = [v for tup in rows for v in tup]
             self.persistence.store.execute(
-                "INSERT INTO q15_v93_decisions (decision_key,contract_key,asset,checkpoint,selected_side,wick_status,wick_score,flow_status,flow_supportive_count,value_pass,checkpoint_relation,decision,conservative_edge_cents,adjusted_required_edge_cents,created_at,model_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (decision_key) DO NOTHING",
-                values,
+                f"INSERT INTO q15_v93_decisions {cols} VALUES {placeholders} "
+                "ON CONFLICT (decision_key) DO NOTHING",
+                flat,
             )
             return
         with self.persistence._lock, self.persistence._sqlite() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO q15_v93_decisions (decision_key,contract_key,asset,checkpoint,selected_side,wick_status,wick_score,flow_status,flow_supportive_count,value_pass,checkpoint_relation,decision,conservative_edge_cents,adjusted_required_edge_cents,created_at,model_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                values,
+            conn.executemany(
+                f"INSERT OR IGNORE INTO q15_v93_decisions {cols} "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
             )
             conn.commit()
 
     def finalize_all(self, snapshots: Mapping[str, dict], now: float) -> dict[str, dict]:
         parent = super().finalize_all(snapshots, now)
         output: dict[str, dict] = {}
+        decision_rows: list[tuple[Any, ...]] = []
         for asset, original in parent.items():
             snap = dict(original)
             side = str(snap.get("calibrated_edge_side") or snap.get("q15_v91_frozen_side") or "UNCERTAIN").upper()
@@ -920,8 +941,10 @@ class CheckpointPolicyV93(CheckpointPolicyV92):
             })
             with _LATEST_LOCK:
                 _LATEST[asset] = deepcopy(snap)
-            self._record_v93(asset, snap, now)
+            decision_rows.append(self._v93_values(asset, snap, now))
             output[asset] = snap
+        # One bulk write for every asset's v93 decision instead of one per asset.
+        self._record_v93_many(decision_rows)
         return output
 
     def _query_stats(self) -> list[dict[str, Any]]:

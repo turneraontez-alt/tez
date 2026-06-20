@@ -9,7 +9,7 @@ import time
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from q15_upgrade.checkpoint_v91 import (
     ASSETS,
@@ -272,7 +272,14 @@ class CheckpointPolicyV92(CheckpointPolicyV91):
                     _side_strength(current_p_yes, current_side),
                 )
             else:
-                fifteen = self.persistence.get_prediction(contract, asset, "15M")
+                # Reuse the 15M prediction the v91 stage already read this
+                # cycle (threaded via the snapshot) instead of a fresh
+                # per-asset round-trip; fall back to a direct read if this
+                # snapshot did not pass through v91 pre-enrich.
+                if "q15_v91_fifteen_prediction" in snap:
+                    fifteen = snap.get("q15_v91_fifteen_prediction")
+                else:
+                    fifteen = self.persistence.get_prediction(contract, asset, "15M")
                 relationship = self._relationship(
                     fifteen,
                     current_side=current_side,
@@ -298,11 +305,11 @@ class CheckpointPolicyV92(CheckpointPolicyV91):
             output[asset] = snap
         return output
 
-    def _record_decision(self, asset: str, snapshot: Mapping[str, Any], now: float) -> None:
+    def _decision_values(self, asset: str, snapshot: Mapping[str, Any], now: float) -> tuple[Any, ...]:
         contract = str(snapshot.get("q15_v91_contract_key") or _contract_key(asset, snapshot))
         checkpoint = str(snapshot.get("q15_v91_checkpoint") or _checkpoint(snapshot))
         key = f"{contract}|{asset}|{checkpoint}|{VERSION}"
-        values = (
+        return (
             key,
             contract,
             asset,
@@ -317,25 +324,36 @@ class CheckpointPolicyV92(CheckpointPolicyV91):
             float(now),
             VERSION,
         )
+
+    def _record_decision(self, asset: str, snapshot: Mapping[str, Any], now: float) -> None:
+        self._record_decisions([self._decision_values(asset, snapshot, now)])
+
+    def _record_decisions(self, rows: Sequence[tuple[Any, ...]]) -> None:
+        """Insert many v92 decisions in one round-trip. Equivalent to N
+        _record_decision calls (ON CONFLICT/OR IGNORE dedups per row)."""
+        rows = list(rows)
+        if not rows:
+            return
+        cols = (
+            "(decision_key,contract_key,asset,checkpoint,selected_side,evidence_state,"
+            "checkpoint_relation,decision,p_yes,conservative_edge_cents,"
+            "adjusted_required_edge_cents,created_at,model_version)"
+        )
         if self.persistence.pg:
+            one = "(" + ",".join(["%s"] * 13) + ")"
+            placeholders = ",".join([one] * len(rows))
+            flat = [v for tup in rows for v in tup]
             self.persistence.store.execute(
-                "INSERT INTO q15_v92_decisions "
-                "(decision_key,contract_key,asset,checkpoint,selected_side,evidence_state,"
-                "checkpoint_relation,decision,p_yes,conservative_edge_cents,"
-                "adjusted_required_edge_cents,created_at,model_version) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                f"INSERT INTO q15_v92_decisions {cols} VALUES {placeholders} "
                 "ON CONFLICT (decision_key) DO NOTHING",
-                values,
+                flat,
             )
             return
         with self.persistence._lock, self.persistence._sqlite() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO q15_v92_decisions "
-                "(decision_key,contract_key,asset,checkpoint,selected_side,evidence_state,"
-                "checkpoint_relation,decision,p_yes,conservative_edge_cents,"
-                "adjusted_required_edge_cents,created_at,model_version) "
+            conn.executemany(
+                f"INSERT OR IGNORE INTO q15_v92_decisions {cols} "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                values,
+                rows,
             )
             conn.commit()
 
@@ -345,6 +363,7 @@ class CheckpointPolicyV92(CheckpointPolicyV91):
         now: float,
     ) -> dict[str, dict]:
         output: dict[str, dict] = {}
+        decision_rows: list[tuple[Any, ...]] = []
         for asset, original in snapshots.items():
             if not isinstance(original, dict):
                 continue
@@ -439,8 +458,10 @@ class CheckpointPolicyV92(CheckpointPolicyV91):
             })
             with _LATEST_LOCK:
                 _LATEST[asset] = deepcopy(snap)
-            self._record_decision(asset, snap, now)
+            decision_rows.append(self._decision_values(asset, snap, now))
             output[asset] = snap
+        # One bulk write for every asset's decision instead of one per asset.
+        self._record_decisions(decision_rows)
         return output
 
     def _query_rows(self, sql_pg: str, sql_sqlite: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
