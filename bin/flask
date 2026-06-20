@@ -1,0 +1,10 @@
+#!/nix/store/flbj8bq2vznkcwss7sm0ky8rd0k6kar7-python-wrapped-0.1.0/bin/python3
+# -*- coding: utf-8 -*-
+import sys
+from flask.cli import main
+if __name__ == "__main__":
+    if sys.argv[0].endswith("-script.pyw"):
+        sys.argv[0] = sys.argv[0][:-11]
+    elif sys.argv[0].endswith(".exe"):
+        sys.argv[0] = sys.argv[0][:-4]
+    sys.exit(main())
