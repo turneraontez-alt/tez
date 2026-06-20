@@ -40,24 +40,28 @@ class AssetRoute:
     kraken_pair: str | None
     kraken_symbol: str | None
     deribit_instrument: str | None
+    okx_instrument: str | None = None
 
 
 ASSET_ROUTES: dict[str, AssetRoute] = {
-    "BTC": AssetRoute("BTC-USD", "XBTUSD", "BTC/USD", "BTC-PERPETUAL"),
-    "XBT": AssetRoute("BTC-USD", "XBTUSD", "BTC/USD", "BTC-PERPETUAL"),
-    "ETH": AssetRoute("ETH-USD", "ETHUSD", "ETH/USD", "ETH-PERPETUAL"),
-    "SOL": AssetRoute("SOL-USD", "SOLUSD", "SOL/USD", None),
-    "DOGE": AssetRoute("DOGE-USD", "XDGUSD", "DOGE/USD", None),
-    "XDG": AssetRoute("DOGE-USD", "XDGUSD", "DOGE/USD", None),
-    "XRP": AssetRoute("XRP-USD", "XRPUSD", "XRP/USD", None),
-    "LTC": AssetRoute("LTC-USD", "LTCUSD", "LTC/USD", None),
-    "BCH": AssetRoute("BCH-USD", "BCHUSD", "BCH/USD", None),
-    "ADA": AssetRoute("ADA-USD", "ADAUSD", "ADA/USD", None),
-    "AVAX": AssetRoute("AVAX-USD", "AVAXUSD", "AVAX/USD", None),
-    "LINK": AssetRoute("LINK-USD", "LINKUSD", "LINK/USD", None),
-    "BNB": AssetRoute("BNB-USD", "BNBUSD", "BNB/USD", None),
-    # HYPE exchange support varies. Configure via Q15_V95_HYPE_* overrides when available.
-    "HYPE": AssetRoute(None, None, None, None),
+    "BTC": AssetRoute("BTC-USD", "XBTUSD", "BTC/USD", "BTC-PERPETUAL", "BTC-USDT"),
+    "XBT": AssetRoute("BTC-USD", "XBTUSD", "BTC/USD", "BTC-PERPETUAL", "BTC-USDT"),
+    "ETH": AssetRoute("ETH-USD", "ETHUSD", "ETH/USD", "ETH-PERPETUAL", "ETH-USDT"),
+    "SOL": AssetRoute("SOL-USD", "SOLUSD", "SOL/USD", None, "SOL-USDT"),
+    "DOGE": AssetRoute("DOGE-USD", "XDGUSD", "DOGE/USD", None, "DOGE-USDT"),
+    "XDG": AssetRoute("DOGE-USD", "XDGUSD", "DOGE/USD", None, "DOGE-USDT"),
+    "XRP": AssetRoute("XRP-USD", "XRPUSD", "XRP/USD", None, "XRP-USDT"),
+    "LTC": AssetRoute("LTC-USD", "LTCUSD", "LTC/USD", None, "LTC-USDT"),
+    "BCH": AssetRoute("BCH-USD", "BCHUSD", "BCH/USD", None, "BCH-USDT"),
+    "ADA": AssetRoute("ADA-USD", "ADAUSD", "ADA/USD", None, "ADA-USDT"),
+    "AVAX": AssetRoute("AVAX-USD", "AVAXUSD", "AVAX/USD", None, "AVAX-USDT"),
+    "LINK": AssetRoute("LINK-USD", "LINKUSD", "LINK/USD", None, "LINK-USDT"),
+    # Coinbase/Kraken do not list BNB or HYPE in USD; both trade on OKX in USDT,
+    # which is the same source the primary spot feed uses. Routing them to OKX
+    # gives the enrichment hub real composite/flow/book data instead of logging
+    # persistent source errors every cycle.
+    "BNB": AssetRoute(None, None, None, None, "BNB-USDT"),
+    "HYPE": AssetRoute(None, None, None, None, os.environ.get("Q15_V95_HYPE_OKX_INSTRUMENT", "HYPE-USDT")),
 }
 
 
@@ -96,21 +100,29 @@ def _num(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _normalize_epoch(parsed: float) -> float | None:
+    if not math.isfinite(parsed):
+        return None
+    # Collapse milli/micro/nano-second epochs down to seconds. A genuine second
+    # epoch (~1.7e9) is below the threshold and is never divided.
+    while parsed > 10_000_000_000:
+        parsed /= 1000.0
+    return parsed
+
+
 def _parse_ts(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        parsed = float(value)
-        if parsed > 10_000_000_000:
-            parsed /= 1000.0
-        return parsed if math.isfinite(parsed) else None
+        return _normalize_epoch(float(value))
     text = str(value).strip()
     if not text:
         return None
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError, OverflowError):
-        return _num(text)
+        numeric = _num(text)
+        return None if numeric is None else _normalize_epoch(numeric)
 
 
 def _iso(ts: float | None) -> str | None:
@@ -308,6 +320,7 @@ class PublicMarketDataHub:
         self.coinbase_enabled = _env_bool("Q15_V95_COINBASE_ENABLED", True)
         self.kraken_enabled = _env_bool("Q15_V95_KRAKEN_ENABLED", True)
         self.deribit_enabled = _env_bool("Q15_V95_DERIBIT_ENABLED", True)
+        self.okx_enabled = _env_bool("Q15_V95_OKX_ENABLED", True)
         self._client = HttpJsonClient(self.timeout_seconds, self.max_response_bytes)
         self._executor: ThreadPoolExecutor | None = None
         self._lock = threading.RLock()
@@ -461,6 +474,11 @@ class PublicMarketDataHub:
                 sources["kraken"] = self._fetch_kraken(route.kraken_pair, route.kraken_symbol, now)
             except Exception as exc:
                 errors["kraken"] = f"{type(exc).__name__}:{exc}"
+        if self.okx_enabled and route.okx_instrument:
+            try:
+                sources["okx"] = self._fetch_okx(route.okx_instrument, now)
+            except Exception as exc:
+                errors["okx"] = f"{type(exc).__name__}:{exc}"
         derivatives: dict[str, Any] | None = None
         if self.deribit_enabled and route.deribit_instrument:
             try:
@@ -603,6 +621,58 @@ class PublicMarketDataHub:
                 return value
         return None
 
+    def _fetch_okx(self, instrument: str, now: float) -> dict[str, Any]:
+        base = "https://www.okx.com/api/v5/market"
+        ticker = self._client.get(base + "/ticker", {"instId": instrument})
+        book = self._client.get(base + "/books", {"instId": instrument, "sz": self.book_levels})
+        trades = self._client.get(base + "/trades", {"instId": instrument, "limit": 100})
+        ticker_row = self._okx_first(ticker)
+        book_row = self._okx_first(book)
+        trade_rows = trades.get("data") if isinstance(trades, Mapping) else None
+        if not isinstance(trade_rows, list):
+            trade_rows = []
+        price = _num(ticker_row.get("last")) if isinstance(ticker_row, Mapping) else None
+        bids = book_row.get("bids", []) if isinstance(book_row, Mapping) else []
+        asks = book_row.get("asks", []) if isinstance(book_row, Mapping) else []
+        book_metrics = _weighted_book_metrics(bids, asks, levels=self.book_levels)
+        # OKX trade rows use px/sz/side/ts; `side` is the aggressor (taker) side.
+        normalized = [
+            {"price": row.get("px"), "size": row.get("sz"), "side": row.get("side"), "ts": row.get("ts")}
+            for row in trade_rows if isinstance(row, Mapping)
+        ]
+        flow = _trade_flow(
+            normalized,
+            side_is_maker=False,
+            now=now,
+            horizon_seconds=self.trade_horizon_seconds,
+        )
+        timestamp = _parse_ts(ticker_row.get("ts")) if isinstance(ticker_row, Mapping) else None
+        timestamp = timestamp or now
+        if price is None and book_metrics.get("available"):
+            price = _num(book_metrics.get("mid"))
+        return {
+            "source": "okx",
+            "instrument": instrument,
+            "price": price,
+            "timestamp": timestamp,
+            "timestamp_iso": _iso(timestamp),
+            "quality": 0.9 if price is not None and book_metrics.get("available") else 0.6,
+            "book": book_metrics,
+            "flow": flow,
+        }
+
+    @staticmethod
+    def _okx_first(payload: Any) -> Any:
+        if not isinstance(payload, Mapping):
+            raise ValueError("unexpected_okx_payload")
+        code = str(payload.get("code", "0"))
+        if code not in {"0", ""}:
+            raise RuntimeError(f"okx:{code}:{payload.get('msg')}")
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            return data[0]
+        raise ValueError("okx_data_missing")
+
     def _fetch_deribit(self, instrument: str, now: float) -> dict[str, Any]:
         payload = self._client.get(
             "https://www.deribit.com/api/v2/public/ticker",
@@ -659,6 +729,7 @@ class PublicMarketDataHub:
                 "coinbase_enabled": self.coinbase_enabled,
                 "kraken_enabled": self.kraken_enabled,
                 "deribit_enabled": self.deribit_enabled,
+                "okx_enabled": self.okx_enabled,
             },
         }
 

@@ -363,9 +363,9 @@ class V95Tests(unittest.TestCase):
         result = analyse_v95(row, self.canonical(row=row), self.ledger)
         analyses = {"BNB": result}
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
-        self.assertIn("V9.5 CHECK", message)
-        self.assertIn("Structural base", message)
-        self.assertIn("data quality", message)
+        self.assertIn("V9.5 CHECK", message)         # formatter guard + identity
+        self.assertIn("BNB", message)                # the pick
+        self.assertIn("grade", message)              # confidence grade shown
         self.assertNotIn("Three requirements", message)
 
     def test_read_only_markers(self):

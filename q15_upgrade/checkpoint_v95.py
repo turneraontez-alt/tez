@@ -622,7 +622,7 @@ def analyse_v95(
     shadow_calibrated_yes = _clamp(float(calibration["probability"]), 0.01, 0.99)
     production_calibration_enabled = _env_bool("Q15_V95_PRODUCTION_CALIBRATION_ENABLED", False)
     calibrated_yes = shadow_calibrated_yes if production_calibration_enabled and calibration.get("active") else raw_yes
-    challenger_weights = ledger.challenger_weights(canonical.checkpoint) if ledger else CHAMPION_WEIGHTS
+    challenger_weights = ledger.challenger_weights(canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _model_probability(structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
     pattern = ledger.pattern_similarity(feature_values, provisional_side, canonical.checkpoint) if ledger else {"active": False, "shadow_adjustment": 0.0}
@@ -642,14 +642,13 @@ def analyse_v95(
     depth = _kalshi_depth(snapshot, side)
     quote_ts = canonical.feed_timestamps.get("quote")
     quote_age = None if quote_ts is None else max(0.0, canonical.observed_at - quote_ts)
-    required_edge = _env_float(
-        "Q15_V95_10M_REQUIRED_EDGE_CENTS" if canonical.checkpoint == "10M" else "Q15_V95_15M_REQUIRED_EDGE_CENTS",
-        6.0 if canonical.checkpoint == "10M" else 4.0, 0.0, 25.0,
-    )
-    minimum_probability = _env_float(
-        "Q15_V95_10M_MIN_PROBABILITY" if canonical.checkpoint == "10M" else "Q15_V95_15M_MIN_PROBABILITY",
-        0.60 if canonical.checkpoint == "10M" else 0.58, 0.50, 0.90,
-    )
+    # Per-checkpoint gates. 7M defaults mirror 10M so adding the 7-minute tracker
+    # does not change live entry behavior; both stay overridable via env.
+    _checkpoint = canonical.checkpoint if canonical.checkpoint in ("10M", "15M", "7M") else "10M"
+    _required_edge_default = {"10M": 6.0, "7M": 6.0, "15M": 4.0}.get(_checkpoint, 4.0)
+    _min_prob_default = {"10M": 0.60, "7M": 0.60, "15M": 0.58}.get(_checkpoint, 0.58)
+    required_edge = _env_float(f"Q15_V95_{_checkpoint}_REQUIRED_EDGE_CENTS", _required_edge_default, 0.0, 25.0)
+    minimum_probability = _env_float(f"Q15_V95_{_checkpoint}_MIN_PROBABILITY", _min_prob_default, 0.50, 0.90)
     minimum_quality = _env_float("Q15_V95_MIN_DATA_QUALITY", 0.55, 0.20, 0.95)
     max_spread = _env_float("Q15_V95_MAX_SPREAD_CENTS", 12.0, 1.0, 50.0)
     min_depth = _env_float("Q15_V95_MIN_DEPTH_AT_ASK", 3.0, 0.0, 10000.0)
@@ -813,58 +812,92 @@ def _fmt_cents(value: Any, signed: bool = False) -> str:
     return f"{parsed:+.2f}¢" if signed else f"{parsed:.2f}¢"
 
 
+# Plain-language labels for the canonical core-data failures, so a degraded
+# cycle explains itself instead of rendering a wall of "n/a".
+_V95_REASON_LABELS = {
+    "missing_or_invalid_spot": "underlying spot price unavailable",
+    "missing_or_invalid_threshold": "strike/threshold not set yet",
+    "missing_time_remaining": "time-to-close unavailable",
+    "contract_closed": "market already closed",
+    "stale_core_snapshot": "core market data is stale",
+    "stale_candle_cache": "candle history is stale",
+    "executable_ask_unavailable": "no executable ask quote",
+    "ledger_unavailable": "calibration ledger unavailable",
+}
+
+
+def _humanize_v95_reasons(blocker: Any) -> str:
+    tokens = [token.strip() for token in str(blocker or "").split(",") if token.strip()]
+    if not tokens:
+        return "core market data was incomplete this cycle"
+    seen: list[str] = []
+    for token in tokens:
+        label = _V95_REASON_LABELS.get(token, token.replace("_", " ").strip())
+        if label and label not in seen:
+            seen.append(label)
+    return "; ".join(seen)
+
+
+_DECISION_LABELS = {
+    "ENTRY_RECOMMENDED": "ENTRY",
+    "WATCH_PRICE": "price too high",
+    "WATCH_CONFIDENCE": "low confidence",
+    "WATCH_DATA_QUALITY": "weak data",
+    "WATCH_LIQUIDITY": "thin/wide book",
+    "WATCH_TIME": "too little time",
+    "PREDICTION_ONLY": "no executable quote",
+    "AVOID_INVALID_DATA": "no data",
+}
+
+
+def _decision_label(decision: Any) -> str:
+    token = str(decision or "").upper()
+    return _DECISION_LABELS.get(token, token.replace("_", " ").lower() or "watch")
+
+
+def _c(value: Any, signed: bool = False) -> str:
+    """Compact whole-cent formatter for the per-cycle checkpoint message."""
+    parsed = _num(value)
+    if parsed is None:
+        return "—"
+    return f"{parsed:+.0f}¢" if signed else f"{parsed:.0f}¢"
+
+
 def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None) -> str:
     any_entry = any(bool(row.get("entry_allowed")) for row in analyses.values())
-    header = f"{'✅' if any_entry else '👀'} {checkpoint} V9.5 CHECK — {'ENTRY RECOMMENDED' if any_entry else 'BEST PICKS, NO ENTRY YET'}"
+    emoji = "✅" if any_entry else "👀"
+    state = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
     medals = ["🥇", "🥈", "🥉"]
-    summary = "  ·  ".join(
-        f"{medals[index] if index < 3 else str(index + 1) + '.'} {row['asset']} {row.get('prediction_side') or '?'}"
-        for index, row in enumerate(ranking[:3])
-    )
-    lines = [header, summary, ""]
+    # Header keeps "V9.5 CHECK" (formatter guard) and the ENTRY/NO ENTRY markers
+    # (alert-suppression classification).
+    lines = [f"{emoji} <b>{checkpoint} V9.5 CHECK · {state}</b>"]
     for index, row in enumerate(ranking[:3]):
         asset = str(row["asset"])
         analysis = analyses[asset]
-        canonical = analysis.get("canonical") or {}
-        structural = analysis.get("structural") or {}
-        quote = analysis.get("quote") or {}
-        costs = analysis.get("costs") or {}
-        regime = analysis.get("regime") or {}
-        supporting = analysis.get("supporting_factors") or []
-        opposing = analysis.get("opposing_factors") or []
-        lines.extend([
-            f"{medals[index] if index < 3 else str(index + 1) + '.'} {asset} {analysis.get('prediction_side')}",
-            f"Probability — YES {_fmt_probability(analysis.get('yes_probability'))} | NO {_fmt_probability(analysis.get('no_probability'))}",
-            f"Structural base: {_fmt_probability(structural.get('yes_probability'))} YES | conservative selected: {_fmt_probability(analysis.get('conservative_probability'))}",
-            *([f"10M shadow challenger: {_fmt_probability(analysis.get('challenger_yes_probability'))} YES — evaluation only, not live"] if checkpoint == "10M" else []),
-            f"Confidence: {analysis.get('confidence_grade')} | data quality {_fmt_probability(analysis.get('data_quality'))} | evidence quality {_fmt_probability(analysis.get('evidence_quality'))}",
-            f"Regime: {regime.get('name', 'n/a')} | feed alignment: {canonical.get('alignment_seconds', 'n/a')}s | candles: {len(canonical.get('candles') or [])}",
-            f"Supporting: {', '.join(item['name'] for item in supporting) if supporting else 'none measured'}",
-            f"Opposing: {', '.join(item['name'] for item in opposing) if opposing else 'none measured'}",
-            "EXECUTABLE VALUE",
-            f"{analysis.get('prediction_side')} ask: {_fmt_cents(quote.get('ask_cents'))} | spread: {_fmt_cents(quote.get('spread_cents'))} | costs: {_fmt_cents(costs.get('total_cents') if 'total_cents' in costs else costs.get('total_cost_cents'))}",
-            f"Conservative net edge: {_fmt_cents(analysis.get('net_edge_cents'), signed=True)} | required: {_fmt_cents(analysis.get('required_edge_cents'))}",
-            f"Ideal maximum entry: {_fmt_cents(analysis.get('ideal_entry_cents'))}",
-            f"Decision: {analysis.get('trade_decision')} | blocker: {analysis.get('main_blocker') or 'none'}",
-            "",
-        ])
+        medal = medals[index] if index < 3 else f"{index + 1}."
+        side = analysis.get("prediction_side") or "—"
+        if not analysis.get("prediction_available"):
+            lines.append(f"{medal} <b>{asset}</b> — no prediction")
+            lines.append(f"   ⛔ {_humanize_v95_reasons(analysis.get('main_blocker'))}")
+            continue
+        regime = (analysis.get("regime") or {}).get("name") or "—"
+        prob = _fmt_probability(analysis.get("selected_probability"))
+        grade = analysis.get("confidence_grade") or "—"
+        ask = _c((analysis.get("quote") or {}).get("ask_cents"))
+        net = analysis.get("net_edge_cents")
+        lines.append(f"{medal} <b>{asset} {side}</b> — {prob} · grade {grade} · {regime}")
+        if analysis.get("entry_allowed"):
+            lines.append(f"   ✅ ENTRY · edge {_c(net, signed=True)} · ask {ask} → max {_c(analysis.get('ideal_entry_cents'))}")
+        else:
+            reason = _decision_label(analysis.get("trade_decision"))
+            edge = f"edge {_c(net, signed=True)} (need {_c(analysis.get('required_edge_cents'))})" if net is not None else "no executable edge"
+            lines.append(f"   👀 {reason} · {edge} · ask {ask}")
     if result_events:
-        lines.append("RECENT OFFICIAL RESULTS")
-        for event in result_events[:3]:
-            lines.append(
-                f"{event.get('asset')} {event.get('checkpoint')}: predicted {event.get('predicted_side')} → result {event.get('official_result')} — {'CORRECT' if event.get('correct') else 'WRONG'}"
-            )
-        lines.append("")
-    if checkpoint in {"10M", "15M"}:
-        updates = (ledger_status.get("shadow_updates_by_checkpoint") or {}).get(checkpoint, 0)
-        primary = ledger_status.get("primary_learning_checkpoint", "10M")
-        enabled = (ledger_status.get("learning_enabled_by_checkpoint") or {}).get(checkpoint, False)
-        lines.append(
-            f"V9.5 learner: {checkpoint} updates {updates} | primary {primary} | "
-            f"checkpoint learning {'ON' if enabled else 'OFF'} | production champion remains frozen."
-        )
-    lines.append("Probability, data quality, and trade quality are separate. Read-only monitor — no orders are placed.")
-    return "\n".join(lines).strip()
+        marks = "  ".join(f"{e.get('asset')} {'✅' if e.get('correct') else '❌'}" for e in result_events[:4])
+        lines.append(f"Recent results — {marks}")
+    lines.append("<i>Paper monitor · not advice · no orders placed</i>")
+    text = "\n".join(lines)
+    return text if len(text) <= 4000 else text[:3990] + "…"
 
 
 def _notification_identity(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], now: float) -> tuple[str, str, str]:
@@ -972,7 +1005,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._latest_public: dict[str, dict[str, Any]] = {}
         self._last_checkpoint_v95 = "UNKNOWN"
         self._last_reconcile: dict[str, Any] = {}
+        self._last_market_reconcile: dict[str, Any] = {}
         self._last_reconcile_at = 0.0
+        # Optional Kalshi client (set by the app) so predictions can be settled
+        # directly from official results, not only via the signals table.
+        self.kalshi_client = None
         self._cycles = 0
         self._errors = 0
         self._last_error: str | None = None
@@ -1001,6 +1038,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             analyses: dict[str, dict[str, Any]] = {}
             output: dict[str, dict] = {}
             public_map: dict[str, dict[str, Any]] = {}
+            canonicals: dict[str, Any] = {}
             for asset_key, raw in parent_output.items():
                 if not isinstance(raw, Mapping):
                     continue
@@ -1024,7 +1062,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 apply_v95_policy(snapshot, analysis)
                 analyses[asset] = copy.deepcopy(analysis)
                 output[asset_key] = snapshot
-                if analysis.get("prediction_available") and canonical.ticker:
+                canonicals[asset] = canonical
+            ranking = rank_analyses(analyses)
+            ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
+            # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
+            # persisted with it, enabling per-rank accuracy tracking.
+            for key, snapshot in output.items():
+                asset = _asset_name(key, snapshot)
+                rank = ranks.get(asset)
+                snapshot["q15_v9_5_rank"] = rank
+                snapshot["q15_v9_5_top_pick"] = rank == 1
+                if asset not in analyses:
+                    continue
+                analysis = analyses[asset]
+                analysis["rank"] = rank
+                analysis["top_pick"] = rank == 1
+                canonical = canonicals.get(asset)
+                if canonical is not None and analysis.get("prediction_available") and canonical.ticker:
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -1041,25 +1095,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         trade_decision=str(analysis["trade_decision"]),
                         regime=str((analysis.get("regime") or {}).get("name") or "UNKNOWN"),
                         features=analysis["feature_values"], contributions=analysis["contributions"],
-                        quote=analysis["quote"],
+                        quote=analysis["quote"], rank=rank, costs=analysis.get("costs"),
                     )
-                    analyses[asset]["prediction_id"] = prediction_id
-                    analyses[asset]["new_unique_prediction_recorded"] = inserted
-            ranking = rank_analyses(analyses)
-            ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
-            for key, snapshot in output.items():
-                asset = _asset_name(key, snapshot)
-                snapshot["q15_v9_5_rank"] = ranks.get(asset)
-                snapshot["q15_v9_5_top_pick"] = ranks.get(asset) == 1
-                if asset in analyses:
-                    analyses[asset]["rank"] = ranks.get(asset)
-                    analyses[asset]["top_pick"] = ranks.get(asset) == 1
+                    analysis["prediction_id"] = prediction_id
+                    analysis["new_unique_prediction_recorded"] = inserted
 
             result_events: list[Mapping[str, Any]] = []
-            if self.signal_store is not None and now - self._last_reconcile_at >= 30.0:
-                self._last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+            if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
-                result_events = list(self._last_reconcile.get("result_events") or [])
+                if self.signal_store is not None:
+                    self._last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+                    result_events = list(self._last_reconcile.get("result_events") or [])
+                # Settle any remaining closed markets directly from Kalshi, so
+                # predictions without a signals row still get graded.
+                get_market = getattr(self.kalshi_client, "get_market", None)
+                if callable(get_market):
+                    self._last_market_reconcile = self.ledger.reconcile_pending_from_market(get_market, now)
+                    result_events = list(self._last_market_reconcile.get("result_events") or []) + result_events
             ledger_status = self.ledger.status()
             message = build_v95_message(checkpoint, analyses, ranking, ledger_status, result_events) if ranking else None
             # Discard all parent V9.4 messages. V9.5 owns the final state machine.
@@ -1128,10 +1180,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def calibration_status(self) -> dict[str, Any]:
         return {"version": VERSION, "read_only": True, **self.ledger.metrics()}
 
+    def scoreboard(self) -> dict[str, Any]:
+        """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
+        return {"version": VERSION, "read_only": True, **self.ledger.scoreboard()}
+
     def learning_status(self) -> dict[str, Any]:
         return {
             "version": VERSION, "read_only": True, **self.ledger.status(),
             "last_reconcile": copy.deepcopy(self._last_reconcile),
+            "last_market_reconcile": copy.deepcopy(self._last_market_reconcile),
             "scope": "SEPARATE_CHECKPOINT_CHALLENGERS_10M_PRIMARY",
             "primary_learning_checkpoint": self.ledger.primary_learning_checkpoint,
             "production_weights_frozen": True,
@@ -1184,7 +1241,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 "derivatives pressure",
             ],
             "latest": self.predictions(), "calibration": self.calibration_status(),
-            "learning": self.learning_status(),
+            "learning": self.learning_status(), "scoreboard": self.ledger.scoreboard(),
         }
 
     def decision_stats(self) -> dict[str, Any]:

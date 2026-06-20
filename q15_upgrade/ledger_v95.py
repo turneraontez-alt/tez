@@ -54,6 +54,17 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _wilson_interval(right: int, n: int, z: float = 1.96) -> tuple[float | None, float | None]:
+    """95% Wilson score interval for a binomial proportion (right/n)."""
+    if n <= 0:
+        return (None, None)
+    p = right / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2.0 * n)) / denom
+    margin = (z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))) / denom
+    return (round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4))
+
+
 def _logit(probability: float) -> float:
     p = _clamp(float(probability), 1e-6, 1.0 - 1e-6)
     return math.log(p / (1.0 - p))
@@ -67,8 +78,40 @@ def _sigmoid(value: float) -> float:
     return z / (1.0 + z)
 
 
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def _two_sided_p(t: float) -> float:
+    """Two-sided p-value from a t/z statistic via a normal approximation.
+
+    Promotion only runs at n >= 50, where the normal approximation to Student's
+    t is accurate enough for a screening gate (final calls remain manual)."""
+    if not math.isfinite(t):
+        return 0.0
+    return _clamp(2.0 * (1.0 - _normal_cdf(abs(t))), 0.0, 1.0)
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _num(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _row_get(row: Any, key: str) -> Any:
+    """Read a column from a sqlite3.Row, tolerating its absence in the SELECT."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
 
 
 def _parse_ts(value: Any) -> float | None:
@@ -81,6 +124,12 @@ def _parse_ts(value: Any) -> float | None:
         return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
+
+
+# Checkpoints whose predictions are recorded and graded for accuracy. 10M/15M
+# also carry shadow weight-learning; 7M is accuracy-tracked only by default.
+TRACKED_CHECKPOINTS = ("15M", "10M", "7M")
+LEARNING_CHECKPOINTS = ("10M", "15M")
 
 
 CHAMPION_WEIGHTS: dict[str, float] = {
@@ -107,25 +156,33 @@ class V95Ledger:
         primary = str(os.environ.get("Q15_V95_PRIMARY_LEARNING_CHECKPOINT", "10M")).strip().upper()
         self.primary_learning_checkpoint = primary if primary in {"10M", "15M"} else "10M"
         legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
+        # 7M is tracked and graded for accuracy alongside 15M/10M, but its weight
+        # learning is observational by default (like 15M). Enabling it requires the
+        # challenger weight tables to admit '7M' — see _initialize.
         self.learning_enabled_by_checkpoint = {
             "10M": _env_bool("Q15_V95_10M_SHADOW_LEARNING", legacy_enabled),
             "15M": _env_bool("Q15_V95_15M_SHADOW_LEARNING", False),
+            "7M": _env_bool("Q15_V95_7M_SHADOW_LEARNING", False),
         }
         self.learning_rate_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_LEARNING_RATE", 0.05, 0.001, 0.20),
             "15M": _env_float("Q15_V95_15M_SHADOW_LEARNING_RATE", 0.02, 0.001, 0.20),
+            "7M": _env_float("Q15_V95_7M_SHADOW_LEARNING_RATE", 0.05, 0.001, 0.20),
         }
         self.per_result_cap_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_MAX_DELTA", 0.015, 0.001, 0.05),
             "15M": _env_float("Q15_V95_15M_SHADOW_MAX_DELTA", 0.008, 0.001, 0.05),
+            "7M": _env_float("Q15_V95_7M_SHADOW_MAX_DELTA", 0.015, 0.001, 0.05),
         }
         self.total_drift_cap_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_MAX_DRIFT", 0.35, 0.05, 1.0),
             "15M": _env_float("Q15_V95_15M_SHADOW_MAX_DRIFT", 0.20, 0.05, 1.0),
+            "7M": _env_float("Q15_V95_7M_SHADOW_MAX_DRIFT", 0.35, 0.05, 1.0),
         }
         self.minimum_learning_quality_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_MIN_QUALITY", 0.55, 0.0, 1.0),
             "15M": _env_float("Q15_V95_15M_SHADOW_MIN_QUALITY", 0.65, 0.0, 1.0),
+            "7M": _env_float("Q15_V95_7M_SHADOW_MIN_QUALITY", 0.55, 0.0, 1.0),
         }
         # Backward-compatible public attributes now describe the primary learner.
         self.shadow_learning_enabled = self.learning_enabled_by_checkpoint[self.primary_learning_checkpoint]
@@ -135,7 +192,11 @@ class V95Ledger:
         self.minimum_learning_quality = self.minimum_learning_quality_by_checkpoint[self.primary_learning_checkpoint]
         self.minimum_calibration_rows = _env_int("Q15_V95_CALIBRATION_MIN_ROWS", 30, 10, 1000)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
-        self.promotion_margin = _env_float("Q15_V95_PROMOTION_BRIER_MARGIN", 0.005, 0.0, 0.10)
+        # Regime-aware challenger: a per-(checkpoint, regime) weight set that
+        # specializes once a regime has enough of its own resolved results,
+        # falling back to the global challenger until then.
+        self.regime_learning_enabled = _env_bool("Q15_V95_REGIME_CHALLENGER", True)
+        self.minimum_regime_updates = _env_int("Q15_V95_REGIME_MIN_UPDATES", 30, 5, 5000)
         self._available = True
         self._last_error: str | None = None
         try:
@@ -178,6 +239,10 @@ class V95Ledger:
                     trade_quality REAL NOT NULL,
                     trade_decision TEXT NOT NULL,
                     regime TEXT NOT NULL,
+                    rank INTEGER,
+                    entry_ask_cents REAL,
+                    entry_cost_cents REAL,
+                    realized_cents REAL,
                     feature_json TEXT NOT NULL,
                     contribution_json TEXT NOT NULL,
                     quote_json TEXT NOT NULL,
@@ -208,6 +273,17 @@ class V95Ledger:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY(checkpoint, name)
                 );
+                CREATE TABLE IF NOT EXISTS regime_challenger_weights (
+                    checkpoint TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    base_value REAL NOT NULL,
+                    value REAL NOT NULL,
+                    grad_sq REAL NOT NULL DEFAULT 0,
+                    updates INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(checkpoint, regime, name)
+                );
                 CREATE TABLE IF NOT EXISTS checkpoint_challenger_updates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     checkpoint TEXT NOT NULL CHECK(checkpoint IN ('10M','15M')),
@@ -236,8 +312,13 @@ class V95Ledger:
                 );
                 """
             )
+            # Migrate older ledgers that predate the rank / P&L columns.
+            self._ensure_column(connection, "predictions", "rank", "rank INTEGER")
+            self._ensure_column(connection, "predictions", "entry_ask_cents", "entry_ask_cents REAL")
+            self._ensure_column(connection, "predictions", "entry_cost_cents", "entry_cost_cents REAL")
+            self._ensure_column(connection, "predictions", "realized_cents", "realized_cents REAL")
             now = time.time()
-            for checkpoint in ("10M", "15M"):
+            for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
                     connection.execute(
                         "INSERT OR IGNORE INTO checkpoint_challenger_weights(checkpoint,name,base_value,value,updated_at) VALUES(?,?,?,?,?)",
@@ -246,18 +327,49 @@ class V95Ledger:
             connection.commit()
 
     @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        existing = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    @staticmethod
     def _checkpoint(value: Any) -> str:
         checkpoint = str(value or "").strip().upper()
-        return checkpoint if checkpoint in {"10M", "15M"} else "10M"
+        return checkpoint if checkpoint in TRACKED_CHECKPOINTS else "10M"
 
     def learning_enabled(self, checkpoint: str) -> bool:
         return bool(self.learning_enabled_by_checkpoint[self._checkpoint(checkpoint)])
 
-    def challenger_weights(self, checkpoint: str | None = None) -> dict[str, float]:
+    @staticmethod
+    def _regime_key(regime: Any) -> str:
+        return (str(regime or "UNKNOWN").strip().upper() or "UNKNOWN")
+
+    def challenger_weights(self, checkpoint: str | None = None, regime: str | None = None) -> dict[str, float]:
+        """Weights for the shadow challenger.
+
+        When a regime is supplied and its per-regime challenger has matured
+        (>= minimum_regime_updates resolved results), the regime-specialized
+        weights are returned; otherwise the global checkpoint challenger is used.
+        """
         checkpoint = self._checkpoint(checkpoint or self.primary_learning_checkpoint)
         if not self._available:
             return dict(CHAMPION_WEIGHTS)
         with self._lock, closing(self._connect()) as connection:
+            if self.regime_learning_enabled and regime:
+                key = self._regime_key(regime)
+                regime_weights = {
+                    str(row["name"]): float(row["value"])
+                    for row in connection.execute(
+                        "SELECT name,value FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+                        (checkpoint, key),
+                    )
+                }
+                maturity = connection.execute(
+                    "SELECT updates FROM regime_challenger_weights WHERE checkpoint=? AND regime=? AND name='intercept'",
+                    (checkpoint, key),
+                ).fetchone()
+                if regime_weights and maturity is not None and int(maturity["updates"] or 0) >= self.minimum_regime_updates:
+                    return regime_weights
             rows = connection.execute(
                 "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=? ORDER BY name",
                 (checkpoint,),
@@ -272,11 +384,26 @@ class V95Ledger:
                           conservative_probability: float, data_quality: float, evidence_quality: float,
                           trade_quality: float, trade_decision: str, regime: str,
                           features: Mapping[str, Any], contributions: Mapping[str, Any],
-                          quote: Mapping[str, Any]) -> tuple[str, bool]:
-        checkpoint = str(checkpoint).upper()
+                          quote: Mapping[str, Any], rank: int | None = None,
+                          costs: Mapping[str, Any] | None = None) -> tuple[str, bool]:
+        checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
             return prediction_id, False
+        rank_value = None
+        try:
+            rank_value = int(rank) if rank is not None else None
+        except (TypeError, ValueError):
+            rank_value = None
+        # Capture the paper entry price and estimated costs so realized P&L can be
+        # computed at settlement: a win pays 100 minus ask and costs, a loss
+        # forfeits ask plus costs. None when no executable ask was available.
+        quote = dict(quote or {})
+        costs = dict(costs or {})
+        entry_ask = _num(quote.get("ask_cents"))
+        entry_cost = _num(costs.get("total_cents"))
+        if entry_cost is None:
+            entry_cost = _num(costs.get("total_cost_cents"), 0.0)
         with self._lock, closing(self._connect()) as connection:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO predictions(
@@ -284,15 +411,16 @@ class V95Ledger:
                        created_at,close_time,predicted_side,raw_yes_probability,
                        calibrated_yes_probability,challenger_yes_probability,baseline_yes_probability,
                        selected_probability,conservative_probability,data_quality,evidence_quality,
-                       trade_quality,trade_decision,regime,feature_json,contribution_json,quote_json)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       trade_quality,trade_decision,regime,rank,entry_ask_cents,entry_cost_cents,
+                       feature_json,contribution_json,quote_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     prediction_id, MODEL_VERSION, FEATURE_SCHEMA_VERSION, ticker, asset, checkpoint,
                     created_at, close_time, predicted_side, raw_yes_probability,
                     calibrated_yes_probability, challenger_yes_probability, baseline_yes_probability,
                     selected_probability, conservative_probability, data_quality, evidence_quality,
-                    trade_quality, trade_decision, regime, _json(dict(features)),
-                    _json(dict(contributions)), _json(dict(quote)),
+                    trade_quality, trade_decision, regime, rank_value, entry_ask, entry_cost,
+                    _json(dict(features)), _json(dict(contributions)), _json(dict(quote)),
                 ),
             )
             connection.commit()
@@ -346,6 +474,50 @@ class V95Ledger:
             "new_predictions_resolved": resolved,
             "shadow_updates_applied": learned,
             "result_events": result_events[:20],
+        }
+
+    def reconcile_pending_from_market(self, get_market: Any, now: float | None = None,
+                                      max_calls: int = 12) -> dict[str, Any]:
+        """Resolve predictions straight from official Kalshi results.
+
+        Unlike reconcile_from_signal_store, this does not depend on a signals-table
+        row existing for the ticker: any prediction whose market has closed gets
+        graded, so the learning corpus is complete. One REST call per ticker,
+        bounded by max_calls per invocation."""
+        if not self._available or not callable(get_market):
+            return {"available": False, "reason": "unavailable"}
+        now = now or time.time()
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT DISTINCT ticker FROM predictions "
+                "WHERE official_result IS NULL AND close_time IS NOT NULL AND close_time <= ? "
+                "ORDER BY close_time LIMIT ?",
+                (now, max(1, int(max_calls))),
+            ))
+        tickers = [str(row["ticker"]) for row in rows if row["ticker"]]
+        resolved = learned = calls = 0
+        events: list[dict[str, Any]] = []
+        for ticker in tickers:
+            try:
+                market = get_market(ticker)
+            except Exception as exc:
+                self._last_error = f"market_reconcile:{type(exc).__name__}:{exc}"
+                continue
+            calls += 1
+            if not isinstance(market, Mapping):
+                continue
+            result = str(market.get("result") or "").upper()
+            if result not in {"YES", "NO"}:
+                continue  # not officially resolved yet
+            outcome_time = _parse_ts(market.get("close_time") or market.get("settled_at")) or now
+            outcome = self.resolve_ticker(ticker, result, outcome_time)
+            resolved += outcome["resolved"]
+            learned += outcome["updates_applied"]
+            events.extend(outcome.get("events", []))
+        return {
+            "available": True, "tickers_checked": len(tickers), "market_calls": calls,
+            "new_predictions_resolved": resolved, "shadow_updates_applied": learned,
+            "result_events": events[:20],
         }
 
     @staticmethod
@@ -404,12 +576,17 @@ class V95Ledger:
                 hb, hl = self._loss(float(row["challenger_yes_probability"]), actual_yes)
                 bb, bl = self._loss(float(row["baseline_yes_probability"]), actual_yes)
                 correct = int(str(row["predicted_side"]) == official)
+                ask = _num(_row_get(row, "entry_ask_cents"))
+                cost = _num(_row_get(row, "entry_cost_cents"), 0.0) or 0.0
+                realized = None
+                if ask is not None:
+                    realized = round((100.0 - ask - cost) if correct else -(ask + cost), 4)
                 connection.execute(
                     """UPDATE predictions SET official_result=?,resolved_at=?,correct=?,
-                       champion_brier=?,challenger_brier=?,baseline_brier=?,
+                       realized_cents=?,champion_brier=?,challenger_brier=?,baseline_brier=?,
                        champion_logloss=?,challenger_logloss=?,baseline_logloss=?
                        WHERE prediction_id=?""",
-                    (official, resolved_at, correct, cb, hb, bb, cl, hl, bl, row["prediction_id"]),
+                    (official, resolved_at, correct, realized, cb, hb, bb, cl, hl, bl, row["prediction_id"]),
                 )
                 review = self._result_review(dict(row), official)
                 events.append({
@@ -499,6 +676,13 @@ class V95Ledger:
                     "UPDATE checkpoint_challenger_weights SET value=?,grad_sq=?,updates=updates+1,updated_at=? WHERE checkpoint=? AND name=?",
                     (next_value, grad_sq, now, checkpoint, name),
                 )
+            # Mirror the same gradient step into the per-regime challenger so it
+            # specializes to the market condition this result occurred in.
+            if self.regime_learning_enabled:
+                self._update_regime_weights(
+                    connection, checkpoint, row["regime"], features, error,
+                    sample_weight, learning_rate, per_result_cap, total_drift_cap, now,
+                )
             connection.execute(
                 "INSERT INTO checkpoint_challenger_updates(checkpoint,prediction_id,created_at,error,sample_weight,delta_json,before_json,after_json) VALUES(?,?,?,?,?,?,?,?)",
                 (checkpoint, prediction_id, now, error, sample_weight, _json(deltas), _json(before), _json(after)),
@@ -506,6 +690,52 @@ class V95Ledger:
             connection.execute("UPDATE predictions SET learning_applied=1 WHERE prediction_id=?", (prediction_id,))
             connection.commit()
             return True
+
+    def _update_regime_weights(self, connection: sqlite3.Connection, checkpoint: str, regime: Any,
+                               features: Mapping[str, Any], error: float, sample_weight: float,
+                               learning_rate: float, per_result_cap: float, total_drift_cap: float,
+                               now: float) -> None:
+        key = self._regime_key(regime)
+        rows = list(connection.execute(
+            "SELECT * FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+            (checkpoint, key),
+        ))
+        if not rows:
+            # Warm-start from the current global challenger; regularize toward the
+            # frozen champion (base_value) just like the global challenger does.
+            global_values = {
+                str(r["name"]): float(r["value"])
+                for r in connection.execute(
+                    "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=?", (checkpoint,)
+                )
+            }
+            for name, base in CHAMPION_WEIGHTS.items():
+                connection.execute(
+                    "INSERT OR IGNORE INTO regime_challenger_weights(checkpoint,regime,name,base_value,value,updated_at) VALUES(?,?,?,?,?,?)",
+                    (checkpoint, key, name, base, global_values.get(name, base), now),
+                )
+            rows = list(connection.execute(
+                "SELECT * FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+                (checkpoint, key),
+            ))
+        for item in rows:
+            name = str(item["name"])
+            base = float(item["base_value"])
+            current = float(item["value"])
+            x = 1.0 if name == "intercept" else float(features.get(name, 0.0) or 0.0)
+            if name != "intercept" and abs(x) < 1e-12:
+                continue  # feature absent this row; don't touch its weight or count
+            gradient = sample_weight * error * x - 0.002 * (current - base)
+            grad_sq = float(item["grad_sq"] or 0.0) + gradient * gradient
+            step = learning_rate * gradient / math.sqrt(1.0 + grad_sq)
+            delta = _clamp(step, -per_result_cap, per_result_cap)
+            next_value = _clamp(current + delta, base - total_drift_cap, base + total_drift_cap)
+            # Always advance the update count (intercept's count = the regime's
+            # resolved-sample count, which gates maturity) even on a zero step.
+            connection.execute(
+                "UPDATE regime_challenger_weights SET value=?,grad_sq=?,updates=updates+1,updated_at=? WHERE checkpoint=? AND regime=? AND name=?",
+                (next_value, grad_sq, now, checkpoint, key, name),
+            )
 
     def pattern_similarity(self, features: Mapping[str, float], provisional_side: str, checkpoint: str = "10M") -> dict[str, Any]:
         """Checkpoint-specific winner/loser similarity; diagnostic at 10 rows and shadow-only at 30."""
@@ -616,6 +846,95 @@ class V95Ledger:
             "scope": "asset" if asset_rows and len(asset_rows) >= self.minimum_calibration_rows else "checkpoint",
         }
 
+    @staticmethod
+    def _win_loss(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        n = len(selected)
+        right = sum(1 for row in selected if int(row["correct"] or 0) == 1)
+        low, high = _wilson_interval(right, n)
+        # Below this many resolved samples, a bucket's rate is statistically
+        # untrustworthy and should be read as "not enough data yet".
+        threshold = _env_int("Q15_V95_SCOREBOARD_MIN_N", 10, 1, 1000)
+        realized = [v for v in (_num(_row_get(row, "realized_cents")) for row in selected) if v is not None]
+        pnl_n = len(realized)
+        return {
+            "right": right, "wrong": n - right, "n": n,
+            "accuracy": round(right / n, 4) if n else None,
+            "ci_low": low, "ci_high": high,
+            "low_n": bool(n and n < threshold),
+            "pnl_n": pnl_n,
+            "realized_total_cents": round(sum(realized), 2) if realized else 0.0,
+            "realized_avg_cents": round(sum(realized) / pnl_n, 2) if pnl_n else None,
+        }
+
+    @staticmethod
+    def _rank_bucket(row: Mapping[str, Any]) -> str:
+        try:
+            value = int(row["rank"]) if row["rank"] is not None else None
+        except (TypeError, ValueError, IndexError, KeyError):
+            value = None
+        return str(value) if value in (1, 2, 3) else "other"
+
+    def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Right/wrong/accuracy by interval (15M/10M/7M), pick rank (#1/#2/#3), and asset."""
+        by_checkpoint = {cp: self._win_loss([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
+        by_rank = {
+            label: self._win_loss([r for r in rows if self._rank_bucket(r) == label])
+            for label in ("1", "2", "3", "other")
+        }
+        assets = sorted({str(r["asset"]) for r in rows})
+        by_asset = {a: self._win_loss([r for r in rows if str(r["asset"]) == a]) for a in assets}
+        # How the top pick (#1) fares per coin — "which coins the #1 pick wins on".
+        rank1 = [r for r in rows if self._rank_bucket(r) == "1"]
+        top_pick_by_asset = {
+            a: self._win_loss([r for r in rank1 if str(r["asset"]) == a])
+            for a in sorted({str(r["asset"]) for r in rank1})
+        }
+        return {
+            "overall": self._win_loss(rows), "by_checkpoint": by_checkpoint,
+            "by_rank": by_rank, "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
+        }
+
+    def scoreboard(self) -> dict[str, Any]:
+        """User-facing record: how often each interval, rank, and asset was right/wrong."""
+        if not self._available:
+            return {"available": False, "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT checkpoint, correct, rank, asset, realized_cents FROM predictions "
+                "WHERE model_version=? AND official_result IS NOT NULL",
+                (MODEL_VERSION,),
+            ))
+        return {
+            "available": True, "model_version": MODEL_VERSION,
+            "intervals": TRACKED_CHECKPOINTS, **self._scoreboard_rows(rows),
+        }
+
+    @staticmethod
+    def _paired_better_test(rows: Sequence[sqlite3.Row], worse_key: str, better_key: str) -> dict[str, Any]:
+        """Paired test of whether `better_key` Brier is genuinely below `worse_key`.
+
+        d_i = worse - better (positive favors the challenger). Returns the mean
+        Brier reduction, t statistic, and two-sided p-value, so promotion rests on
+        statistical significance rather than a fixed margin."""
+        diffs = []
+        for row in rows:
+            worse = _num(_row_get(row, worse_key))
+            better = _num(_row_get(row, better_key))
+            if worse is not None and better is not None:
+                diffs.append(worse - better)
+        n = len(diffs)
+        if n < 2:
+            return {"n": n, "mean_brier_reduction": None, "t": None, "p_value": None, "favored": False}
+        mean = sum(diffs) / n
+        variance = sum((d - mean) ** 2 for d in diffs) / (n - 1)
+        se = math.sqrt(variance / n) if variance > 0 else 0.0
+        t = (mean / se) if se > 0 else (math.inf if mean > 0 else -math.inf if mean < 0 else 0.0)
+        return {
+            "n": n, "mean_brier_reduction": round(mean, 6),
+            "t": round(t, 4) if math.isfinite(t) else None,
+            "p_value": round(_two_sided_p(t), 6), "favored": mean > 0,
+        }
+
     def metrics(self) -> dict[str, Any]:
         if not self._available:
             return {"available": False, "error": self._last_error}
@@ -639,7 +958,7 @@ class V95Ledger:
                 "baseline_logloss": sum(float(row["baseline_logloss"]) for row in selected) / len(selected),
             }
         overall = aggregate(rows)
-        by_checkpoint = {cp: aggregate([r for r in rows if r["checkpoint"] == cp]) for cp in ("15M", "10M")}
+        by_checkpoint = {cp: aggregate([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
         by_regime: dict[str, Any] = {}
         for regime in sorted({str(r["regime"]) for r in rows}):
             by_regime[regime] = aggregate([r for r in rows if r["regime"] == regime])
@@ -658,26 +977,35 @@ class V95Ledger:
                     "mean_predicted": sum(float(r["selected_probability"]) for r in chosen) / len(chosen),
                     "actual_win_rate": sum(int(r["correct"] or 0) for r in chosen) / len(chosen),
                 })
+        alpha = _env_float("Q15_V95_PROMOTION_ALPHA", 0.05, 0.0001, 0.5)
         promotion_by_checkpoint: dict[str, dict[str, Any]] = {}
-        for checkpoint in ("10M", "15M"):
-            metrics = by_checkpoint.get(checkpoint, {})
-            resolved = int(metrics.get("resolved", 0))
+        for checkpoint in LEARNING_CHECKPOINTS:
+            cp_rows = [r for r in rows if r["checkpoint"] == checkpoint]
+            resolved = len(cp_rows)
             candidate = False
+            vs_champion = vs_baseline = None
             reason = "learning_disabled" if not self.learning_enabled(checkpoint) else "insufficient_resolved_rows"
             if self.learning_enabled(checkpoint) and resolved >= self.minimum_promotion_rows:
-                champion = float(metrics.get("champion_brier", 1.0))
-                challenger = float(metrics.get("challenger_brier", 1.0))
-                baseline = float(metrics.get("baseline_brier", 1.0))
-                candidate = challenger + self.promotion_margin < min(champion, baseline)
-                reason = "eligible_for_manual_review" if candidate else "challenger_not_better_enough"
+                # Significant paired Brier improvement over BOTH champion and baseline.
+                vs_champion = self._paired_better_test(cp_rows, "champion_brier", "challenger_brier")
+                vs_baseline = self._paired_better_test(cp_rows, "baseline_brier", "challenger_brier")
+                pc, pb = vs_champion["p_value"], vs_baseline["p_value"]
+                significant = (
+                    vs_champion["favored"] and pc is not None and pc < alpha
+                    and vs_baseline["favored"] and pb is not None and pb < alpha
+                )
+                candidate = bool(significant)
+                reason = "eligible_for_manual_review" if candidate else "challenger_not_significantly_better"
             promotion_by_checkpoint[checkpoint] = {
                 "candidate": candidate, "reason": reason, "resolved": resolved,
                 "learning_enabled": self.learning_enabled(checkpoint),
+                "alpha": alpha, "vs_champion": vs_champion, "vs_baseline": vs_baseline,
             }
         primary = promotion_by_checkpoint[self.primary_learning_checkpoint]
         return {
             "available": True, "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "overall": overall, "by_checkpoint": by_checkpoint, "by_regime": by_regime,
+            "scoreboard": self._scoreboard_rows(rows),
             "calibration_bands": bins, "promotion_candidate": bool(primary["candidate"]),
             "promotion_reason": str(primary["reason"]), "promotion_by_checkpoint": promotion_by_checkpoint,
             "primary_learning_checkpoint": self.primary_learning_checkpoint,
@@ -773,6 +1101,7 @@ class V95Ledger:
                    SUM(CASE WHEN official_result IS NOT NULL THEN 1 ELSE 0 END) resolved,
                    SUM(CASE WHEN checkpoint='15M' THEN 1 ELSE 0 END) fifteen,
                    SUM(CASE WHEN checkpoint='10M' THEN 1 ELSE 0 END) ten,
+                   SUM(CASE WHEN checkpoint='7M' THEN 1 ELSE 0 END) seven,
                    SUM(CASE WHEN learning_applied=1 THEN 1 ELSE 0 END) learned
                    FROM predictions WHERE model_version=?""",
                 (MODEL_VERSION,),
@@ -787,12 +1116,25 @@ class V95Ledger:
                 ).fetchone()[0] or 0)
                 for checkpoint in ("10M", "15M")
             }
+            regime_rows = list(connection.execute(
+                "SELECT checkpoint, regime, MAX(CASE WHEN name='intercept' THEN updates ELSE 0 END) AS results "
+                "FROM regime_challenger_weights GROUP BY checkpoint, regime ORDER BY results DESC"
+            ))
+        regime_challengers = [
+            {
+                "checkpoint": str(r["checkpoint"]), "regime": str(r["regime"]),
+                "results": int(r["results"] or 0),
+                "active": int(r["results"] or 0) >= self.minimum_regime_updates,
+            }
+            for r in regime_rows
+        ]
         return {
             "available": True, "path": str(self.path), "version": VERSION,
             "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "unique_predictions": int(counts["total"] or 0), "unique_resolved": int(counts["resolved"] or 0),
             "fifteen_minute_predictions": int(counts["fifteen"] or 0),
             "ten_minute_predictions": int(counts["ten"] or 0),
+            "seven_minute_predictions": int(counts["seven"] or 0),
             "shadow_updates_applied": int(counts["learned"] or 0),
             "champion_weights": dict(CHAMPION_WEIGHTS),
             "challenger_weights": {checkpoint: self.challenger_weights(checkpoint) for checkpoint in ("10M", "15M")},
@@ -801,6 +1143,9 @@ class V95Ledger:
             "learning_rate_by_checkpoint": dict(self.learning_rate_by_checkpoint),
             "minimum_learning_quality_by_checkpoint": dict(self.minimum_learning_quality_by_checkpoint),
             "shadow_updates_by_checkpoint": updates_by_checkpoint,
+            "regime_learning_enabled": self.regime_learning_enabled,
+            "minimum_regime_updates": self.minimum_regime_updates,
+            "regime_challengers": regime_challengers,
             "shadow_learning_enabled": self.shadow_learning_enabled, "production_weights_frozen": True,
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,

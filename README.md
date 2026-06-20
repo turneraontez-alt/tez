@@ -1,7 +1,8 @@
 # Kalshi 15-Minute Crypto Monitor
 
 A read-only, paper-trading monitor for Kalshi crypto binary markets. Watches
-BTC and ETH 15-minute contracts, runs a multi-factor edge model, and fires
+BTC, ETH, SOL, XRP, DOGE, BNB and HYPE 15-minute contracts, runs a multi-factor
+edge model, and fires
 Telegram alerts at the 15m, 10m, and 7m checkpoints — plus a between-checkpoint
 **DIP alert** when a favorable price appears mid-window.
 
@@ -18,7 +19,7 @@ Telegram alerts at the 15m, 10m, and 7m checkpoints — plus a between-checkpoin
 - Reliable Telegram outbox with idempotency keys, retry, and dead-letter
 - Shadow learning engine (read-only — never executes real trades)
 - Live dashboard at `/`; JSON API at `/api/snapshot`
-- 275 passing tests across 25 test files
+- 315+ passing tests across 31 test files
 
 ---
 
