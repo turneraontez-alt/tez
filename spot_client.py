@@ -5,7 +5,9 @@ available, so we approximate the underlying with public spot prices and
 emit a data-quality warning. Coinbase covers most assets in USD; BNB and
 HYPE are sourced from OKX in USDT (treated as ~USD with a noted caveat).
 """
+import os
 import time
+import threading
 import logging
 
 import requests
@@ -23,9 +25,60 @@ SPOT_SOURCES = {
     "HYPE": ("okx", "HYPE-USDT", "USDT"),
 }
 
+# Last successful spot per asset, so a single transient fetch failure (rate
+# limit, network blip) does not blank `underlying_current` and force the whole
+# checkpoint into "NO PREDICTION (underlying spot price unavailable)". A cached
+# price is reused for at most Q15_SPOT_MAX_STALE_SECONDS, after which we honestly
+# report failure rather than predict on a stale price.
+_LAST_GOOD = {}
+_LAST_GOOD_LOCK = threading.Lock()
+
+
+def _max_stale_seconds():
+    try:
+        return max(0.0, float(os.environ.get("Q15_SPOT_MAX_STALE_SECONDS", "30") or 30))
+    except (TypeError, ValueError):
+        return 30.0
+
 
 def get_spot(asset):
-    """Return {ok, price, bid, ask, ts, source, quote} for an asset."""
+    """Return {ok, price, bid, ask, ts, source, quote} for an asset.
+
+    On a fetch failure, fall back to the last good price for this asset if it is
+    still within the staleness budget, flagged with ``stale``/``stale_age_seconds``
+    so downstream surfaces can see it is a fallback.
+    """
+    result = _fetch_spot(asset)
+    now = time.time()
+    if result.get("ok") and result.get("price"):
+        with _LAST_GOOD_LOCK:
+            _LAST_GOOD[asset] = (now, dict(result))
+        return result
+    with _LAST_GOOD_LOCK:
+        cached = _LAST_GOOD.get(asset)
+    if cached:
+        cached_at, good = cached
+        age = now - cached_at
+        if 0.0 <= age <= _max_stale_seconds():
+            fallback = dict(good)
+            # Stamp the reuse time so candle/freshness continuity holds, but keep
+            # the failure reason and original timestamp visible for diagnostics.
+            fallback["ts"] = now
+            fallback["stale"] = True
+            fallback["stale_age_seconds"] = round(age, 3)
+            fallback["original_ts"] = good.get("ts")
+            fallback["error"] = result.get("error")
+            fallback["source"] = f"{good.get('source')} (last good {age:.0f}s)"
+            logger.warning(
+                "Spot fetch for %s failed (%s); reusing last good price %.6gs old",
+                asset, result.get("error"), age,
+            )
+            return fallback
+    return result
+
+
+def _fetch_spot(asset):
+    """Single live fetch from the configured public source (no caching)."""
     src, sym, quote = SPOT_SOURCES.get(asset, (None, None, None))
     if src is None:
         return {"ok": False, "price": None, "source": None, "error": "no spot source"}
