@@ -1,9 +1,10 @@
-modules = ["python-3.11"]
+modules = ["python-3.11", "postgresql-16"]
 [agent]
 expertMode = true
 
 [nix]
 packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
+channel = "stable-25_05"
 
 [[ports]]
 localPort = 8000
@@ -40,4 +41,4 @@ outputType = "webview"
 [userenv]
 
 [userenv.shared]
-KALSHI_WS_ENABLED = "true"
+KALSHI_WS_ENABLED = "false"
