@@ -100,6 +100,15 @@ class CalibratedEdgeTests(unittest.TestCase):
         message = augment_telegram_message("🛑 15M EARLY CHECK — ETH YES")
         self.assertIn("V9 TRADE QUALITY", message)
 
+    def test_v95_checkpoint_message_is_left_untouched(self):
+        # V9.5 checkpoint alerts own their full hourly-report-style layout, so the
+        # reformatter must not append a "V9 TRADE QUALITY" block under them.
+        snap = base_snapshot()
+        self.engine.preview_all({"ETH": snap}, 99.0, {})
+        original = "👀 <b>10M V9.5 CHECK · NO ENTRY YET</b>\n<pre>\nETH  YES\n</pre>"
+        self.assertEqual(augment_telegram_message(original), original)
+        self.assertNotIn("V9 TRADE QUALITY", augment_telegram_message(original))
+
     def test_alert_augmentation_adds_trade_quality(self):
         snap = base_snapshot()
         self.engine.enrich_all({"ETH": snap}, 100.0, {})

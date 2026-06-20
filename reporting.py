@@ -7,11 +7,37 @@ scalp line. Delivery is deduped across the dev + prod instances via
 store.claim_event so the chat only ever gets one report per hour.
 """
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timezone, timedelta
+
+try:  # stdlib on 3.9+; needs the `tzdata` wheel on a bare container.
+    from zoneinfo import ZoneInfo
+    _EASTERN = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - fallback if tz database is missing
+    _EASTERN = None
 
 logger = logging.getLogger(__name__)
 
 DISCLAIMER = "Paper monitor \u2014 not financial advice \u2014 no orders are placed."
+
+
+def _env_int(name, default, low, high):
+    try:
+        return max(low, min(high, int(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _eastern_header():
+    """Top-of-hour label in US Eastern time (auto EST/EDT), e.g. '3:00 PM EDT'.
+
+    Falls back to a fixed EST offset only if the tz database is unavailable.
+    """
+    if _EASTERN is not None:
+        local = datetime.now(_EASTERN)
+    else:  # pragma: no cover - exercised only without tzdata
+        local = datetime.now(timezone(timedelta(hours=-5), "EST"))
+    return local.strftime("%I:00 %p %Z").lstrip("0")
 
 
 def _pct(x):
@@ -32,10 +58,17 @@ class HourlyReporter:
         self._last_hour = None
 
     @staticmethod
-    def _sb_row(label, d):
-        """One aligned monospace row, or None if the bucket has no settled rows."""
+    def _sb_row(label, d, placeholder=False):
+        """One aligned monospace row.
+
+        Returns None for an empty bucket unless ``placeholder`` is set, in which
+        case a zeroed "awaiting data" row is rendered — used for the checkpoint
+        group so 15M/10M/7M are always visible even before they settle.
+        """
         n = (d or {}).get("n") or 0
         if not n:
+            if placeholder:
+                return f"{label:<8}{'0-0':>5}{'—':>6}{'—':>7}"
             return None
         wl = f"{d.get('right', 0)}-{d.get('wrong', 0)}"
         acc = d.get("accuracy")
@@ -67,7 +100,7 @@ class HourlyReporter:
 
         by_cp, by_rank, by_asset = sb.get("by_checkpoint", {}), sb.get("by_rank", {}), sb.get("by_asset", {})
         groups = [
-            [self._sb_row(cp, by_cp.get(cp)) for cp in ("15M", "10M", "7M")],
+            [self._sb_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")],
             [self._sb_row(f"#{k} pick", by_rank.get(k)) for k in ("1", "2", "3")],
             [self._sb_row(a, d) for a, d in sorted(
                 ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
@@ -88,24 +121,32 @@ class HourlyReporter:
     def maybe_send(self, now):
         if not self.cfg.hourly_report_enabled or not self.notifier.enabled:
             return
-        hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-        if self._last_hour is None:
-            # don't fire mid-hour on (re)start; wait for the next boundary
-            self._last_hour = hour
-            return
-        if hour == self._last_hour:
+        utc = datetime.now(timezone.utc)
+        hour = utc.strftime("%Y%m%d%H")
+        first_call = self._last_hour is None
+        if not first_call and hour == self._last_hour:
             return
         self._last_hour = hour
+        # On (re)start, only catch up the current hour while we're still near the
+        # top of it — otherwise wait for the next boundary so a late restart never
+        # sends a stale, badly-delayed report. The cross-instance claim below keeps
+        # this idempotent. (Was: always skip the first hour after start, which on a
+        # frequently-restarting host could delay/drop reports.)
+        if first_call and utc.minute >= _env_int("Q15_HOURLY_CATCHUP_MINUTES", 5, 0, 59):
+            return
         if not self.store.claim_event(f"hourly:{hour}"):
             return  # another instance already sent this hour's report
         try:
             self.notifier.send(self.build_report())
+            # Surface how far past the hour delivery actually happened, so a
+            # recurring lateness (e.g. a sleeping/ restarting host) is visible.
+            logger.info("Hourly report sent for %s at :%02d past the hour", hour, utc.minute)
         except Exception as e:
             logger.error(f"hourly report failed: {e}")
 
     # -- report body ----------------------------------------------------
     def build_report(self):
-        hh = datetime.now(timezone.utc).strftime("%H:00 UTC")
+        hh = _eastern_header()
         lines = [f"\U0001f4ca <b>Hourly Report \u2014 {hh}</b>"]
 
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
