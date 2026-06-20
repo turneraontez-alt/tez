@@ -128,6 +128,12 @@ class KalshiWebSocketFeed:
                 "mode": "websocket" if self._connected else "rest-fallback",
             }
 
+    def book_ages(self) -> dict:
+        """Per-ticker age (seconds) of the cached orderbook — freshness probe."""
+        now = time.time()
+        with self._lock:
+            return {t: round(now - b.get("updated_at", 0.0), 3) for t, b in self._books.items()}
+
     def get_orderbook(self, ticker: str, max_age: float = 3.0):
         now = time.time()
         with self._lock:
