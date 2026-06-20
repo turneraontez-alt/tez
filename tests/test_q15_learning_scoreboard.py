@@ -206,6 +206,7 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
     """End-to-end: a 7-minute cycle records each prediction as 7M with its rank."""
 
     def setUp(self):
+        self._prior_public = os.environ.get("Q15_V95_PUBLIC_DATA_ENABLED")
         os.environ["Q15_V95_PUBLIC_DATA_ENABLED"] = "false"
         from q15_upgrade.checkpoint_v95 import CheckpointPolicyV95
         from tests.test_q15_v95 import snapshot, candles, FakeHub, FakeNotifier
@@ -218,6 +219,10 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        if self._prior_public is None:
+            os.environ.pop("Q15_V95_PUBLIC_DATA_ENABLED", None)
+        else:
+            os.environ["Q15_V95_PUBLIC_DATA_ENABLED"] = self._prior_public
         # A real cycle populates module-level "latest" caches; clear them so we
         # don't leak state into tests asserting a pre-first-cycle startup state.
         import q15_upgrade.checkpoint_v95 as cp95

@@ -50,6 +50,7 @@ class TestNoLegacyUI(unittest.TestCase):
 
 class TestRunCycleStampsCardFields(unittest.TestCase):
     def setUp(self):
+        self._prior_public = os.environ.get("Q15_V95_PUBLIC_DATA_ENABLED")
         os.environ["Q15_V95_PUBLIC_DATA_ENABLED"] = "false"
         from q15_upgrade.checkpoint_v95 import CheckpointPolicyV95
         from q15_upgrade.ledger_v95 import V95Ledger
@@ -62,6 +63,10 @@ class TestRunCycleStampsCardFields(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        if self._prior_public is None:
+            os.environ.pop("Q15_V95_PUBLIC_DATA_ENABLED", None)
+        else:
+            os.environ["Q15_V95_PUBLIC_DATA_ENABLED"] = self._prior_public
         with cp95._LATEST_LOCK:
             cp95._LATEST_ANALYSES.clear()
             cp95._LATEST_RANKING.clear()
