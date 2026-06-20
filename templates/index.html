@@ -75,6 +75,15 @@
   .kv-box { background: #0d0d18; border-radius: 8px; padding: 7px 9px; }
   .kv-label { font-size: 9px; color: var(--muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
   .kv-val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  /* V9.5 prediction card */
+  .pred-card { background:#0d0d18; border:1px solid #23233a; border-radius:10px; padding:9px 11px; margin-top:8px; }
+  .pred-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:7px; }
+  .pred-interval { font-size:10px; font-weight:700; background:#1b1b2e; color:var(--blue); padding:2px 7px; border-radius:6px; letter-spacing:0.5px; }
+  .pred-side { font-size:15px; font-weight:800; letter-spacing:0.5px; }
+  .pred-grade { font-size:11px; font-weight:700; color:var(--yellow); cursor:help; }
+  .pred-stab { font-size:11px; color:var(--muted); margin-left:auto; }
+  .pred-probs { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; }
+  .pred-meta { display:flex; justify-content:space-between; gap:8px; font-size:10px; color:var(--muted); margin-top:6px; }
   .price-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; }
   .price-box { background: #0d0d18; border-radius: 8px; padding: 6px 4px; text-align: center; }
   .price-label { font-size: 9px; color: var(--muted); margin-bottom: 2px; }
@@ -164,6 +173,35 @@ function entryClass(s){
   return 'entry-NONE';
 }
 
+// Consistent confidence-grade definitions (A high / B moderate / C low-developing).
+const GRADE_TXT = {A:'A · high confidence', B:'B · moderate confidence', C:'C · low / developing', D:'D · developing'};
+const STAB_TXT = {stable:'● stable', strengthening:'▲ strengthening', weakening:'▼ weakening', changed:'⤿ changed'};
+
+// V9.5 prediction card: interval, side, grade, confidence %, P(Yes)/P(No),
+// timestamp, time-remaining and the stable/strengthening/weakening/changed tag.
+function renderPrediction(R, d){
+  if (!R.predWrap) return;
+  const side = d.q15_v9_5_selected_side;
+  if (!d.q15_v9_5_prediction_available || !side){ R.predWrap.style.display='none'; return; }
+  R.predWrap.style.display='';
+  const expired = !!d.q15_v9_5_expired;
+  R.predInterval.textContent = d.q15_v9_5_interval || '–';
+  R.predSide.textContent = side;
+  R.predSide.className = 'pred-side ' + (side==='YES'?'price-yes':'price-no');
+  const g = d.q15_v9_5_confidence_grade || '–';
+  R.predGrade.textContent = 'Grade ' + g;
+  R.predGrade.title = GRADE_TXT[g] || '';
+  R.predStab.textContent = expired ? '· expired' : (STAB_TXT[d.q15_v9_5_stability] || '');
+  const pct = v => (v===null||v===undefined) ? '–' : (Number(v)*100).toFixed(0)+'%';
+  R.predConf.textContent = pct(d.q15_v9_5_selected_probability);
+  R.predYes.textContent = pct(d.q15_v9_5_yes_probability);
+  R.predNo.textContent = pct(d.q15_v9_5_no_probability);
+  const rem = (d.q15_v9_5_seconds_remaining!=null) ? d.q15_v9_5_seconds_remaining : d.seconds_remaining;
+  R.predRemaining.textContent = (rem!=null) ? ('⏳ '+fmtCountdown(rem)+' left in interval') : '';
+  R.predTs.textContent = d.q15_v9_5_prediction_timestamp ? ('· @ '+fmtClock(d.q15_v9_5_prediction_timestamp)) : '';
+  R.predWrap.style.opacity = expired ? '0.55' : '1';
+}
+
 // ---- card scaffolds -------------------------------------------------
 function buildLiveScaffold(asset){
   const el = document.createElement('div');
@@ -177,6 +215,23 @@ function buildLiveScaffold(asset){
       <div class="entry-banner entry-NONE" data-r="entry">
         <div><div class="entry-status-txt" data-r="entryStatus">–</div><div style="font-size:10px;opacity:.8" data-r="entrySide"></div></div>
         <div class="entry-econ" data-r="entryEcon"></div>
+      </div>
+      <div class="pred-card" data-r="predWrap" style="display:none">
+        <div class="pred-top">
+          <span class="pred-interval" data-r="predInterval">–</span>
+          <span class="pred-side" data-r="predSide">–</span>
+          <span class="pred-grade" data-r="predGrade">–</span>
+          <span class="pred-stab" data-r="predStab"></span>
+        </div>
+        <div class="pred-probs">
+          <div class="kv-box"><div class="kv-label">Confidence</div><div class="kv-val" data-r="predConf">–</div></div>
+          <div class="kv-box"><div class="kv-label">P(Yes)</div><div class="kv-val price-yes" data-r="predYes">–</div></div>
+          <div class="kv-box"><div class="kv-label">P(No)</div><div class="kv-val price-no" data-r="predNo">–</div></div>
+        </div>
+        <div class="pred-meta">
+          <span data-r="predRemaining"></span>
+          <span data-r="predTs"></span>
+        </div>
       </div>
       <div class="chart-wrap">
         <div class="chart" data-r="chart"></div>
@@ -321,6 +376,9 @@ function updateLiveCard(mgr, d){
   if (d.fee_adjusted_break_even!==null&&d.fee_adjusted_break_even!==undefined) econ.push('B/E '+fmtCents(d.fee_adjusted_break_even));
   if (d.estimated_edge!==null&&d.estimated_edge!==undefined) econ.push('edge '+(d.estimated_edge>0?'+':'')+Number(d.estimated_edge).toFixed(1)+'¢');
   R.entryEcon.innerHTML = econ.join('<br>');
+
+  // V9.5 prediction card
+  renderPrediction(R, d);
 
   // kv
   R.underlying.innerHTML = fmtUsd(d.underlying_current) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${d.underlying_source}</span>`:'');

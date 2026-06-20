@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -18,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 VERSION = "q15-v9.5.1-ledger-v2-10m-primary"
 MODEL_VERSION = "q15-v9.5.1-champion-ensemble-10m-primary-v1"
@@ -132,6 +135,20 @@ TRACKED_CHECKPOINTS = ("15M", "10M", "7M")
 LEARNING_CHECKPOINTS = ("10M", "15M")
 
 
+# Frozen champion logit weights. Each is the maximum logit swing a feature can
+# add to the structural base, applied as ``weight * value * quality`` where value
+# is in [-1, 1] and quality in [0, 1] (see _model_probability). The ranking
+# encodes the model's priors at these horizons:
+#   momentum (0.34)              — strongest single directional signal short-term.
+#   threshold_interaction (0.30) — distance/crossings vs the strike; second only
+#                                  to momentum because it is what actually settles.
+#   flow (0.26)                  — aggressive taker imbalance.
+#   absorption (0.20)            — flow that fails to move price (mean-reversion warning).
+#   book / context / exchange    — confirmation signals (0.18 each), weaker alone.
+#   wick (0.12), derivatives (0.10) — weakest / sparsest, kept low on purpose.
+# These are FROZEN: only the shadow challenger learns; changing them is a manual,
+# significance-tested promotion. test_q15_v95_weights.py pins these values so an
+# accidental edit fails loudly rather than silently shifting every prediction.
 CHAMPION_WEIGHTS: dict[str, float] = {
     "intercept": 0.0,
     "momentum": 0.34,
@@ -169,6 +186,10 @@ class V95Ledger:
         self._shared_connection: sqlite3.Connection | None = None
         primary = str(os.environ.get("Q15_V95_PRIMARY_LEARNING_CHECKPOINT", "10M")).strip().upper()
         self.primary_learning_checkpoint = primary if primary in {"10M", "15M"} else "10M"
+        # How much more the primary (10M) checkpoint's resolved results count in
+        # shadow training vs the secondary intervals. 10M is the best performer,
+        # so it gets the heaviest sample weight; 7M/15M still learn, just slower.
+        self.primary_learning_weight = _env_float("Q15_V95_PRIMARY_LEARNING_WEIGHT", 1.25, 1.0, 3.0)
         legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
         # 7M is tracked and graded for accuracy alongside 15M/10M, but its weight
         # learning is observational by default (like 15M). Enabling it requires the
@@ -222,6 +243,10 @@ class V95Ledger:
         # Q15_V95_LEDGER_CACHE=false reverts to recompute-every-call.
         self._cache_enabled = _env_bool("Q15_V95_LEDGER_CACHE", True)
         self._data_version = 0
+        # Observability: rows silently dropped because their stored feature JSON
+        # was unparseable. Surfaced via stats() so a corrupt data pipeline shows
+        # up instead of quietly thinning calibration/learning inputs.
+        self._dropped_feature_rows = 0
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
@@ -354,6 +379,14 @@ class V95Ledger:
             self._ensure_column(connection, "predictions", "entry_ask_cents", "entry_ask_cents REAL")
             self._ensure_column(connection, "predictions", "entry_cost_cents", "entry_cost_cents REAL")
             self._ensure_column(connection, "predictions", "realized_cents", "realized_cents REAL")
+            # Per-interval performance breakdowns: store the confidence grade the
+            # alert showed, the side first predicted at checkpoint fire, and a flag
+            # set when the live side later drifts from that locked prediction
+            # before the market closed (a prediction-stability signal). All
+            # additive; old rows read as NULL/0.
+            self._ensure_column(connection, "predictions", "confidence_grade", "confidence_grade TEXT")
+            self._ensure_column(connection, "predictions", "original_predicted_side", "original_predicted_side TEXT")
+            self._ensure_column(connection, "predictions", "changed_before_close", "changed_before_close INTEGER DEFAULT 0")
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
@@ -435,7 +468,8 @@ class V95Ledger:
                           trade_quality: float, trade_decision: str, regime: str,
                           features: Mapping[str, Any], contributions: Mapping[str, Any],
                           quote: Mapping[str, Any], rank: int | None = None,
-                          costs: Mapping[str, Any] | None = None) -> tuple[str, bool]:
+                          costs: Mapping[str, Any] | None = None,
+                          confidence_grade: str | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
@@ -462,8 +496,9 @@ class V95Ledger:
                        calibrated_yes_probability,challenger_yes_probability,baseline_yes_probability,
                        selected_probability,conservative_probability,data_quality,evidence_quality,
                        trade_quality,trade_decision,regime,rank,entry_ask_cents,entry_cost_cents,
-                       feature_json,contribution_json,quote_json)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       feature_json,contribution_json,quote_json,
+                       confidence_grade,original_predicted_side,changed_before_close)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
                 (
                     prediction_id, MODEL_VERSION, FEATURE_SCHEMA_VERSION, ticker, asset, checkpoint,
                     created_at, close_time, predicted_side, raw_yes_probability,
@@ -471,10 +506,34 @@ class V95Ledger:
                     selected_probability, conservative_probability, data_quality, evidence_quality,
                     trade_quality, trade_decision, regime, rank_value, entry_ask, entry_cost,
                     _json(dict(features)), _json(dict(contributions)), _json(dict(quote)),
+                    (str(confidence_grade).upper() if confidence_grade else None), predicted_side,
                 ),
             )
             connection.commit()
             return prediction_id, cursor.rowcount == 1
+
+    def note_prediction_revision(self, *, ticker: str, checkpoint: str, current_side: str) -> bool:
+        """Flag that the live predicted side drifted from the locked prediction
+        before the market closed. The recorded (graded) prediction is NOT mutated
+        — only ``changed_before_close`` is set — so this measures prediction
+        stability ("how often a prediction changes before the interval ends")
+        without changing what gets scored. Idempotent; safe to call every cycle.
+        """
+        checkpoint = self._checkpoint(checkpoint)
+        current = str(current_side or "").upper()
+        if not self._available or not ticker or current not in {"YES", "NO"}:
+            return False
+        prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                "UPDATE predictions SET changed_before_close=1 "
+                "WHERE prediction_id=? AND official_result IS NULL "
+                "AND changed_before_close=0 AND original_predicted_side IS NOT NULL "
+                "AND original_predicted_side<>?",
+                (prediction_id, current),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
 
     @staticmethod
     def _official_result(row: Mapping[str, Any]) -> str | None:
@@ -699,6 +758,8 @@ class V95Ledger:
             try:
                 features = json.loads(str(row["feature_json"] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
+                self._dropped_feature_rows += 1
+                logger.warning("Unparseable feature_json for prediction_id=%s; skipping learning", prediction_id)
                 connection.execute("UPDATE predictions SET learning_applied=-3 WHERE prediction_id=?", (prediction_id,))
                 connection.commit()
                 return False
@@ -714,7 +775,7 @@ class V95Ledger:
             # rows still have limited influence.
             sample_weight = 0.25 + 0.75 * quality_factor
             if checkpoint == self.primary_learning_checkpoint:
-                sample_weight = min(1.0, sample_weight * 1.10)
+                sample_weight = min(1.0, sample_weight * self.primary_learning_weight)
             learning_rate = self.learning_rate_by_checkpoint[checkpoint]
             per_result_cap = self.per_result_cap_by_checkpoint[checkpoint]
             total_drift_cap = self.total_drift_cap_by_checkpoint[checkpoint]
@@ -837,6 +898,7 @@ class V95Ledger:
                     try:
                         values = json.loads(str(row["feature_json"]))
                     except (TypeError, ValueError, json.JSONDecodeError):
+                        self._dropped_feature_rows += 1
                         continue
                     orientation = 1.0 if str(row["predicted_side"]).upper() == "YES" else -1.0
                     quality = _clamp(float(row["data_quality"] or 0.0), 0.10, 1.0)
@@ -939,7 +1001,10 @@ class V95Ledger:
         else:
             # Penalized logistic regression y ~ intercept + slope*logit(raw_p).
             intercept, slope = 0.0, 1.0
+            converged = False
+            iterations = 0
             for _ in range(12):
+                iterations += 1
                 g0 = -0.20 * intercept
                 g1 = -0.20 * (slope - 1.0)
                 h00 = 0.20
@@ -964,9 +1029,19 @@ class V95Ledger:
                 intercept = _clamp(intercept + d0, -0.75, 0.75)
                 slope = _clamp(slope + d1, 0.50, 1.50)
                 if abs(d0) + abs(d1) < 1e-6:
+                    converged = True
                     break
+            if not converged:
+                # Rare given regularization; surface it instead of silently
+                # shipping an unconverged calibrator.
+                logger.warning(
+                    "Platt calibration did not converge for checkpoint=%s scope=%s rows=%d "
+                    "after %d iterations (intercept=%.4f slope=%.4f)",
+                    checkpoint, scope, len(rows), iterations, intercept, slope,
+                )
             fit = {"active": True, "reason": "platt_current_version", "rows": len(rows),
-                   "intercept": intercept, "slope": slope, "scope": scope}
+                   "intercept": intercept, "slope": slope, "scope": scope,
+                   "converged": converged, "iterations": iterations}
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.
@@ -995,6 +1070,65 @@ class V95Ledger:
         }
 
     @staticmethod
+    def _classification_metrics(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Precision/recall for YES and NO, plus false-positive / false-negative
+        rates, treating YES as the positive class. Needs predicted_side and
+        official_result; rows missing either are skipped."""
+        tp = fp = tn = fn = 0
+        for row in selected:
+            pred = str(_row_get(row, "predicted_side") or "").upper()
+            truth = str(_row_get(row, "official_result") or "").upper()
+            if pred not in {"YES", "NO"} or truth not in {"YES", "NO"}:
+                continue
+            if pred == "YES":
+                tp += truth == "YES"
+                fp += truth == "NO"
+            else:
+                tn += truth == "NO"
+                fn += truth == "YES"
+
+        def _ratio(num: int, den: int) -> float | None:
+            return round(num / den, 4) if den else None
+
+        return {
+            "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            "precision_yes": _ratio(tp, tp + fp),
+            "recall_yes": _ratio(tp, tp + fn),
+            "precision_no": _ratio(tn, tn + fn),
+            "recall_no": _ratio(tn, tn + fp),
+            "false_positive_rate": _ratio(fp, fp + tn),
+            "false_negative_rate": _ratio(fn, fn + tp),
+        }
+
+    @staticmethod
+    def _change_rate(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """How often the prediction drifted from its locked side before close."""
+        n = len(selected)
+        changed = sum(1 for row in selected if int(_row_get(row, "changed_before_close") or 0) == 1)
+        return {"n": n, "changed": changed, "change_rate": round(changed / n, 4) if n else None}
+
+    def _by_grade(self, selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Right/wrong record split by the confidence grade (A/B/C/D) shown."""
+        out: dict[str, Any] = {}
+        for grade in ("A", "B", "C", "D"):
+            bucket = [r for r in selected if str(_row_get(r, "confidence_grade") or "").upper() == grade]
+            if bucket:
+                out[grade] = self._win_loss(bucket)
+        return out
+
+    def _checkpoint_metrics(self, selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Per-interval record: accuracy/P&L (via _win_loss) enriched with the
+        classification, stability, and by-grade breakdowns. 10M is the priority
+        interval, but every interval gets the same full breakdown so 7M/15M stay
+        fully evaluated."""
+        return {
+            **self._win_loss(selected),
+            "classification": self._classification_metrics(selected),
+            "stability": self._change_rate(selected),
+            "by_grade": self._by_grade(selected),
+        }
+
+    @staticmethod
     def _rank_bucket(row: Mapping[str, Any]) -> str:
         try:
             value = int(row["rank"]) if row["rank"] is not None else None
@@ -1004,7 +1138,7 @@ class V95Ledger:
 
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
         """Right/wrong/accuracy by interval (15M/10M/7M), pick rank (#1/#2/#3), and asset."""
-        by_checkpoint = {cp: self._win_loss([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
+        by_checkpoint = {cp: self._checkpoint_metrics([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
         by_rank = {
             label: self._win_loss([r for r in rows if self._rank_bucket(r) == label])
             for label in ("1", "2", "3", "other")
@@ -1028,13 +1162,15 @@ class V95Ledger:
             return {"available": False, "error": self._last_error}
         with self._lock, closing(self._connect()) as connection:
             rows = list(connection.execute(
-                "SELECT checkpoint, correct, rank, asset, realized_cents FROM predictions "
-                "WHERE model_version=? AND official_result IS NOT NULL",
+                "SELECT checkpoint, correct, rank, asset, realized_cents, "
+                "predicted_side, official_result, confidence_grade, changed_before_close "
+                "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
                 (MODEL_VERSION,),
             ))
         return {
             "available": True, "model_version": MODEL_VERSION,
-            "intervals": TRACKED_CHECKPOINTS, **self._scoreboard_rows(rows),
+            "intervals": TRACKED_CHECKPOINTS, "priority_interval": self.primary_learning_checkpoint,
+            **self._scoreboard_rows(rows),
         }
 
     @staticmethod
@@ -1277,6 +1413,7 @@ class V95Ledger:
             "shadow_learning_enabled": self.shadow_learning_enabled, "production_weights_frozen": True,
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,
+            "dropped_feature_rows": int(self._dropped_feature_rows),
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
         }
 

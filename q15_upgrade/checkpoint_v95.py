@@ -59,6 +59,22 @@ from .market_data_v95 import PublicMarketDataHub
 VERSION = "q15-v9.5.2-runtime-activation-data-bridge-v1"
 READ_ONLY = True
 
+# Coverage weights for evidence_quality: a feature-importance-ordered blend of
+# the per-feature qualities (sums to 1.0). Pinned by test_q15_v95_weights.py so
+# an accidental edit fails loudly instead of silently re-weighting confidence.
+# (absorption is excluded — it is derived from flow+momentum, so weighting its
+# quality here would double-count those two.)
+_EVIDENCE_QUALITY_WEIGHTS: dict[str, float] = {
+    "momentum": 0.25,
+    "flow": 0.16,
+    "book": 0.12,
+    "wick": 0.08,
+    "context": 0.12,
+    "threshold_interaction": 0.15,
+    "exchange_consensus": 0.08,
+    "derivatives": 0.04,
+}
+
 _LATEST_LOCK = threading.RLock()
 _LATEST_ANALYSES: dict[str, dict[str, Any]] = {}
 _LATEST_RANKING: list[dict[str, Any]] = []
@@ -651,6 +667,29 @@ def _market_implied_yes(snapshot: Mapping[str, Any]) -> float | None:
     return None
 
 
+def _regime_anchor_strength(base_strength: float, regime: Mapping[str, Any]) -> tuple[float, float]:
+    """Optionally scale the market-anchor strength by regime trustworthiness.
+
+    The model is noisiest in chaotic regimes (high volatility, exchange
+    divergence, threshold pin) and most reliable in clean trends. When
+    ``Q15_V95_REGIME_AWARE_ANCHOR`` is enabled we shrink the model's allowed
+    deviation from the market as regime uncertainty rises above the NORMAL
+    baseline (0.08), so a noisy regime is anchored harder to the (efficient)
+    market. Default-OFF: the returned factor is exactly 1.0 unless enabled, so
+    production behavior is unchanged until shadow-validated.
+
+    Returns ``(effective_strength, factor)``.
+    """
+    if not _env_bool("Q15_V95_REGIME_AWARE_ANCHOR", False):
+        return base_strength, 1.0
+    baseline = 0.08
+    uncertainty = float(regime.get("uncertainty", baseline) or baseline)
+    sensitivity = _env_float("Q15_V95_REGIME_ANCHOR_SENSITIVITY", 3.0, 0.0, 20.0)
+    floor = _env_float("Q15_V95_REGIME_ANCHOR_MIN_FACTOR", 0.40, 0.0, 1.0)
+    factor = _clamp(1.0 - sensitivity * max(0.0, uncertainty - baseline), floor, 1.0)
+    return base_strength * factor, factor
+
+
 def _market_anchored_probability(model_yes: float, market_yes: float | None,
                                  data_quality: float, evidence_quality: float,
                                  strength: float) -> tuple[float, dict[str, Any]]:
@@ -720,9 +759,16 @@ def analyse_v95(
         "exchange_consensus": exchange_q, "derivatives": derivatives_q,
         "absorption": absorption_q,
     }
+    # Evidence quality = how much of the model's evidence is actually backed by
+    # data, as a coverage-weighted blend of the per-feature qualities. The blend
+    # weights sum to 1.0 and track feature importance (momentum/threshold/flow
+    # lead; wick/derivatives trail) so that a missing high-value feature drags
+    # quality down more than a missing minor one. This feeds both the market
+    # anchor's model_trust and data_quality (-> temperature), so thin evidence
+    # automatically yields a more conservative, market-anchored probability.
+    # Weights are pinned by test_q15_v95_weights.py.
     evidence_quality = _clamp(
-        0.25 * momentum_q + 0.16 * flow_q + 0.12 * book_q + 0.08 * wick_q +
-        0.12 * context_q + 0.15 * threshold_q + 0.08 * exchange_q + 0.04 * derivatives_q,
+        sum(w * feature_quality[name] for name, w in _EVIDENCE_QUALITY_WEIGHTS.items()),
         0.0, 1.0,
     )
     data_quality = _clamp(0.70 * canonical.data_quality + 0.30 * evidence_quality, 0.0, 1.0)
@@ -735,10 +781,14 @@ def analyse_v95(
     # Market-price anchoring: defer to the (efficient) Kalshi market unless the
     # model has earned the confidence to deviate. This is the bot's working prob.
     market_implied_yes = _market_implied_yes(snapshot)
-    anchor_strength = _env_float("Q15_V95_MARKET_ANCHOR_STRENGTH", 1.0, 0.0, 1.0)
+    base_anchor_strength = _env_float("Q15_V95_MARKET_ANCHOR_STRENGTH", 1.0, 0.0, 1.0)
+    anchor_strength, anchor_regime_factor = _regime_anchor_strength(base_anchor_strength, regime)
     calibrated_yes, market_anchor = _market_anchored_probability(
         model_yes, market_implied_yes, data_quality, evidence_quality, anchor_strength
     )
+    if anchor_regime_factor != 1.0:
+        market_anchor["regime_factor"] = round(anchor_regime_factor, 4)
+        market_anchor["base_strength"] = base_anchor_strength
     challenger_weights = _timed(prof, "challenger_weights", ledger.challenger_weights, canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _timed(prof, "model_challenger", _model_probability, structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
@@ -752,6 +802,17 @@ def analyse_v95(
     uncertainty = 0.018 + (1.0 - data_quality) * 0.12 + float(regime.get("uncertainty", 0.08)) * 0.25
     divergence = _num(exchange_d.get("divergence_bps"), 0.0) or 0.0
     uncertainty += min(0.04, divergence / 1000.0)
+    # Evidence-coverage penalty: "insufficient evidence" must read as low
+    # confidence, not as a clean neutral signal. Features that have no data
+    # contribute nothing (quality 0), so a thin snapshot yields low coverage;
+    # when enabled, low coverage widens the conservative haircut toward 0.5.
+    # Default 0.0 -> no behavior change until tuned and shadow-validated.
+    coverage_penalty = _env_float("Q15_V95_EVIDENCE_COVERAGE_PENALTY", 0.0, 0.0, 0.20)
+    if coverage_penalty > 0.0:
+        coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
+        covered = sum(1 for q in feature_quality.values() if q >= coverage_floor)
+        coverage = covered / max(1, len(feature_quality))
+        uncertainty += coverage_penalty * (1.0 - coverage)
     conservative = _clamp(selected - uncertainty, 0.01, 0.99)
 
     quote = _selected_quote(snapshot, side)
@@ -887,6 +948,11 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_ideal_entry_cents"] = analysis.get("ideal_entry_cents")
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
     snapshot["q15_v9_5_entry_allowed"] = bool(analysis.get("entry_allowed"))
+    # Richer prediction-card fields (the run_cycle recording loop refreshes
+    # interval/stability/expiry/timestamp with live clock context each cycle).
+    snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
+    snapshot["q15_v9_5_selected_probability"] = analysis.get("selected_probability")
+    snapshot["q15_v9_5_interval"] = analysis.get("checkpoint")
     # V9.5 is authoritative for the returned snapshot. It never places orders.
     snapshot["selected_side"] = analysis.get("prediction_side")
     snapshot["decision_state"] = analysis.get("trade_decision")
@@ -1017,22 +1083,28 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
     available = [r for r in top if analyses.get(str(r["asset"]), {}).get("prediction_available")]
     unavailable = [r for r in top if not analyses.get(str(r["asset"]), {}).get("prediction_available")]
 
-    # One-line headline from the top-ranked available pick.
-    if available:
-        lead = available[0]
-        a = analyses[str(lead["asset"])]
+    # One concise headline: the single highest-confidence prediction, with its
+    # direction, confidence %, grade, stability trend, interval and Yes/No split.
+    best = _best_pick(analyses, ranking)
+    if best is not None and analyses.get(best[0], {}).get("prediction_available"):
+        b_asset, a = best
         side = a.get("prediction_side") or "—"
         net = a.get("net_edge_cents")
+        grade = a.get("confidence_grade") or "—"
+        conf = _pct0(a.get("selected_probability"))
+        stab = a.get("stability")
+        tag = f" · {stab}" if stab else ""
         if a.get("entry_allowed"):
-            lines.append(f"Best: {lead['asset']} {side} · edge {_c(net, signed=True)}")
+            lines.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · edge {_c(net, signed=True)}")
         elif net is not None:
             need = a.get("required_edge_cents")
             lines.append(
-                f"Best: {lead['asset']} {side} {_pct0(a.get('selected_probability'))} · "
+                f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · "
                 f"edge {_c(net, signed=True)} (need {_c(need)}) — holding"
             )
         else:
-            lines.append(f"Best: {lead['asset']} {side} {_pct0(a.get('selected_probability'))} · no executable edge — holding")
+            lines.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · no executable edge — holding")
+        lines.append(f"P(Yes) {_pct0(a.get('yes_probability'))} · P(No) {_pct0(a.get('no_probability'))} · {checkpoint} interval")
     else:
         lines.append("No prediction available this cycle")
 
@@ -1092,30 +1164,95 @@ _CHECKPOINT_BAND_LOWER = {"15M": 660.0, "10M": 480.0, "7M": 0.0}
 _CHECKPOINT_TARGET_SECONDS = {"15M": 900.0, "10M": 600.0, "7M": 420.0}
 
 
-def _decision_signature(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple:
-    """Identity of the current verdict — the top-3 (asset, side, entry?) tuple.
+# Seconds-remaining at which each interval's alert is considered expired: the
+# next interval's mark for 15M/10M, and a configurable cutoff before close for
+# 7M (the final leg) so a 7-minute alert does NOT stay live until market close.
+def _checkpoint_expiry_seconds(checkpoint: str) -> float:
+    if checkpoint == "15M":
+        return 600.0   # superseded by the 10M check at the 10:00 mark
+    if checkpoint == "10M":
+        return 420.0   # superseded by the 7M check at the 7:00 mark
+    # 7M is last: expire it well before close (default 2:00 left) so it doesn't
+    # linger as an "active" prediction with nothing left to act on.
+    return _env_float("Q15_V95_7M_EXPIRY_SECONDS", 120.0, 0.0, 420.0)
 
-    Used to decide when the model has "made up its mind": the alert is held
-    until this signature is stable across several cycles, so leader/edge jitter
-    early in a checkpoint band no longer produces a burst of alerts.
+
+def _checkpoint_expired(checkpoint: str, seconds_left: float | None) -> bool:
+    """A checkpoint alert is expired once the clock passes its interval end."""
+    if seconds_left is None:
+        return False
+    return seconds_left <= _checkpoint_expiry_seconds(checkpoint)
+
+
+def _iso_from_epoch(epoch: float) -> str:
+    """UTC ISO-8601 timestamp for a unix epoch (the prediction's wall-clock)."""
+    try:
+        return datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _best_pick(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple[str, Mapping[str, Any]] | None:
+    """The single highest-confidence prediction this cycle.
+
+    Prefers picks whose prediction is available, choosing the one with the
+    greatest ``selected_probability`` (confidence), tie-broken by net edge. Falls
+    back to the top-ranked row when none are marked available so the identity is
+    still well-defined. Returns ``(asset, analysis)`` or ``None``.
     """
-    out = []
-    for row in ranking[:3]:
-        asset = str(row.get("asset"))
-        a = analyses.get(asset, {})
-        out.append((asset, a.get("prediction_side"), bool(a.get("entry_allowed"))))
-    return tuple(out)
+    ranked = [(str(r.get("asset")), analyses.get(str(r.get("asset")), {})) for r in ranking]
+    if not ranked:
+        return None
+    available = [(a, x) for a, x in ranked if x.get("prediction_available")]
+    pool = available if available else ranked
+
+    def _confidence(item: tuple[str, Mapping[str, Any]]) -> tuple[float, float]:
+        _a, x = item
+        return (float(x.get("selected_probability") or 0.0), float(x.get("net_edge_cents") or -1e9))
+
+    return max(pool, key=_confidence)
+
+
+def _material_token(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> str:
+    """A short token for the *material* state of the best pick: which coin, which
+    side (direction), and which confidence grade. The alert key embeds this, so a
+    new alert is only minted when the direction or confidence band materially
+    changes — not on minor probability/edge jitter within the same grade."""
+    best = _best_pick(analyses, ranking)
+    if best is None:
+        return "none"
+    asset, a = best
+    return f"{asset}:{a.get('prediction_side') or '-'}:{a.get('confidence_grade') or '-'}"
+
+
+def _decision_signature(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple:
+    """Identity of the current verdict — the single best pick's (asset, side,
+    grade, entry?) material state.
+
+    Used to decide when the model has "made up its mind": the alert is held until
+    this signature is stable across several cycles, so leader/edge jitter early in
+    a checkpoint band no longer produces a burst of alerts. Keying on the single
+    best pick (not the whole top-3) means a reshuffle of the trailing picks no
+    longer counts as a new verdict.
+    """
+    best = _best_pick(analyses, ranking)
+    if best is None:
+        return ()
+    asset, a = best
+    return (asset, a.get("prediction_side"), a.get("confidence_grade"), bool(a.get("entry_allowed")))
 
 
 def _notification_identity(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], now: float) -> tuple[str, str, str]:
-    # One alert per (checkpoint, 15-minute market window): all assets share the
-    # XX:00/15/30/45 boundaries, so `now // 900` is identical for every cycle and
-    # every asset within a market. Keying on this — instead of the top-ranked
-    # ticker, which churns as probabilities/edges jitter and used to mint a fresh
-    # key (and a duplicate send) per leader — collapses the burst to a single
-    # alert. Disable via Q15_V95_SINGLE_ALERT_PER_CHECKPOINT=false.
+    # One alert per (checkpoint, 15-minute market window, material state). All
+    # assets share the XX:00/15/30/45 boundaries, so `now // 900` is identical for
+    # every cycle and asset within a market. Embedding the material token (best
+    # coin / side / grade) means an unchanged verdict reuses the same key (and is
+    # deduplicated after the first send), while a real direction or confidence-band
+    # change mints a fresh key — i.e. a replacement alert — exactly as wanted.
+    # Disable via Q15_V95_SINGLE_ALERT_PER_CHECKPOINT=false.
     if _env_bool("Q15_V95_SINGLE_ALERT_PER_CHECKPOINT", True):
-        event_key = f"{VERSION}|{checkpoint}|W{int(now // 900)}"
+        token = _material_token(checkpoint, analyses, ranking)
+        event_key = f"{VERSION}|{checkpoint}|W{int(now // 900)}|{token}"
     else:
         top = ranking[0] if ranking else {}
         ticker = str(top.get("ticker") or "UNKNOWN")
@@ -1267,6 +1404,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         # Per (checkpoint, market-window) verdict-stability tracker so an alert is
         # only emitted once the decision has held steady for a few cycles.
         self._decision_stability: dict[tuple[str, int], dict[str, Any]] = {}
+        # Per (asset, checkpoint, market-window) trend tracker: the prior cycle's
+        # side + confidence, so each prediction can be tagged stable / strengthening
+        # / weakening / changed for the UI and alert.
+        self._prediction_trend: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._last_reconcile: dict[str, Any] = {}
         self._last_market_reconcile: dict[str, Any] = {}
         self._run_cycle_timing: dict[str, Any] = {}
@@ -1359,6 +1500,22 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 analysis = analyses[asset]
                 analysis["rank"] = rank
                 analysis["top_pick"] = rank == 1
+                # Richer per-prediction UI fields: interval, grade, confidence,
+                # explicit P(yes)/P(no) (already summing to ~1.0 from analyse_v95),
+                # timestamp, time-remaining, stability trend, and interval expiry.
+                stability = self._stability_marker(asset, checkpoint, analysis, now)
+                analysis["stability"] = stability
+                seconds_left = _seconds_remaining(snapshot, now)
+                expired = _checkpoint_expired(checkpoint, seconds_left)
+                analysis["interval"] = checkpoint
+                analysis["expired"] = expired
+                snapshot["q15_v9_5_interval"] = checkpoint
+                snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
+                snapshot["q15_v9_5_selected_probability"] = analysis.get("selected_probability")
+                snapshot["q15_v9_5_prediction_timestamp"] = _iso_from_epoch(now)
+                snapshot["q15_v9_5_seconds_remaining"] = seconds_left
+                snapshot["q15_v9_5_stability"] = stability
+                snapshot["q15_v9_5_expired"] = expired
                 canonical = canonicals.get(asset)
                 if canonical is not None and analysis.get("prediction_available") and canonical.ticker:
                     prediction_id, inserted = self.ledger.record_prediction(
@@ -1378,9 +1535,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         regime=str((analysis.get("regime") or {}).get("name") or "UNKNOWN"),
                         features=analysis["feature_values"], contributions=analysis["contributions"],
                         quote=analysis["quote"], rank=rank, costs=analysis.get("costs"),
+                        confidence_grade=analysis.get("confidence_grade"),
                     )
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
+                    # Flag (without mutating the graded prediction) when the live
+                    # side drifts from the locked one before close — the stability
+                    # / change-rate metric per interval.
+                    self.ledger.note_prediction_revision(
+                        ticker=canonical.ticker, checkpoint=checkpoint,
+                        current_side=str(analysis["prediction_side"]),
+                    )
 
             _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
@@ -1508,6 +1673,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         if not times:
             return stable  # no clock available -> stability only
         seconds_left = max(times)
+        # Auto-expire: once the clock passes this interval's end, stop alerting —
+        # a 7M alert must not stay live until market close.
+        if _checkpoint_expired(checkpoint, seconds_left):
+            return False
         # Safety net: never let the band close without one alert.
         band_lower = _CHECKPOINT_BAND_LOWER.get(checkpoint, 0.0)
         force_margin = _env_float("Q15_V95_DECISION_FORCE_MARGIN_SECONDS", 60.0, 0.0, 300.0)
@@ -1520,6 +1689,34 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             if target is not None and seconds_left > target + tol:
                 return False
         return stable
+
+    def _stability_marker(self, asset: str, checkpoint: str, analysis: Mapping[str, Any], now: float) -> str | None:
+        """Tag a prediction stable / strengthening / weakening / changed by
+        comparing this cycle's side + confidence to the prior cycle's (per asset,
+        checkpoint, market window). Returns None when no prediction is available.
+        """
+        if not analysis.get("prediction_available"):
+            return None
+        side = analysis.get("prediction_side")
+        prob = _num(analysis.get("selected_probability"))
+        if side is None or prob is None:
+            return None
+        window_id = int(now // 900)
+        key = (str(asset), str(checkpoint), window_id)
+        prev = self._prediction_trend.get(key)
+        eps = _env_float("Q15_V95_TREND_EPSILON", 0.01, 0.0, 0.5)
+        if prev is None:
+            marker = "stable"
+        elif prev.get("side") != side:
+            marker = "changed"
+        else:
+            delta = float(prob) - float(prev.get("prob") or prob)
+            marker = "strengthening" if delta > eps else "weakening" if delta < -eps else "stable"
+        self._prediction_trend[key] = {"side": side, "prob": float(prob)}
+        if len(self._prediction_trend) > 128:
+            for stale in [k for k in self._prediction_trend if k[2] < window_id - 2]:
+                self._prediction_trend.pop(stale, None)
+        return marker
 
     def predictions(self) -> dict[str, Any]:
         with self._v95_lock:
@@ -1653,7 +1850,13 @@ def format_telegram_message(text: Any) -> str:
     # temporary and validates that the live constructor is CheckpointPolicyV95.
     if is_q15_report:
         return "🟡 Q15 V9.5 STARTUP — canonical analysis is not ready; legacy report suppressed. Check /api/q15-v9-5/diagnostics."
-    return _format_v94_message(message)
+    # Old-UI guard: by default the legacy v94 reformatter is disabled so no
+    # message is ever re-rendered in the old layout — non-Q15 notifications (dip,
+    # scalp, exit, etc.) pass through in the clean form their own module built.
+    # Set Q15_V95_LEGACY_FALLBACK_FORMAT=true to restore the legacy reformatter.
+    if _env_bool("Q15_V95_LEGACY_FALLBACK_FORMAT", False):
+        return _format_v94_message(message)
+    return message
 
 
 __all__ = [

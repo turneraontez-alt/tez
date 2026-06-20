@@ -6,8 +6,68 @@ trades REAL money manually off the alerts**, so reliability + honest data
 freshness + honest accuracy measurement matter more than new model features.
 
 ⚠️ Fresh container: `pytest` and `websockets` are NOT preinstalled →
-`pip install pytest "websockets>=12.0" -q` first. Tests: `python3 -m pytest tests/ -q`
-→ **435 passed, 4 skipped**.
+`pip install pytest "websockets>=12.0" -q` first. The app-level tests also need
+`flask` (+ a working `cryptography`/`cffi`); without them those two files skip.
+Tests: `python3 -m pytest tests/ -q` → **486 passed, 4 skipped**.
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — alerts, UI, learning priority
+Four-part request — fewer/expiring alerts, consistent UI, richer prediction
+cards, and a 10-minute learning priority with per-interval metrics.
+1. **One alert per *material* verdict + auto-expiry** (`checkpoint_v95.py`). The
+   notification key now embeds the best pick's material state (coin/side/grade)
+   via `_material_token`, so an unchanged verdict is deduplicated and only a real
+   direction/confidence-band change (or an entry appearing/withdrawing, still via
+   the state machine) sends a replacement. `_decision_signature` keys on the
+   single best pick (not top-3). `_checkpoint_expired` auto-expires each interval
+   (15M at 10:00, 10M at 7:00, 7M at `Q15_V95_7M_EXPIRY_SECONDS`=120 before close)
+   so a 7-minute alert no longer lingers to market close.
+2. **Stability trend** (`_stability_marker`): each prediction is tagged stable /
+   strengthening / weakening / changed per (asset, checkpoint, window).
+3. **UI consistency** (`format_telegram_message`): the legacy v94 reformatter is
+   now disabled by default (`Q15_V95_LEGACY_FALLBACK_FORMAT`, default OFF) so no
+   message renders in the old layout; `V9.5 CHECK` + the canonical hourly report
+   still own their clean output.
+4. **Richer prediction cards** (`templates/index.html` + new `q15_v9_5_*`
+   snapshot keys): interval, side, grade (A high / B moderate / C low-developing),
+   confidence %, P(Yes)/P(No) (sum ~100%), timestamp, time-remaining, and the
+   stability trend; expired predictions dim.
+5. **10-minute learning priority** (`ledger_v95.py`): configurable primary sample
+   weight (`Q15_V95_PRIMARY_LEARNING_WEIGHT`=1.25), and per-interval metrics in
+   `scoreboard()` — precision/recall for Yes & No, FPR/FNR, by-confidence-grade,
+   and prediction-stability (change-rate) via new columns
+   (`confidence_grade`/`original_predicted_side`/`changed_before_close`) +
+   `note_prediction_revision`. 7M/15M keep collecting + grading; 10M just trains
+   heavier. Displayed confidence is unchanged — validate real lift OOS.
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — review follow-ups (rating → ~8.5)
+Implemented the "how to raise the rating" list from the code review. Every
+model-behavior change is **default-OFF** behind a `Q15_*` flag (shadow-validate
+first) so production output is byte-identical until enabled.
+- **Loop + concurrency tests** (`tests/test_app_refresh_loop.py`,
+  `test_app_concurrent_routes.py`) — the biggest gap. Added a test-only seam:
+  `refresh_loop(max_cycles=…)` and `Q15_AUTOSTART_REFRESH=0` (skip autostart on
+  import). Tests drive a real cycle (no network), prove `ct.safe`/discovery
+  exception isolation, and hammer `/api/snapshot|summary` from many threads
+  against a writer to prove the `state_lock` contract (no deadlock / 500).
+- **Regime-aware market anchor** (`Q15_V95_REGIME_AWARE_ANCHOR`,
+  `_regime_anchor_strength` in `checkpoint_v95.py`): shrinks model deviation from
+  the market in noisy regimes (high-vol / divergence / pin), full deviation in
+  clean trends. Knobs `..._SENSITIVITY`, `..._MIN_FACTOR`.
+- **Evidence-coverage confidence penalty** (`Q15_V95_EVIDENCE_COVERAGE_PENALTY`):
+  thin evidence now widens the conservative haircut toward 0.5 instead of reading
+  as a clean neutral — the "no data ≠ neutral" fix.
+- **Pinned the frozen model constants**: `CHAMPION_WEIGHTS` and the new named
+  `_EVIDENCE_QUALITY_WEIGHTS` (was an inline literal) are documented and locked by
+  `tests/test_q15_v95_weights.py` so an accidental edit fails loudly.
+- **Public-feed circuit breaker** (`market_data_v95.py`,
+  `Q15_V95_PUBLIC_BREAKER_THRESHOLD`/`_COOLDOWN_SECONDS`, default 5/30s): per-asset
+  backoff after repeated all-source failures; `health()["breaker_open_assets"]`.
+- **Ledger observability**: Platt fit now logs non-convergence and returns
+  `converged`/`iterations`; unparseable `feature_json` rows increment
+  `dropped_feature_rows` (in ledger `stats()`) instead of vanishing silently.
+- Skipped from the list: full `Q15_*`→dataclass centralization (too large/risky
+  vs value for the frozen-adjacent engine; flagged as polish). The per-loop
+  executor item was a false positive — it's already created once before `while`.
 
 ## ✅ Shipped (branch `claude/read-handoff-e79js5`) — Telegram UX + alert dedup
 Verified live first: speedup (~4.5s → ~2.3–2.6s) and the checkpoint-label fix

@@ -240,7 +240,13 @@ def fetch_market_detail(ticker):
     return client.get_market(ticker)
 
 
-def refresh_loop():
+def refresh_loop(max_cycles=None):
+    """The ~1s cycle that drives every subsystem.
+
+    Runs forever in production. ``max_cycles`` bounds the number of iterations so
+    the loop can be driven deterministically from tests (default ``None`` keeps
+    the production infinite behavior unchanged).
+    """
     last_discovery = 0
     current_markets = {}
     cycling = {}
@@ -248,6 +254,7 @@ def refresh_loop():
     detail_inflight = {}  # asset -> (ticker, Future) for the off-critical detail fetch
     detail_cache = {}     # asset -> (ticker, detail) last-good market volume
     executor = ThreadPoolExecutor(max_workers=8)
+    cycles = 0
     while True:
         cycle_clock = time.monotonic()
         cycle_start = time.time()
@@ -497,6 +504,9 @@ def refresh_loop():
                 notifier.send(page)
         except Exception:
             logger.exception("watchdog pager failed")
+        cycles += 1
+        if max_cycles is not None and cycles >= max_cycles:
+            return
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
 
 
@@ -963,7 +973,11 @@ def _start_refresh():
             logger.info("Refresh loop started")
 
 
-_start_refresh()
+# Autostart on import keeps deployment behavior unchanged. Set
+# Q15_AUTOSTART_REFRESH=0 to import the app (routes, globals) without spawning
+# the live cycle — used by tests and offline diagnostics.
+if os.environ.get("Q15_AUTOSTART_REFRESH", "1") != "0":
+    _start_refresh()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
