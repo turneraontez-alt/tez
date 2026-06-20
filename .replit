@@ -56,4 +56,4 @@ outputType = "console"
 [userenv]
 
 [userenv.shared]
-KALSHI_WS_ENABLED = "false"
+KALSHI_WS_ENABLED = "true"
