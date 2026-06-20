@@ -263,7 +263,7 @@ def build_canonical_snapshot(
         spot=spot,
         spot_source=spot_source,
         yes_is_higher=_yes_is_higher(snapshot),
-        candles=tuple(copy.deepcopy(candles)),
+        candles=tuple(candles),  # already freshly built by _canonical_candles; no copy needed
         context=copy.deepcopy(dict(context or {})),
         public=public_data,
         feed_timestamps=timestamps,
