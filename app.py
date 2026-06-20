@@ -625,6 +625,9 @@ _COMPACT_FIELDS = (
     "q15_v9_5_ideal_entry_cents",
     "q15_v9_5_regime",
     "q15_v9_5_entry_allowed",
+    "q15_v9_5_manipulation_suspected",
+    "q15_v9_5_manipulation_reason",
+    "q15_v9_5_manipulation_lean",
     "q15_v9_5_rank",
     "q15_v9_5_top_pick",
 )

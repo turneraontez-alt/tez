@@ -116,7 +116,36 @@ class HourlyReporter:
         # Only mention the footnote if some bucket is actually flagged thin.
         if any("*" in (r or "") for group in groups for r in group):
             table.append("<i>* under 10 settled — not yet reliable</i>")
-        return [headline, ""] + table
+        return [headline, ""] + table + self._manipulation_lines(sb)
+
+    @staticmethod
+    def _manipulation_lines(sb):
+        """Compact "is the model worse when manipulation is suspected?" summary.
+
+        Suspected-vs-clean accuracy + P/L, then a per-tell line (pin / absorption /
+        divergence) so the lowest-accuracy tell — the one most often preceding a
+        flip — stands out. Empty until something has settled under a flag."""
+        bm = sb.get("by_manipulation") or {}
+        susp, clean = bm.get("suspected") or {}, bm.get("clean") or {}
+        if not (susp.get("n") or 0):
+            return []
+
+        def _acc(d):
+            a = d.get("accuracy")
+            return f"{a * 100:.0f}%" if isinstance(a, (int, float)) else "-"
+
+        def _pnl(d):
+            rt = d.get("realized_total_cents")
+            return f" {rt:+.0f}¢" if (isinstance(rt, (int, float)) and d.get("pnl_n")) else ""
+
+        head = (f"⚠ <b>Manipulation watch</b> — suspected {susp.get('n', 0)} · "
+                f"{_acc(susp)} right{_pnl(susp)} vs clean {clean.get('n', 0)} · {_acc(clean)} right")
+        out = ["", head]
+        by_reason = bm.get("by_reason") or {}
+        if by_reason:
+            parts = [f"{r} {d.get('right', 0)}-{d.get('wrong', 0)} {_acc(d)}" for r, d in by_reason.items()]
+            out.append("by tell: " + " · ".join(parts))
+        return out
 
     def maybe_send(self, now):
         if not self.cfg.hourly_report_enabled or not self.notifier.enabled:

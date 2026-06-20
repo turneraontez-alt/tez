@@ -394,6 +394,13 @@ class V95Ledger:
             self._ensure_column(connection, "predictions", "confidence_grade", "confidence_grade TEXT")
             self._ensure_column(connection, "predictions", "original_predicted_side", "original_predicted_side TEXT")
             self._ensure_column(connection, "predictions", "changed_before_close", "changed_before_close INTEGER DEFAULT 0")
+            # Suspected price-manipulation tracking: a read-only flag (1/0) set when
+            # large-player signals (strike pin / order-wall absorption / cross-
+            # exchange divergence) fired at prediction time, plus the comma-joined
+            # reason(s). Lets the scoreboard show whether the model is less reliable
+            # when manipulation is suspected. Additive; old rows read NULL/0.
+            self._ensure_column(connection, "predictions", "manipulation_suspected", "manipulation_suspected INTEGER DEFAULT 0")
+            self._ensure_column(connection, "predictions", "manipulation_reason", "manipulation_reason TEXT")
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
@@ -476,7 +483,9 @@ class V95Ledger:
                           features: Mapping[str, Any], contributions: Mapping[str, Any],
                           quote: Mapping[str, Any], rank: int | None = None,
                           costs: Mapping[str, Any] | None = None,
-                          confidence_grade: str | None = None) -> tuple[str, bool]:
+                          confidence_grade: str | None = None,
+                          manipulation_suspected: bool = False,
+                          manipulation_reason: str | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
@@ -504,8 +513,9 @@ class V95Ledger:
                        selected_probability,conservative_probability,data_quality,evidence_quality,
                        trade_quality,trade_decision,regime,rank,entry_ask_cents,entry_cost_cents,
                        feature_json,contribution_json,quote_json,
-                       confidence_grade,original_predicted_side,changed_before_close)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                       confidence_grade,original_predicted_side,changed_before_close,
+                       manipulation_suspected,manipulation_reason)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
                 (
                     prediction_id, MODEL_VERSION, FEATURE_SCHEMA_VERSION, ticker, asset, checkpoint,
                     created_at, close_time, predicted_side, raw_yes_probability,
@@ -514,6 +524,8 @@ class V95Ledger:
                     trade_quality, trade_decision, regime, rank_value, entry_ask, entry_cost,
                     _json(dict(features)), _json(dict(contributions)), _json(dict(quote)),
                     (str(confidence_grade).upper() if confidence_grade else None), predicted_side,
+                    1 if manipulation_suspected else 0,
+                    (str(manipulation_reason) or None) if manipulation_reason else None,
                 ),
             )
             connection.commit()
@@ -1143,6 +1155,36 @@ class V95Ledger:
             value = None
         return str(value) if value in (1, 2, 3) else "other"
 
+    # Manipulation reasons recorded at prediction time (see checkpoint_v95).
+    _MANIPULATION_REASONS = ("PIN", "ABSORPTION", "DIVERGENCE")
+
+    def _by_manipulation(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Accuracy / realized P&L split by whether price manipulation was suspected.
+
+        Answers "is the model less reliable / less profitable when big players look
+        to be pushing the price?" — suspected vs clean, and per individual reason
+        (a row counts under each reason it carries) so the data shows which signal
+        (pin / absorption / divergence) most clearly precedes a flip.
+        """
+        def _flag(row: sqlite3.Row) -> int:
+            return int(_row_get(row, "manipulation_suspected") or 0)
+
+        suspected = [r for r in rows if _flag(r) == 1]
+        clean = [r for r in rows if _flag(r) == 0]
+        by_reason: dict[str, Any] = {}
+        for reason in self._MANIPULATION_REASONS:
+            bucket = [
+                r for r in rows
+                if reason in {p.strip().upper() for p in str(_row_get(r, "manipulation_reason") or "").split(",") if p.strip()}
+            ]
+            if bucket:
+                by_reason[reason] = self._win_loss(bucket)
+        return {
+            "suspected": self._win_loss(suspected),
+            "clean": self._win_loss(clean),
+            "by_reason": by_reason,
+        }
+
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
         """Right/wrong/accuracy by interval (15M/10M/7M), pick rank (#1/#2/#3), and asset."""
         by_checkpoint = {cp: self._checkpoint_metrics([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
@@ -1161,6 +1203,7 @@ class V95Ledger:
         return {
             "overall": self._win_loss(rows), "by_checkpoint": by_checkpoint,
             "by_rank": by_rank, "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
+            "by_manipulation": self._by_manipulation(rows),
         }
 
     def scoreboard(self) -> dict[str, Any]:
@@ -1170,7 +1213,8 @@ class V95Ledger:
         with self._lock, closing(self._connect()) as connection:
             rows = list(connection.execute(
                 "SELECT checkpoint, correct, rank, asset, realized_cents, "
-                "predicted_side, official_result, confidence_grade, changed_before_close "
+                "predicted_side, official_result, confidence_grade, changed_before_close, "
+                "manipulation_suspected, manipulation_reason "
                 "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
                 (MODEL_VERSION,),
             ))

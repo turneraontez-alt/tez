@@ -711,6 +711,77 @@ def _market_anchored_probability(model_yes: float, market_yes: float | None,
     }
 
 
+_MANIPULATION_REASON_PHRASES = {
+    "ABSORPTION": "order-wall absorption",
+    "PIN": "strike pin (outcome unstable)",
+    "DIVERGENCE": "cross-exchange divergence",
+}
+
+
+def _manipulation_signal(regime: Mapping[str, Any], absorption: Mapping[str, Any],
+                         exchange: Mapping[str, Any]) -> dict[str, Any]:
+    """Read-only suspicion that large players are pushing the price around.
+
+    Composed ENTIRELY from signals the model already computed this cycle — it
+    never changes the prediction or the edge. Three classic "big spender" tells
+    near a binary strike:
+
+      * ABSORPTION — aggressive taker flow getting eaten by resting orders
+        without price moving (someone defending a level); the most *directional*
+        flip signal, so it also returns a ``lean`` (the side it is likely to
+        reverse toward).
+      * PIN — price stapled to the strike with repeated crossings: the outcome
+        is unstable and prone to flip at settlement.
+      * DIVERGENCE — one public venue pushed off the others' consensus.
+
+    Returns ``{suspected, reasons, lean, score}``. Disable via
+    ``Q15_V95_MANIPULATION_TRACKING=false``; ``Q15_V95_MANIPULATION_MIN_SIGNALS``
+    (default 1) sets how many tells must agree to flag.
+    """
+    if not _env_bool("Q15_V95_MANIPULATION_TRACKING", True):
+        return {"suspected": False, "reasons": [], "lean": None, "score": 0.0}
+    regime_name = str((regime or {}).get("name") or "")
+    absorption = absorption or {}
+    exchange = exchange or {}
+    divergence = _num(exchange.get("divergence_bps"), 0.0) or 0.0
+    div_threshold = _env_float("Q15_V95_MANIPULATION_DIVERGENCE_BPS", 35.0, 0.0, 500.0)
+
+    reasons: list[str] = []
+    lean: str | None = None
+    if absorption.get("available") and absorption.get("absorbed"):
+        reasons.append("ABSORPTION")
+        flow = _num(absorption.get("flow"), 0.0) or 0.0
+        # Positive aggressive flow failing to lift price is bearish (leans NO);
+        # negative flow failing to push price down is bullish (leans YES).
+        lean = "NO" if flow > 0 else "YES" if flow < 0 else None
+    if regime_name == "THRESHOLD_PIN":
+        reasons.append("PIN")
+    if regime_name == "EXCHANGE_DIVERGENCE" or divergence >= div_threshold:
+        reasons.append("DIVERGENCE")
+
+    min_signals = int(_env_float("Q15_V95_MANIPULATION_MIN_SIGNALS", 1.0, 1.0, 3.0))
+    suspected = len(reasons) >= min_signals
+    # Weighted toward absorption (the directional flip tell).
+    score = min(1.0, len(reasons) / 3.0 + (0.34 if "ABSORPTION" in reasons else 0.0))
+    return {
+        "suspected": suspected,
+        "reasons": reasons if suspected else [],
+        "lean": (lean if suspected else None),
+        "score": round(score, 4) if suspected else 0.0,
+    }
+
+
+def _manipulation_phrase(manip: Mapping[str, Any]) -> str:
+    """Human-readable one-liner for a suspected-manipulation signal."""
+    reasons = list(manip.get("reasons") or [])
+    parts = [_MANIPULATION_REASON_PHRASES.get(r, r.lower()) for r in reasons]
+    text = ", ".join(parts) if parts else "suspected"
+    lean = manip.get("lean")
+    if lean in ("YES", "NO"):
+        text += f" · may flip → {lean}"
+    return text
+
+
 def analyse_v95(
     snapshot: Mapping[str, Any],
     canonical: CanonicalSnapshot,
@@ -903,6 +974,7 @@ def analyse_v95(
             "exchange_consensus": exchange_d, "derivatives": derivatives_d,
             "absorption": absorption_d,
         },
+        "manipulation": _manipulation_signal(regime, absorption_d, exchange_d),
         "contributions": contributions,
         "challenger_contributions": challenger_contributions,
         "supporting_factors": supporting,
@@ -947,6 +1019,11 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_ideal_entry_cents"] = analysis.get("ideal_entry_cents")
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
     snapshot["q15_v9_5_entry_allowed"] = bool(analysis.get("entry_allowed"))
+    # Suspected price-manipulation tracking (read-only; does not affect the call).
+    _manip = analysis.get("manipulation") or {}
+    snapshot["q15_v9_5_manipulation_suspected"] = bool(_manip.get("suspected"))
+    snapshot["q15_v9_5_manipulation_reason"] = ",".join(_manip.get("reasons") or []) or None
+    snapshot["q15_v9_5_manipulation_lean"] = _manip.get("lean")
     # Richer prediction-card fields (the run_cycle recording loop refreshes
     # interval/stability/expiry/timestamp with live clock context each cycle).
     snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
@@ -1137,6 +1214,20 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
                 f"✅ {asset} entry — ask {ask} → max {_c(a.get('ideal_entry_cents'))} · "
                 f"edge {_c(a.get('net_edge_cents'), signed=True)}"
             )
+
+    # Suspected price-manipulation watch: surface any flagged pick so you can read
+    # the alert with the caveat. Read-only signal — it never changed the call.
+    if _env_bool("Q15_V95_MANIPULATION_ALERT_TAG", True):
+        flagged = [
+            (str(row["asset"]), analyses.get(str(row["asset"]), {}).get("manipulation") or {})
+            for row in top
+        ]
+        flagged = [(asset, manip) for asset, manip in flagged if manip.get("suspected")]
+        if flagged:
+            lines.append("")
+            lines.append("⚠ <b>Manipulation watch</b>")
+            for asset, manip in flagged:
+                lines.append(f"{asset}: {_manipulation_phrase(manip)}")
 
     # Unavailable picks below the table so the aligned columns stay clean.
     for row in unavailable:
@@ -1534,6 +1625,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         features=analysis["feature_values"], contributions=analysis["contributions"],
                         quote=analysis["quote"], rank=rank, costs=analysis.get("costs"),
                         confidence_grade=analysis.get("confidence_grade"),
+                        manipulation_suspected=bool((analysis.get("manipulation") or {}).get("suspected")),
+                        manipulation_reason=(",".join((analysis.get("manipulation") or {}).get("reasons") or []) or None),
                     )
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
