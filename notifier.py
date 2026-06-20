@@ -45,6 +45,20 @@ _ALERT_NONACTIONABLE_MARKERS = (
 )
 _ALERT_LEVEL_DELIVER_ALL = {"all", "off", "none", "full", "verbose", "everything"}
 
+# The canonical hourly performance report (reporting.HourlyReporter.build_report)
+# is already fully formatted, complete, and honest. It must NOT be piped through
+# the checkpoint-check reformatters (augment_telegram_message -> v95 -> v94 ->
+# v93._format_hourly), because that chain rebuilds the report from live decision
+# stats and discards every per-segment number (Real alerts, Paper, Last hour,
+# loss factors, scalps), surfacing them to the user as zeros / "n/a". The em dash
+# header is unique to the canonical report; the reformatters emit "Hourly
+# Operational Status" instead, so this never matches an already-mangled message.
+_PERF_REPORT_MARKER = "Hourly Report —"
+
+
+def _is_performance_report(text):
+    return _PERF_REPORT_MARKER in str(text or "")
+
 
 def _alert_level():
     return (os.environ.get("Q15_ALERT_LEVEL", "balanced") or "balanced").strip().lower()
@@ -103,8 +117,13 @@ class TelegramNotifier:
     def send(self, text):
         if not self.enabled:
             return False
-        text = augment_telegram_message(text)
-        text = professionalize_telegram_message(text)
+        if _is_performance_report(text):
+            # Deliver the canonical performance report as built. The reformatter
+            # chain would otherwise strip its stats down to zeros / "n/a".
+            text = str(text or "")
+        else:
+            text = augment_telegram_message(text)
+            text = professionalize_telegram_message(text)
         if should_suppress_alert(text):
             # Muted by Q15_ALERT_LEVEL. Report success so the outbox marks the
             # message durably handled (no retry); nothing is sent to Telegram.
