@@ -714,6 +714,11 @@ def q15_v95_decision_stats_ep():
 def q15_v95_scoreboard_ep():
     return jsonify(checkpoint_v95.scoreboard())
 
+@app.route("/api/q15-v9-5/accuracy")
+@app.route("/data/q15-v9-5/accuracy")
+def q15_v95_accuracy_ep():
+    return jsonify(checkpoint_v95.accuracy_report())
+
 @app.route("/api/market-cache")
 @app.route("/data/market-cache")
 def market_cache_ep():
@@ -932,6 +937,7 @@ def health():
         "assets_subscribed": [s.get("asset") for s in live],
         "assets_tracked": len(snaps),
         "telegram_status": notifier.status(),
+        "model_accuracy": checkpoint_v95.accuracy_summary(),
         "data_age_seconds": data_age,
         "alerts_generated": store.count_alerts(),
         "deployment_type": deployment_type,

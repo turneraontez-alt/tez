@@ -1306,6 +1306,16 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
         return {"version": VERSION, "read_only": True, **self.ledger.scoreboard()}
 
+    def accuracy_report(self) -> dict[str, Any]:
+        """Honest accuracy / promotion-readiness readout over the ledger metrics."""
+        from .accuracy_report import build_accuracy_report
+        return {"version": VERSION, "read_only": True, **build_accuracy_report(self.ledger.metrics())}
+
+    def accuracy_summary(self) -> dict[str, Any]:
+        """Compact one-glance accuracy headline for /api/health."""
+        from .accuracy_report import build_accuracy_report, compact_summary
+        return compact_summary(build_accuracy_report(self.ledger.metrics()))
+
     def learning_status(self) -> dict[str, Any]:
         return {
             "version": VERSION, "read_only": True, **self.ledger.status(),
