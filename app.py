@@ -849,6 +849,12 @@ def health():
     except Exception:
         wsh = {}
 
+    try:
+        from spot_ws import spot_ws_health
+        spot_ws_status = spot_ws_health()
+    except Exception:
+        spot_ws_status = {"enabled": False}
+
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
     return jsonify({
         "status": "ok",
@@ -874,6 +880,7 @@ def health():
         "uptime_seconds": round(now - SERVER_STARTED_AT),
         "websocket_connected": bool(wsh.get("connected")),
         "websocket_last_message_at": wsh.get("last_message_at"),
+        "spot_ws": spot_ws_status,
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
         "assets_tracked": len(snaps),
