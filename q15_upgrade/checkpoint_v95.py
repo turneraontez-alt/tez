@@ -843,73 +843,66 @@ def _fmt_alignment(value: Any) -> str:
     return "n/a" if parsed is None else f"{parsed:.1f}"
 
 
+_DECISION_LABELS = {
+    "ENTRY_RECOMMENDED": "ENTRY",
+    "WATCH_PRICE": "price too high",
+    "WATCH_CONFIDENCE": "low confidence",
+    "WATCH_DATA_QUALITY": "weak data",
+    "WATCH_LIQUIDITY": "thin/wide book",
+    "WATCH_TIME": "too little time",
+    "PREDICTION_ONLY": "no executable quote",
+    "AVOID_INVALID_DATA": "no data",
+}
+
+
+def _decision_label(decision: Any) -> str:
+    token = str(decision or "").upper()
+    return _DECISION_LABELS.get(token, token.replace("_", " ").lower() or "watch")
+
+
+def _c(value: Any, signed: bool = False) -> str:
+    """Compact whole-cent formatter for the per-cycle checkpoint message."""
+    parsed = _num(value)
+    if parsed is None:
+        return "—"
+    return f"{parsed:+.0f}¢" if signed else f"{parsed:.0f}¢"
+
+
 def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None) -> str:
     any_entry = any(bool(row.get("entry_allowed")) for row in analyses.values())
-    header = f"{'✅' if any_entry else '👀'} {checkpoint} V9.5 CHECK — {'ENTRY RECOMMENDED' if any_entry else 'BEST PICKS, NO ENTRY YET'}"
+    emoji = "✅" if any_entry else "👀"
+    state = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
     medals = ["🥇", "🥈", "🥉"]
-    summary = "  ·  ".join(
-        f"{medals[index] if index < 3 else str(index + 1) + '.'} {row['asset']} {row.get('prediction_side') or '?'}"
-        for index, row in enumerate(ranking[:3])
-    )
-    lines = [header, summary, ""]
+    # Header keeps "V9.5 CHECK" (formatter guard) and the ENTRY/NO ENTRY markers
+    # (alert-suppression classification).
+    lines = [f"{emoji} <b>{checkpoint} V9.5 CHECK · {state}</b>"]
     for index, row in enumerate(ranking[:3]):
         asset = str(row["asset"])
         analysis = analyses[asset]
-        canonical = analysis.get("canonical") or {}
         medal = medals[index] if index < 3 else f"{index + 1}."
         side = analysis.get("prediction_side") or "—"
-        alignment = _fmt_alignment(canonical.get("alignment_seconds"))
-        candle_count = len(canonical.get("candles") or [])
         if not analysis.get("prediction_available"):
-            # No directional probability this cycle (invalid/missing core data).
-            # State the cause plainly rather than emitting a wall of "n/a".
-            lines.extend([
-                f"{medal} {asset} — NO PREDICTION (data unavailable)",
-                f"Why: {_humanize_v95_reasons(analysis.get('main_blocker'))}",
-                f"Data quality: {_fmt_probability(analysis.get('data_quality'))} | candles: {candle_count} | feed alignment: {alignment}s",
-                f"Decision: {analysis.get('trade_decision')}",
-                "",
-            ])
+            lines.append(f"{medal} <b>{asset}</b> — no prediction")
+            lines.append(f"   ⛔ {_humanize_v95_reasons(analysis.get('main_blocker'))}")
             continue
-        structural = analysis.get("structural") or {}
-        quote = analysis.get("quote") or {}
-        costs = analysis.get("costs") or {}
-        regime = analysis.get("regime") or {}
-        supporting = analysis.get("supporting_factors") or []
-        opposing = analysis.get("opposing_factors") or []
-        lines.extend([
-            f"{medal} {asset} {side}",
-            f"Probability — YES {_fmt_probability(analysis.get('yes_probability'))} | NO {_fmt_probability(analysis.get('no_probability'))}",
-            f"Structural base: {_fmt_probability(structural.get('yes_probability'))} YES | conservative selected: {_fmt_probability(analysis.get('conservative_probability'))}",
-            *([f"10M shadow challenger: {_fmt_probability(analysis.get('challenger_yes_probability'))} YES — evaluation only, not live"] if checkpoint == "10M" else []),
-            f"Confidence: {analysis.get('confidence_grade') or 'n/a'} | data quality {_fmt_probability(analysis.get('data_quality'))} | evidence quality {_fmt_probability(analysis.get('evidence_quality'))}",
-            f"Regime: {regime.get('name', 'n/a')} | feed alignment: {alignment}s | candles: {candle_count}",
-            f"Supporting: {', '.join(item['name'] for item in supporting) if supporting else 'none measured'}",
-            f"Opposing: {', '.join(item['name'] for item in opposing) if opposing else 'none measured'}",
-            "EXECUTABLE VALUE",
-            f"{side} ask: {_fmt_cents(quote.get('ask_cents'))} | spread: {_fmt_cents(quote.get('spread_cents'))} | costs: {_fmt_cents(costs.get('total_cents') if 'total_cents' in costs else costs.get('total_cost_cents'))}",
-            f"Conservative net edge: {_fmt_cents(analysis.get('net_edge_cents'), signed=True)} | required: {_fmt_cents(analysis.get('required_edge_cents'))}",
-            f"Ideal maximum entry: {_fmt_cents(analysis.get('ideal_entry_cents'))}",
-            f"Decision: {analysis.get('trade_decision')} | blocker: {analysis.get('main_blocker') or 'none'}",
-            "",
-        ])
+        regime = (analysis.get("regime") or {}).get("name") or "—"
+        prob = _fmt_probability(analysis.get("selected_probability"))
+        grade = analysis.get("confidence_grade") or "—"
+        ask = _c((analysis.get("quote") or {}).get("ask_cents"))
+        net = analysis.get("net_edge_cents")
+        lines.append(f"{medal} <b>{asset} {side}</b> — {prob} · grade {grade} · {regime}")
+        if analysis.get("entry_allowed"):
+            lines.append(f"   ✅ ENTRY · edge {_c(net, signed=True)} · ask {ask} → max {_c(analysis.get('ideal_entry_cents'))}")
+        else:
+            reason = _decision_label(analysis.get("trade_decision"))
+            edge = f"edge {_c(net, signed=True)} (need {_c(analysis.get('required_edge_cents'))})" if net is not None else "no executable edge"
+            lines.append(f"   👀 {reason} · {edge} · ask {ask}")
     if result_events:
-        lines.append("RECENT OFFICIAL RESULTS")
-        for event in result_events[:3]:
-            lines.append(
-                f"{event.get('asset')} {event.get('checkpoint')}: predicted {event.get('predicted_side')} → result {event.get('official_result')} — {'CORRECT' if event.get('correct') else 'WRONG'}"
-            )
-        lines.append("")
-    if checkpoint in {"10M", "15M"}:
-        updates = (ledger_status.get("shadow_updates_by_checkpoint") or {}).get(checkpoint, 0)
-        primary = ledger_status.get("primary_learning_checkpoint", "10M")
-        enabled = (ledger_status.get("learning_enabled_by_checkpoint") or {}).get(checkpoint, False)
-        lines.append(
-            f"V9.5 learner: {checkpoint} updates {updates} | primary {primary} | "
-            f"checkpoint learning {'ON' if enabled else 'OFF'} | production champion remains frozen."
-        )
-    lines.append("Probability, data quality, and trade quality are separate. Read-only monitor — no orders are placed.")
-    return "\n".join(lines).strip()
+        marks = "  ".join(f"{e.get('asset')} {'✅' if e.get('correct') else '❌'}" for e in result_events[:4])
+        lines.append(f"Recent results — {marks}")
+    lines.append("<i>Paper monitor · not advice · no orders placed</i>")
+    text = "\n".join(lines)
+    return text if len(text) <= 4000 else text[:3990] + "…"
 
 
 def _notification_identity(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], now: float) -> tuple[str, str, str]:

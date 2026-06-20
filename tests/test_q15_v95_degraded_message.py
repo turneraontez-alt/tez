@@ -54,14 +54,12 @@ class TestDegradedV95Message(unittest.TestCase):
         analyses = {"ETH": analysis}
         msg = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
 
-        self.assertIn("NO PREDICTION (data unavailable)", msg)
-        self.assertIn("Why:", msg)
+        self.assertIn("no prediction", msg)
         self.assertIn("strike/threshold not set yet", msg)
         # The literal None / n/a wall must be gone for the unavailable row.
         self.assertNotIn("ETH None", msg)
         self.assertNotIn("None ask:", msg)
-        self.assertNotIn("Confidence: None", msg)
-        self.assertNotIn("Probability — YES n/a", msg)
+        self.assertNotIn("n/a", msg)
 
     def test_healthy_row_unaffected(self):
         good = snapshot(asset="BNB", checkpoint="10M", ask=52.0, target=100.0, spot=101.0)
@@ -69,9 +67,10 @@ class TestDegradedV95Message(unittest.TestCase):
         self.assertTrue(analysis.get("prediction_available"))
         analyses = {"BNB": analysis}
         msg = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
-        self.assertIn("Probability — YES", msg)
-        self.assertIn("EXECUTABLE VALUE", msg)
-        self.assertNotIn("NO PREDICTION", msg)
+        self.assertIn("BNB YES", msg)        # the pick + side
+        self.assertIn("ENTRY", msg)          # the action
+        self.assertIn("edge", msg)           # the economics
+        self.assertNotIn("no prediction", msg)
         self.assertNotIn("None", msg)
 
 

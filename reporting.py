@@ -11,34 +11,11 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-DISCLAIMER = ("Model-based estimate, not financial advice. "
-              "Read-only monitor \u2014 no orders are placed.")
+DISCLAIMER = "Paper monitor \u2014 not financial advice \u2014 no orders are placed."
 
 
 def _pct(x):
     return f"{x * 100:.0f}%" if isinstance(x, (int, float)) else "n/a"
-
-
-def _rec(r):
-    return f"{r['wins']}W/{r['losses']}L \u2014 {_pct(r['win_rate'])} (n={r['n']})"
-
-
-def _wl(d):
-    """Format a {right,wrong,n,accuracy,low_n} scoreboard bucket, or None if empty."""
-    n = (d or {}).get("n") or 0
-    if not n:
-        return None
-    acc = d.get("accuracy")
-    pct = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "n/a"
-    parts = [pct]
-    # Realized paper P&L after fees, when any priced entries resolved.
-    rt = d.get("realized_total_cents")
-    if isinstance(rt, (int, float)) and d.get("pnl_n"):
-        parts.append(f"{rt:+.0f}¢")
-    # Flag thin samples so a 2-of-2 = 100% bucket is not over-read.
-    if d.get("low_n"):
-        parts.append("low n")
-    return f"{d.get('right', 0)}W/{d.get('wrong', 0)}L ({', '.join(parts)})"
 
 
 class HourlyReporter:
@@ -54,8 +31,22 @@ class HourlyReporter:
         self.v95_ledger = v95_ledger
         self._last_hour = None
 
-    def _scoreboard_lines(self):
-        """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
+    @staticmethod
+    def _sb_row(label, d):
+        """One aligned monospace row, or None if the bucket has no settled rows."""
+        n = (d or {}).get("n") or 0
+        if not n:
+            return None
+        wl = f"{d.get('right', 0)}-{d.get('wrong', 0)}"
+        acc = d.get("accuracy")
+        acc_s = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "-"
+        rt = d.get("realized_total_cents")
+        pnl = f"{rt:+.0f}¢" if (isinstance(rt, (int, float)) and d.get("pnl_n")) else "-"
+        flag = " *" if d.get("low_n") else ""
+        return f"{label:<8}{wl:>5}{acc_s:>6}{pnl:>7}{flag}"
+
+    def _scoreboard_table(self):
+        """Canonical track record: a compact monospace table by interval, rank, asset."""
         ledger = getattr(self, "v95_ledger", None)
         if ledger is None:
             return []
@@ -64,28 +55,35 @@ class HourlyReporter:
         except Exception as e:
             logger.warning(f"scoreboard fetch failed: {e}")
             return []
-        if not sb.get("available") or (sb.get("overall", {}).get("n") or 0) <= 0:
-            return []
-        lines = ["\n\U0001f4c8 <b>Track record (V9.5 paper ledger)</b>"]
-        by_cp = sb.get("by_checkpoint", {})
-        interval = [f"{cp}: {_wl(by_cp.get(cp))}" for cp in ("15M", "10M", "7M") if _wl(by_cp.get(cp))]
-        if interval:
-            lines.append("By interval — " + "  ·  ".join(interval))
-        by_rank = sb.get("by_rank", {})
-        ranked = [f"{label}: {_wl(by_rank.get(key))}"
-                  for key, label in (("1", "#1"), ("2", "#2"), ("3", "#3")) if _wl(by_rank.get(key))]
-        if ranked:
-            lines.append("By pick rank — " + "  ·  ".join(ranked))
-        # By asset, busiest first, capped so the line stays readable.
-        by_asset = sb.get("by_asset", {})
-        asset_items = sorted(
-            ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
-            key=lambda kv: kv[1]["n"], reverse=True,
-        )[:6]
-        asset_parts = [f"{a}: {_wl(d)}" for a, d in asset_items if _wl(d)]
-        if asset_parts:
-            lines.append("By asset — " + "  ·  ".join(asset_parts))
-        return lines
+        overall = sb.get("overall", {}) if sb.get("available") else {}
+        if (overall.get("n") or 0) <= 0:
+            return ["No settled predictions yet — building history."]
+
+        acc = overall.get("accuracy")
+        acc_s = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "n/a"
+        pnl = overall.get("realized_total_cents")
+        pnl_s = f" · P/L {pnl:+.0f}¢" if (isinstance(pnl, (int, float)) and overall.get("pnl_n")) else ""
+        headline = f"Settled {overall['n']} · {acc_s} right{pnl_s}"
+
+        by_cp, by_rank, by_asset = sb.get("by_checkpoint", {}), sb.get("by_rank", {}), sb.get("by_asset", {})
+        groups = [
+            [self._sb_row(cp, by_cp.get(cp)) for cp in ("15M", "10M", "7M")],
+            [self._sb_row(f"#{k} pick", by_rank.get(k)) for k in ("1", "2", "3")],
+            [self._sb_row(a, d) for a, d in sorted(
+                ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
+                key=lambda kv: kv[1]["n"], reverse=True)[:5]],
+        ]
+        body = [f"{'':<8}{'W-L':>5}{'Acc':>6}{'P/L':>7}"]
+        for group in groups:
+            rows = [r for r in group if r]
+            if rows:
+                body.append("")
+                body.extend(rows)
+        table = ["<b>Track record</b> (paper, after fees)", "<pre>", *body, "</pre>"]
+        # Only mention the footnote if some bucket is actually flagged thin.
+        if any("*" in (r or "") for group in groups for r in group):
+            table.append("<i>* under 10 settled — not yet reliable</i>")
+        return [headline, ""] + table
 
     def maybe_send(self, now):
         if not self.cfg.hourly_report_enabled or not self.notifier.enabled:
@@ -126,69 +124,33 @@ class HourlyReporter:
 
     def build_report(self):
         hh = datetime.now(timezone.utc).strftime("%H:00 UTC")
-        stats = self.perf.stats()
         lines = [f"\U0001f4ca <b>Hourly Report \u2014 {hh}</b>"]
 
-        if not stats.get("available"):
-            lines.append("No performance data yet (persistence disabled).")
-            lines.append(f"<i>{DISCLAIMER}</i>")
-            return "\n".join(lines)
+        # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
+        lines.extend(self._scoreboard_table())
 
-        overall_n = stats["settled_entries"]
-        lines.append(
-            f"Overall: {stats['wins']}W/{stats['losses']}L \u2014 "
-            f"{_pct(stats['win_rate'])} (n={overall_n}, {stats['pending_entries']} pending)"
-        )
-        lines.append(f"\u2022 Real alerts: {_rec(stats['real_record'])}")
-        lines.append(f"\u2022 Paper (untraded): {_rec(stats['paper_record'])}")
+        # Actually-sent alerts (real-money proxy), kept distinct and one line.
+        try:
+            stats = self.perf.stats()
+        except Exception:
+            stats = {}
+        if stats.get("available"):
+            rr = stats.get("real_record") or {}
+            if rr.get("n"):
+                tot = stats.get("total_realized_return")
+                tail = f" \u00b7 realized {tot:+.0f}\u00a2" if isinstance(tot, (int, float)) else ""
+                lines.append(f"\nSent alerts: {rr['wins']}W/{rr['losses']}L ({_pct(rr.get('win_rate'))}){tail}")
 
-        lh = self._last_hour_stats()
-        lines.append(
-            f"Last hour: {lh['wins']}W/{lh['losses']}L \u2014 "
-            f"{_pct(lh['win_rate'])} (n={lh['n']})"
-        )
-        avg = stats.get("avg_realized_return")
-        tot = stats.get("total_realized_return")
-        if avg is not None:
-            lines.append(f"Realized: {avg:+.1f}\u00a2 avg, {tot:+.1f}\u00a2 total")
-
-        # factors associated with loss risk (association, not causation)
-        reasons = self.learner.loss_reason_summary(24)
-        if reasons:
-            lines.append("\n<b>Factors associated with higher loss risk:</b>")
-            for reason, cnt in list(reasons.items())[:6]:
-                lines.append(f"\u2022 {reason.replace('_', ' ')}: coefficient {float(cnt):+.3f}")
-
-        # learning adjustments in force
-        adj = self.learner.active_adjustments()
-        if adj:
-            lines.append("\n<b>Learning adjustments active:</b>")
-            for a in adj[:6]:
-                live_suppressed = bool(a.get("suppressed"))
-                shadow_suppressed = bool(a.get("shadow_suppressed"))
-                tag = " [SUPPRESSED]" if live_suppressed else " [SHADOW SUPPRESS]" if shadow_suppressed else ""
-                pen = a.get("edge_penalty", a.get("edge_adjustment", 0)) or 0
-                shadow_pen = a.get("shadow_edge_adjustment", pen) or 0
-                post = _pct(a.get("posterior_win_rate"))
-                mode = "live" if abs(float(pen)) > 0 else "shadow"
-                shown = pen if mode == "live" else shadow_pen
-                lines.append(
-                    f"\u2022 {a.get('segment')} {shown:+.1f}pp ({mode}; post {post}, n={a.get('n')}){tag}"
-                )
-
-        # scalp record
+        # Scalp record, one line.
         try:
             sr = self.scalp.record()
             if sr["total"] or sr["open"]:
                 lines.append(
-                    f"\n\u26a1 Scalps: {sr['wins']}W/{sr['losses']}L \u2014 "
-                    f"{_pct(sr['win_rate'])} (n={sr['total']}, "
-                    f"{sr['total_realized_cents']:+.1f}\u00a2, {sr['open']} open)"
+                    f"\u26a1 Scalps: {sr['wins']}W/{sr['losses']}L "
+                    f"({_pct(sr['win_rate'])}, {sr['total_realized_cents']:+.0f}\u00a2, {sr['open']} open)"
                 )
         except Exception:
             pass
-
-        lines.extend(self._scoreboard_lines())
 
         lines.append(f"\n<i>{DISCLAIMER}</i>")
         return "\n".join(lines)

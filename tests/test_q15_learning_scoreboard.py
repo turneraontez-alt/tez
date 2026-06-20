@@ -154,19 +154,25 @@ class TestHourlyReportScoreboard(unittest.TestCase):
                 "other": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
             },
         }
-        lines = self._reporter(_FakeLedger(sb))._scoreboard_lines()
-        text = "\n".join(lines)
+        sb["overall"]["accuracy"] = 0.625
+        text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
         self.assertIn("Track record", text)
-        self.assertIn("15M: 2W/1L (67%)", text)
-        self.assertIn("7M: 1W/1L (50%)", text)
-        self.assertIn("#1: 3W/1L (75%)", text)
+        self.assertIn("Settled 8 ·", text)
+        self.assertIn("right", text)
+        self.assertIn("<pre>", text)
+        # aligned rows for interval and rank
+        self.assertIn("15M", text)
+        self.assertIn("7M", text)
+        self.assertIn("#1 pick", text)
+        self.assertIn("67%", text)
 
-    def test_no_lines_when_empty(self):
+    def test_empty_shows_building_history(self):
         sb = {"available": True, "overall": {"n": 0}, "by_checkpoint": {}, "by_rank": {}}
-        self.assertEqual(self._reporter(_FakeLedger(sb))._scoreboard_lines(), [])
+        lines = self._reporter(_FakeLedger(sb))._scoreboard_table()
+        self.assertEqual(lines, ["No settled predictions yet — building history."])
 
     def test_no_ledger_is_safe(self):
-        self.assertEqual(self._reporter(None)._scoreboard_lines(), [])
+        self.assertEqual(self._reporter(None)._scoreboard_table(), [])
 
 
 if __name__ == "__main__":
