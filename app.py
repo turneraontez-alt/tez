@@ -455,6 +455,13 @@ def refresh_loop():
 
         elapsed = time.monotonic() - cycle_clock
         ct.commit(elapsed)
+        # Page on a genuine stall so a freeze reaches you instead of going silent.
+        try:
+            page = cycle_watchdog.alert_message(now, now - SERVER_STARTED_AT)
+            if page:
+                notifier.send(page)
+        except Exception:
+            logger.exception("watchdog pager failed")
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
 
 

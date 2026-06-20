@@ -20,6 +20,21 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        return min(high, max(low, float(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 _lock = threading.Lock()
 
 
@@ -41,10 +56,7 @@ _state = _blank_state()
 
 
 def threshold_seconds() -> float:
-    try:
-        return max(0.5, float(os.environ.get("Q15_CYCLE_WATCHDOG_SECONDS", "10") or 10))
-    except (TypeError, ValueError):
-        return 10.0
+    return _env_float("Q15_CYCLE_WATCHDOG_SECONDS", 10.0, 0.5, 3600.0)
 
 
 class CycleTimer:
@@ -110,8 +122,50 @@ def health() -> dict:
     return snap
 
 
+# --- Pager: turn a freeze into a Telegram alert instead of silence -----------
+_pager_lock = threading.Lock()
+_pager_state = {"last_alert_at": 0.0}
+
+
+def alert_message(now: float, uptime_seconds: float) -> str | None:
+    """Return a Telegram alert string if the latest cycle is a real stall, else None.
+
+    Stateful and cooldown-limited, so a sustained freeze pages once per window
+    rather than every cycle. Returns None unless the last cycle exceeded
+    ``Q15_WATCHDOG_ALERT_SECONDS`` (default 20s — higher than the watchdog's own
+    log threshold, so only genuine freezes page), the process is past warmup, and
+    the cooldown has elapsed. Never raises.
+    """
+    if not _env_bool("Q15_WATCHDOG_ALERT_ENABLED", True):
+        return None
+    alert_threshold = _env_float("Q15_WATCHDOG_ALERT_SECONDS", 20.0, 1.0, 600.0)
+    warmup = _env_float("Q15_WATCHDOG_ALERT_WARMUP_SECONDS", 60.0, 0.0, 3600.0)
+    cooldown = _env_float("Q15_WATCHDOG_ALERT_COOLDOWN_SECONDS", 600.0, 30.0, 86400.0)
+    with _lock:
+        cycle_s = _state.get("last_cycle_seconds")
+        slowest = _state.get("slowest_stage")
+        slowest_s = _state.get("slowest_stage_seconds") or 0.0
+    if cycle_s is None or cycle_s < alert_threshold:
+        return None
+    if uptime_seconds < warmup:
+        return None  # ignore expected cold-start heaviness right after a restart
+    with _pager_lock:
+        if now - _pager_state["last_alert_at"] < cooldown:
+            return None
+        _pager_state["last_alert_at"] = now
+    return (
+        "⚠️ <b>Monitor cycle stall</b>\n"
+        f"Last refresh cycle took <b>{cycle_s:.0f}s</b> "
+        f"(slowest stage: {slowest} {slowest_s:.0f}s).\n"
+        "Predictions pause while the loop is blocked — "
+        "check /api/health → cycle_watchdog."
+    )
+
+
 def reset() -> None:
     """Reset accumulated state (used by tests)."""
     with _lock:
         _state.clear()
         _state.update(_blank_state())
+    with _pager_lock:
+        _pager_state["last_alert_at"] = 0.0
