@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import time
 import re
 import statistics
 import threading
@@ -849,9 +850,14 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
     ) -> Dict[str, dict]:
         self._ingest(snapshots, now)
         buffered_notifier = _BufferedNotifier(notifier)
+        _ct = getattr(self, "_chain_timing", None)
+        _t0 = time.monotonic()
         enriched = super().run_cycle(
             snapshots, now, ws_health, focus_manager, calibrated_edge, buffered_notifier
         )
+        if isinstance(_ct, dict):
+            _ct["v91_run_cycle"] = round(time.monotonic() - _t0, 3)
+        _t_v94 = time.monotonic()
         self._telegram_buffered += len(buffered_notifier.calls)
         self._ingest(enriched, now)
         if not self.enabled:
@@ -886,6 +892,8 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
                 with _LATEST_LOCK:
                     _LATEST_BY_ASSET[asset] = copy.deepcopy(context)
                 cycle_contexts[asset] = copy.deepcopy(context)
+            if isinstance(_ct, dict):
+                _ct["v94_own_work"] = round(time.monotonic() - _t_v94, 3)
             sent, failed = buffered_notifier.flush(cycle_contexts)
             self._telegram_flushed += sent
             self._telegram_flush_failures += failed

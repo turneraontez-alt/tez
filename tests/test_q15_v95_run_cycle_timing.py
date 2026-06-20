@@ -50,12 +50,20 @@ class TestRunCycleTiming(unittest.TestCase):
 
         self.policy.run_cycle(dict(snaps), now, {}, FM(), CE(), self.FakeNotifier())
 
-        timing = self.policy.health()["run_cycle_timing"]
+        health = self.policy.health()
+        timing = health["run_cycle_timing"]
         for key in ("parent_chain", "v95_analysis", "total", "other"):
             self.assertIn(key, timing)
         self.assertGreaterEqual(timing["total"], 0.0)
         # total accounts for the measured spans plus the unattributed remainder.
         self.assertGreaterEqual(timing["other"], 0.0)
+
+        # The parent (legacy v94) chain is profiled one level deeper so a slow
+        # cycle names the offending layer instead of one opaque bucket.
+        parent = health["parent_chain_timing"]
+        for key in ("v94_super_chain", "v91_pre_enrich", "v91_finalize_all"):
+            self.assertIn(key, parent)
+            self.assertGreaterEqual(parent[key], 0.0)
 
 
 if __name__ == "__main__":

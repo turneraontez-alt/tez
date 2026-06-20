@@ -1274,6 +1274,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "version": VERSION, "enabled": self.v95_enabled, "read_only": True,
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
             "run_cycle_timing": copy.deepcopy(self._run_cycle_timing),
+            "parent_chain_timing": copy.deepcopy(getattr(self, "_chain_timing", {})),
             "last_checkpoint": self._last_checkpoint_v95,
             "telegram_sent": self._telegram_sent_v95,
             "telegram_failed": self._telegram_failed_v95,
