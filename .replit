@@ -58,3 +58,8 @@ outputType = "console"
 [userenv.shared]
 KALSHI_WS_ENABLED = "true"
 Q15_SPOT_WS_ENABLED = "true"
+# v9.5 is authoritative; the legacy v9.4 "unified" loop (~1.6s/cycle) is computed
+# then fully discarded by v9.5. Disable it to cut cycle time. Trade-off: the
+# /api/q15-v9-4/unified/* endpoints, q15_v9_4_unified_* snapshot keys, and the
+# v9.4 15M learning ledger go dark (all superseded by v9.5). Re-enable with "true".
+Q15_V94_UNIFIED_ENABLED = "false"

@@ -42,8 +42,39 @@ _ALERT_NONACTIONABLE_MARKERS = (
     "#1 WATCH",
     "WATCH —",
     "WATCH -",
+    # The "canonical analysis is not ready" placeholder emitted while the v9.5
+    # globals are still empty (the startup window re-opens on every restart). It
+    # carries no decision — pure noise to the user — so mute it under balanced.
+    # Still delivered under Q15_ALERT_LEVEL=all and always visible in
+    # /api/health + /api/q15-v9-5/diagnostics.
+    "V9.5 STARTUP",
 )
 _ALERT_LEVEL_DELIVER_ALL = {"all", "off", "none", "full", "verbose", "everything"}
+
+# Per-checkpoint overrides of Q15_ALERT_LEVEL. When one is set, that checkpoint's
+# own level governs delivery of its messages — so e.g. the 10m and 7m checks can
+# be delivered ("all") while the 15m check stays muted under the global
+# "balanced" level (or vice versa). Unset -> inherit Q15_ALERT_LEVEL (so the
+# default behaviour is unchanged). Identification keys off the checkpoint label
+# already present in the rendered header (e.g. "10M V9.5 CHECK ...").
+_CHECKPOINT_ALERT_LEVEL_ENV = {
+    "15M": "Q15_ALERT_LEVEL_15M",
+    "10M": "Q15_ALERT_LEVEL_10M",
+    "7M": "Q15_ALERT_LEVEL_7M",
+}
+
+
+def _checkpoint_of(header):
+    """Return the checkpoint (15M/10M/7M) a rendered header belongs to, else None.
+
+    Only checkpoint messages — those whose header carries a checkpoint label —
+    can be governed by a per-checkpoint override. Everything else (dip alerts,
+    exits/invalidations, the hourly report, startup pings) keeps the global
+    Q15_ALERT_LEVEL. The tokens are mutually non-overlapping substrings."""
+    for checkpoint in ("10M", "15M", "7M"):
+        if checkpoint in header:
+            return checkpoint
+    return None
 
 # The canonical hourly performance report (reporting.HourlyReporter.build_report)
 # is already fully formatted, complete, and honest. It must NOT be piped through
@@ -60,7 +91,13 @@ def _is_performance_report(text):
     return _PERF_REPORT_MARKER in str(text or "")
 
 
-def _alert_level():
+def _alert_level(checkpoint=None):
+    """Effective verbosity level. A per-checkpoint override (e.g. for 10M/7M)
+    takes precedence over the global Q15_ALERT_LEVEL when set."""
+    if checkpoint:
+        override = os.environ.get(_CHECKPOINT_ALERT_LEVEL_ENV.get(checkpoint, ""))
+        if override and override.strip():
+            return override.strip().lower()
     return (os.environ.get("Q15_ALERT_LEVEL", "balanced") or "balanced").strip().lower()
 
 
@@ -71,16 +108,21 @@ def should_suppress_alert(text, level=None):
     formatted message — that is exactly what the user sees. Actionable markers
     always win, so a message is only muted when its header is unambiguously a
     routine, non-actionable checkpoint/watch report.
+
+    When ``level`` is not given explicitly it is resolved from the environment,
+    honouring a per-checkpoint override (Q15_ALERT_LEVEL_10M / _7M / _15M) keyed
+    off the checkpoint label in the header, then falling back to Q15_ALERT_LEVEL.
     """
-    level = (level or _alert_level())
-    if level in _ALERT_LEVEL_DELIVER_ALL:
-        return False
     header = ""
     for line in str(text or "").splitlines():
         if line.strip():
             header = line.upper()
             break
     if not header:
+        return False
+    if level is None:
+        level = _alert_level(_checkpoint_of(header))
+    if level in _ALERT_LEVEL_DELIVER_ALL:
         return False
     if any(marker in header for marker in _ALERT_ACTIONABLE_MARKERS):
         return False
@@ -125,9 +167,11 @@ class TelegramNotifier:
             text = augment_telegram_message(text)
             text = professionalize_telegram_message(text)
         if should_suppress_alert(text):
-            # Muted by Q15_ALERT_LEVEL. Report success so the outbox marks the
-            # message durably handled (no retry); nothing is sent to Telegram.
-            logger.info("Telegram alert muted (Q15_ALERT_LEVEL=%s)", _alert_level())
+            # Muted by Q15_ALERT_LEVEL (or a per-checkpoint override). Report
+            # success so the outbox marks the message durably handled (no retry);
+            # nothing is sent to Telegram.
+            header = next((ln.upper() for ln in str(text or "").splitlines() if ln.strip()), "")
+            logger.info("Telegram alert muted (level=%s)", _alert_level(_checkpoint_of(header)))
             return True
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         try:
