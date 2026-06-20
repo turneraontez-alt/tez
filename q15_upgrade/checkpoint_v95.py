@@ -997,6 +997,51 @@ def _notification_identity(checkpoint: str, analyses: Mapping[str, Mapping[str, 
     return event_key, state, fingerprint
 
 
+def _resolve_checkpoint(
+    snapshots: Mapping[str, Mapping[str, Any]],
+    messages: Sequence[str],
+    now: float,
+) -> str:
+    """Authoritatively resolve the active checkpoint (15M/10M/7M).
+
+    The inherited ``_detect_checkpoint`` consults a recursive snapshot key-walk
+    (``_first_value``) and the buffered parent message text BEFORE its
+    time-based fallback. Both are unreliable on the live path: a stale nested
+    ``*checkpoint*``/``*stage*``/``*horizon*`` value, or any parent message that
+    merely contains the substring ``"15M"`` (e.g. the
+    ``30M CHART CONTEXT — PRIOR 15M + CURRENT 15M`` header), pins the label to
+    ``15M`` for the whole cycle. The observed effect was every prediction being
+    recorded under 15M — so 10M/7M never accumulated and the 10M/7M checkpoint
+    alerts never fired.
+
+    When the feed carries ``seconds_remaining`` we trust it: classify by the
+    *same* boundaries ``_detect_checkpoint`` uses for its time fallback, and only
+    defer to the heuristic detector when no time is available (or when disabled
+    via ``Q15_V95_TIME_AUTHORITATIVE_CHECKPOINT=false``).
+    """
+    if not _env_bool("Q15_V95_TIME_AUTHORITATIVE_CHECKPOINT", True):
+        return _detect_checkpoint(snapshots, messages)
+    times = []
+    for snapshot in snapshots.values():
+        if not isinstance(snapshot, Mapping):
+            continue
+        seconds = _seconds_remaining(snapshot, now)
+        if seconds is not None:
+            times.append(seconds)
+    if not times:
+        return _detect_checkpoint(snapshots, messages)
+    # Boundaries mirror _detect_checkpoint's time fallback exactly (same env
+    # vars + defaults): >=15m boundary is 15M, >=7m boundary is 10M, else 7M.
+    fifteen_boundary = _env_float("Q15_V95_15M_BOUNDARY_SECONDS", 660.0, 0.0, 1800.0)
+    seven_boundary = _env_float("Q15_V95_7M_BOUNDARY_SECONDS", 480.0, 0.0, 1800.0)
+    longest = max(times)
+    if longest >= fifteen_boundary:
+        return "15M"
+    if longest >= seven_boundary:
+        return "10M"
+    return "7M"
+
+
 def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]], now: float) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Inject one canonical candle/flow/book view before the legacy parent runs.
 
@@ -1115,9 +1160,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             deferred.flush(None)
             return parent_output
         try:
-            checkpoint = _detect_checkpoint(
+            checkpoint = _resolve_checkpoint(
                 {str(key): value for key, value in parent_output.items() if isinstance(value, Mapping)},
                 deferred.messages(),
+                now,
             )
             _t0 = time.monotonic()
             analyses: dict[str, dict[str, Any]] = {}
