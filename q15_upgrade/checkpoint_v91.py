@@ -285,6 +285,40 @@ class _Persistence:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def recent_observations_for_pairs(
+        self, pairs: Sequence[tuple[str, str]], limit: int
+    ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+        """Batched recent_observations for many (contract_key, asset) pairs.
+
+        On Postgres this is ONE round-trip — a UNION ALL of the exact per-pair
+        top-`limit` window query — so each group's rows are byte-identical to a
+        standalone recent_observations() call (order within a group is irrelevant
+        downstream, which only counts sides). SQLite is local, so round-trips are
+        free and we reuse the per-pair query unchanged. Returns {pair: rows}.
+        """
+        unique = list(dict.fromkeys(pairs))  # de-dup, preserve order
+        result: dict[tuple[str, str], list[dict[str, Any]]] = {p: [] for p in unique}
+        if not unique:
+            return result
+        cols = "observation_key,contract_key,asset,bucket,observed_at,side,p_yes,model_version"
+        if self.pg:
+            branch = (
+                f"(SELECT {cols} FROM q15_v91_observations "
+                "WHERE contract_key=%s AND asset=%s ORDER BY bucket DESC LIMIT %s)"
+            )
+            sql = " UNION ALL ".join(branch for _ in unique)
+            params: list[Any] = []
+            for contract_key, asset in unique:
+                params += [contract_key, asset, limit]
+            for row in self.store.query(sql, tuple(params)) or []:
+                key = (row.get("contract_key"), row.get("asset"))
+                if key in result:
+                    result[key].append(dict(row))
+            return result
+        for contract_key, asset in unique:
+            result[(contract_key, asset)] = self.recent_observations(contract_key, asset, limit)
+        return result
+
     def write_prediction(self, row: Mapping[str, Any]) -> None:
         """Freeze a prediction (write only). Splitting the write from the
         read-back lets the hot pre-enrich path reuse a single batched read
@@ -493,6 +527,12 @@ class CheckpointPolicyV91:
         # first 10M observation would be contaminated by older 15M votes and
         # could freeze the wrong side before fresh 10M evidence arrives.
         rows = self.persistence.recent_observations(observation_scope, asset, self.window)
+        return self._rolling_from_rows(rows)
+
+    def _rolling_from_rows(self, rows: Sequence[Mapping[str, Any]]) -> RollingMetrics:
+        # Pure function of the rolling window rows (side counts only, order
+        # independent) so pre_enrich_all can feed it batch-read rows without a
+        # per-asset round-trip. Identical result to the per-asset path.
         sides = [str(row.get("side") or "UNCERTAIN").upper() for row in rows]
         yes = sides.count("YES")
         no = sides.count("NO")
@@ -550,9 +590,14 @@ class CheckpointPolicyV91:
         self.persistence.insert_observations(obs_rows)
 
         # 2) Per-asset rolling evidence + the prediction row to freeze.
+        #    One batched round-trip for every asset's rolling window (was one per
+        #    asset); each group is identical to the standalone per-asset read.
+        rolling_by_pair = self.persistence.recent_observations_for_pairs(
+            [(it["scope"], it["asset"]) for it in items], self.window
+        )
         pred_rows: list[dict[str, Any]] = []
         for it in items:
-            rolling = self._rolling_for(it["scope"], it["asset"])
+            rolling = self._rolling_from_rows(rolling_by_pair.get((it["scope"], it["asset"]), []))
             checkpoint = _checkpoint(it["snap"])
             side = self._prediction_side(it["current_side"], rolling)
             constructed = {
