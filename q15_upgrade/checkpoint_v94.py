@@ -861,7 +861,10 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
 
     def _candles(self, asset: str) -> list[dict[str, float]]:
         with self._context_lock:
-            return [copy.deepcopy(row) for _, row in sorted(self._candle_cache.get(asset, {}).items())]
+            # Candle rows are flat dicts of immutable floats, so dict() gives the
+            # same independent copy as deepcopy at a fraction of the cost. This
+            # runs ~4x/cycle over the full per-asset history, so it matters.
+            return [dict(row) for _, row in sorted(self._candle_cache.get(asset, {}).items())]
 
     def run_cycle(
         self,
