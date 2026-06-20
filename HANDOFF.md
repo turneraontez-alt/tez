@@ -12,20 +12,34 @@ The Repl is **still freezing**: `/api/health` shows `cycle_watchdog.slowest_stag
 freshness gate, so no predictions/alerts. The 54s stall (PR #10) is fixed; ~18s
 remains.
 
-**Step 1 — diagnose the residual ~18s:** merge the dev branch
-`claude/beautiful-lamport-mrwnwm` @ `14f734c` (run_cycle sub-stage timing —
-tested, NOT yet merged, parked at owner's request). Then on the Repl: it
-auto-syncs via the relay (~20s) → **Stop ▸ Run** → read `/api/health` →
-`q15_v9_5.run_cycle_timing`. It breaks `run_cycle` into `parent_chain`,
-`v95_analysis`, `signal_store_reconcile`, `market_reconcile`, `total`, `other`.
-- If `market_reconcile` is still ~18s → the PR #10 budget isn't effective; tighten
-  `Q15_V95_RECONCILE_BUDGET_SECONDS` or add a per-ticker backoff.
-- If `parent_chain` dominates → the legacy v94 chain has its own slow settlement
-  path; that's the next target.
+**Step 1 — read the run_cycle sub-stage timing (instrumentation is now landed).**
+The sub-stage timer is on `claude/fervent-cannon-ufnnu4` (cherry-picked clean off
+the old parked `beautiful-lamport-mrwnwm`, which carried a stale HANDOFF.md). It
+splits `run_cycle` into `parent_chain`, `v95_analysis`, `signal_store_reconcile`,
+`market_reconcile`, `total`, `other`, surfaced at
+`/api/health → q15_v9_5.run_cycle_timing`. Merge that branch → relay syncs (~20s)
+→ **Stop ▸ Run** → read the breakdown. Decision tree (sharpened by a code read of
+the cycle this session — the non-suspects are already ruled out):
+- `market_reconcile` is already wall-clock-budgeted (PR #10, ~8s worst case), so it
+  should NOT be the ~18s. If it somehow is → lower `Q15_V95_RECONCILE_BUDGET_SECONDS`.
+- `market_data.schedule`/`snapshot` are non-blocking (background thread pool), so
+  they fall in `other`; a large `other` would point there or at `_bridge_parent_inputs`.
+- The legacy v94 `parent_chain` makes **no** `get_market` REST calls, so a slow
+  `parent_chain` is internal (orderbook/candle work or its own signal-store reads).
+- `signal_store_reconcile` hits Postgres — a slow query here is a strong candidate.
+- ⚠️ The three OTHER settlement reconcilers (`performance.reconcile`,
+  `window_focus.reconcile_settlements`, `learning.reconcile`) still bound only by
+  call-count (max 12), NOT wall-clock — the same pre-PR-#10 pattern that caused the
+  54s freeze. They run as their own watchdog stages (`perf`/`focus_settlement`/
+  `learning_reconcile`), so they're not the current `run_cycle` ~18s, but they're
+  latent stalls of the same family. If the watchdog ever names one of them, port the
+  PR-#10 wall-clock-budget pattern to it (leftover tickers already retry next cycle).
 
 ## Repo state
-- `main` @ `40a2f91` (PR #11). Dev branch `claude/beautiful-lamport-mrwnwm` @
-  `14f734c` (run_cycle timing, pushed, unmerged).
+- `main` @ `0aaaf00` (PR #12, HANDOFF refresh). Active dev branch
+  `claude/fervent-cannon-ufnnu4`: run_cycle sub-stage timing (clean cherry-pick of
+  `14f734c`, minus its stale HANDOFF.md) + `test_q15_v95_run_cycle_timing.py`. The
+  old `claude/beautiful-lamport-mrwnwm` is superseded — don't merge it (stale HANDOFF).
 - Tests: `python3 -m pytest tests/ -q` → **354 passed, 4 skipped**.
   ⚠️ `pytest` is NOT preinstalled in a fresh container — `pip install pytest -q` first.
 
