@@ -154,6 +154,49 @@ class HourlyReporter:
             out.append("by tell: " + " · ".join(parts))
         return out
 
+    def _flip_warning_lines(self):
+        """MANIPULATION WARNING PERFORMANCE — precision, detection rate, advance
+        time and P&L of fired HIGH FLIP RISK warnings, plus the learned flip-rate
+        calibration by score bucket. Empty until warnings have been reconciled."""
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None:
+            return []
+        try:
+            perf = ledger.flip_warning_performance()
+            stats = ledger.flip_stats()
+        except Exception as e:
+            logger.warning(f"flip performance fetch failed: {e}")
+            return []
+        o = perf.get("overall") or {}
+        out = []
+        if o.get("alerts"):
+            def _s(v, suffix=""):
+                return f"{v}{suffix}" if isinstance(v, (int, float)) else "—"
+            adv = o.get("avg_advance_seconds")
+            adv_s = f"{int(adv)//60}m {int(adv)%60:02d}s" if isinstance(adv, (int, float)) else "—"
+            pnl = o.get("realized_total_cents")
+            out += [
+                "", "⚠ <b>MANIPULATION WARNING PERFORMANCE</b>",
+                f"Alerts: {o.get('alerts', 0)} · {o.get('correct', 0)} correct / {o.get('false', 0)} false "
+                f"· precision {_pct(o.get('precision'))}",
+                f"Flips: {o.get('detected', 0)}/{o.get('actual_flips', 0)} detected "
+                f"({_pct(o.get('detection_rate'))}) · {o.get('missed', 0)} missed",
+                f"Avg advance {adv_s} · P/L {pnl:+.0f}¢" if isinstance(pnl, (int, float)) else f"Avg advance {adv_s}",
+            ]
+        # Learned flip-rate curve for the primary interval (10M), both directions,
+        # so you can see what risk score has historically preceded a flip.
+        if stats.get("available"):
+            for direction in ("NO → YES", "YES → NO"):
+                scope = (stats.get("by_checkpoint", {}).get("10M", {}) or {}).get(direction, {}).get("overall", {})
+                buckets = scope.get("buckets") or {}
+                if scope.get("samples"):
+                    curve = " · ".join(
+                        f"{lbl}:{_pct(b['flip_rate'])}"
+                        for lbl, b in buckets.items() if b.get("n")
+                    )
+                    out += ["", f"10M {direction} flip-rate by risk ({scope.get('samples')} obs): {curve or '—'}"]
+        return out
+
     def maybe_send(self, now):
         if not self.cfg.hourly_report_enabled or not self.notifier.enabled:
             return
@@ -187,6 +230,9 @@ class HourlyReporter:
 
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
         lines.extend(self._scoreboard_table())
+
+        # Flip-risk warning performance (precision / detection / advance / P&L).
+        lines.extend(self._flip_warning_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:

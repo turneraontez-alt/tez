@@ -200,7 +200,23 @@ function renderPrediction(R, d){
   R.predRemaining.textContent = (rem!=null) ? ('⏳ '+fmtCountdown(rem)+' left in interval') : '';
   R.predTs.textContent = d.q15_v9_5_prediction_timestamp ? ('· @ '+fmtClock(d.q15_v9_5_prediction_timestamp)) : '';
   R.predWrap.style.opacity = expired ? '0.55' : '1';
+  renderFlipRisk(R, d);
 }
+
+// MANIPULATION / FLIP RISK block under each prediction (read-only — it watches
+// the frozen prediction, it never changes it).
+const FLIP_COLOR = {'NORMAL':'var(--muted)','WATCH':'var(--yellow)','HIGH FLIP RISK':'var(--red,#e5484d)','CONFIRMED PREDICTION FLIP':'var(--red,#e5484d)'};
+function renderFlipRisk(R, d){
+  const el = R.flipRisk; if(!el) return;
+  const lines = d.q15_v9_5_flip_dashboard;
+  if(!Array.isArray(lines) || !lines.length || d.q15_v9_5_flip_risk_score==null){ el.style.display='none'; return; }
+  const state = d.q15_v9_5_flip_state || 'NORMAL';
+  const head = '<div style="font-weight:600;color:'+(FLIP_COLOR[state]||'var(--muted)')+'">'+esc(lines[0])+'</div>';
+  const body = lines.slice(1).map(l => esc(l)).join('<br>');
+  el.innerHTML = head + '<div style="color:var(--muted)">'+body+'</div>';
+  el.style.display='';
+}
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 // ---- card scaffolds -------------------------------------------------
 function buildLiveScaffold(asset){
@@ -232,6 +248,7 @@ function buildLiveScaffold(asset){
           <span data-r="predRemaining"></span>
           <span data-r="predTs"></span>
         </div>
+        <div class="flip-risk" data-r="flipRisk" style="display:none;margin-top:8px;padding:8px;border-radius:8px;background:#14141c;font-size:11px;line-height:1.5"></div>
       </div>
       <div class="chart-wrap">
         <div class="chart" data-r="chart"></div>

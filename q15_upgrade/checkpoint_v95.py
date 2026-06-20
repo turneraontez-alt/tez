@@ -47,6 +47,7 @@ from .checkpoint_v94_unified import (
     _yes_is_higher,
     format_telegram_message as _format_v94_message,
 )
+from . import flip_risk
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,
@@ -1024,6 +1025,14 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_manipulation_suspected"] = bool(_manip.get("suspected"))
     snapshot["q15_v9_5_manipulation_reason"] = ",".join(_manip.get("reasons") or []) or None
     snapshot["q15_v9_5_manipulation_lean"] = _manip.get("lean")
+    # Flip-risk overlay base fields (threshold/flip-prob/state added in run_cycle
+    # where the learned stats + cross-cycle persistence are available).
+    _fr = analysis.get("flip_risk") or {}
+    snapshot["q15_v9_5_flip_risk_score"] = _fr.get("score")
+    snapshot["q15_v9_5_flip_risk_confidence"] = _fr.get("confidence")
+    snapshot["q15_v9_5_flip_risk_primary_reason"] = _fr.get("primary_reason")
+    snapshot["q15_v9_5_flip_risk_direction"] = _fr.get("direction_monitored")
+    snapshot["q15_v9_5_flip_risk_evidence_count"] = _fr.get("evidence_count")
     # Richer prediction-card fields (the run_cycle recording loop refreshes
     # interval/stability/expiry/timestamp with live clock context each cycle).
     snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
@@ -1497,6 +1506,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         # side + confidence, so each prediction can be tagged stable / strengthening
         # / weakening / changed for the UI and alert.
         self._prediction_trend: dict[tuple[str, str, int], dict[str, Any]] = {}
+        # Flip-risk alert state per (asset, checkpoint, ticker): persistence count,
+        # hysteresis latch, last-alert score/time/categories — carried across cycles
+        # by the alert state machine. And a dedup set for confirmed-flip notices.
+        self._flip_alert_state: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._flip_confirmed_sent: set[tuple[str, str, str]] = set()
         self._last_reconcile: dict[str, Any] = {}
         self._last_market_reconcile: dict[str, Any] = {}
         self._run_cycle_timing: dict[str, Any] = {}
@@ -1569,6 +1583,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _sub["build"] += time.monotonic() - _s
                 _s = time.monotonic()
                 analysis = analyse_v95(snapshot, canonical, self.ledger)
+                # Flip-risk overlay (read-only; never changes the prediction).
+                if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
+                    _ra = flip_risk.compute_risk(analysis)
+                    analysis["flip_risk"] = _ra.as_dict()
+                    analysis["flip_risk_obj"] = _ra
                 apply_v95_policy(snapshot, analysis)
                 _sub["analyse"] += time.monotonic() - _s
                 analyses[asset] = copy.deepcopy(analysis)
@@ -1576,6 +1595,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 canonicals[asset] = canonical
             ranking = rank_analyses(analyses)
             ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
+            # Learned flip stats (cached against the data version) for this cycle's
+            # threshold/flip-probability resolution.
+            flip_learned = self.ledger.flip_stats() if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True) else {"available": False}
+            flip_sent = flip_failed = 0
             _s_record = time.monotonic()
             # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
             # persisted with it, enabling per-rank accuracy tracking.
@@ -1627,6 +1650,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         confidence_grade=analysis.get("confidence_grade"),
                         manipulation_suspected=bool((analysis.get("manipulation") or {}).get("suspected")),
                         manipulation_reason=(",".join((analysis.get("manipulation") or {}).get("reasons") or []) or None),
+                        flip_risk_score=(analysis.get("flip_risk") or {}).get("score"),
+                        flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
+                        flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
                     )
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
@@ -1637,6 +1663,16 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         ticker=canonical.ticker, checkpoint=checkpoint,
                         current_side=str(analysis["prediction_side"]),
                     )
+                    # Flip-risk overlay: learned threshold, flip-probability, alert
+                    # state machine + dashboard, and confirmed-flip detection. Sends
+                    # are gated (dormant until a learned threshold exists); CONFIRMED
+                    # flips are factual and send regardless. Never changes the call.
+                    _fsent, _ffailed = self._process_flip_risk(
+                        snapshot, asset, checkpoint, canonical.ticker, analysis,
+                        flip_learned, notifier, now,
+                    )
+                    flip_sent += _fsent
+                    flip_failed += _ffailed
 
             _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
@@ -1657,6 +1693,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     self._last_market_reconcile = self.ledger.reconcile_pending_from_market(get_market, now)
                     _t["market_reconcile"] = round(time.monotonic() - _t0, 3)
                     result_events = list(self._last_market_reconcile.get("result_events") or []) + result_events
+                # Score fired flip warnings against whether the prediction flipped.
+                if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
+                    self.ledger.reconcile_flip_warnings()
             ledger_status = self.ledger.status()
             message = build_v95_message(checkpoint, analyses, ranking, ledger_status, result_events) if ranking else None
             # Discard all parent V9.4 messages. V9.5 owns the final state machine.
@@ -1676,8 +1715,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     self.ledger.complete_notification(event_key=permit_key, success=sent > 0 and failed == 0, now=now)
                 else:
                     self._telegram_suppressed_v95 += 1
-            self._telegram_sent_v95 += sent
-            self._telegram_failed_v95 += failed
+            self._telegram_sent_v95 += sent + flip_sent
+            self._telegram_failed_v95 += failed + flip_failed
             self._cycles += 1
             self._last_error = None
             with self._v95_lock:
@@ -1808,6 +1847,91 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             for stale in [k for k in self._prediction_trend if k[2] < window_id - 2]:
                 self._prediction_trend.pop(stale, None)
         return marker
+
+    def _process_flip_risk(self, snapshot: MutableMapping[str, Any], asset: str, checkpoint: str,
+                           ticker: str, analysis: Mapping[str, Any], flip_learned: Mapping[str, Any],
+                           notifier: Any, now: float) -> tuple[int, int]:
+        """Resolve threshold + flip-probability, run the alert state machine, stamp
+        the dashboard block, and send HIGH FLIP RISK / CONFIRMED PREDICTION FLIP.
+
+        Read-only: never touches the prediction. HIGH FLIP RISK is gated to fire
+        only once a *learned* threshold exists (dormant-until-learned posture);
+        CONFIRMED flips are factual and send regardless. Returns (sent, failed)."""
+        ra = analysis.get("flip_risk_obj")
+        if ra is None:
+            return 0, 0
+        side = str(analysis.get("prediction_side") or "").upper()
+        direction = ra.direction_monitored or ""
+        cp_dir = {}
+        if flip_learned.get("available"):
+            cp_dir = (flip_learned.get("by_checkpoint", {}).get(checkpoint, {}) or {}).get(direction, {}) or {}
+        asset_stats = (cp_dir.get("by_asset", {}) or {}).get(asset)
+        overall_stats = cp_dir.get("overall")
+        threshold = flip_risk.resolve_threshold(
+            asset_stats, overall_stats, asset=asset, checkpoint=checkpoint, direction=direction,
+        )
+        scope = asset_stats if (asset_stats and threshold.status == "Learned") else overall_stats
+        flip_prob = flip_risk.estimate_flip_probability(ra.score, (scope or {}).get("buckets"))
+
+        key = (str(asset), str(checkpoint), str(ticker))
+        decision, new_state = flip_risk.evaluate_alert(
+            risk=ra, threshold=threshold, flip_probability=flip_prob,
+            prior=self._flip_alert_state.get(key), now=now,
+        )
+        self._flip_alert_state[key] = new_state
+        if len(self._flip_alert_state) > 256:
+            for k in list(self._flip_alert_state)[:64]:
+                self._flip_alert_state.pop(k, None)
+
+        snapshot["q15_v9_5_flip_threshold"] = threshold.threshold
+        snapshot["q15_v9_5_flip_threshold_source"] = threshold.source
+        snapshot["q15_v9_5_flip_threshold_status"] = threshold.status
+        snapshot["q15_v9_5_flip_samples"] = threshold.samples
+        snapshot["q15_v9_5_flip_probability"] = flip_prob
+        snapshot["q15_v9_5_flip_state"] = decision.state
+        snapshot["q15_v9_5_flip_dashboard"] = flip_risk.dashboard_block(
+            risk=ra, threshold=threshold, flip_probability=flip_prob,
+            state=decision.state, persistence=decision.persistence,
+        )
+
+        sent = failed = 0
+        # Confirmed flip: a later frozen checkpoint side differs from the earlier
+        # one for this contract — factual, sent regardless of the learned gate.
+        prior_cp = {"10M": "15M", "7M": "10M"}.get(checkpoint)
+        if prior_cp and _env_bool("Q15_V95_FLIP_CONFIRMED_ALERTS", True):
+            prev = self.ledger.frozen_prediction(str(ticker), prior_cp) or {}
+            cur = self.ledger.frozen_prediction(str(ticker), checkpoint) or {}
+            prev_side, cur_side = prev.get("side"), cur.get("side")
+            dkey = (str(ticker), prior_cp, str(checkpoint))
+            if (prev_side in ("YES", "NO") and cur_side in ("YES", "NO") and prev_side != cur_side
+                    and dkey not in self._flip_confirmed_sent):
+                self._flip_confirmed_sent.add(dkey)
+                msg = flip_risk.format_confirmed_flip(
+                    asset=asset, checkpoint=checkpoint, previous_side=prev_side, new_side=cur_side,
+                    risk_before=prev.get("flip_risk_score"), flip_prob_before=None,
+                    evidence=(analysis.get("flip_risk") or {}).get("evidence_categories") or [],
+                )
+                s, f, _ = _BufferedNotifier(notifier).flush(msg)
+                sent += s
+                failed += f
+
+        # HIGH FLIP RISK: dormant until a learned threshold exists.
+        require_learned = _env_bool("Q15_V95_FLIP_ALERTS_REQUIRE_LEARNED", True)
+        if (decision.should_send and _env_bool("Q15_V95_FLIP_ALERTS_ENABLED", True)
+                and (threshold.status == "Learned" or not require_learned)):
+            msg = flip_risk.format_high_flip_risk(
+                asset=asset, checkpoint=checkpoint, current_side=side, risk=ra,
+                threshold=threshold, flip_probability=flip_prob, persistence=decision.persistence,
+            )
+            s, f, _ = _BufferedNotifier(notifier).flush(msg)
+            sent += s
+            failed += f
+            if s:
+                self.ledger.record_flip_warning(
+                    asset=asset, checkpoint=checkpoint, ticker=str(ticker), direction=direction,
+                    risk_score=ra.score, flip_probability=flip_prob, confidence=ra.confidence, now=now,
+                )
+        return sent, failed
 
     def predictions(self) -> dict[str, Any]:
         with self._v95_lock:
