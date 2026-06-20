@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "uY1gwKOqEDIL-B9-tfTMt"
+uri = "file://health_snapshot.json"
+type = "unspecified"
+title = "health_snapshot.json — full /api/health response"
