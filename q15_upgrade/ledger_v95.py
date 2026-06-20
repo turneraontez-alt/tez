@@ -483,10 +483,14 @@ class V95Ledger:
         Unlike reconcile_from_signal_store, this does not depend on a signals-table
         row existing for the ticker: any prediction whose market has closed gets
         graded, so the learning corpus is complete. One REST call per ticker,
-        bounded by max_calls per invocation."""
+        bounded by max_calls per invocation AND a wall-clock budget
+        (Q15_V95_RECONCILE_BUDGET_SECONDS) so a batch of slow Kalshi lookups for
+        recently-closed-but-unsettled markets can never monopolise the refresh
+        loop. Any tickers left over are retried on the next invocation."""
         if not self._available or not callable(get_market):
             return {"available": False, "reason": "unavailable"}
         now = now or time.time()
+        budget = _env_float("Q15_V95_RECONCILE_BUDGET_SECONDS", 4.0, 0.5, 60.0)
         with self._lock, closing(self._connect()) as connection:
             rows = list(connection.execute(
                 "SELECT DISTINCT ticker FROM predictions "
@@ -497,7 +501,14 @@ class V95Ledger:
         tickers = [str(row["ticker"]) for row in rows if row["ticker"]]
         resolved = learned = calls = 0
         events: list[dict[str, Any]] = []
+        started = time.monotonic()
+        budget_exceeded = False
         for ticker in tickers:
+            # Stop before the next slow REST call would blow the time budget; the
+            # remaining tickers are picked up on a later cycle.
+            if time.monotonic() - started > budget:
+                budget_exceeded = True
+                break
             try:
                 market = get_market(ticker)
             except Exception as exc:
@@ -517,6 +528,8 @@ class V95Ledger:
         return {
             "available": True, "tickers_checked": len(tickers), "market_calls": calls,
             "new_predictions_resolved": resolved, "shadow_updates_applied": learned,
+            "budget_seconds": budget, "budget_exceeded": budget_exceeded,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
             "result_events": events[:20],
         }
 
