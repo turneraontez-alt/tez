@@ -1,0 +1,13 @@
+{
+  "adaptive_helper_sha256": "d4065cf11d844ec47acb611918dc46f53afd6f9e42fe1a6ad5409373451a27b2",
+  "automatic_threshold_changes": false,
+  "backup": "/home/runner/workspace/artifacts/kalshi-monitor/backups/q15_v94_unified_20260619-192748",
+  "installed_at": 1781897271.0137787,
+  "installer_version": "q15-v9.4-unified-probability-fix-installer-v3",
+  "learning_scope": "15M_ONLY",
+  "model_version": "q15-v9.4-unified-probability-report-v3",
+  "read_only": true,
+  "ten_minute_learning": false,
+  "test_sha256": "ec6edc05c0380f04bef589b8e9c00c272a9f236f5746def1b419db1eea88adac",
+  "unified_sha256": "53f60df588157ad40cc1b9f0cb153caeebbac39ddf07abd1c4cae3917d751123"
+}

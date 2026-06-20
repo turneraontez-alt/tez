@@ -1,0 +1,813 @@
+"""Version-scoped prediction ledger, calibration, and shadow learning for Q15 V9.5.
+
+The production champion is intentionally frozen. Separate bounded challengers
+learn by checkpoint. The 10-minute challenger is primary by default; the
+15-minute challenger is disabled by default and can be enabled independently.
+Neither challenger can promote itself or change live thresholds.  Every stored prediction is tagged by model
+and feature-schema version so historical rows cannot silently contaminate the
+current release.
+"""
+from __future__ import annotations
+
+from contextlib import closing
+import json
+import math
+import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+VERSION = "q15-v9.5.1-ledger-v2-10m-primary"
+MODEL_VERSION = "q15-v9.5.1-champion-ensemble-10m-primary-v1"
+FEATURE_SCHEMA_VERSION = "q15-v9.5.1-canonical-snapshot-v1"
+READ_ONLY = True
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    if not math.isfinite(value):
+        value = default
+    return max(low, min(high, value))
+
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(high, value))
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _logit(probability: float) -> float:
+    p = _clamp(float(probability), 1e-6, 1.0 - 1e-6)
+    return math.log(p / (1.0 - p))
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1.0 / (1.0 + z)
+    z = math.exp(value)
+    return z / (1.0 + z)
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _parse_ts(value: Any) -> float | None:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        parsed = float(value)
+        if parsed > 10_000_000_000:
+            parsed /= 1000.0
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError):
+        return None
+
+
+CHAMPION_WEIGHTS: dict[str, float] = {
+    "intercept": 0.0,
+    "momentum": 0.34,
+    "flow": 0.26,
+    "book": 0.18,
+    "wick": 0.12,
+    "context": 0.18,
+    "threshold_interaction": 0.30,
+    "exchange_consensus": 0.18,
+    "derivatives": 0.10,
+    "absorption": 0.20,
+}
+
+
+class V95Ledger:
+    """Atomic SQLite ledger with frozen champion and shadow challenger."""
+
+    def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
+        self.path = Path(path or os.environ.get("Q15_V95_LEDGER_DB") or "data/q15_v95_ledger_v1.sqlite3")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        primary = str(os.environ.get("Q15_V95_PRIMARY_LEARNING_CHECKPOINT", "10M")).strip().upper()
+        self.primary_learning_checkpoint = primary if primary in {"10M", "15M"} else "10M"
+        legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
+        self.learning_enabled_by_checkpoint = {
+            "10M": _env_bool("Q15_V95_10M_SHADOW_LEARNING", legacy_enabled),
+            "15M": _env_bool("Q15_V95_15M_SHADOW_LEARNING", False),
+        }
+        self.learning_rate_by_checkpoint = {
+            "10M": _env_float("Q15_V95_10M_SHADOW_LEARNING_RATE", 0.05, 0.001, 0.20),
+            "15M": _env_float("Q15_V95_15M_SHADOW_LEARNING_RATE", 0.02, 0.001, 0.20),
+        }
+        self.per_result_cap_by_checkpoint = {
+            "10M": _env_float("Q15_V95_10M_SHADOW_MAX_DELTA", 0.015, 0.001, 0.05),
+            "15M": _env_float("Q15_V95_15M_SHADOW_MAX_DELTA", 0.008, 0.001, 0.05),
+        }
+        self.total_drift_cap_by_checkpoint = {
+            "10M": _env_float("Q15_V95_10M_SHADOW_MAX_DRIFT", 0.35, 0.05, 1.0),
+            "15M": _env_float("Q15_V95_15M_SHADOW_MAX_DRIFT", 0.20, 0.05, 1.0),
+        }
+        self.minimum_learning_quality_by_checkpoint = {
+            "10M": _env_float("Q15_V95_10M_SHADOW_MIN_QUALITY", 0.55, 0.0, 1.0),
+            "15M": _env_float("Q15_V95_15M_SHADOW_MIN_QUALITY", 0.65, 0.0, 1.0),
+        }
+        # Backward-compatible public attributes now describe the primary learner.
+        self.shadow_learning_enabled = self.learning_enabled_by_checkpoint[self.primary_learning_checkpoint]
+        self.learning_rate = self.learning_rate_by_checkpoint[self.primary_learning_checkpoint]
+        self.per_result_cap = self.per_result_cap_by_checkpoint[self.primary_learning_checkpoint]
+        self.total_drift_cap = self.total_drift_cap_by_checkpoint[self.primary_learning_checkpoint]
+        self.minimum_learning_quality = self.minimum_learning_quality_by_checkpoint[self.primary_learning_checkpoint]
+        self.minimum_calibration_rows = _env_int("Q15_V95_CALIBRATION_MIN_ROWS", 30, 10, 1000)
+        self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
+        self.promotion_margin = _env_float("Q15_V95_PROMOTION_BRIER_MARGIN", 0.005, 0.0, 0.10)
+        self._available = True
+        self._last_error: str | None = None
+        try:
+            self._initialize()
+        except Exception as exc:  # fail closed but keep monitor alive
+            self._available = False
+            self._last_error = f"{type(exc).__name__}: {exc}"
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=15.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA busy_timeout=15000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+
+    def _initialize(self) -> None:
+        with self._lock, closing(self._connect()) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS predictions (
+                    prediction_id TEXT PRIMARY KEY,
+                    model_version TEXT NOT NULL,
+                    feature_schema_version TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    checkpoint TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    close_time REAL,
+                    predicted_side TEXT NOT NULL CHECK(predicted_side IN ('YES','NO')),
+                    raw_yes_probability REAL NOT NULL,
+                    calibrated_yes_probability REAL NOT NULL,
+                    challenger_yes_probability REAL NOT NULL,
+                    baseline_yes_probability REAL NOT NULL,
+                    selected_probability REAL NOT NULL,
+                    conservative_probability REAL NOT NULL,
+                    data_quality REAL NOT NULL,
+                    evidence_quality REAL NOT NULL,
+                    trade_quality REAL NOT NULL,
+                    trade_decision TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    feature_json TEXT NOT NULL,
+                    contribution_json TEXT NOT NULL,
+                    quote_json TEXT NOT NULL,
+                    official_result TEXT CHECK(official_result IN ('YES','NO')),
+                    resolved_at REAL,
+                    correct INTEGER,
+                    champion_brier REAL,
+                    challenger_brier REAL,
+                    baseline_brier REAL,
+                    champion_logloss REAL,
+                    challenger_logloss REAL,
+                    baseline_logloss REAL,
+                    learning_applied INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(model_version, ticker, checkpoint)
+                );
+                CREATE INDEX IF NOT EXISTS idx_v95_predictions_resolved
+                    ON predictions(model_version, checkpoint, resolved_at);
+                CREATE INDEX IF NOT EXISTS idx_v95_predictions_asset
+                    ON predictions(model_version, checkpoint, asset, resolved_at);
+
+                CREATE TABLE IF NOT EXISTS checkpoint_challenger_weights (
+                    checkpoint TEXT NOT NULL CHECK(checkpoint IN ('10M','15M')),
+                    name TEXT NOT NULL,
+                    base_value REAL NOT NULL,
+                    value REAL NOT NULL,
+                    grad_sq REAL NOT NULL DEFAULT 0,
+                    updates INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(checkpoint, name)
+                );
+                CREATE TABLE IF NOT EXISTS checkpoint_challenger_updates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    checkpoint TEXT NOT NULL CHECK(checkpoint IN ('10M','15M')),
+                    prediction_id TEXT NOT NULL UNIQUE,
+                    created_at REAL NOT NULL,
+                    error REAL NOT NULL,
+                    sample_weight REAL NOT NULL,
+                    delta_json TEXT NOT NULL,
+                    before_json TEXT NOT NULL,
+                    after_json TEXT NOT NULL,
+                    FOREIGN KEY(prediction_id) REFERENCES predictions(prediction_id)
+                );
+                CREATE TABLE IF NOT EXISTS notification_state (
+                    event_key TEXT PRIMARY KEY,
+                    checkpoint TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    sent_at REAL,
+                    reserved_until REAL,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                """
+            )
+            now = time.time()
+            for checkpoint in ("10M", "15M"):
+                for name, base in CHAMPION_WEIGHTS.items():
+                    connection.execute(
+                        "INSERT OR IGNORE INTO checkpoint_challenger_weights(checkpoint,name,base_value,value,updated_at) VALUES(?,?,?,?,?)",
+                        (checkpoint, name, base, base, now),
+                    )
+            connection.commit()
+
+    @staticmethod
+    def _checkpoint(value: Any) -> str:
+        checkpoint = str(value or "").strip().upper()
+        return checkpoint if checkpoint in {"10M", "15M"} else "10M"
+
+    def learning_enabled(self, checkpoint: str) -> bool:
+        return bool(self.learning_enabled_by_checkpoint[self._checkpoint(checkpoint)])
+
+    def challenger_weights(self, checkpoint: str | None = None) -> dict[str, float]:
+        checkpoint = self._checkpoint(checkpoint or self.primary_learning_checkpoint)
+        if not self._available:
+            return dict(CHAMPION_WEIGHTS)
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=? ORDER BY name",
+                (checkpoint,),
+            )
+            weights = {str(row["name"]): float(row["value"]) for row in rows}
+        return weights or dict(CHAMPION_WEIGHTS)
+
+    def record_prediction(self, *, ticker: str, asset: str, checkpoint: str, created_at: float,
+                          close_time: float | None, predicted_side: str, raw_yes_probability: float,
+                          calibrated_yes_probability: float, challenger_yes_probability: float,
+                          baseline_yes_probability: float, selected_probability: float,
+                          conservative_probability: float, data_quality: float, evidence_quality: float,
+                          trade_quality: float, trade_decision: str, regime: str,
+                          features: Mapping[str, Any], contributions: Mapping[str, Any],
+                          quote: Mapping[str, Any]) -> tuple[str, bool]:
+        checkpoint = str(checkpoint).upper()
+        prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
+        if not self._available or not ticker:
+            return prediction_id, False
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO predictions(
+                       prediction_id,model_version,feature_schema_version,ticker,asset,checkpoint,
+                       created_at,close_time,predicted_side,raw_yes_probability,
+                       calibrated_yes_probability,challenger_yes_probability,baseline_yes_probability,
+                       selected_probability,conservative_probability,data_quality,evidence_quality,
+                       trade_quality,trade_decision,regime,feature_json,contribution_json,quote_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    prediction_id, MODEL_VERSION, FEATURE_SCHEMA_VERSION, ticker, asset, checkpoint,
+                    created_at, close_time, predicted_side, raw_yes_probability,
+                    calibrated_yes_probability, challenger_yes_probability, baseline_yes_probability,
+                    selected_probability, conservative_probability, data_quality, evidence_quality,
+                    trade_quality, trade_decision, regime, _json(dict(features)),
+                    _json(dict(contributions)), _json(dict(quote)),
+                ),
+            )
+            connection.commit()
+            return prediction_id, cursor.rowcount == 1
+
+    @staticmethod
+    def _official_result(row: Mapping[str, Any]) -> str | None:
+        side = str(row.get("side") or "").upper()
+        outcome = str(row.get("outcome") or "").lower()
+        if side not in {"YES", "NO"} or outcome not in {"win", "loss"}:
+            return None
+        return side if outcome == "win" else ("NO" if side == "YES" else "YES")
+
+    def reconcile_from_signal_store(self, signal_store: Any) -> dict[str, Any]:
+        if not self._available:
+            return {"available": False, "reason": self._last_error or "ledger_unavailable"}
+        query = getattr(signal_store, "query", None)
+        if not callable(query):
+            return {"available": False, "reason": "signal_store_query_unavailable"}
+        try:
+            rows = query(
+                "SELECT ticker, asset, side, outcome, settled_at FROM signals "
+                "WHERE ticker IS NOT NULL AND side IN ('YES','NO') "
+                "AND outcome IN ('win','loss') ORDER BY settled_at DESC LIMIT 5000"
+            ) or []
+        except Exception as exc:
+            self._last_error = f"reconcile:{type(exc).__name__}:{exc}"
+            return {"available": False, "reason": self._last_error}
+        newest: dict[str, Mapping[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            ticker = str(row.get("ticker") or "").strip()
+            if ticker and ticker not in newest:
+                newest[ticker] = row
+        resolved = learned = 0
+        result_events: list[dict[str, Any]] = []
+        for ticker, row in newest.items():
+            official = self._official_result(row)
+            if official is None:
+                continue
+            outcome_time = _parse_ts(row.get("settled_at")) or time.time()
+            result = self.resolve_ticker(ticker, official, outcome_time)
+            resolved += result["resolved"]
+            learned += result["updates_applied"]
+            result_events.extend(result.get("events", []))
+        return {
+            "available": True,
+            "signal_rows_examined": len(rows),
+            "unique_settled_tickers": len(newest),
+            "new_predictions_resolved": resolved,
+            "shadow_updates_applied": learned,
+            "result_events": result_events[:20],
+        }
+
+    @staticmethod
+    def _loss(probability: float, actual_yes: float) -> tuple[float, float]:
+        p = _clamp(probability, 1e-6, 1.0 - 1e-6)
+        brier = (p - actual_yes) ** 2
+        logloss = -(actual_yes * math.log(p) + (1.0 - actual_yes) * math.log(1.0 - p))
+        return brier, logloss
+
+    @staticmethod
+    def _result_review(row: Mapping[str, Any], official: str) -> dict[str, Any]:
+        try:
+            contributions = json.loads(str(row.get("contribution_json") or "{}"))
+            features = json.loads(str(row.get("feature_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            contributions, features = {}, {}
+        predicted = str(row.get("predicted_side") or "").upper()
+        direction = 1.0 if predicted == "YES" else -1.0
+        ranked = []
+        for name, raw in contributions.items():
+            if name in {"structural_logit", "intercept", "evidence_total", "temperature"}:
+                continue
+            try:
+                aligned = direction * float(raw)
+            except (TypeError, ValueError):
+                continue
+            ranked.append({"name": name, "aligned_contribution": aligned, "feature": features.get(name)})
+        supporters = sorted((item for item in ranked if item["aligned_contribution"] > 0), key=lambda x: x["aligned_contribution"], reverse=True)[:3]
+        warnings = sorted((item for item in ranked if item["aligned_contribution"] < 0), key=lambda x: x["aligned_contribution"])[:3]
+        correct = predicted == official
+        return {
+            "correct": correct,
+            "top_supporters": supporters,
+            "top_warnings": warnings,
+            "interpretation": (
+                "supporting factors were directionally consistent" if correct
+                else "the strongest supporting factors failed; review regime, threshold interaction, and absorption"
+            ),
+        }
+
+    def resolve_ticker(self, ticker: str, official_result: str, resolved_at: float | None = None) -> dict[str, Any]:
+        official = str(official_result).upper()
+        if official not in {"YES", "NO"} or not self._available:
+            return {"resolved": 0, "updates_applied": 0, "events": []}
+        resolved_at = resolved_at or time.time()
+        rows: list[sqlite3.Row] = []
+        events: list[dict[str, Any]] = []
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT * FROM predictions WHERE ticker=? AND official_result IS NULL ORDER BY created_at",
+                (ticker,),
+            ))
+            for row in rows:
+                actual_yes = 1.0 if official == "YES" else 0.0
+                cb, cl = self._loss(float(row["calibrated_yes_probability"]), actual_yes)
+                hb, hl = self._loss(float(row["challenger_yes_probability"]), actual_yes)
+                bb, bl = self._loss(float(row["baseline_yes_probability"]), actual_yes)
+                correct = int(str(row["predicted_side"]) == official)
+                connection.execute(
+                    """UPDATE predictions SET official_result=?,resolved_at=?,correct=?,
+                       champion_brier=?,challenger_brier=?,baseline_brier=?,
+                       champion_logloss=?,challenger_logloss=?,baseline_logloss=?
+                       WHERE prediction_id=?""",
+                    (official, resolved_at, correct, cb, hb, bb, cl, hl, bl, row["prediction_id"]),
+                )
+                review = self._result_review(dict(row), official)
+                events.append({
+                    "ticker": ticker, "asset": row["asset"], "checkpoint": row["checkpoint"],
+                    "predicted_side": row["predicted_side"], "official_result": official,
+                    "correct": bool(correct), "probability": row["calibrated_yes_probability"],
+                    "review": review,
+                })
+            connection.commit()
+        learned = 0
+        for row in rows:
+            if self._apply_shadow_update(str(row["prediction_id"])):
+                learned += 1
+        return {"resolved": len(rows), "updates_applied": learned, "events": events}
+
+    def _apply_shadow_update(self, prediction_id: str) -> bool:
+        if not self._available:
+            return False
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute("SELECT * FROM predictions WHERE prediction_id=?", (prediction_id,)).fetchone()
+            if row is None or row["official_result"] not in {"YES", "NO"}:
+                return False
+            if str(row["model_version"] or "") != MODEL_VERSION:
+                connection.execute("UPDATE predictions SET learning_applied=-4 WHERE prediction_id=?", (prediction_id,))
+                connection.commit()
+                return False
+            checkpoint = self._checkpoint(row["checkpoint"])
+            if not self.learning_enabled(checkpoint):
+                connection.execute("UPDATE predictions SET learning_applied=-2 WHERE prediction_id=?", (prediction_id,))
+                connection.commit()
+                return False
+            if connection.execute(
+                "SELECT 1 FROM checkpoint_challenger_updates WHERE prediction_id=?", (prediction_id,)
+            ).fetchone():
+                connection.execute("UPDATE predictions SET learning_applied=1 WHERE prediction_id=?", (prediction_id,))
+                connection.commit()
+                return False
+            quality = float(row["data_quality"] or 0.0)
+            minimum_quality = self.minimum_learning_quality_by_checkpoint[checkpoint]
+            if quality < minimum_quality:
+                connection.execute("UPDATE predictions SET learning_applied=-1 WHERE prediction_id=?", (prediction_id,))
+                connection.commit()
+                return False
+            try:
+                features = json.loads(str(row["feature_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                connection.execute("UPDATE predictions SET learning_applied=-3 WHERE prediction_id=?", (prediction_id,))
+                connection.commit()
+                return False
+            weight_rows = list(connection.execute(
+                "SELECT * FROM checkpoint_challenger_weights WHERE checkpoint=? ORDER BY name", (checkpoint,)
+            ))
+            before = {str(item["name"]): float(item["value"]) for item in weight_rows}
+            actual_yes = 1.0 if row["official_result"] == "YES" else 0.0
+            probability = _clamp(float(row["challenger_yes_probability"]), 0.01, 0.99)
+            error = actual_yes - probability
+            quality_factor = _clamp((quality - minimum_quality) / max(1e-9, 1.0 - minimum_quality), 0.0, 1.0)
+            # The primary 10M learner gets more useful weight, while low-quality
+            # rows still have limited influence.
+            sample_weight = 0.25 + 0.75 * quality_factor
+            if checkpoint == self.primary_learning_checkpoint:
+                sample_weight = min(1.0, sample_weight * 1.10)
+            learning_rate = self.learning_rate_by_checkpoint[checkpoint]
+            per_result_cap = self.per_result_cap_by_checkpoint[checkpoint]
+            total_drift_cap = self.total_drift_cap_by_checkpoint[checkpoint]
+            after = dict(before)
+            deltas: dict[str, float] = {}
+            now = time.time()
+            for item in weight_rows:
+                name = str(item["name"])
+                base = float(item["base_value"])
+                current = float(item["value"])
+                x = 1.0 if name == "intercept" else float(features.get(name, 0.0) or 0.0)
+                if name != "intercept" and abs(x) < 1e-12:
+                    continue
+                gradient = sample_weight * error * x - 0.002 * (current - base)
+                grad_sq = float(item["grad_sq"] or 0.0) + gradient * gradient
+                step = learning_rate * gradient / math.sqrt(1.0 + grad_sq)
+                delta = _clamp(step, -per_result_cap, per_result_cap)
+                next_value = _clamp(current + delta, base - total_drift_cap, base + total_drift_cap)
+                actual_delta = next_value - current
+                if abs(actual_delta) < 1e-15:
+                    continue
+                after[name] = next_value
+                deltas[name] = actual_delta
+                connection.execute(
+                    "UPDATE checkpoint_challenger_weights SET value=?,grad_sq=?,updates=updates+1,updated_at=? WHERE checkpoint=? AND name=?",
+                    (next_value, grad_sq, now, checkpoint, name),
+                )
+            connection.execute(
+                "INSERT INTO checkpoint_challenger_updates(checkpoint,prediction_id,created_at,error,sample_weight,delta_json,before_json,after_json) VALUES(?,?,?,?,?,?,?,?)",
+                (checkpoint, prediction_id, now, error, sample_weight, _json(deltas), _json(before), _json(after)),
+            )
+            connection.execute("UPDATE predictions SET learning_applied=1 WHERE prediction_id=?", (prediction_id,))
+            connection.commit()
+            return True
+
+    def pattern_similarity(self, features: Mapping[str, float], provisional_side: str, checkpoint: str = "10M") -> dict[str, Any]:
+        """Checkpoint-specific winner/loser similarity; diagnostic at 10 rows and shadow-only at 30."""
+        if not self._available:
+            return {"active": False, "reason": "ledger_unavailable", "shadow_adjustment": 0.0}
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT predicted_side,correct,data_quality,feature_json FROM predictions "
+                "WHERE model_version=? AND checkpoint=? AND official_result IS NOT NULL "
+                "ORDER BY resolved_at DESC LIMIT 500", (MODEL_VERSION, checkpoint),
+            ))
+        winners = [row for row in rows if int(row["correct"] or 0) == 1]
+        losers = [row for row in rows if int(row["correct"] or 0) == 0]
+        if len(rows) < 10 or len(winners) < 3 or len(losers) < 3:
+            return {"active": False, "reason": "need_10_resolved_with_3_winners_and_3_losers", "resolved": len(rows), "shadow_adjustment": 0.0}
+        names = [name for name in CHAMPION_WEIGHTS if name != "intercept"]
+        def centroid(selected: Sequence[sqlite3.Row]) -> dict[str, float]:
+            sums = {name: 0.0 for name in names}
+            weights = {name: 0.0 for name in names}
+            for row in selected:
+                try:
+                    values = json.loads(str(row["feature_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                orientation = 1.0 if str(row["predicted_side"]).upper() == "YES" else -1.0
+                quality = _clamp(float(row["data_quality"] or 0.0), 0.10, 1.0)
+                for name in names:
+                    try:
+                        value = orientation * float(values.get(name, 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    sums[name] += value * quality
+                    weights[name] += quality
+            return {name: sums[name] / weights[name] if weights[name] else 0.0 for name in names}
+        winner = centroid(winners)
+        loser = centroid(losers)
+        orientation = 1.0 if str(provisional_side).upper() == "YES" else -1.0
+        current = {name: orientation * float(features.get(name, 0.0) or 0.0) for name in names}
+        def cosine(a: Mapping[str, float], b: Mapping[str, float]) -> float:
+            dot = sum(a[name] * b[name] for name in names)
+            an = math.sqrt(sum(a[name] ** 2 for name in names))
+            bn = math.sqrt(sum(b[name] ** 2 for name in names))
+            return dot / (an * bn) if an > 1e-12 and bn > 1e-12 else 0.0
+        win_similarity = cosine(current, winner)
+        loss_similarity = cosine(current, loser)
+        diagnostic = _clamp(win_similarity - loss_similarity, -1.0, 1.0)
+        shadow_adjustment = _clamp(diagnostic * 0.03, -0.03, 0.03) if len(rows) >= 30 else 0.0
+        return {
+            "active": True, "resolved": len(rows), "winners": len(winners), "losers": len(losers),
+            "winner_similarity": win_similarity, "loser_similarity": loss_similarity,
+            "diagnostic_score": diagnostic, "shadow_adjustment": shadow_adjustment,
+            "production_adjustment": 0.0, "shadow_influence_active": len(rows) >= 30,
+            "checkpoint": checkpoint,
+        }
+
+    def calibrate(self, raw_probability: float, checkpoint: str, asset: str | None = None) -> dict[str, Any]:
+        """Regularized Platt calibration fitted only to resolved current-version rows."""
+        raw = _clamp(raw_probability, 0.01, 0.99)
+        if not self._available:
+            return {"probability": raw, "active": False, "reason": "ledger_unavailable", "rows": 0}
+        checkpoint = str(checkpoint).upper()
+        with self._lock, closing(self._connect()) as connection:
+            asset_rows: list[sqlite3.Row] = []
+            if asset:
+                asset_rows = list(connection.execute(
+                    "SELECT raw_yes_probability,official_result FROM predictions WHERE model_version=? AND checkpoint=? AND asset=? AND official_result IS NOT NULL ORDER BY resolved_at DESC LIMIT 1000",
+                    (MODEL_VERSION, checkpoint, str(asset).upper()),
+                ))
+            rows = asset_rows if len(asset_rows) >= self.minimum_calibration_rows else list(connection.execute(
+                "SELECT raw_yes_probability,official_result FROM predictions WHERE model_version=? AND checkpoint=? AND official_result IS NOT NULL ORDER BY resolved_at DESC LIMIT 2500",
+                (MODEL_VERSION, checkpoint),
+            ))
+        if len(rows) < self.minimum_calibration_rows:
+            return {"probability": raw, "active": False, "reason": "insufficient_resolved_rows", "rows": len(rows)}
+        # Penalized logistic regression y ~ intercept + slope*logit(raw_p).
+        intercept, slope = 0.0, 1.0
+        for _ in range(12):
+            g0 = -0.20 * intercept
+            g1 = -0.20 * (slope - 1.0)
+            h00 = 0.20
+            h01 = 0.0
+            h11 = 0.20
+            for row in rows:
+                x = _clamp(_logit(float(row["raw_yes_probability"])), -4.0, 4.0)
+                y = 1.0 if row["official_result"] == "YES" else 0.0
+                p = _sigmoid(intercept + slope * x)
+                residual = y - p
+                variance = max(1e-6, p * (1.0 - p))
+                g0 += residual
+                g1 += residual * x
+                h00 += variance
+                h01 += variance * x
+                h11 += variance * x * x
+            determinant = h00 * h11 - h01 * h01
+            if determinant <= 1e-9:
+                break
+            d0 = (g0 * h11 - g1 * h01) / determinant
+            d1 = (g1 * h00 - g0 * h01) / determinant
+            intercept = _clamp(intercept + d0, -0.75, 0.75)
+            slope = _clamp(slope + d1, 0.50, 1.50)
+            if abs(d0) + abs(d1) < 1e-6:
+                break
+        calibrated = _clamp(_sigmoid(intercept + slope * _logit(raw)), 0.01, 0.99)
+        return {
+            "probability": calibrated, "active": True, "reason": "platt_current_version",
+            "rows": len(rows), "intercept": intercept, "slope": slope,
+            "scope": "asset" if asset_rows and len(asset_rows) >= self.minimum_calibration_rows else "checkpoint",
+        }
+
+    def metrics(self) -> dict[str, Any]:
+        if not self._available:
+            return {"available": False, "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT * FROM predictions WHERE model_version=? AND official_result IS NOT NULL ORDER BY resolved_at",
+                (MODEL_VERSION,),
+            ))
+        def aggregate(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+            if not selected:
+                return {"resolved": 0}
+            return {
+                "resolved": len(selected),
+                "correct": sum(int(row["correct"] or 0) for row in selected),
+                "accuracy": sum(int(row["correct"] or 0) for row in selected) / len(selected),
+                "champion_brier": sum(float(row["champion_brier"]) for row in selected) / len(selected),
+                "challenger_brier": sum(float(row["challenger_brier"]) for row in selected) / len(selected),
+                "baseline_brier": sum(float(row["baseline_brier"]) for row in selected) / len(selected),
+                "champion_logloss": sum(float(row["champion_logloss"]) for row in selected) / len(selected),
+                "challenger_logloss": sum(float(row["challenger_logloss"]) for row in selected) / len(selected),
+                "baseline_logloss": sum(float(row["baseline_logloss"]) for row in selected) / len(selected),
+            }
+        overall = aggregate(rows)
+        by_checkpoint = {cp: aggregate([r for r in rows if r["checkpoint"] == cp]) for cp in ("15M", "10M")}
+        by_regime: dict[str, Any] = {}
+        for regime in sorted({str(r["regime"]) for r in rows}):
+            by_regime[regime] = aggregate([r for r in rows if r["regime"] == regime])
+        bins: list[dict[str, Any]] = []
+        for lower in range(50, 100, 5):
+            upper = lower + 5
+            chosen = []
+            for row in rows:
+                side_p = float(row["selected_probability"])
+                pct = side_p * 100.0
+                if lower <= pct < upper:
+                    chosen.append(row)
+            if chosen:
+                bins.append({
+                    "band": f"{lower}-{upper}%", "count": len(chosen),
+                    "mean_predicted": sum(float(r["selected_probability"]) for r in chosen) / len(chosen),
+                    "actual_win_rate": sum(int(r["correct"] or 0) for r in chosen) / len(chosen),
+                })
+        promotion_by_checkpoint: dict[str, dict[str, Any]] = {}
+        for checkpoint in ("10M", "15M"):
+            metrics = by_checkpoint.get(checkpoint, {})
+            resolved = int(metrics.get("resolved", 0))
+            candidate = False
+            reason = "learning_disabled" if not self.learning_enabled(checkpoint) else "insufficient_resolved_rows"
+            if self.learning_enabled(checkpoint) and resolved >= self.minimum_promotion_rows:
+                champion = float(metrics.get("champion_brier", 1.0))
+                challenger = float(metrics.get("challenger_brier", 1.0))
+                baseline = float(metrics.get("baseline_brier", 1.0))
+                candidate = challenger + self.promotion_margin < min(champion, baseline)
+                reason = "eligible_for_manual_review" if candidate else "challenger_not_better_enough"
+            promotion_by_checkpoint[checkpoint] = {
+                "candidate": candidate, "reason": reason, "resolved": resolved,
+                "learning_enabled": self.learning_enabled(checkpoint),
+            }
+        primary = promotion_by_checkpoint[self.primary_learning_checkpoint]
+        return {
+            "available": True, "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "overall": overall, "by_checkpoint": by_checkpoint, "by_regime": by_regime,
+            "calibration_bands": bins, "promotion_candidate": bool(primary["candidate"]),
+            "promotion_reason": str(primary["reason"]), "promotion_by_checkpoint": promotion_by_checkpoint,
+            "primary_learning_checkpoint": self.primary_learning_checkpoint,
+            "automatic_promotion": False, "minimum_promotion_rows": self.minimum_promotion_rows,
+        }
+
+    def reserve_notification(self, *, event_key: str, checkpoint: str, state: str,
+                             fingerprint: str, now: float | None = None) -> str | None:
+        """Atomic persistent transition gate. Failed sends can be retried."""
+        if not self._available:
+            return None
+        now = now or time.time()
+        reservation = _env_float("Q15_V95_TELEGRAM_RESERVATION_SECONDS", 30.0, 5.0, 300.0)
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM notification_state WHERE event_key=?", (event_key,)).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO notification_state(event_key,checkpoint,state,fingerprint,reserved_until,updated_at) VALUES(?,?,?,?,?,?)",
+                    (event_key, checkpoint, state, fingerprint, now + reservation, now),
+                )
+                connection.commit()
+                return event_key
+            if row["sent_at"] is None and float(row["reserved_until"] or 0.0) <= now:
+                connection.execute(
+                    "UPDATE notification_state SET state=?,fingerprint=?,reserved_until=?,updated_at=? WHERE event_key=?",
+                    (state, fingerprint, now + reservation, now, event_key),
+                )
+                connection.commit()
+                return event_key
+            previous_state = str(row["state"])
+            meaningful = previous_state != state and (
+                state in {"ENTRY_RECOMMENDED", "ENTRY_WITHDRAWN", "CHECKPOINT_CLOSED", "RESULT_RESOLVED"}
+                or previous_state == "ENTRY_RECOMMENDED"
+            )
+            if row["sent_at"] is not None and meaningful:
+                transition_key = f"{event_key}|{previous_state}->{state}"
+                existing = connection.execute("SELECT * FROM notification_state WHERE event_key=?", (transition_key,)).fetchone()
+                if existing is None:
+                    connection.execute(
+                        "INSERT INTO notification_state(event_key,checkpoint,state,fingerprint,reserved_until,updated_at) VALUES(?,?,?,?,?,?)",
+                        (transition_key, checkpoint, state, fingerprint, now + reservation, now),
+                    )
+                    connection.commit()
+                    return transition_key
+                if existing["sent_at"] is None and float(existing["reserved_until"] or 0.0) <= now:
+                    connection.execute(
+                        "UPDATE notification_state SET fingerprint=?,reserved_until=?,updated_at=? WHERE event_key=?",
+                        (fingerprint, now + reservation, now, transition_key),
+                    )
+                    connection.commit()
+                    return transition_key
+            connection.commit()
+            return None
+
+    def notification_state(self, event_key: str) -> str | None:
+        if not self._available:
+            return None
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute("SELECT state FROM notification_state WHERE event_key=?", (event_key,)).fetchone()
+            return None if row is None else str(row["state"])
+
+    def complete_notification(self, *, event_key: str, success: bool, now: float | None = None) -> None:
+        if not self._available:
+            return
+        now = now or time.time()
+        with self._lock, closing(self._connect()) as connection:
+            if success:
+                connection.execute(
+                    "UPDATE notification_state SET sent_at=?,reserved_until=NULL,updated_at=? WHERE event_key=?",
+                    (now, now, event_key),
+                )
+                if "->" in event_key:
+                    base_key, transition = event_key.rsplit("|", 1)
+                    final_state = transition.split("->", 1)[1]
+                    connection.execute(
+                        "UPDATE notification_state SET state=?,updated_at=? WHERE event_key=?",
+                        (final_state, now, base_key),
+                    )
+            else:
+                connection.execute(
+                    "UPDATE notification_state SET reserved_until=NULL,failures=failures+1,updated_at=? WHERE event_key=?",
+                    (now, event_key),
+                )
+            connection.commit()
+
+    def status(self) -> dict[str, Any]:
+        if not self._available:
+            return {"available": False, "path": str(self.path), "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            counts = connection.execute(
+                """SELECT COUNT(*) total,
+                   SUM(CASE WHEN official_result IS NOT NULL THEN 1 ELSE 0 END) resolved,
+                   SUM(CASE WHEN checkpoint='15M' THEN 1 ELSE 0 END) fifteen,
+                   SUM(CASE WHEN checkpoint='10M' THEN 1 ELSE 0 END) ten,
+                   SUM(CASE WHEN learning_applied=1 THEN 1 ELSE 0 END) learned
+                   FROM predictions WHERE model_version=?""",
+                (MODEL_VERSION,),
+            ).fetchone()
+            notifications = connection.execute(
+                "SELECT COUNT(*) total,SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) sent,SUM(failures) failures FROM notification_state"
+            ).fetchone()
+            last_update = connection.execute("SELECT * FROM checkpoint_challenger_updates ORDER BY id DESC LIMIT 1").fetchone()
+            updates_by_checkpoint = {
+                checkpoint: int(connection.execute(
+                    "SELECT COUNT(*) FROM checkpoint_challenger_updates WHERE checkpoint=?", (checkpoint,)
+                ).fetchone()[0] or 0)
+                for checkpoint in ("10M", "15M")
+            }
+        return {
+            "available": True, "path": str(self.path), "version": VERSION,
+            "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "unique_predictions": int(counts["total"] or 0), "unique_resolved": int(counts["resolved"] or 0),
+            "fifteen_minute_predictions": int(counts["fifteen"] or 0),
+            "ten_minute_predictions": int(counts["ten"] or 0),
+            "shadow_updates_applied": int(counts["learned"] or 0),
+            "champion_weights": dict(CHAMPION_WEIGHTS),
+            "challenger_weights": {checkpoint: self.challenger_weights(checkpoint) for checkpoint in ("10M", "15M")},
+            "primary_learning_checkpoint": self.primary_learning_checkpoint,
+            "learning_enabled_by_checkpoint": dict(self.learning_enabled_by_checkpoint),
+            "learning_rate_by_checkpoint": dict(self.learning_rate_by_checkpoint),
+            "minimum_learning_quality_by_checkpoint": dict(self.minimum_learning_quality_by_checkpoint),
+            "shadow_updates_by_checkpoint": updates_by_checkpoint,
+            "shadow_learning_enabled": self.shadow_learning_enabled, "production_weights_frozen": True,
+            "automatic_promotion": False, "automatic_threshold_changes": False,
+            "last_shadow_update": dict(last_update) if last_update else None,
+            "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
+        }
+
+
+__all__ = [
+    "CHAMPION_WEIGHTS", "FEATURE_SCHEMA_VERSION", "MODEL_VERSION", "READ_ONLY", "VERSION", "V95Ledger"
+]

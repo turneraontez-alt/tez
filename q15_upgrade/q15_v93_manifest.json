@@ -1,0 +1,28 @@
+{
+  "installer_version": "q15-v9.3-wick-flow-value-installer-v1",
+  "model_version": "q15-v9.3-wick-flow-value",
+  "installed_at_utc": "2026-06-19T07:15:46Z",
+  "backup_path": "/home/runner/workspace/artifacts/kalshi-monitor/backups/q15_v93_20260619_071545",
+  "created_or_modified": [
+    "app.py",
+    "notifier.py",
+    "q15_upgrade/checkpoint_v93.py",
+    "tests/test_q15_v93.py"
+  ],
+  "source_inspection": {
+    "app_sha256": "7ac9e4e808f33b0bde6e3eee3551e67c53bb3ea0bf71729b277339b2ea787a67",
+    "notifier_sha256": "a9b2e61501da20da0f8cfaf13a511c5984b9bf3ff540a5129710765abe88c3ad",
+    "checkpoint_v92_sha256": "29d1b6f577437e5dc0ba15f8934b205c6c732c87d1c2444e043db2e98e425f58",
+    "calibrated_edge_sha256": "4b314c40ae5b122a75bcd7367edf086c1c881baa6432f39a95c44efcf1b22a84",
+    "v9_2_detected": true,
+    "read_only": true
+  },
+  "read_only": true,
+  "order_placement_added": false,
+  "tests_passed": 11,
+  "entry_requirements": [
+    "wick_price_action",
+    "independent_flow",
+    "executable_value"
+  ]
+}

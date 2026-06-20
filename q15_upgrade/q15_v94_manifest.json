@@ -1,0 +1,40 @@
+{
+  "automatic_learning": false,
+  "automatic_threshold_changes": false,
+  "backup_path": "/home/runner/workspace/artifacts/kalshi-monitor/backups/q15_v94_20260619_074644",
+  "context_design": {
+    "context_is_vote": false,
+    "current_window_seconds": 900,
+    "existing_confirmed_position_invalidated": false,
+    "persistent_cache": true,
+    "previous_window_seconds": 900,
+    "rolling_cache_seconds": 2400,
+    "selected_side_can_change": false
+  },
+  "created_or_modified": [
+    "app.py",
+    "notifier.py",
+    "q15_upgrade/checkpoint_v94.py",
+    "tests/test_q15_v94.py",
+    "q15_upgrade/q15_v94_manifest.json"
+  ],
+  "endpoints": [
+    "/api/q15-v9-4/diagnostics",
+    "/api/q15-v9-4/context",
+    "/api/q15-v9-4/decision-stats"
+  ],
+  "installed_at_utc": "2026-06-19T07:46:47Z",
+  "installer_version": "q15-v9.4-dual-window-context-installer-v1",
+  "model_version": "q15-v9.4-dual-window-context",
+  "order_placement_added": false,
+  "read_only": true,
+  "source_inspection": {
+    "app_sha256": "053cbfc87b06142878f514d956c8ad003edc260d5ae6695d1c203fe1246bb3f2",
+    "calibrated_edge_sha256": "4b314c40ae5b122a75bcd7367edf086c1c881baa6432f39a95c44efcf1b22a84",
+    "checkpoint_v93_sha256": "e6a93989b908a8710e6fff744794d205018d43ce5f69c5b2c254f2f139c9d600",
+    "notifier_sha256": "27cffcfa47c38d13170887cdeaad9d59510f966683e638cae86fdd439693e160",
+    "read_only": true,
+    "v9_3_detected": true
+  },
+  "tests_passed": 13
+}

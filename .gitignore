@@ -1,0 +1,38 @@
+# Runtime databases & trading state
+*.sqlite3
+*.sqlite
+*.db
+data/
+
+# Logs & diagnostic journals
+*.log
+*.jsonl
+logs/
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+*.p8
+
+# Review bundle & capture artifacts
+review_bundle/
+q15_complete_review_bundle.zip
+Q15_REVIEW_PASTE.txt
+
+# Installer receipts & backup snapshots
+.q15_v*
+backups/
+*_recommended_env.txt
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Replit internals
+.replit-artifact
