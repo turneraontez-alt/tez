@@ -50,7 +50,17 @@ class SignalStore:
 
     # -- connection helpers ---------------------------------------------
     def _conn(self):
-        return self.pool.getconn()
+        conn = self.pool.getconn()
+        # Every method here runs exactly one statement (one execute, then
+        # commit), so there is no multi-statement transaction to preserve.
+        # autocommit removes the separate COMMIT network round-trip, which
+        # roughly halves Postgres round-trips on the hot per-asset cycle path
+        # (v91 pre-enrich does ~5 queries/asset/cycle, plus settlement
+        # reconcile). Pooled connections are returned clean, so enabling it is
+        # safe; commit()/rollback() become harmless no-ops under autocommit.
+        if not conn.autocommit:
+            conn.autocommit = True
+        return conn
 
     def _release(self, conn):
         try:

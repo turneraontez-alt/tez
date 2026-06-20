@@ -683,6 +683,17 @@ def apply_context_gate(snapshot: dict[str, Any], context: Mapping[str, Any]) -> 
     return snapshot
 
 
+class _PersistentCacheConnection(sqlite3.Connection):
+    """SQLite connection whose ``close()`` is a no-op so the context-candle cache
+    reuses one connection instead of re-opening the file on every cycle.
+    ``_persist_candles`` runs per asset every cycle; re-opening the file on
+    Replit's networked ``data/`` disk dominated that cost. Reuse is serialized by
+    the cache's lock. ``with conn:`` transactions still commit/roll back."""
+
+    def close(self) -> None:  # noqa: D401 - intentional no-op for connection reuse
+        pass
+
+
 class CheckpointPolicyV94(CheckpointPolicyV93):
     """V9.3 policy plus rolling prior/current 15-minute chart context."""
 
@@ -701,6 +712,8 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
         self.persist_cache = _env_bool("Q15_V94_CACHE_PERSIST", True)
         self.cache_db_path = os.environ.get("Q15_V94_CACHE_DB_PATH", "data/q15_v94_context.sqlite3")
         self._context_lock = threading.RLock()
+        self._cache_db_lock = threading.RLock()
+        self._cache_shared_connection: sqlite3.Connection | None = None
         self._candle_cache: dict[str, dict[float, dict[str, float]]] = {}
         self._loaded_cache_assets: set[str] = set()
         self._cache_db_error: str | None = None
@@ -715,19 +728,30 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
         self._init_cache_db()
 
     def _cache_connection(self) -> sqlite3.Connection:
+        # Reuse one persistent connection (serialized by self._cache_db_lock at
+        # every call site) instead of re-opening the file each cycle — the file
+        # open is the dominant cost on Replit's networked disk and
+        # _persist_candles runs per asset every cycle.
+        connection = self._cache_shared_connection
+        if connection is not None:
+            return connection
         path = Path(self.cache_db_path)
         if path.parent and str(path.parent) not in {"", "."}:
             path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(path), timeout=3.0)
+        connection = sqlite3.connect(
+            str(path), timeout=3.0, check_same_thread=False,
+            factory=_PersistentCacheConnection,
+        )
         connection.execute("PRAGMA busy_timeout=3000")
         connection.execute("PRAGMA journal_mode=WAL")
+        self._cache_shared_connection = connection
         return connection
 
     def _init_cache_db(self) -> None:
         if not self.persist_cache:
             return
         try:
-            with self._cache_connection() as connection:
+            with self._cache_db_lock, self._cache_connection() as connection:
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS q15_v94_candles (
@@ -757,7 +781,7 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
             return
         cutoff = now - self.cache_seconds
         try:
-            with self._cache_connection() as connection:
+            with self._cache_db_lock, self._cache_connection() as connection:
                 rows = connection.execute(
                     "SELECT start_time, end_time, open, high, low, close, volume, trade_count "
                     "FROM q15_v94_candles WHERE asset=? AND end_time>=? ORDER BY start_time",
@@ -797,7 +821,7 @@ class CheckpointPolicyV94(CheckpointPolicyV93):
                 )
                 for row in candles
             ]
-            with self._cache_connection() as connection:
+            with self._cache_db_lock, self._cache_connection() as connection:
                 connection.executemany(
                     "INSERT OR REPLACE INTO q15_v94_candles "
                     "(asset,start_time,end_time,open,high,low,close,volume,trade_count) "

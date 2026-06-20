@@ -1014,6 +1014,16 @@ class _TelegramPermit:
     reserved_at: float
 
 
+class _PersistentGateConnection(sqlite3.Connection):
+    """SQLite connection whose ``close()`` is a no-op so the Telegram gate reuses
+    one connection across its ``with closing(self._connect())`` call sites instead
+    of re-opening the file each time. Every call site is under ``self._lock``;
+    explicit ``BEGIN IMMEDIATE`` transactions still commit/roll back normally."""
+
+    def close(self) -> None:  # noqa: D401 - intentional no-op for connection reuse
+        pass
+
+
 class TelegramNotificationGate:
     """Persistent, concurrency-safe once-per-checkpoint Telegram gate.
 
@@ -1045,22 +1055,31 @@ class TelegramNotificationGate:
             "Q15_V94_TELEGRAM_ENTRY_TRANSITION_ENABLED", True
         )
         self._lock = threading.RLock()
+        self._shared_connection: sqlite3.Connection | None = None
         path = os.path.abspath(self.db_path)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.db_path = path
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
+        # Reuse one persistent connection (close() is a no-op) — every call site
+        # is serialized by self._lock. Re-opening the file each call is the
+        # dominant cost on Replit's networked disk.
+        connection = self._shared_connection
+        if connection is not None:
+            return connection
         connection = sqlite3.connect(
             self.db_path,
             timeout=5.0,
             isolation_level=None,
             check_same_thread=False,
+            factory=_PersistentGateConnection,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
+        self._shared_connection = connection
         return connection
 
     def _initialize(self) -> None:
