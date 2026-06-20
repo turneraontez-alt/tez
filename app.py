@@ -11,6 +11,7 @@ from flask import Flask, render_template, jsonify
 from q15_upgrade.kalshi_rest import KalshiClient
 from market_cache import MarketResultCache
 from spot_client import get_spot
+import cycle_watchdog
 from q15_upgrade.orderbook import parse_orderbook, OrderbookTracker
 from analysis import AssetEngine
 from alert_config import AlertConfig
@@ -239,6 +240,7 @@ def refresh_loop():
         cycle_clock = time.monotonic()
         cycle_start = time.time()
         now = cycle_start
+        ct = cycle_watchdog.CycleTimer()
         try:
             # -- discovery --
             if now - last_discovery >= DISCOVERY_INTERVAL or not current_markets:
@@ -424,27 +426,27 @@ def refresh_loop():
                 snaps = dict(state)
             ws_health = market_data.health()
             global _last_cycle_ok, _last_learn
-            snaps = focus_manager.pre_enrich(snaps, now)
-            snaps = upgrade.enrich_all(snaps, now, ws_health)
-            snaps = learner.enrich_and_observe(snaps, now, ws_health)
+            snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
+            snaps = ct.time("upgrade_enrich", upgrade.enrich_all, snaps, now, ws_health)
+            snaps = ct.time("learner_enrich", learner.enrich_and_observe, snaps, now, ws_health)
             snaps = {
                 asset: risk_preview(enforce_fail_closed(snap))
                 for asset, snap in snaps.items()
             }
-            snaps = calibrated_edge.preview_all(snaps, now, ws_health)
-            snaps = checkpoint_v95.run_cycle(snaps, now, ws_health, focus_manager, calibrated_edge, notifier)
-            snaps = professional_v7.observe_all(snaps, now, ws_health)
+            snaps = ct.time("calibrated_edge", calibrated_edge.preview_all, snaps, now, ws_health)
+            snaps = ct.time("run_cycle", checkpoint_v95.run_cycle, snaps, now, ws_health, focus_manager, calibrated_edge, notifier)
+            snaps = ct.time("professional_v7", professional_v7.observe_all, snaps, now, ws_health)
             with state_lock:
                 state.update(snaps)
-            deep_snaps = focus_manager.deep_evaluation_snapshots(snaps, signal_engine, scalp_engine)
-            _safe("signals", signal_engine.evaluate_all, deep_snaps, now, ws_health)
-            _safe("scalp", scalp_engine.evaluate, deep_snaps, now)
-            _safe("focus_settlement", focus_manager.reconcile_settlements, now)
-            _safe("report", reporter.maybe_send, now)
+            deep_snaps = ct.time("deep_eval_snapshots", focus_manager.deep_evaluation_snapshots, snaps, signal_engine, scalp_engine)
+            ct.safe("signals", signal_engine.evaluate_all, deep_snaps, now, ws_health)
+            ct.safe("scalp", scalp_engine.evaluate, deep_snaps, now)
+            ct.safe("focus_settlement", focus_manager.reconcile_settlements, now)
+            ct.safe("report", reporter.maybe_send, now)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
-                _safe("perf", perf.reconcile, now)
-                _safe("learning_reconcile", learner.reconcile, now, market_cache)
-                _safe("learner", learner.recompute, now)
+                ct.safe("perf", perf.reconcile, now)
+                ct.safe("learning_reconcile", learner.reconcile, now, market_cache)
+                ct.safe("learner", learner.recompute, now)
                 _last_learn = now
             _last_cycle_ok = now
 
@@ -452,6 +454,7 @@ def refresh_loop():
             logger.error(f"Refresh loop error: {e}")
 
         elapsed = time.monotonic() - cycle_clock
+        ct.commit(elapsed)
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
 
 
@@ -849,6 +852,12 @@ def health():
     except Exception:
         wsh = {}
 
+    try:
+        from spot_ws import spot_ws_health
+        spot_ws_status = spot_ws_health()
+    except Exception:
+        spot_ws_status = {"enabled": False}
+
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
     return jsonify({
         "status": "ok",
@@ -874,6 +883,9 @@ def health():
         "uptime_seconds": round(now - SERVER_STARTED_AT),
         "websocket_connected": bool(wsh.get("connected")),
         "websocket_last_message_at": wsh.get("last_message_at"),
+        "websocket_book_ages": wsh.get("book_ages"),
+        "spot_ws": spot_ws_status,
+        "cycle_watchdog": cycle_watchdog.health(),
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
         "assets_tracked": len(snaps),

@@ -46,6 +46,8 @@ class HybridMarketData:
             }
         result = dict(self.ws.health() or {})
         result["ticker_sources"] = dict(self._ticker_sources)
+        if hasattr(self.ws, "book_ages"):
+            result["book_ages"] = self.ws.book_ages()
         return result
 
     def get_orderbook(self, ticker):
