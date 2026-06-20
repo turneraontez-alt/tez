@@ -180,11 +180,17 @@ def _parse_volume(market):
         return 0
 
 
-def fetch_asset_raw(asset, market, now, last_trade_ts, want_detail):
-    """Network worker that preserves source timestamps for freshness gates."""
+def fetch_asset_raw(asset, market, now, last_trade_ts):
+    """Network worker that preserves source timestamps for freshness gates.
+
+    Only the freshness-critical, websocket-backed legs (orderbook, trades, spot)
+    run here, so this stays well under the fetch deadline. Market detail (volume)
+    is a slow Kalshi REST call and is refreshed OFF this critical path — see
+    fetch_market_detail and the detail cache in refresh_loop — so it can never
+    blow the deadline and age the snapshot.
+    """
     started = time.time()
     ticker = market["ticker"]
-    detail = client.get_market(ticker) if want_detail else None
     min_ts = int(last_trade_ts - 1) if last_trade_ts else int(now - 60)
     ob_raw = market_data.get_orderbook(ticker)
     trades = market_data.get_trades(ticker, min_ts=min_ts)
@@ -217,7 +223,6 @@ def fetch_asset_raw(asset, market, now, last_trade_ts, want_detail):
     return {
         "asset": asset,
         "ticker": ticker,
-        "detail": detail,
         "ob_raw": ob_raw,
         "trades": trades,
         "spot": spot,
@@ -230,11 +235,18 @@ def fetch_asset_raw(asset, market, now, last_trade_ts, want_detail):
     }
 
 
+def fetch_market_detail(ticker):
+    """Slow Kalshi REST market detail (volume), fetched off the critical path."""
+    return client.get_market(ticker)
+
+
 def refresh_loop():
     last_discovery = 0
     current_markets = {}
     cycling = {}
     inflight = {}  # asset -> Future (at most one outstanding fetch per asset)
+    detail_inflight = {}  # asset -> (ticker, Future) for the off-critical detail fetch
+    detail_cache = {}     # asset -> (ticker, detail) last-good market volume
     executor = ThreadPoolExecutor(max_workers=8)
     while True:
         cycle_clock = time.monotonic()
@@ -300,12 +312,9 @@ def refresh_loop():
             for asset, market in active.items():
                 if asset in inflight:
                     continue
-                want_detail = (now - _last_detail[asset]) >= DETAIL_INTERVAL
-                if want_detail:
-                    _last_detail[asset] = now
                 f = executor.submit(
                     fetch_asset_raw, asset, market, now,
-                    engines[asset].last_trade_ts, want_detail,
+                    engines[asset].last_trade_ts,
                 )
                 inflight[asset] = f
                 futs[f] = asset
@@ -327,6 +336,30 @@ def refresh_loop():
                 logger.warning(
                     f"fetch deadline {FETCH_DEADLINE}s exceeded; deferring {slow}"
                 )
+
+            # -- decoupled market-detail (volume) refresh, off the freshness path --
+            # Kalshi REST get_market can take seconds; keeping it out of the
+            # critical fetch stops it from blowing the deadline and aging the
+            # snapshot. Volume is not freshness-critical, so last-good detail (kept
+            # per ticker so a rollover never reuses the prior market's volume) is
+            # fine between refreshes. At most one detail fetch in flight per asset.
+            for a in list(detail_inflight.keys()):
+                tkr, dfut = detail_inflight[a]
+                if dfut.done():
+                    try:
+                        d = dfut.result()
+                        if d:
+                            detail_cache[a] = (tkr, d)
+                    except Exception as e:
+                        logger.warning(f"detail {a}: {e}")
+                    del detail_inflight[a]
+            for asset, market in active.items():
+                tkr = market.get("ticker")
+                if not tkr or asset in detail_inflight:
+                    continue
+                if (now - _last_detail[asset]) >= DETAIL_INTERVAL:
+                    _last_detail[asset] = now
+                    detail_inflight[asset] = (tkr, executor.submit(fetch_market_detail, tkr))
 
             # -- ingest sequentially into engines --
             prelim = {}
@@ -356,7 +389,9 @@ def refresh_loop():
             # -- build snapshots --
             for a, (r, ob_parsed, ob_delta) in prelim.items():
                 eng = engines[a]
-                market = {**active[a], **(r["detail"] or {})}
+                cached_detail = detail_cache.get(a)
+                detail = cached_detail[1] if (cached_detail and cached_detail[0] == active[a].get("ticker")) else None
+                market = {**active[a], **(detail or {})}
                 market["_volume"] = _parse_volume(market)
                 try:
                     snap = eng.build_snapshot(

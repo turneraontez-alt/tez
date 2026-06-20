@@ -48,6 +48,7 @@ class V91RoundTripTests(unittest.TestCase):
             "get_prediction", "get_predictions_for", "get_predictions_for_pairs",
             "write_prediction", "write_predictions",
             "insert_observation", "insert_observations",
+            "recent_observations_for_pairs",
         ]
         counts = {n: 0 for n in names}
         for n in names:
@@ -84,10 +85,12 @@ class V91RoundTripTests(unittest.TestCase):
             for a in ("BTC", "ETH", "SOL")
         }
         self.policy.pre_enrich_all(snaps, 1000.0)
-        # 3 assets, still ONE insert / ONE write / ONE prediction read.
+        # 3 assets, still ONE insert / ONE write / ONE prediction read, and now
+        # ONE batched rolling-window read instead of one per asset.
         self.assertEqual(counts["insert_observations"], 1)
         self.assertEqual(counts["write_predictions"], 1)
         self.assertEqual(counts["get_predictions_for_pairs"], 1)
+        self.assertEqual(counts["recent_observations_for_pairs"], 1)
 
     def test_batched_read_matches_per_checkpoint_reads(self):
         p = self.policy.persistence
