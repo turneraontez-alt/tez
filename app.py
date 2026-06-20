@@ -93,6 +93,9 @@ checkpoint_v95 = CheckpointPolicyV95(store)
 # Give the hourly reporter the V9.5 ledger so it can publish the interval
 # (15M/10M/7M) and pick-rank (#1/#2/#3) track record.
 reporter.v95_ledger = checkpoint_v95.ledger
+# Let the V9.5 ledger settle predictions directly from official Kalshi results,
+# not only via the signals table, so every prediction gets graded.
+checkpoint_v95.kalshi_client = client
 professional_v7 = ProfessionalV7Engine(store, notifier, config, learner)
 
 oos_v9 = OutOfSampleEvaluator(store)

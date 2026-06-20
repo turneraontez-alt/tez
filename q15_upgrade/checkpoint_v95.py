@@ -1017,7 +1017,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._latest_public: dict[str, dict[str, Any]] = {}
         self._last_checkpoint_v95 = "UNKNOWN"
         self._last_reconcile: dict[str, Any] = {}
+        self._last_market_reconcile: dict[str, Any] = {}
         self._last_reconcile_at = 0.0
+        # Optional Kalshi client (set by the app) so predictions can be settled
+        # directly from official results, not only via the signals table.
+        self.kalshi_client = None
         self._cycles = 0
         self._errors = 0
         self._last_error: str | None = None
@@ -1103,16 +1107,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         trade_decision=str(analysis["trade_decision"]),
                         regime=str((analysis.get("regime") or {}).get("name") or "UNKNOWN"),
                         features=analysis["feature_values"], contributions=analysis["contributions"],
-                        quote=analysis["quote"], rank=rank,
+                        quote=analysis["quote"], rank=rank, costs=analysis.get("costs"),
                     )
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
 
             result_events: list[Mapping[str, Any]] = []
-            if self.signal_store is not None and now - self._last_reconcile_at >= 30.0:
-                self._last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+            if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
-                result_events = list(self._last_reconcile.get("result_events") or [])
+                if self.signal_store is not None:
+                    self._last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+                    result_events = list(self._last_reconcile.get("result_events") or [])
+                # Settle any remaining closed markets directly from Kalshi, so
+                # predictions without a signals row still get graded.
+                get_market = getattr(self.kalshi_client, "get_market", None)
+                if callable(get_market):
+                    self._last_market_reconcile = self.ledger.reconcile_pending_from_market(get_market, now)
+                    result_events = list(self._last_market_reconcile.get("result_events") or []) + result_events
             ledger_status = self.ledger.status()
             message = build_v95_message(checkpoint, analyses, ranking, ledger_status, result_events) if ranking else None
             # Discard all parent V9.4 messages. V9.5 owns the final state machine.
@@ -1189,6 +1200,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         return {
             "version": VERSION, "read_only": True, **self.ledger.status(),
             "last_reconcile": copy.deepcopy(self._last_reconcile),
+            "last_market_reconcile": copy.deepcopy(self._last_market_reconcile),
             "scope": "SEPARATE_CHECKPOINT_CHALLENGERS_10M_PRIMARY",
             "primary_learning_checkpoint": self.ledger.primary_learning_checkpoint,
             "production_weights_frozen": True,

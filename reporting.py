@@ -24,13 +24,21 @@ def _rec(r):
 
 
 def _wl(d):
-    """Format a {right,wrong,n,accuracy} scoreboard bucket, or None if empty."""
+    """Format a {right,wrong,n,accuracy,low_n} scoreboard bucket, or None if empty."""
     n = (d or {}).get("n") or 0
     if not n:
         return None
     acc = d.get("accuracy")
     pct = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "n/a"
-    return f"{d.get('right', 0)}W/{d.get('wrong', 0)}L ({pct})"
+    parts = [pct]
+    # Realized paper P&L after fees, when any priced entries resolved.
+    rt = d.get("realized_total_cents")
+    if isinstance(rt, (int, float)) and d.get("pnl_n"):
+        parts.append(f"{rt:+.0f}¢")
+    # Flag thin samples so a 2-of-2 = 100% bucket is not over-read.
+    if d.get("low_n"):
+        parts.append("low n")
+    return f"{d.get('right', 0)}W/{d.get('wrong', 0)}L ({', '.join(parts)})"
 
 
 class HourlyReporter:

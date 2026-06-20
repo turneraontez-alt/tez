@@ -18,6 +18,11 @@ def _mk_ledger():
     return V95Ledger(tempfile.mktemp(suffix=".sqlite3"))
 
 
+def _core(d):
+    """Just the win/loss core of a scoreboard bucket (drops CI/low_n extras)."""
+    return {k: d[k] for k in ("right", "wrong", "n", "accuracy")}
+
+
 def _record(led, ticker, cp, side, rank):
     return led.record_prediction(
         ticker=ticker, asset="ETH", checkpoint=cp, created_at=time.time(),
@@ -52,10 +57,10 @@ class TestLedgerScoreboard(unittest.TestCase):
 
         sb = led.scoreboard()
         self.assertTrue(sb["available"])
-        self.assertEqual(sb["by_checkpoint"]["15M"], {"right": 1, "wrong": 0, "n": 1, "accuracy": 1.0})
-        self.assertEqual(sb["by_checkpoint"]["10M"], {"right": 0, "wrong": 1, "n": 1, "accuracy": 0.0})
-        self.assertEqual(sb["by_checkpoint"]["7M"], {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
-        self.assertEqual(sb["by_rank"]["1"], {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
+        self.assertEqual(_core(sb["by_checkpoint"]["15M"]), {"right": 1, "wrong": 0, "n": 1, "accuracy": 1.0})
+        self.assertEqual(_core(sb["by_checkpoint"]["10M"]), {"right": 0, "wrong": 1, "n": 1, "accuracy": 0.0})
+        self.assertEqual(_core(sb["by_checkpoint"]["7M"]), {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
+        self.assertEqual(_core(sb["by_rank"]["1"]), {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
         self.assertEqual(sb["by_rank"]["2"]["right"], 1)
         self.assertEqual(sb["by_rank"]["3"]["wrong"], 1)
 
@@ -79,10 +84,10 @@ class TestLedgerScoreboard(unittest.TestCase):
             )
             led.resolve_ticker(t, res)
         sb = led.scoreboard()
-        self.assertEqual(sb["by_asset"]["ETH"], {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
+        self.assertEqual(_core(sb["by_asset"]["ETH"]), {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
         self.assertEqual(sb["by_asset"]["BTC"]["right"], 1)
         # top_pick (#1) per coin: ETH 1/2, BTC 1/1; SOL was rank #2 so excluded
-        self.assertEqual(sb["top_pick_by_asset"]["ETH"], {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
+        self.assertEqual(_core(sb["top_pick_by_asset"]["ETH"]), {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
         self.assertEqual(sb["top_pick_by_asset"]["BTC"]["accuracy"], 1.0)
         self.assertNotIn("SOL", sb["top_pick_by_asset"])
 
