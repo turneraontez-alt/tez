@@ -1085,6 +1085,12 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
 # _resolve_checkpoint): a band "closes" when the clock drops below this.
 _CHECKPOINT_BAND_LOWER = {"15M": 660.0, "10M": 480.0, "7M": 0.0}
 
+# The named minute each checkpoint is *about* — the alert is held until the clock
+# reaches this many seconds before close so e.g. the "10M" check lands at the
+# 10-minute mark, not at band entry (~11:00). The detection bands above are wider
+# than these marks; firing is mark-driven, not band-entry-driven.
+_CHECKPOINT_TARGET_SECONDS = {"15M": 900.0, "10M": 600.0, "7M": 420.0}
+
 
 def _decision_signature(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple:
     """Identity of the current verdict — the top-3 (asset, side, entry?) tuple.
@@ -1464,13 +1470,19 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def _decision_settled(self, checkpoint: str, analyses: Mapping[str, Mapping[str, Any]],
                           ranking: Sequence[Mapping[str, Any]], snapshots: Mapping[str, Any],
                           now: float) -> bool:
-        """Hold the alert until the verdict has "made up its mind".
+        """Decide whether to emit the checkpoint alert this cycle.
 
-        The top-3 (asset/side/entry) signature must repeat for
-        ``Q15_V95_DECISION_STABILITY_CYCLES`` consecutive cycles before the alert
-        is allowed out, so early-band leader/edge jitter no longer produces a
-        burst. A fallback forces a single send as the checkpoint band closes, so
-        a verdict that never fully settles still yields exactly one alert.
+        Two gates, so each alert lands once and on time:
+          * **On the mark** — held until the clock reaches the checkpoint's named
+            minute (15:00 / 10:00 / 7:00 remaining), so the "10M" alert fires at
+            the 10-minute mark rather than at band entry (~11:00). Disable via
+            ``Q15_V95_FIRE_AT_CHECKPOINT_MARK=false``.
+          * **Made up its mind** — the top-3 (asset/side/entry) signature must
+            repeat for ``Q15_V95_DECISION_STABILITY_CYCLES`` cycles, so leader/
+            edge jitter no longer fires early.
+        A fallback forces a single send as the band closes
+        (``Q15_V95_DECISION_FORCE_MARGIN_SECONDS``) so a verdict that never fully
+        settles, or a window first seen late, still yields exactly one alert.
         No-op (always settled) when single-alert gating is disabled.
         """
         if not _env_bool("Q15_V95_SINGLE_ALERT_PER_CHECKPOINT", True):
@@ -1489,18 +1501,25 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             for stale in [k for k in self._decision_stability if k[1] < window_id - 2]:
                 self._decision_stability.pop(stale, None)
         required = int(_env_float("Q15_V95_DECISION_STABILITY_CYCLES", 3.0, 1.0, 120.0))
-        if entry["count"] >= required:
-            return True
-        # Fallback: emit once as the band is about to close (mirrors the
-        # seconds-remaining boundaries _resolve_checkpoint classifies on).
+        stable = entry["count"] >= required
+
         times = [_seconds_remaining(s, now) for s in snapshots.values() if isinstance(s, Mapping)]
         times = [t for t in times if t is not None]
-        if times:
-            lower = _CHECKPOINT_BAND_LOWER.get(checkpoint, 0.0)
-            margin = _env_float("Q15_V95_DECISION_FORCE_MARGIN_SECONDS", 60.0, 0.0, 300.0)
-            if max(times) <= lower + margin:
-                return True
-        return False
+        if not times:
+            return stable  # no clock available -> stability only
+        seconds_left = max(times)
+        # Safety net: never let the band close without one alert.
+        band_lower = _CHECKPOINT_BAND_LOWER.get(checkpoint, 0.0)
+        force_margin = _env_float("Q15_V95_DECISION_FORCE_MARGIN_SECONDS", 60.0, 0.0, 300.0)
+        if seconds_left <= band_lower + force_margin:
+            return True
+        # Hold until the clock reaches the named checkpoint minute.
+        if _env_bool("Q15_V95_FIRE_AT_CHECKPOINT_MARK", True):
+            target = _CHECKPOINT_TARGET_SECONDS.get(checkpoint)
+            tol = _env_float("Q15_V95_CHECKPOINT_MARK_TOLERANCE_SECONDS", 15.0, 0.0, 120.0)
+            if target is not None and seconds_left > target + tol:
+                return False
+        return stable
 
     def predictions(self) -> dict[str, Any]:
         with self._v95_lock:

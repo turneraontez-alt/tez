@@ -101,6 +101,41 @@ class TestDecisionSettledGate(unittest.TestCase):
         finally:
             del os.environ["Q15_V95_DECISION_STABILITY_CYCLES"]
 
+    def test_alert_fires_on_the_named_minute_not_band_entry(self):
+        # 10M band is entered at ~660s (11:00) but the alert must hold until the
+        # 10-minute mark (~600s), so it lands on time rather than ~1 min early.
+        obj = self._policy()
+        os.environ["Q15_V95_DECISION_STABILITY_CYCLES"] = "1"  # isolate the mark gate
+        try:
+            # Band entry — still 11:00 remaining: held back.
+            self.assertFalse(obj._decision_settled("10M", _analyses(), _ranking(), {"BTC": {"seconds_remaining": 660.0}}, NOW))
+            # At the 10:00 mark: allowed out.
+            self.assertTrue(obj._decision_settled("10M", _analyses(), _ranking(), {"BTC": {"seconds_remaining": 600.0}}, NOW))
+        finally:
+            del os.environ["Q15_V95_DECISION_STABILITY_CYCLES"]
+
+    def test_seven_minute_holds_until_seven_mark(self):
+        obj = self._policy()
+        os.environ["Q15_V95_DECISION_STABILITY_CYCLES"] = "1"
+        try:
+            # 7M band entry ~480s (8:00): held.
+            self.assertFalse(obj._decision_settled("7M", _analyses(), _ranking(), {"BTC": {"seconds_remaining": 475.0}}, NOW))
+            # 7:00 mark: fires.
+            self.assertTrue(obj._decision_settled("7M", _analyses(), _ranking(), {"BTC": {"seconds_remaining": 420.0}}, NOW))
+        finally:
+            del os.environ["Q15_V95_DECISION_STABILITY_CYCLES"]
+
+    def test_mark_gate_can_be_disabled(self):
+        obj = self._policy()
+        os.environ["Q15_V95_FIRE_AT_CHECKPOINT_MARK"] = "false"
+        os.environ["Q15_V95_DECISION_STABILITY_CYCLES"] = "1"
+        try:
+            # With the mark gate off, a stable verdict fires at band entry again.
+            self.assertTrue(obj._decision_settled("10M", _analyses(), _ranking(), {"BTC": {"seconds_remaining": 660.0}}, NOW))
+        finally:
+            del os.environ["Q15_V95_FIRE_AT_CHECKPOINT_MARK"]
+            del os.environ["Q15_V95_DECISION_STABILITY_CYCLES"]
+
     def test_disabled_flag_is_always_settled(self):
         obj = self._policy()
         os.environ["Q15_V95_SINGLE_ALERT_PER_CHECKPOINT"] = "false"

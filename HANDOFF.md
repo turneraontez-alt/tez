@@ -37,13 +37,19 @@ Verified live first: speedup (~4.5s → ~2.3–2.6s) and the checkpoint-label fi
    (`Q15_V95_DECISION_FORCE_MARGIN_SECONDS`, default 60). NOTE: a genuine
    WATCH→ENTRY upgrade after the first send still re-fires (intentional — don't
    miss a real entry); only jitter is suppressed.
+   **Timing fix:** the detection bands (660s/480s) made the alert fire at band
+   *entry* — 10M at ~11:00 and 7M at ~8:00 remaining (~1 min early). The gate now
+   holds each alert until the clock reaches its **named minute**
+   (`_CHECKPOINT_TARGET_SECONDS` = 900/600/420s; `Q15_V95_FIRE_AT_CHECKPOINT_MARK`
+   default ON, `Q15_V95_CHECKPOINT_MARK_TOLERANCE_SECONDS` default 15) so 15M/10M/7M
+   land on time.
 5. **Hourly report "14 min late"**: scheduling code is correct (fires every ~1s at
    the UTC boundary). Owner confirmed Always-On, so cause is restarts. Added
    send-time logging (`:NN past the hour`) + a restart catch-up
    (`Q15_HOURLY_CATCHUP_MINUTES`, default 5) so a restart shortly after the hour
    still delivers (claim_event keeps it idempotent). Watch the logs to confirm.
 
-Tests: `447 passed, 4 skipped`. New: `test_q15_v95_single_alert.py`; updated
+Tests: `450 passed, 4 skipped`. New: `test_q15_v95_single_alert.py`; updated
 checkpoint-message + scoreboard + calibrated-edge tests for the new format.
 **Still TODO on Replit:** set `Q15_ALERT_LEVEL_10M=all` / `_7M=all` in Secrets to
 actually receive the 10m/7m checks (else muted as `NO ENTRY YET` under `balanced`).
