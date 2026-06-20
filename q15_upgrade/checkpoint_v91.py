@@ -239,6 +239,37 @@ class _Persistence:
             conn.commit()
         return True
 
+    def insert_observations(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Insert many observations in a single round-trip (one multi-row
+        INSERT on Postgres, one executemany on SQLite). Equivalent to N calls
+        to insert_observation — ON CONFLICT/OR IGNORE dedups per row exactly as
+        before."""
+        rows = list(rows)
+        if not rows:
+            return
+        values = [
+            (r["observation_key"], r["contract_key"], r["asset"], int(r["bucket"]),
+             float(r["observed_at"]), r["side"], r.get("p_yes"), VERSION)
+            for r in rows
+        ]
+        if self.pg:
+            placeholders = ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s)"] * len(values))
+            flat = [v for tup in values for v in tup]
+            self.store.execute(
+                "INSERT INTO q15_v91_observations "
+                "(observation_key,contract_key,asset,bucket,observed_at,side,p_yes,model_version) "
+                f"VALUES {placeholders} ON CONFLICT (observation_key) DO NOTHING",
+                flat,
+            )
+            return
+        with self._lock, self._sqlite() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO q15_v91_observations "
+                "(observation_key,contract_key,asset,bucket,observed_at,side,p_yes,model_version) "
+                "VALUES (?,?,?,?,?,?,?,?)", values,
+            )
+            conn.commit()
+
     def recent_observations(self, contract_key: str, asset: str, limit: int) -> list[dict[str, Any]]:
         if self.pg:
             return list(self.store.query(
@@ -279,6 +310,37 @@ class _Persistence:
                     "VALUES (?,?,?,?,?,?,?,?,?,?)", values,
                 )
                 conn.commit()
+
+    def write_predictions(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Freeze many predictions in a single round-trip. Equivalent to N
+        write_prediction calls (ON CONFLICT/OR IGNORE dedups per row)."""
+        rows = list(rows)
+        if not rows:
+            return
+        values = [
+            (r["prediction_key"], r["contract_key"], r["asset"], r["checkpoint"],
+             r["side"], r.get("p_yes"), r.get("evidence_status"),
+             json.dumps(r.get("rolling") or {}, separators=(",", ":")),
+             float(r["created_at"]), VERSION)
+            for r in rows
+        ]
+        if self.pg:
+            placeholders = ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(values))
+            flat = [v for tup in values for v in tup]
+            self.store.execute(
+                "INSERT INTO q15_v91_predictions "
+                "(prediction_key,contract_key,asset,checkpoint,side,p_yes,evidence_status,rolling_json,created_at,model_version) "
+                f"VALUES {placeholders} ON CONFLICT (prediction_key) DO NOTHING",
+                flat,
+            )
+            return
+        with self._lock, self._sqlite() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO q15_v91_predictions "
+                "(prediction_key,contract_key,asset,checkpoint,side,p_yes,evidence_status,rolling_json,created_at,model_version) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)", values,
+            )
+            conn.commit()
 
     def freeze_prediction(self, row: Mapping[str, Any]) -> dict[str, Any]:
         self.write_prediction(row)
@@ -322,6 +384,40 @@ class _Persistence:
         for row in rows:
             parsed = self._parse_prediction_row(row)
             result[str(parsed.get("checkpoint"))] = parsed
+        return result
+
+    def get_predictions_for_pairs(
+        self, pairs: Sequence[tuple[str, str]], checkpoints: Sequence[str]
+    ) -> dict[tuple[str, str], dict[str, dict[str, Any]]]:
+        """Fetch frozen predictions for many (contract_key, asset) pairs in one
+        round-trip. Returns {(contract_key, asset): {checkpoint: row}}.
+        Equivalent to calling get_predictions_for per pair — a plain OR-of-pairs
+        WHERE clause (no version-specific row-value IN), so results are
+        byte-identical to the per-pair reads."""
+        pairs = list(dict.fromkeys(pairs))  # de-dup, preserve order
+        checkpoints = tuple(checkpoints)
+        if not pairs or not checkpoints:
+            return {}
+        ph = "%s" if self.pg else "?"
+        cp_ph = ",".join([ph] * len(checkpoints))
+        pair_clause = " OR ".join([f"(contract_key={ph} AND asset={ph})"] * len(pairs))
+        sql = (
+            f"SELECT * FROM q15_v91_predictions WHERE checkpoint IN ({cp_ph}) "
+            f"AND ({pair_clause})"
+        )
+        params: list[Any] = [*checkpoints]
+        for contract_key, asset in pairs:
+            params.extend((contract_key, asset))
+        if self.pg:
+            rows = self.store.query(sql, params) or []
+        else:
+            with self._lock, self._sqlite() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        result: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        for row in rows:
+            parsed = self._parse_prediction_row(row)
+            key = (str(parsed.get("contract_key")), str(parsed.get("asset")))
+            result.setdefault(key, {})[str(parsed.get("checkpoint"))] = parsed
         return result
 
     def get_prediction(self, contract_key: str, asset: str, checkpoint: str) -> dict[str, Any] | None:
@@ -369,22 +465,30 @@ class CheckpointPolicyV91:
         self._lock = threading.RLock()
         self._cycles = 0
 
-    def _observe(self, asset: str, snapshot: Mapping[str, Any], now: float) -> tuple[str, float | None, RollingMetrics, str]:
+    def _observation_row(
+        self, asset: str, snapshot: Mapping[str, Any], now: float
+    ) -> tuple[str, float | None, str, str, dict[str, Any]]:
+        """Build (but do not write) an observation row. Returns
+        (contract, p_yes, current_side, observation_scope, row) so the caller
+        can bulk-insert every asset's observation in one round-trip."""
         contract = _contract_key(asset, snapshot)
         p_yes = _canonical_p_yes(snapshot)
         current_side = _direct_side(p_yes, self.side_threshold)
         bucket = int(now // self.bucket_seconds)
         key = f"{contract}|{asset}|{bucket}|{VERSION}"
-        self.persistence.insert_observation({
+        observation_scope = f"{contract}|{_checkpoint(snapshot)}"
+        row = {
             "observation_key": key,
-            "contract_key": f"{contract}|{_checkpoint(snapshot)}",
+            "contract_key": observation_scope,
             "asset": asset,
             "bucket": bucket,
             "observed_at": now,
             "side": current_side,
             "p_yes": p_yes,
-        })
-        observation_scope = f"{contract}|{_checkpoint(snapshot)}"
+        }
+        return contract, p_yes, current_side, observation_scope, row
+
+    def _rolling_for(self, observation_scope: str, asset: str) -> RollingMetrics:
         # Each checkpoint gets its own rolling evidence window. Otherwise the
         # first 10M observation would be contaminated by older 15M votes and
         # could freeze the wrong side before fresh 10M evidence arrives.
@@ -407,8 +511,14 @@ class CheckpointPolicyV91:
             status = "DIRECTION_UNCERTAIN"
         else:
             status = "OK"
-        metrics = RollingMetrics(yes, no, neutral, len(rows), directional, agreement, coverage, selected, status)
-        return contract, p_yes, metrics, current_side
+        return RollingMetrics(yes, no, neutral, len(rows), directional, agreement, coverage, selected, status)
+
+    def _observe(self, asset: str, snapshot: Mapping[str, Any], now: float) -> tuple[str, float | None, RollingMetrics, str]:
+        # Single-asset path kept for compatibility; pre_enrich_all uses the
+        # split helpers above to batch across assets.
+        contract, p_yes, current_side, scope, row = self._observation_row(asset, snapshot, now)
+        self.persistence.insert_observation(row)
+        return contract, p_yes, self._rolling_for(scope, asset), current_side
 
     def _prediction_side(self, current_side: str, rolling: RollingMetrics) -> str:
         if rolling.status == "OK" and rolling.selected_side in {"YES", "NO"}:
@@ -419,36 +529,66 @@ class CheckpointPolicyV91:
         return current_side if current_side in {"YES", "NO"} else "UNCERTAIN"
 
     def pre_enrich_all(self, snapshots: Mapping[str, dict], now: float) -> dict[str, dict]:
-        output: dict[str, dict] = {}
+        # Batched across assets to minimise Postgres round-trips: one bulk
+        # observation insert, one bulk prediction write, and one batched
+        # prediction read for all assets — instead of those three per asset.
+        # The per-asset rolling read stays separate (per-group LIMIT window).
+        items: list[dict[str, Any]] = []
+        obs_rows: list[dict[str, Any]] = []
         for asset, original in snapshots.items():
             if not isinstance(original, dict):
                 continue
             snap = dict(original)
-            contract, p_yes, rolling, current_side = self._observe(asset, snap, now)
-            checkpoint = _checkpoint(snap)
-            side = self._prediction_side(current_side, rolling)
-            prediction_key = f"{contract}|{asset}|{checkpoint}|{VERSION}"
+            contract, p_yes, current_side, scope, obs_row = self._observation_row(asset, snap, now)
+            obs_rows.append(obs_row)
+            items.append({
+                "asset": asset, "snap": snap, "contract": contract, "p_yes": p_yes,
+                "current_side": current_side, "scope": scope,
+            })
+        # 1) Bulk-insert every observation (one round-trip). Must commit before
+        #    the rolling reads below so each asset sees its own fresh tick.
+        self.persistence.insert_observations(obs_rows)
+
+        # 2) Per-asset rolling evidence + the prediction row to freeze.
+        pred_rows: list[dict[str, Any]] = []
+        for it in items:
+            rolling = self._rolling_for(it["scope"], it["asset"])
+            checkpoint = _checkpoint(it["snap"])
+            side = self._prediction_side(it["current_side"], rolling)
             constructed = {
-                "prediction_key": prediction_key,
-                "contract_key": contract,
-                "asset": asset,
+                "prediction_key": f"{it['contract']}|{it['asset']}|{checkpoint}|{VERSION}",
+                "contract_key": it["contract"],
+                "asset": it["asset"],
                 "checkpoint": checkpoint,
                 "side": side,
-                "p_yes": p_yes,
+                "p_yes": it["p_yes"],
                 "evidence_status": rolling.status,
                 "rolling": rolling.as_dict(),
                 "created_at": now,
             }
+            it.update({"rolling": rolling, "checkpoint": checkpoint, "side": side, "constructed": constructed})
             if checkpoint in {"15M", "10M"}:
-                self.persistence.write_prediction(constructed)
-            # One batched read covers the just-frozen checkpoint plus the prior
-            # one, replacing the freeze read-back and the two separate
-            # get_prediction calls (6 round-trips/asset -> 4).
-            predictions = self.persistence.get_predictions_for(contract, asset, ("15M", "10M"))
+                pred_rows.append(constructed)
+        # 3) Bulk-write all freezes (one round-trip), then one batched read of
+        #    both checkpoints for every (contract, asset) pair.
+        self.persistence.write_predictions(pred_rows)
+        preds_by_pair = self.persistence.get_predictions_for_pairs(
+            [(it["contract"], it["asset"]) for it in items], ("15M", "10M")
+        )
+
+        output: dict[str, dict] = {}
+        for it in items:
+            snap = it["snap"]
+            contract = it["contract"]
+            checkpoint = it["checkpoint"]
+            rolling = it["rolling"]
+            side = it["side"]
+            current_side = it["current_side"]
+            predictions = preds_by_pair.get((contract, it["asset"]), {})
             fifteen = predictions.get("15M")
             ten = predictions.get("10M")
             if checkpoint in {"15M", "10M"}:
-                frozen = predictions.get(checkpoint) or dict(constructed)
+                frozen = predictions.get(checkpoint) or dict(it["constructed"])
             else:
                 frozen = None
             frozen_side = str((frozen or {}).get("side") or side).upper()
@@ -489,13 +629,16 @@ class CheckpointPolicyV91:
                 "q15_consensus_side": frozen_side if frozen_side in {"YES", "NO"} else None,
                 "q15_new_entry_allowed": bool(evidence_ok and sequence_ok),
             })
+            # Thread the frozen 15M prediction so the v92 stage can reuse it
+            # instead of issuing its own get_prediction(15M) read.
+            snap["q15_v91_fifteen_prediction"] = fifteen
             if checkpoint == "15M":
                 snap["q15_15m_side"] = frozen_side
                 snap["q15_15m_prediction"] = {"side": frozen_side, "p_yes": (frozen or {}).get("p_yes"), "evidence_status": (frozen or {}).get("evidence_status")}
             else:
                 snap["q15_10m_side"] = frozen_side
                 snap["q15_10m_prediction"] = {"side": frozen_side, "p_yes": (frozen or {}).get("p_yes"), "evidence_status": (frozen or {}).get("evidence_status")}
-            output[asset] = snap
+            output[it["asset"]] = snap
         self._cycles += 1
         return output
 

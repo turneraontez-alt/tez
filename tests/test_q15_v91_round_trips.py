@@ -44,38 +44,50 @@ class V91RoundTripTests(unittest.TestCase):
 
     def _instrument(self):
         p = self.policy.persistence
-        counts = {"get_prediction": 0, "get_predictions_for": 0, "write_prediction": 0}
-        orig_gp = p.get_prediction
-        orig_gpf = p.get_predictions_for
-        orig_wp = p.write_prediction
+        names = [
+            "get_prediction", "get_predictions_for", "get_predictions_for_pairs",
+            "write_prediction", "write_predictions",
+            "insert_observation", "insert_observations",
+        ]
+        counts = {n: 0 for n in names}
+        for n in names:
+            orig = getattr(p, n)
 
-        def gp(*a, **k):
-            counts["get_prediction"] += 1
-            return orig_gp(*a, **k)
+            def make(fn, key):
+                def wrapped(*a, **k):
+                    counts[key] += 1
+                    return fn(*a, **k)
+                return wrapped
 
-        def gpf(*a, **k):
-            counts["get_predictions_for"] += 1
-            return orig_gpf(*a, **k)
-
-        def wp(*a, **k):
-            counts["write_prediction"] += 1
-            return orig_wp(*a, **k)
-
-        p.get_prediction = gp
-        p.get_predictions_for = gpf
-        p.write_prediction = wp
+            setattr(p, n, make(orig, n))
         return counts
 
-    def test_pre_enrich_uses_single_batched_read_no_readback(self):
+    def test_pre_enrich_batches_writes_and_reads(self):
         counts = self._instrument()
         # 10M checkpoint exercises the freeze + prior-checkpoint comparison path.
         snap = snapshot(seconds=590)
         self.policy.pre_enrich_all({snap["asset"]: snap}, 1000.0)
-        # Exactly one write (no read-back) and one batched read per asset; the
-        # legacy per-checkpoint get_prediction calls are gone.
-        self.assertEqual(counts["write_prediction"], 1)
-        self.assertEqual(counts["get_predictions_for"], 1)
+        # Bulk methods only: one observation insert, one prediction write, one
+        # batched prediction read. The legacy per-call methods are unused.
+        self.assertEqual(counts["insert_observations"], 1)
+        self.assertEqual(counts["write_predictions"], 1)
+        self.assertEqual(counts["get_predictions_for_pairs"], 1)
+        self.assertEqual(counts["insert_observation"], 0)
+        self.assertEqual(counts["write_prediction"], 0)
         self.assertEqual(counts["get_prediction"], 0)
+        self.assertEqual(counts["get_predictions_for"], 0)
+
+    def test_many_assets_still_one_round_trip_each(self):
+        counts = self._instrument()
+        snaps = {
+            a: snapshot(asset=a, ticker=f"{a}-RT", seconds=590, p_yes=0.15)
+            for a in ("BTC", "ETH", "SOL")
+        }
+        self.policy.pre_enrich_all(snaps, 1000.0)
+        # 3 assets, still ONE insert / ONE write / ONE prediction read.
+        self.assertEqual(counts["insert_observations"], 1)
+        self.assertEqual(counts["write_predictions"], 1)
+        self.assertEqual(counts["get_predictions_for_pairs"], 1)
 
     def test_batched_read_matches_per_checkpoint_reads(self):
         p = self.policy.persistence
@@ -95,10 +107,34 @@ class V91RoundTripTests(unittest.TestCase):
             self.assertEqual(batched[cp]["p_yes"], single["p_yes"])
             self.assertEqual(batched[cp].get("rolling"), single.get("rolling"))
 
+    def test_pairs_read_matches_per_pair_reads(self):
+        p = self.policy.persistence
+        rows = []
+        for contract, asset, cp in (("C1", "BTC", "15M"), ("C1", "BTC", "10M"), ("C2", "ETH", "15M")):
+            rows.append({
+                "prediction_key": f"{contract}|{asset}|{cp}|x",
+                "contract_key": contract, "asset": asset, "checkpoint": cp,
+                "side": "NO", "p_yes": 0.2, "evidence_status": "OK",
+                "rolling": {"k": cp}, "created_at": 1000.0,
+            })
+        p.write_predictions(rows)  # bulk write
+        pairs = [("C1", "BTC"), ("C2", "ETH")]
+        batched = p.get_predictions_for_pairs(pairs, ("15M", "10M"))
+        # Grouped result equals per-pair get_predictions_for.
+        for pair in pairs:
+            self.assertEqual(
+                batched.get(pair, {}).keys(),
+                p.get_predictions_for(pair[0], pair[1], ("15M", "10M")).keys(),
+            )
+        self.assertEqual(set(batched[("C1", "BTC")]), {"15M", "10M"})
+        self.assertEqual(set(batched[("C2", "ETH")]), {"15M"})
+
     def test_missing_checkpoints_return_empty(self):
         p = self.policy.persistence
         self.assertEqual(p.get_predictions_for("NONE", "DOGE", ("15M", "10M")), {})
         self.assertEqual(p.get_predictions_for("C", "DOGE", ()), {})
+        self.assertEqual(p.get_predictions_for_pairs([], ("15M",)), {})
+        self.assertEqual(p.get_predictions_for_pairs([("C", "DOGE")], ()), {})
 
 
 if __name__ == "__main__":
