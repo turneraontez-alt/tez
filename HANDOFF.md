@@ -32,14 +32,17 @@ confidence (`data_quality × evidence_quality × Q15_V95_MARKET_ANCHOR_STRENGTH`
 - New API fields: `model_yes_probability`, `market_implied_yes_probability`,
   `market_anchor` (see `/api/q15-v9-5/predictions` and `/diagnostics`).
 
-## Immediate next step (was mid-edit, NOT done)
-Show the market-implied prob next to each pick in the Telegram checkpoint message
-so the model-vs-market gap is visible at a glance, e.g.
-`🥇 BNB YES — 96% vs mkt 52% · grade A · NORMAL`. Edit `build_v95_message` in
-`q15_upgrade/checkpoint_v95.py` (the per-pick header line ~`{medal} {asset} {side} — {prob} …`),
-using `analysis["market_implied_yes_probability"]` for the selected side. Keep it
-short (the message was deliberately tightened) and update the degraded-message test
-if needed.
+## Immediate next step — DONE
+The checkpoint message now shows the market-implied prob next to each pick
+(`build_v95_message` in `q15_upgrade/checkpoint_v95.py`): the per-pick line reads
+e.g. `🥇 BNB YES — 71.2% vs mkt 51.5% · grade B · NORMAL`. It uses
+`market_implied_yes_probability` for the selected side (inverted for a NO pick) and
+omits the ` vs mkt …` annotation when there's no quote. Tests live in
+`tests/test_q15_v95.py` (`test_message_shows_market_implied_probability`,
+`test_message_omits_market_implied_when_no_quote`).
+
+## Next up
+Start the accuracy roadmap below at **#2 (volatility model)** — the biggest lever.
 
 ## Remaining roadmap (my earlier prioritized suggestions, highest leverage first)
 2. **Volatility model** — biggest accuracy lever at this horizon. Add intraday
