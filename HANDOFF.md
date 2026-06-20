@@ -8,7 +8,36 @@ freshness + honest accuracy measurement matter more than new model features.
 ⚠️ Fresh container: `pytest` and `websockets` are NOT preinstalled →
 `pip install pytest "websockets>=12.0" -q` first. The app-level tests also need
 `flask` (+ a working `cryptography`/`cffi`); without them those two files skip.
-Tests: `python3 -m pytest tests/ -q` → **464 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **486 passed, 4 skipped**.
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — alerts, UI, learning priority
+Four-part request — fewer/expiring alerts, consistent UI, richer prediction
+cards, and a 10-minute learning priority with per-interval metrics.
+1. **One alert per *material* verdict + auto-expiry** (`checkpoint_v95.py`). The
+   notification key now embeds the best pick's material state (coin/side/grade)
+   via `_material_token`, so an unchanged verdict is deduplicated and only a real
+   direction/confidence-band change (or an entry appearing/withdrawing, still via
+   the state machine) sends a replacement. `_decision_signature` keys on the
+   single best pick (not top-3). `_checkpoint_expired` auto-expires each interval
+   (15M at 10:00, 10M at 7:00, 7M at `Q15_V95_7M_EXPIRY_SECONDS`=120 before close)
+   so a 7-minute alert no longer lingers to market close.
+2. **Stability trend** (`_stability_marker`): each prediction is tagged stable /
+   strengthening / weakening / changed per (asset, checkpoint, window).
+3. **UI consistency** (`format_telegram_message`): the legacy v94 reformatter is
+   now disabled by default (`Q15_V95_LEGACY_FALLBACK_FORMAT`, default OFF) so no
+   message renders in the old layout; `V9.5 CHECK` + the canonical hourly report
+   still own their clean output.
+4. **Richer prediction cards** (`templates/index.html` + new `q15_v9_5_*`
+   snapshot keys): interval, side, grade (A high / B moderate / C low-developing),
+   confidence %, P(Yes)/P(No) (sum ~100%), timestamp, time-remaining, and the
+   stability trend; expired predictions dim.
+5. **10-minute learning priority** (`ledger_v95.py`): configurable primary sample
+   weight (`Q15_V95_PRIMARY_LEARNING_WEIGHT`=1.25), and per-interval metrics in
+   `scoreboard()` — precision/recall for Yes & No, FPR/FNR, by-confidence-grade,
+   and prediction-stability (change-rate) via new columns
+   (`confidence_grade`/`original_predicted_side`/`changed_before_close`) +
+   `note_prediction_revision`. 7M/15M keep collecting + grading; 10M just trains
+   heavier. Displayed confidence is unchanged — validate real lift OOS.
 
 ## ✅ Shipped (branch `claude/read-handoff-e79js5`) — review follow-ups (rating → ~8.5)
 Implemented the "how to raise the rating" list from the code review. Every
