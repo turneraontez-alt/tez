@@ -146,6 +146,19 @@ CHAMPION_WEIGHTS: dict[str, float] = {
 }
 
 
+class _PersistentConnection(sqlite3.Connection):
+    """SQLite connection whose ``close()`` is a no-op so a single connection can
+    be reused across the ledger's many ``with closing(self._connect())`` call
+    sites. Re-opening the file every call is expensive on Replit's networked
+    ``data/`` disk, and the ledger is read several times per asset per cycle
+    inside ``v95_analysis``; the connection lives for the process lifetime and
+    is serialized by the ledger's lock. ``with conn:`` transactions still
+    commit/roll back normally."""
+
+    def close(self) -> None:  # noqa: D401 - intentional no-op for connection reuse
+        pass
+
+
 class V95Ledger:
     """Atomic SQLite ledger with frozen champion and shadow challenger."""
 
@@ -153,6 +166,7 @@ class V95Ledger:
         self.path = Path(path or os.environ.get("Q15_V95_LEDGER_DB") or "data/q15_v95_ledger_v1.sqlite3")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._shared_connection: sqlite3.Connection | None = None
         primary = str(os.environ.get("Q15_V95_PRIMARY_LEARNING_CHECKPOINT", "10M")).strip().upper()
         self.primary_learning_checkpoint = primary if primary in {"10M", "15M"} else "10M"
         legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
@@ -206,12 +220,23 @@ class V95Ledger:
             self._last_error = f"{type(exc).__name__}: {exc}"
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15.0)
+        # Reuse one persistent connection (close() is a no-op) instead of opening
+        # the SQLite file on every call — file open is the dominant cost on
+        # Replit's networked disk and this method is hit several times per asset
+        # per cycle. Every call site serializes via self._lock.
+        connection = self._shared_connection
+        if connection is not None:
+            return connection
+        connection = sqlite3.connect(
+            self.path, timeout=15.0, check_same_thread=False,
+            factory=_PersistentConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=15000")
         connection.execute("PRAGMA foreign_keys=ON")
+        self._shared_connection = connection
         return connection
 
     def _initialize(self) -> None:
