@@ -213,6 +213,18 @@ class V95Ledger:
         self.minimum_regime_updates = _env_int("Q15_V95_REGIME_MIN_UPDATES", 30, 5, 5000)
         self._available = True
         self._last_error: str | None = None
+        # Behaviour-identical hot-path caches for the per-asset ledger reads that
+        # dominate run_cycle's `analyse` bucket but only change when results are
+        # resolved or challenger weights are written. Each entry stores the data
+        # version it was computed at; a monotonic counter is bumped on the only
+        # two mutations that matter (resolve_ticker / _apply_shadow_update), so a
+        # cache hit returns the identical fit/centroids/weights. Kill-switch:
+        # Q15_V95_LEDGER_CACHE=false reverts to recompute-every-call.
+        self._cache_enabled = _env_bool("Q15_V95_LEDGER_CACHE", True)
+        self._data_version = 0
+        self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
+        self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
         try:
             self._initialize()
         except Exception as exc:  # fail closed but keep monitor alive
@@ -379,28 +391,41 @@ class V95Ledger:
         checkpoint = self._checkpoint(checkpoint or self.primary_learning_checkpoint)
         if not self._available:
             return dict(CHAMPION_WEIGHTS)
-        with self._lock, closing(self._connect()) as connection:
-            if self.regime_learning_enabled and regime:
-                key = self._regime_key(regime)
-                regime_weights = {
-                    str(row["name"]): float(row["value"])
-                    for row in connection.execute(
-                        "SELECT name,value FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
-                        (checkpoint, key),
+        use_regime = bool(self.regime_learning_enabled and regime)
+        regime_key = self._regime_key(regime) if use_regime else None
+        cache_key = (checkpoint, regime_key)
+        with self._lock:
+            version = self._data_version
+            if self._cache_enabled:
+                cached = self._challenger_weights_cache.get(cache_key)
+                if cached is not None and cached[0] == version:
+                    return dict(cached[1])  # fresh copy: callers may treat it as owned
+            with closing(self._connect()) as connection:
+                result: dict[str, float] | None = None
+                if use_regime:
+                    regime_weights = {
+                        str(row["name"]): float(row["value"])
+                        for row in connection.execute(
+                            "SELECT name,value FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+                            (checkpoint, regime_key),
+                        )
+                    }
+                    maturity = connection.execute(
+                        "SELECT updates FROM regime_challenger_weights WHERE checkpoint=? AND regime=? AND name='intercept'",
+                        (checkpoint, regime_key),
+                    ).fetchone()
+                    if regime_weights and maturity is not None and int(maturity["updates"] or 0) >= self.minimum_regime_updates:
+                        result = regime_weights
+                if result is None:
+                    rows = connection.execute(
+                        "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=? ORDER BY name",
+                        (checkpoint,),
                     )
-                }
-                maturity = connection.execute(
-                    "SELECT updates FROM regime_challenger_weights WHERE checkpoint=? AND regime=? AND name='intercept'",
-                    (checkpoint, key),
-                ).fetchone()
-                if regime_weights and maturity is not None and int(maturity["updates"] or 0) >= self.minimum_regime_updates:
-                    return regime_weights
-            rows = connection.execute(
-                "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=? ORDER BY name",
-                (checkpoint,),
-            )
-            weights = {str(row["name"]): float(row["value"]) for row in rows}
-        return weights or dict(CHAMPION_WEIGHTS)
+                    weights = {str(row["name"]): float(row["value"]) for row in rows}
+                    result = weights or dict(CHAMPION_WEIGHTS)
+            if self._cache_enabled:
+                self._challenger_weights_cache[cache_key] = (version, dict(result))
+            return dict(result)
 
     def record_prediction(self, *, ticker: str, asset: str, checkpoint: str, created_at: float,
                           close_time: float | None, predicted_side: str, raw_yes_probability: float,
@@ -634,6 +659,9 @@ class V95Ledger:
                     "review": review,
                 })
             connection.commit()
+            if rows:
+                # Resolved rows changed -> invalidate calibrate/pattern caches.
+                self._data_version += 1
         learned = 0
         for row in rows:
             if self._apply_shadow_update(str(row["prediction_id"])):
@@ -727,6 +755,8 @@ class V95Ledger:
             )
             connection.execute("UPDATE predictions SET learning_applied=1 WHERE prediction_id=?", (prediction_id,))
             connection.commit()
+            # Challenger weights changed -> invalidate the challenger_weights cache.
+            self._data_version += 1
             return True
 
     def _update_regime_weights(self, connection: sqlite3.Connection, checkpoint: str, regime: Any,
@@ -775,42 +805,69 @@ class V95Ledger:
                 (next_value, grad_sq, now, checkpoint, key, name),
             )
 
+    def _pattern_centroids(self, checkpoint: str) -> dict[str, Any]:
+        """Cached winner/loser feature centroids for a checkpoint. The 500-row
+        fetch + per-row JSON parse is identical for every asset in a cycle and
+        unchanged until a resolution bumps the data version, so it is computed
+        once and reused. Returns {active, resolved} (insufficient) or
+        {active, resolved, winners, losers, winner, loser, names}."""
+        with self._lock:
+            version = self._data_version
+            if self._cache_enabled:
+                cached = self._pattern_centroid_cache.get(checkpoint)
+                if cached is not None and cached[0] == version:
+                    return cached[1]
+            with closing(self._connect()) as connection:
+                rows = list(connection.execute(
+                    "SELECT predicted_side,correct,data_quality,feature_json FROM predictions "
+                    "WHERE model_version=? AND checkpoint=? AND official_result IS NOT NULL "
+                    "ORDER BY resolved_at DESC LIMIT 500", (MODEL_VERSION, checkpoint),
+                ))
+        # Lock released; centroid build below is identical to the original.
+        winners = [row for row in rows if int(row["correct"] or 0) == 1]
+        losers = [row for row in rows if int(row["correct"] or 0) == 0]
+        if len(rows) < 10 or len(winners) < 3 or len(losers) < 3:
+            result: dict[str, Any] = {"active": False, "resolved": len(rows)}
+        else:
+            names = [name for name in CHAMPION_WEIGHTS if name != "intercept"]
+            def centroid(selected: Sequence[sqlite3.Row]) -> dict[str, float]:
+                sums = {name: 0.0 for name in names}
+                weights = {name: 0.0 for name in names}
+                for row in selected:
+                    try:
+                        values = json.loads(str(row["feature_json"]))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    orientation = 1.0 if str(row["predicted_side"]).upper() == "YES" else -1.0
+                    quality = _clamp(float(row["data_quality"] or 0.0), 0.10, 1.0)
+                    for name in names:
+                        try:
+                            value = orientation * float(values.get(name, 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            continue
+                        sums[name] += value * quality
+                        weights[name] += quality
+                return {name: sums[name] / weights[name] if weights[name] else 0.0 for name in names}
+            result = {"active": True, "resolved": len(rows), "winners": len(winners), "losers": len(losers),
+                      "winner": centroid(winners), "loser": centroid(losers), "names": names}
+        if self._cache_enabled:
+            with self._lock:
+                if self._data_version == version:
+                    self._pattern_centroid_cache[checkpoint] = (version, result)
+        return result
+
     def pattern_similarity(self, features: Mapping[str, float], provisional_side: str, checkpoint: str = "10M") -> dict[str, Any]:
         """Checkpoint-specific winner/loser similarity; diagnostic at 10 rows and shadow-only at 30."""
         if not self._available:
             return {"active": False, "reason": "ledger_unavailable", "shadow_adjustment": 0.0}
         checkpoint = self._checkpoint(checkpoint)
-        with self._lock, closing(self._connect()) as connection:
-            rows = list(connection.execute(
-                "SELECT predicted_side,correct,data_quality,feature_json FROM predictions "
-                "WHERE model_version=? AND checkpoint=? AND official_result IS NOT NULL "
-                "ORDER BY resolved_at DESC LIMIT 500", (MODEL_VERSION, checkpoint),
-            ))
-        winners = [row for row in rows if int(row["correct"] or 0) == 1]
-        losers = [row for row in rows if int(row["correct"] or 0) == 0]
-        if len(rows) < 10 or len(winners) < 3 or len(losers) < 3:
-            return {"active": False, "reason": "need_10_resolved_with_3_winners_and_3_losers", "resolved": len(rows), "shadow_adjustment": 0.0}
-        names = [name for name in CHAMPION_WEIGHTS if name != "intercept"]
-        def centroid(selected: Sequence[sqlite3.Row]) -> dict[str, float]:
-            sums = {name: 0.0 for name in names}
-            weights = {name: 0.0 for name in names}
-            for row in selected:
-                try:
-                    values = json.loads(str(row["feature_json"]))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                orientation = 1.0 if str(row["predicted_side"]).upper() == "YES" else -1.0
-                quality = _clamp(float(row["data_quality"] or 0.0), 0.10, 1.0)
-                for name in names:
-                    try:
-                        value = orientation * float(values.get(name, 0.0) or 0.0)
-                    except (TypeError, ValueError):
-                        continue
-                    sums[name] += value * quality
-                    weights[name] += quality
-            return {name: sums[name] / weights[name] if weights[name] else 0.0 for name in names}
-        winner = centroid(winners)
-        loser = centroid(losers)
+        centroids = self._pattern_centroids(checkpoint)
+        if not centroids["active"]:
+            return {"active": False, "reason": "need_10_resolved_with_3_winners_and_3_losers", "resolved": centroids["resolved"], "shadow_adjustment": 0.0}
+        names = centroids["names"]
+        winner = centroids["winner"]
+        loser = centroids["loser"]
+        resolved = centroids["resolved"]
         orientation = 1.0 if str(provisional_side).upper() == "YES" else -1.0
         current = {name: orientation * float(features.get(name, 0.0) or 0.0) for name in names}
         def cosine(a: Mapping[str, float], b: Mapping[str, float]) -> float:
@@ -821,68 +878,101 @@ class V95Ledger:
         win_similarity = cosine(current, winner)
         loss_similarity = cosine(current, loser)
         diagnostic = _clamp(win_similarity - loss_similarity, -1.0, 1.0)
-        shadow_adjustment = _clamp(diagnostic * 0.03, -0.03, 0.03) if len(rows) >= 30 else 0.0
+        shadow_adjustment = _clamp(diagnostic * 0.03, -0.03, 0.03) if resolved >= 30 else 0.0
         return {
-            "active": True, "resolved": len(rows), "winners": len(winners), "losers": len(losers),
+            "active": True, "resolved": resolved, "winners": centroids["winners"], "losers": centroids["losers"],
             "winner_similarity": win_similarity, "loser_similarity": loss_similarity,
             "diagnostic_score": diagnostic, "shadow_adjustment": shadow_adjustment,
-            "production_adjustment": 0.0, "shadow_influence_active": len(rows) >= 30,
+            "production_adjustment": 0.0, "shadow_influence_active": resolved >= 30,
             "checkpoint": checkpoint,
         }
 
     def calibrate(self, raw_probability: float, checkpoint: str, asset: str | None = None) -> dict[str, Any]:
-        """Regularized Platt calibration fitted only to resolved current-version rows."""
+        """Regularized Platt calibration fitted only to resolved current-version rows.
+
+        The expensive Platt fit (intercept/slope) depends solely on the resolved-
+        row set for (checkpoint, asset); only the cheap final transform uses
+        ``raw_probability``. The fit is cached via ``_calibration_fit`` and reused
+        across assets/cycles until a resolution bumps the data version.
+        """
         raw = _clamp(raw_probability, 0.01, 0.99)
         if not self._available:
             return {"probability": raw, "active": False, "reason": "ledger_unavailable", "rows": 0}
         checkpoint = str(checkpoint).upper()
-        with self._lock, closing(self._connect()) as connection:
-            asset_rows: list[sqlite3.Row] = []
-            if asset:
-                asset_rows = list(connection.execute(
-                    "SELECT raw_yes_probability,official_result FROM predictions WHERE model_version=? AND checkpoint=? AND asset=? AND official_result IS NOT NULL ORDER BY resolved_at DESC LIMIT 1000",
-                    (MODEL_VERSION, checkpoint, str(asset).upper()),
-                ))
-            rows = asset_rows if len(asset_rows) >= self.minimum_calibration_rows else list(connection.execute(
-                "SELECT raw_yes_probability,official_result FROM predictions WHERE model_version=? AND checkpoint=? AND official_result IS NOT NULL ORDER BY resolved_at DESC LIMIT 2500",
-                (MODEL_VERSION, checkpoint),
-            ))
-        if len(rows) < self.minimum_calibration_rows:
-            return {"probability": raw, "active": False, "reason": "insufficient_resolved_rows", "rows": len(rows)}
-        # Penalized logistic regression y ~ intercept + slope*logit(raw_p).
-        intercept, slope = 0.0, 1.0
-        for _ in range(12):
-            g0 = -0.20 * intercept
-            g1 = -0.20 * (slope - 1.0)
-            h00 = 0.20
-            h01 = 0.0
-            h11 = 0.20
-            for row in rows:
-                x = _clamp(_logit(float(row["raw_yes_probability"])), -4.0, 4.0)
-                y = 1.0 if row["official_result"] == "YES" else 0.0
-                p = _sigmoid(intercept + slope * x)
-                residual = y - p
-                variance = max(1e-6, p * (1.0 - p))
-                g0 += residual
-                g1 += residual * x
-                h00 += variance
-                h01 += variance * x
-                h11 += variance * x * x
-            determinant = h00 * h11 - h01 * h01
-            if determinant <= 1e-9:
-                break
-            d0 = (g0 * h11 - g1 * h01) / determinant
-            d1 = (g1 * h00 - g0 * h01) / determinant
-            intercept = _clamp(intercept + d0, -0.75, 0.75)
-            slope = _clamp(slope + d1, 0.50, 1.50)
-            if abs(d0) + abs(d1) < 1e-6:
-                break
-        calibrated = _clamp(_sigmoid(intercept + slope * _logit(raw)), 0.01, 0.99)
+        fit = self._calibration_fit(checkpoint, asset)
+        if not fit["active"]:
+            return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
+        calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
         return {
             "probability": calibrated, "active": True, "reason": "platt_current_version",
-            "rows": len(rows), "intercept": intercept, "slope": slope,
-            "scope": "asset" if asset_rows and len(asset_rows) >= self.minimum_calibration_rows else "checkpoint",
+            "rows": fit["rows"], "intercept": fit["intercept"], "slope": fit["slope"],
+            "scope": fit["scope"],
         }
+
+    def _calibration_fit(self, checkpoint: str, asset: str | None) -> dict[str, Any]:
+        """Cached Platt fit for (checkpoint, asset). Pure function of the resolved
+        rows; invalidated by the data version. Returns {active, reason, rows} and,
+        when active, {intercept, slope, scope}. The Newton solve runs outside the
+        lock (as the original did), so heavy compute never blocks other readers."""
+        cache_key = (checkpoint, str(asset).upper() if asset else None)
+        with self._lock:
+            version = self._data_version
+            if self._cache_enabled:
+                cached = self._calibration_fit_cache.get(cache_key)
+                if cached is not None and cached[0] == version:
+                    return cached[1]
+            with closing(self._connect()) as connection:
+                asset_rows: list[sqlite3.Row] = []
+                if asset:
+                    asset_rows = list(connection.execute(
+                        "SELECT raw_yes_probability,official_result FROM predictions WHERE model_version=? AND checkpoint=? AND asset=? AND official_result IS NOT NULL ORDER BY resolved_at DESC LIMIT 1000",
+                        (MODEL_VERSION, checkpoint, str(asset).upper()),
+                    ))
+                rows = asset_rows if len(asset_rows) >= self.minimum_calibration_rows else list(connection.execute(
+                    "SELECT raw_yes_probability,official_result FROM predictions WHERE model_version=? AND checkpoint=? AND official_result IS NOT NULL ORDER BY resolved_at DESC LIMIT 2500",
+                    (MODEL_VERSION, checkpoint),
+                ))
+                scope = "asset" if asset_rows and len(asset_rows) >= self.minimum_calibration_rows else "checkpoint"
+        # Lock released; the Platt solve below is identical to the original.
+        if len(rows) < self.minimum_calibration_rows:
+            fit: dict[str, Any] = {"active": False, "reason": "insufficient_resolved_rows", "rows": len(rows)}
+        else:
+            # Penalized logistic regression y ~ intercept + slope*logit(raw_p).
+            intercept, slope = 0.0, 1.0
+            for _ in range(12):
+                g0 = -0.20 * intercept
+                g1 = -0.20 * (slope - 1.0)
+                h00 = 0.20
+                h01 = 0.0
+                h11 = 0.20
+                for row in rows:
+                    x = _clamp(_logit(float(row["raw_yes_probability"])), -4.0, 4.0)
+                    y = 1.0 if row["official_result"] == "YES" else 0.0
+                    p = _sigmoid(intercept + slope * x)
+                    residual = y - p
+                    variance = max(1e-6, p * (1.0 - p))
+                    g0 += residual
+                    g1 += residual * x
+                    h00 += variance
+                    h01 += variance * x
+                    h11 += variance * x * x
+                determinant = h00 * h11 - h01 * h01
+                if determinant <= 1e-9:
+                    break
+                d0 = (g0 * h11 - g1 * h01) / determinant
+                d1 = (g1 * h00 - g0 * h01) / determinant
+                intercept = _clamp(intercept + d0, -0.75, 0.75)
+                slope = _clamp(slope + d1, 0.50, 1.50)
+                if abs(d0) + abs(d1) < 1e-6:
+                    break
+            fit = {"active": True, "reason": "platt_current_version", "rows": len(rows),
+                   "intercept": intercept, "slope": slope, "scope": scope}
+        if self._cache_enabled:
+            with self._lock:
+                # Only cache if no resolution landed during the (unlocked) solve.
+                if self._data_version == version:
+                    self._calibration_fit_cache[cache_key] = (version, fit)
+        return fit
 
     @staticmethod
     def _win_loss(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:

@@ -89,12 +89,13 @@ def _build_candles(
 ) -> list[dict[str, float]]:
     """Canonical candle build for the v9.5 layer.
 
-    Behaviour-identical to the frozen ``_canonical_candles``; when
-    ``Q15_FAST_CANONICAL_CANDLES`` is set it uses the optimised equivalent that
-    skips redundant per-row alias resolution on the cached history.  Default OFF,
-    so production behaviour is unchanged until the flag is flipped and A/B'd.
+    Behaviour-identical to the frozen ``_canonical_candles`` (fuzz-locked in
+    tests/test_q15_fast_canonical_candles.py); it uses the optimised equivalent
+    that skips redundant per-row alias resolution on the cached history. Now
+    default ON — set ``Q15_FAST_CANONICAL_CANDLES=false`` to revert to the frozen
+    builder.
     """
-    if _env_bool("Q15_FAST_CANONICAL_CANDLES", False):
+    if _env_bool("Q15_FAST_CANONICAL_CANDLES", True):
         return fast_canonical_candles(snapshot, cached)
     return _canonical_candles(snapshot, cached)
 
