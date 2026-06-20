@@ -47,6 +47,7 @@ from .checkpoint_v94_unified import (
     _yes_is_higher,
     format_telegram_message as _format_v94_message,
 )
+from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,
     FEATURE_SCHEMA_VERSION,
@@ -80,6 +81,22 @@ def _env_float(name: str, default: float, low: float, high: float) -> float:
     if not math.isfinite(value):
         value = default
     return max(low, min(high, value))
+
+
+def _build_candles(
+    snapshot: Mapping[str, Any],
+    cached: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, float]]:
+    """Canonical candle build for the v9.5 layer.
+
+    Behaviour-identical to the frozen ``_canonical_candles``; when
+    ``Q15_FAST_CANONICAL_CANDLES`` is set it uses the optimised equivalent that
+    skips redundant per-row alias resolution on the cached history.  Default OFF,
+    so production behaviour is unchanged until the flag is flipped and A/B'd.
+    """
+    if _env_bool("Q15_FAST_CANONICAL_CANDLES", False):
+        return fast_canonical_candles(snapshot, cached)
+    return _canonical_candles(snapshot, cached)
 
 
 def _num(value: Any, default: float | None = None) -> float | None:
@@ -188,7 +205,7 @@ def build_canonical_snapshot(
     context: Mapping[str, Any] | None,
     public: Mapping[str, Any] | None,
 ) -> CanonicalSnapshot:
-    candles = _canonical_candles(snapshot, cached_candles)
+    candles = _build_candles(snapshot, cached_candles)
     public_data = copy.deepcopy(dict(public or {}))
     snapshot_spot = _spot(snapshot, candles)
     public_spot = _num(public_data.get("composite_price"))
@@ -1001,7 +1018,7 @@ def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]
         stats["assets"] += 1
         try:
             cached = policy._candles(asset) if hasattr(policy, "_candles") else []
-            candles = _canonical_candles(row, cached)
+            candles = _build_candles(row, cached)
             if candles:
                 # Flat float candle dicts: dict() copies are equivalent to
                 # deepcopy but cheaper.
