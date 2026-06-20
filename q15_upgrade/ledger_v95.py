@@ -1192,6 +1192,18 @@ class V95Ledger:
             label: self._win_loss([r for r in rows if self._rank_bucket(r) == label])
             for label in ("1", "2", "3", "other")
         }
+        # Rank record split by interval — "how the #1/#2/#3 pick fares within each
+        # checkpoint", so e.g. the 10M top pick can be judged on its own merits
+        # rather than blended across all intervals.
+        rank_by_checkpoint = {
+            cp: {
+                label: self._win_loss(
+                    [r for r in rows if r["checkpoint"] == cp and self._rank_bucket(r) == label]
+                )
+                for label in ("1", "2", "3")
+            }
+            for cp in TRACKED_CHECKPOINTS
+        }
         assets = sorted({str(r["asset"]) for r in rows})
         by_asset = {a: self._win_loss([r for r in rows if str(r["asset"]) == a]) for a in assets}
         # How the top pick (#1) fares per coin — "which coins the #1 pick wins on".
@@ -1202,7 +1214,8 @@ class V95Ledger:
         }
         return {
             "overall": self._win_loss(rows), "by_checkpoint": by_checkpoint,
-            "by_rank": by_rank, "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
+            "by_rank": by_rank, "rank_by_checkpoint": rank_by_checkpoint,
+            "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
             "by_manipulation": self._by_manipulation(rows),
         }
 

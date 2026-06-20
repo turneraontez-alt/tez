@@ -63,6 +63,14 @@ class TestLedgerScoreboard(unittest.TestCase):
         self.assertEqual(_core(sb["by_rank"]["1"]), {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
         self.assertEqual(sb["by_rank"]["2"]["right"], 1)
         self.assertEqual(sb["by_rank"]["3"]["wrong"], 1)
+        # Rank record separated by interval: the all-interval #1 blends 15M (right)
+        # + 10M (wrong) into 1-1, but per-interval keeps them distinct.
+        rbc = sb["rank_by_checkpoint"]
+        self.assertEqual(_core(rbc["15M"]["1"]), {"right": 1, "wrong": 0, "n": 1, "accuracy": 1.0})
+        self.assertEqual(_core(rbc["10M"]["1"]), {"right": 0, "wrong": 1, "n": 1, "accuracy": 0.0})
+        self.assertEqual(rbc["7M"]["2"]["right"], 1)
+        self.assertEqual(rbc["7M"]["3"]["wrong"], 1)
+        self.assertEqual(rbc["10M"]["2"]["n"], 0)  # no 10M #2 settled
 
     def test_scoreboard_breaks_down_by_asset(self):
         led = _mk_ledger()
@@ -153,6 +161,13 @@ class TestHourlyReportScoreboard(unittest.TestCase):
                 "3": {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5},
                 "other": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
             },
+            "rank_by_checkpoint": {
+                "10M": {
+                    "1": {"right": 2, "wrong": 0, "n": 2, "accuracy": 1.0},
+                    "2": {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5},
+                    "3": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
+                },
+            },
         }
         sb["overall"]["accuracy"] = 0.625
         text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
@@ -165,6 +180,26 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertIn("7M", text)
         self.assertIn("#1 pick", text)
         self.assertIn("67%", text)
+        # New: a 10M-specific rank section with its own header and the 10M #1 record.
+        self.assertIn("10M RANK PERFORMANCE", text)
+        rank_block = text.split("10M RANK PERFORMANCE", 1)[1]
+        self.assertIn("100%", rank_block)  # 10M #1 went 2-0
+        self.assertIn("2-0", rank_block)
+
+    def test_ten_minute_rank_section_shows_placeholders_before_settling(self):
+        # The 10M rank section is always visible (0-0 rows) so the user sees it is
+        # tracked even before any 10M pick has settled.
+        sb = {
+            "available": True,
+            "overall": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667},
+            "by_checkpoint": {"15M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+        text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
+        self.assertIn("10M RANK PERFORMANCE", text)
+        rank_block = text.split("10M RANK PERFORMANCE", 1)[1]
+        self.assertIn("#1 pick", rank_block)
+        self.assertIn("0-0", rank_block)
 
     def test_all_three_checkpoints_shown_even_when_empty(self):
         # 15M has settled rows; 10M/7M have none yet. All three must still appear

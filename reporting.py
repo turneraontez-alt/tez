@@ -98,23 +98,30 @@ class HourlyReporter:
         pnl_s = f" · P/L {pnl:+.0f}¢" if (isinstance(pnl, (int, float)) and overall.get("pnl_n")) else ""
         headline = f"Settled {overall['n']} · {acc_s} right{pnl_s}"
 
-        by_cp, by_rank, by_asset = sb.get("by_checkpoint", {}), sb.get("by_rank", {}), sb.get("by_asset", {})
+        by_cp, by_asset = sb.get("by_checkpoint", {}), sb.get("by_asset", {})
+        # Rank record for the primary (10M) interval on its own — the #1/#2/#3 pick
+        # judged within 10M rather than blended across every interval.
+        rank_10m = (sb.get("rank_by_checkpoint", {}) or {}).get("10M", {})
+        # Each group is (optional section header, rows). placeholder=True keeps the
+        # 10M rank rows visible (0-0 — —) before they settle.
         groups = [
-            [self._sb_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")],
-            [self._sb_row(f"#{k} pick", by_rank.get(k)) for k in ("1", "2", "3")],
-            [self._sb_row(a, d) for a, d in sorted(
+            (None, [self._sb_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")]),
+            ("10M RANK PERFORMANCE", [self._sb_row(f"#{k} pick", rank_10m.get(k), placeholder=True) for k in ("1", "2", "3")]),
+            (None, [self._sb_row(a, d) for a, d in sorted(
                 ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
-                key=lambda kv: kv[1]["n"], reverse=True)[:5]],
+                key=lambda kv: kv[1]["n"], reverse=True)[:5]]),
         ]
         body = [f"{'':<8}{'W-L':>5}{'Acc':>6}{'P/L':>7}"]
-        for group in groups:
+        for header, group in groups:
             rows = [r for r in group if r]
             if rows:
                 body.append("")
+                if header:
+                    body.append(header)
                 body.extend(rows)
         table = ["<b>Track record</b> (paper, after fees)", "<pre>", *body, "</pre>"]
         # Only mention the footnote if some bucket is actually flagged thin.
-        if any("*" in (r or "") for group in groups for r in group):
+        if any("*" in (r or "") for _header, group in groups for r in group):
             table.append("<i>* under 10 settled — not yet reliable</i>")
         return [headline, ""] + table + self._manipulation_lines(sb)
 
