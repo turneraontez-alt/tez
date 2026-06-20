@@ -1162,7 +1162,11 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
     any_entry = any(bool(row.get("entry_allowed")) for row in analyses.values())
     emoji = "✅" if any_entry else "👀"
     state = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
-    lines = [f"{emoji} <b>{checkpoint} V9.5 CHECK · {state}</b>"]
+    # The bold title stays OUTSIDE the box (suppression + reformatters key on the
+    # V9.5 CHECK / ENTRY RECOMMENDED / NO ENTRY YET markers here); everything else
+    # goes INSIDE one <pre> block so the whole card renders as a single panel.
+    header = f"{emoji} <b>{checkpoint} V9.5 CHECK · {state}</b>"
+    body: list[str] = []
 
     top = list(ranking[:3])
     available = [r for r in top if analyses.get(str(r["asset"]), {}).get("prediction_available")]
@@ -1180,22 +1184,24 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
         stab = a.get("stability")
         tag = f" · {stab}" if stab else ""
         if a.get("entry_allowed"):
-            lines.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · edge {_c(net, signed=True)}")
+            body.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · edge {_c(net, signed=True)}")
         elif net is not None:
             need = a.get("required_edge_cents")
-            lines.append(
+            body.append(
                 f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · "
                 f"edge {_c(net, signed=True)} (need {_c(need)}) — holding"
             )
         else:
-            lines.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · no executable edge — holding")
-        lines.append(f"P(Yes) {_pct0(a.get('yes_probability'))} · P(No) {_pct0(a.get('no_probability'))} · {checkpoint} interval")
+            body.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · no executable edge — holding")
+        body.append(f"P(Yes) {_pct0(a.get('yes_probability'))} · P(No) {_pct0(a.get('no_probability'))} · {checkpoint} interval")
     else:
-        lines.append("No prediction available this cycle")
+        body.append("No prediction available this cycle")
 
     # Aligned monospace table of the available picks (model vs market + edge).
     if available:
-        body = [f"{'':<6}{'Side':>5}{'P':>6}{'Mkt':>6}{'Edge':>7}"]
+        body.append("")
+        body.append("Top picks")
+        body.append(f"{'':<6}{'Side':>5}{'P':>6}{'Mkt':>6}{'Edge':>7}")
         for row in available:
             asset = str(row["asset"])
             a = analyses[asset]
@@ -1207,11 +1213,6 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             mkt = _pct0(market_for_side)
             edge = _c(a.get("net_edge_cents"), signed=True)
             body.append(f"{asset:<6}{side:>5}{prob:>6}{mkt:>6}{edge:>7}")
-        lines.append("")
-        lines.append("<b>Top picks</b>")
-        lines.append("<pre>")
-        lines.extend(body)
-        lines.append("</pre>")
 
     # Entry economics — only for live entries; the actionable detail.
     for row in available:
@@ -1219,7 +1220,7 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
         a = analyses[asset]
         if a.get("entry_allowed"):
             ask = _c((a.get("quote") or {}).get("ask_cents"))
-            lines.append(
+            body.append(
                 f"✅ {asset} entry — ask {ask} → max {_c(a.get('ideal_entry_cents'))} · "
                 f"edge {_c(a.get('net_edge_cents'), signed=True)}"
             )
@@ -1233,23 +1234,27 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
         ]
         flagged = [(asset, manip) for asset, manip in flagged if manip.get("suspected")]
         if flagged:
-            lines.append("")
-            lines.append("⚠ <b>Manipulation watch</b>")
+            body.append("")
+            body.append("⚠ Manipulation watch")
             for asset, manip in flagged:
-                lines.append(f"{asset}: {_manipulation_phrase(manip)}")
+                body.append(f"{asset}: {_manipulation_phrase(manip)}")
 
-    # Unavailable picks below the table so the aligned columns stay clean.
+    # Unavailable picks (kept in the box so the whole card is one panel).
     for row in unavailable:
         asset = str(row["asset"])
         a = analyses[asset]
-        lines.append(f"⛔ {asset} — no prediction ({_humanize_v95_reasons(a.get('main_blocker'))})")
+        body.append(f"⛔ {asset} — no prediction ({_humanize_v95_reasons(a.get('main_blocker'))})")
 
     if result_events:
         marks = "  ".join(f"{e.get('asset')} {'✅' if e.get('correct') else '❌'}" for e in result_events[:4])
-        lines.append(f"Recent results — {marks}")
-    lines.append("<i>Paper monitor · not advice · no orders placed</i>")
+        body.append(f"Recent results — {marks}")
+    body.append("")
+    body.append("Paper monitor · not advice · no orders placed")
+
+    # Header outside, the entire body inside one <pre> "panel".
+    lines = [header, "<pre>", *body, "</pre>"]
     text = "\n".join(lines)
-    return text if len(text) <= 4000 else text[:3990] + "…"
+    return text if len(text) <= 4000 else text[:3985] + "…\n</pre>"
 
 
 # Lower seconds-remaining boundary of each checkpoint band (mirrors
