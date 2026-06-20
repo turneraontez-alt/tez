@@ -226,3 +226,27 @@ class Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyCloseTimeClaim(unittest.TestCase):
+    def _settings(self):
+        return FocusSettings(min_vote_samples=3, checkpoint_15_seconds=885,
+            checkpoint_15_latest_seconds=720, checkpoint_10_seconds=600,
+            checkpoint_10_latest_seconds=480, alert_15_at_seconds=870, alert_10_at_seconds=585)
+
+    def test_missing_close_time_creates_no_empty_claim_or_alert(self):
+        m = TwoWindowFocusManager(Store(), Notifier(), None, Client(), self._settings())
+        s = snap(secs=400, close="")          # past every checkpoint time, but no close_time
+        m.update({"BTC": s}, time.time())
+        self.assertFalse(
+            any(k.endswith(":") for k in m._local_claims),
+            f"degenerate empty-suffix claim keys were created: {m._local_claims}",
+        )
+        self.assertEqual(m.notifier.messages, [])   # nothing delivered for an unidentifiable market
+
+    def test_valid_close_time_still_claims_and_alerts(self):
+        m = TwoWindowFocusManager(Store(), Notifier(), None, Client(), self._settings())
+        s = snap(secs=400, close="2026-06-19T00:00:00+00:00")
+        m.update({"BTC": s}, time.time())
+        self.assertTrue(any(k == "q15-two-window:7m:2026-06-19T00:00:00+00:00" for k in m._local_claims))
+        self.assertTrue(m.notifier.messages)        # the 7m checkpoint alert fired
