@@ -813,6 +813,37 @@ def _fmt_cents(value: Any, signed: bool = False) -> str:
     return f"{parsed:+.2f}¢" if signed else f"{parsed:.2f}¢"
 
 
+# Plain-language labels for the canonical core-data failures, so a degraded
+# cycle explains itself instead of rendering a wall of "n/a".
+_V95_REASON_LABELS = {
+    "missing_or_invalid_spot": "underlying spot price unavailable",
+    "missing_or_invalid_threshold": "strike/threshold not set yet",
+    "missing_time_remaining": "time-to-close unavailable",
+    "contract_closed": "market already closed",
+    "stale_core_snapshot": "core market data is stale",
+    "stale_candle_cache": "candle history is stale",
+    "executable_ask_unavailable": "no executable ask quote",
+    "ledger_unavailable": "calibration ledger unavailable",
+}
+
+
+def _humanize_v95_reasons(blocker: Any) -> str:
+    tokens = [token.strip() for token in str(blocker or "").split(",") if token.strip()]
+    if not tokens:
+        return "core market data was incomplete this cycle"
+    seen: list[str] = []
+    for token in tokens:
+        label = _V95_REASON_LABELS.get(token, token.replace("_", " ").strip())
+        if label and label not in seen:
+            seen.append(label)
+    return "; ".join(seen)
+
+
+def _fmt_alignment(value: Any) -> str:
+    parsed = _num(value)
+    return "n/a" if parsed is None else f"{parsed:.1f}"
+
+
 def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None) -> str:
     any_entry = any(bool(row.get("entry_allowed")) for row in analyses.values())
     header = f"{'✅' if any_entry else '👀'} {checkpoint} V9.5 CHECK — {'ENTRY RECOMMENDED' if any_entry else 'BEST PICKS, NO ENTRY YET'}"
@@ -826,6 +857,21 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
         asset = str(row["asset"])
         analysis = analyses[asset]
         canonical = analysis.get("canonical") or {}
+        medal = medals[index] if index < 3 else f"{index + 1}."
+        side = analysis.get("prediction_side") or "—"
+        alignment = _fmt_alignment(canonical.get("alignment_seconds"))
+        candle_count = len(canonical.get("candles") or [])
+        if not analysis.get("prediction_available"):
+            # No directional probability this cycle (invalid/missing core data).
+            # State the cause plainly rather than emitting a wall of "n/a".
+            lines.extend([
+                f"{medal} {asset} — NO PREDICTION (data unavailable)",
+                f"Why: {_humanize_v95_reasons(analysis.get('main_blocker'))}",
+                f"Data quality: {_fmt_probability(analysis.get('data_quality'))} | candles: {candle_count} | feed alignment: {alignment}s",
+                f"Decision: {analysis.get('trade_decision')}",
+                "",
+            ])
+            continue
         structural = analysis.get("structural") or {}
         quote = analysis.get("quote") or {}
         costs = analysis.get("costs") or {}
@@ -833,16 +879,16 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
         supporting = analysis.get("supporting_factors") or []
         opposing = analysis.get("opposing_factors") or []
         lines.extend([
-            f"{medals[index] if index < 3 else str(index + 1) + '.'} {asset} {analysis.get('prediction_side')}",
+            f"{medal} {asset} {side}",
             f"Probability — YES {_fmt_probability(analysis.get('yes_probability'))} | NO {_fmt_probability(analysis.get('no_probability'))}",
             f"Structural base: {_fmt_probability(structural.get('yes_probability'))} YES | conservative selected: {_fmt_probability(analysis.get('conservative_probability'))}",
             *([f"10M shadow challenger: {_fmt_probability(analysis.get('challenger_yes_probability'))} YES — evaluation only, not live"] if checkpoint == "10M" else []),
-            f"Confidence: {analysis.get('confidence_grade')} | data quality {_fmt_probability(analysis.get('data_quality'))} | evidence quality {_fmt_probability(analysis.get('evidence_quality'))}",
-            f"Regime: {regime.get('name', 'n/a')} | feed alignment: {canonical.get('alignment_seconds', 'n/a')}s | candles: {len(canonical.get('candles') or [])}",
+            f"Confidence: {analysis.get('confidence_grade') or 'n/a'} | data quality {_fmt_probability(analysis.get('data_quality'))} | evidence quality {_fmt_probability(analysis.get('evidence_quality'))}",
+            f"Regime: {regime.get('name', 'n/a')} | feed alignment: {alignment}s | candles: {candle_count}",
             f"Supporting: {', '.join(item['name'] for item in supporting) if supporting else 'none measured'}",
             f"Opposing: {', '.join(item['name'] for item in opposing) if opposing else 'none measured'}",
             "EXECUTABLE VALUE",
-            f"{analysis.get('prediction_side')} ask: {_fmt_cents(quote.get('ask_cents'))} | spread: {_fmt_cents(quote.get('spread_cents'))} | costs: {_fmt_cents(costs.get('total_cents') if 'total_cents' in costs else costs.get('total_cost_cents'))}",
+            f"{side} ask: {_fmt_cents(quote.get('ask_cents'))} | spread: {_fmt_cents(quote.get('spread_cents'))} | costs: {_fmt_cents(costs.get('total_cents') if 'total_cents' in costs else costs.get('total_cost_cents'))}",
             f"Conservative net edge: {_fmt_cents(analysis.get('net_edge_cents'), signed=True)} | required: {_fmt_cents(analysis.get('required_edge_cents'))}",
             f"Ideal maximum entry: {_fmt_cents(analysis.get('ideal_entry_cents'))}",
             f"Decision: {analysis.get('trade_decision')} | blocker: {analysis.get('main_blocker') or 'none'}",
