@@ -392,6 +392,29 @@ class V95Tests(unittest.TestCase):
         self.assertIn("grade", message)              # confidence grade shown
         self.assertNotIn("Three requirements", message)
 
+    def test_message_shows_market_implied_probability(self):
+        # ask=52 -> yes mid 51.5 -> market-implied YES ~ 0.515; the pick is YES,
+        # so the checkpoint line shows the model prob next to "vs mkt 51.5%".
+        row = snapshot(ask=52.0)
+        result = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertEqual(result["prediction_side"], "YES")
+        analyses = {"BNB": result}
+        message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
+        self.assertIn("vs mkt 51.5%", message)
+
+    def test_message_omits_market_implied_when_no_quote(self):
+        # With no Kalshi quote the market-implied prob is None, so the "vs mkt"
+        # annotation is dropped rather than rendering a noisy "vs mkt n/a".
+        row = snapshot(ask=52.0)
+        for key in ("yes_bid", "yes_ask", "no_bid", "no_ask"):
+            row.pop(key, None)
+        result = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNone(result["market_implied_yes_probability"])
+        analyses = {"BNB": result}
+        message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
+        self.assertNotIn("vs mkt", message)
+        self.assertIn("BNB", message)
+
     def test_read_only_markers(self):
         row = snapshot()
         result = analyse_v95(row, self.canonical(row=row), self.ledger)

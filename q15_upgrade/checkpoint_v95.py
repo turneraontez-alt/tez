@@ -933,10 +933,15 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             continue
         regime = (analysis.get("regime") or {}).get("name") or "—"
         prob = _fmt_probability(analysis.get("selected_probability"))
+        # Market-implied prob for the selected side (invert the YES-implied for a
+        # NO pick) so the model-vs-market gap shows at a glance; omit if no quote.
+        market_yes = _num(analysis.get("market_implied_yes_probability"))
+        market_for_side = None if market_yes is None else (market_yes if side == "YES" else 1.0 - market_yes)
+        mkt = "" if market_for_side is None else f" vs mkt {_fmt_probability(market_for_side)}"
         grade = analysis.get("confidence_grade") or "—"
         ask = _c((analysis.get("quote") or {}).get("ask_cents"))
         net = analysis.get("net_edge_cents")
-        lines.append(f"{medal} <b>{asset} {side}</b> — {prob} · grade {grade} · {regime}")
+        lines.append(f"{medal} <b>{asset} {side}</b> — {prob}{mkt} · grade {grade} · {regime}")
         if analysis.get("entry_allowed"):
             lines.append(f"   ✅ ENTRY · edge {_c(net, signed=True)} · ask {ask} → max {_c(analysis.get('ideal_entry_cents'))}")
         else:
