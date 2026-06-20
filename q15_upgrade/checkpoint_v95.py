@@ -564,6 +564,45 @@ def _kalshi_depth(snapshot: Mapping[str, Any], side: str) -> float | None:
     return None
 
 
+def _market_implied_yes(snapshot: Mapping[str, Any]) -> float | None:
+    """Market-implied P(YES) from the Kalshi quote (a YES price in cents is the
+    market's probability estimate). Uses the YES mid, falling back to the NO mid."""
+    def _mid(bid_key: str, ask_key: str) -> float | None:
+        cents = [c for c in (_num(snapshot.get(bid_key)), _num(snapshot.get(ask_key)))
+                 if c is not None and 0.0 <= c <= 100.0]
+        return (sum(cents) / len(cents)) if cents else None
+
+    yes_mid = _mid("yes_bid", "yes_ask")
+    if yes_mid is not None:
+        return _clamp(yes_mid / 100.0, 0.01, 0.99)
+    no_mid = _mid("no_bid", "no_ask")
+    if no_mid is not None:
+        return _clamp(1.0 - no_mid / 100.0, 0.01, 0.99)
+    return None
+
+
+def _market_anchored_probability(model_yes: float, market_yes: float | None,
+                                 data_quality: float, evidence_quality: float,
+                                 strength: float) -> tuple[float, dict[str, Any]]:
+    """Shrink the model probability toward the market-implied probability.
+
+    At these horizons the Kalshi market is an efficient predictor, so an
+    independent model should only deviate from it in proportion to its own
+    confidence: model_trust = data_quality x evidence_quality x strength. With
+    no quote (or strength 0) the model is used unchanged."""
+    model_yes = _clamp(model_yes, 0.01, 0.99)
+    if market_yes is None or strength <= 0.0:
+        return model_yes, {"applied": False,
+                           "reason": "no_market_quote" if market_yes is None else "disabled"}
+    market_yes = _clamp(market_yes, 0.01, 0.99)
+    trust = _clamp(data_quality * evidence_quality * strength, 0.0, 1.0)
+    anchored = _clamp(_sigmoid(_logit(market_yes) + trust * (_logit(model_yes) - _logit(market_yes))), 0.01, 0.99)
+    return anchored, {
+        "applied": True, "market_yes": round(market_yes, 4), "model_yes": round(model_yes, 4),
+        "model_trust": round(trust, 4), "anchored_yes": round(anchored, 4), "strength": strength,
+    }
+
+
 def analyse_v95(
     snapshot: Mapping[str, Any],
     canonical: CanonicalSnapshot,
@@ -621,13 +660,22 @@ def analyse_v95(
     calibration = ledger.calibrate(raw_yes, canonical.checkpoint, canonical.asset) if ledger else {"probability": raw_yes, "active": False, "reason": "ledger_unavailable"}
     shadow_calibrated_yes = _clamp(float(calibration["probability"]), 0.01, 0.99)
     production_calibration_enabled = _env_bool("Q15_V95_PRODUCTION_CALIBRATION_ENABLED", False)
-    calibrated_yes = shadow_calibrated_yes if production_calibration_enabled and calibration.get("active") else raw_yes
+    model_yes = shadow_calibrated_yes if production_calibration_enabled and calibration.get("active") else raw_yes
+    # Market-price anchoring: defer to the (efficient) Kalshi market unless the
+    # model has earned the confidence to deviate. This is the bot's working prob.
+    market_implied_yes = _market_implied_yes(snapshot)
+    anchor_strength = _env_float("Q15_V95_MARKET_ANCHOR_STRENGTH", 1.0, 0.0, 1.0)
+    calibrated_yes, market_anchor = _market_anchored_probability(
+        model_yes, market_implied_yes, data_quality, evidence_quality, anchor_strength
+    )
     challenger_weights = ledger.challenger_weights(canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _model_probability(structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
     pattern = ledger.pattern_similarity(feature_values, provisional_side, canonical.checkpoint) if ledger else {"active": False, "shadow_adjustment": 0.0}
     shadow_pattern_adjustment = float(pattern.get("shadow_adjustment") or 0.0)
     challenger_yes = _clamp(challenger_yes + (shadow_pattern_adjustment if provisional_side == "YES" else -shadow_pattern_adjustment), 0.01, 0.99)
+    # Anchor the challenger identically so champion-vs-challenger compares weights, not anchoring.
+    challenger_yes, _ = _market_anchored_probability(challenger_yes, market_implied_yes, data_quality, evidence_quality, anchor_strength)
     side = provisional_side
     selected = calibrated_yes if side == "YES" else 1.0 - calibrated_yes
     uncertainty = 0.018 + (1.0 - data_quality) * 0.12 + float(regime.get("uncertainty", 0.08)) * 0.25
@@ -700,6 +748,9 @@ def analyse_v95(
         "yes_probability": calibrated_yes,
         "no_probability": 1.0 - calibrated_yes,
         "raw_yes_probability": raw_yes,
+        "model_yes_probability": model_yes,
+        "market_implied_yes_probability": market_implied_yes,
+        "market_anchor": market_anchor,
         "baseline_yes_probability": float(structural["yes_probability"]),
         "challenger_yes_probability": challenger_yes,
         "selected_probability": selected,
@@ -1210,7 +1261,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "canonical_snapshot": True, "timestamp_alignment": True,
             "runtime_binding": self._runtime_binding, "runtime_active": self._cycles > 0,
             "parent_input_bridge": copy.deepcopy(self._bridge_status),
-            "probability_separate_from_market_price": True,
+            "raw_model_signal_independent_of_price": True,
+            "market_anchor_strength": _env_float("Q15_V95_MARKET_ANCHOR_STRENGTH", 1.0, 0.0, 1.0),
             "production_weights_frozen": True, "shadow_challenger": True,
             "primary_learning_checkpoint": self.ledger.primary_learning_checkpoint,
             "learning_enabled_by_checkpoint": dict(self.ledger.learning_enabled_by_checkpoint),

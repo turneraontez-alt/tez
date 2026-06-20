@@ -176,13 +176,37 @@ class V95Tests(unittest.TestCase):
         self.assertLess(result["yes_probability"], 0.5)
         self.assertEqual(result["prediction_side"], "NO")
 
-    def test_kalshi_ask_does_not_change_probability(self):
+    def test_raw_model_signal_is_independent_of_kalshi_price(self):
+        # The model's own (raw) probability must not depend on the Kalshi price...
         low = snapshot(ask=25)
         high = snapshot(ask=85)
         a = analyse_v95(low, self.canonical(row=low), self.ledger)
         b = analyse_v95(high, self.canonical(row=high), self.ledger)
-        self.assertAlmostEqual(a["yes_probability"], b["yes_probability"], places=12)
+        self.assertAlmostEqual(a["raw_yes_probability"], b["raw_yes_probability"], places=12)
+        # ...but the final anchored probability now reflects the market price, and
+        # the edge still differs with the ask.
+        self.assertNotEqual(a["yes_probability"], b["yes_probability"])
         self.assertNotEqual(a["net_edge_cents"], b["net_edge_cents"])
+
+    def test_market_anchoring_shrinks_toward_market_price(self):
+        # Model is very bullish; a cheap YES (market ~ low) pulls the prob down.
+        row = snapshot(ask=20)   # yes mid ~ 19.5 -> market-implied YES ~ 0.195
+        result = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertTrue(result["market_anchor"]["applied"])
+        self.assertLess(result["yes_probability"], result["model_yes_probability"])
+        self.assertLessEqual(result["market_implied_yes_probability"], 0.25)
+
+    def test_anchoring_disabled_restores_pure_model(self):
+        os.environ["Q15_V95_MARKET_ANCHOR_STRENGTH"] = "0"
+        try:
+            low = snapshot(ask=25)
+            high = snapshot(ask=85)
+            a = analyse_v95(low, self.canonical(row=low), self.ledger)
+            b = analyse_v95(high, self.canonical(row=high), self.ledger)
+            self.assertAlmostEqual(a["yes_probability"], b["yes_probability"], places=12)
+            self.assertFalse(a["market_anchor"]["applied"])
+        finally:
+            os.environ.pop("Q15_V95_MARKET_ANCHOR_STRENGTH", None)
 
     def test_missing_optional_data_still_produces_prediction(self):
         row = snapshot(candle_rows=[])
