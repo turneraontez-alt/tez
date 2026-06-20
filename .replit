@@ -57,3 +57,4 @@ outputType = "console"
 
 [userenv.shared]
 KALSHI_WS_ENABLED = "true"
+Q15_SPOT_WS_ENABLED = "true"
