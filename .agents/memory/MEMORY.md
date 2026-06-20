@@ -1,0 +1,6 @@
+- [Non-JS artifact deployment](nonjs-artifact-deploy.md) — how to make a Python/Flask (or other non-JS) app deployable in the pnpm application-router workspace; createArtifact has no Python type.
+- [Deploy run command source](deploy-run-command-source.md) — deploy "cannot find run command" = no "Start application" workflow; create one (python3 app.py, port 8000) to source the deploy run command. Reserved VM, not Autoscale.
+- [Kalshi fix-pack installers](kalshi-fix-installers.md) — user ships fixes as one-paste Python installers; brittle exact-match edits can fail mid-run leaving a half-applied state; inspect zip + verify targets first.
+- [Kalshi entry quality & loss control](kalshi-entry-quality.md) — fair-prob model is overconfident; win-prob floor fixes losses; hard gates must override persistence grace, not just live in base_candidate.
+- [Kalshi alert-engine invariants](kalshi-alert-engine-invariants.md) — read-only engine; latch alert intent at decision, claim_event before every send (shared dev+prod DB+chat); SCALP rows stay out of the learning corpus.
+- [Kalshi WS integration contract](kalshi-ws-integration-contract.md) — future auth WS must own an isolated cache; refresh_loop stays the sole engine mutator; never auto-activate on secret presence.
