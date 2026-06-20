@@ -508,7 +508,11 @@ class CheckpointPolicyV91:
         notifier: Any,
     ) -> dict[str, dict]:
         """Run the checkpoint stage and defer its Telegram send until current-cycle economics exist."""
+        _ct = getattr(self, "_chain_timing", None)
+        _t0 = time.monotonic()
         prepared = self.pre_enrich_all(snapshots, now)
+        if isinstance(_ct, dict):
+            _ct["v91_pre_enrich"] = round(time.monotonic() - _t0, 3)
         captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         original_send = getattr(notifier, "send", None)
         patched = False
@@ -530,9 +534,18 @@ class CheckpointPolicyV91:
         completed = False
         result: dict[str, dict] = {}
         try:
+            _t = time.monotonic()
             focused = focus_manager.update(prepared, now, ws_health)
+            if isinstance(_ct, dict):
+                _ct["v91_focus_update"] = round(time.monotonic() - _t, 3)
+            _t = time.monotonic()
             enriched = calibrated_edge.enrich_all(focused, now, ws_health)
+            if isinstance(_ct, dict):
+                _ct["v91_calibrated_edge"] = round(time.monotonic() - _t, 3)
+            _t = time.monotonic()
             result = self.finalize_all(enriched, now)
+            if isinstance(_ct, dict):
+                _ct["v91_finalize_all"] = round(time.monotonic() - _t, 3)
             completed = True
             return result
         finally:

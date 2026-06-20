@@ -1515,9 +1515,12 @@ class CheckpointPolicyV94Unified(CheckpointPolicyV94):
         notifier: Any,
     ) -> dict[str, dict]:
         deferred = _BufferedNotifier(notifier)
+        self._chain_timing = {}
+        _t_super = time.monotonic()
         parent_output = super().run_cycle(
             snapshots, now, ws_health, focus_manager, calibrated_edge, deferred
         )
+        self._chain_timing["v94_super_chain"] = round(time.monotonic() - _t_super, 3)
         if not self.unified_enabled:
             sent, failed, suppressed = deferred.flush(None)
             self._telegram_sent += sent
@@ -1532,6 +1535,7 @@ class CheckpointPolicyV94Unified(CheckpointPolicyV94):
             )
             analyses: dict[str, dict[str, Any]] = {}
             output: dict[str, dict] = {}
+            _t_loop = time.monotonic()
             for asset_key, raw_snapshot in parent_output.items():
                 if not isinstance(raw_snapshot, Mapping):
                     continue
@@ -1578,6 +1582,7 @@ class CheckpointPolicyV94Unified(CheckpointPolicyV94):
                         analysis["prediction_id"] = prediction_id
                         analysis["new_unique_prediction_recorded"] = inserted
 
+            self._chain_timing["unified_loop"] = round(time.monotonic() - _t_loop, 3)
             ranking = rank_analyses(analyses)
             ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
             for asset_key, snapshot in output.items():
