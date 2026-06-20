@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from flask import Flask, render_template, jsonify
 
 from q15_upgrade.kalshi_rest import KalshiClient
+from market_cache import MarketResultCache
 from spot_client import get_spot
 from q15_upgrade.orderbook import parse_orderbook, OrderbookTracker
 from analysis import AssetEngine
@@ -59,6 +60,9 @@ DETAIL_INTERVAL = 5  # refresh market detail (volume) every N seconds
 FETCH_DEADLINE = 3.0  # max seconds a cycle waits on concurrent fetches
 
 client = KalshiClient()
+# Shared cache of immutable settled-market results. All settlement reconcilers
+# go through this so a resolved market is fetched from Kalshi once, not ~4x.
+market_cache = MarketResultCache(client)
 engines = {a: AssetEngine(a) for a in ASSETS}
 # Q15_V5_APP_HARDENING: parser and tracker now use the same schema.
 for _engine in engines.values():
@@ -79,12 +83,12 @@ learner = LearningEngine(store, config, notifier=notifier)  # Q15_V4_LEARNING_IN
 upgrade = Q15Runtime(config, learner)
 logger.info("Q15 settings active: %s", asdict(upgrade.settings))
 signal_engine = SignalEngine(config, store, notifier, learner)
-perf = PerformanceTracker(store, client)
+perf = PerformanceTracker(store, market_cache)
 scalp_engine = ScalpEngine(store, notifier, config)
 scalp_engine.learning_v2 = learner
 reporter = HourlyReporter(store, notifier, config, perf, learner, scalp_engine)
 
-focus_manager = TwoWindowFocusManager(store, notifier, config, client)
+focus_manager = TwoWindowFocusManager(store, notifier, config, market_cache)
 
 calibrated_edge = CalibratedEdgeEngine(store, notifier, config, learner)
 
@@ -95,7 +99,7 @@ checkpoint_v95 = CheckpointPolicyV95(store)
 reporter.v95_ledger = checkpoint_v95.ledger
 # Let the V9.5 ledger settle predictions directly from official Kalshi results,
 # not only via the signals table, so every prediction gets graded.
-checkpoint_v95.kalshi_client = client
+checkpoint_v95.kalshi_client = market_cache
 professional_v7 = ProfessionalV7Engine(store, notifier, config, learner)
 
 oos_v9 = OutOfSampleEvaluator(store)
@@ -439,7 +443,7 @@ def refresh_loop():
             _safe("report", reporter.maybe_send, now)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 _safe("perf", perf.reconcile, now)
-                _safe("learning_reconcile", learner.reconcile, now, client)
+                _safe("learning_reconcile", learner.reconcile, now, market_cache)
                 _safe("learner", learner.recompute, now)
                 _last_learn = now
             _last_cycle_ok = now
@@ -664,6 +668,11 @@ def q15_v95_decision_stats_ep():
 @app.route("/data/q15-v9-5/scoreboard")
 def q15_v95_scoreboard_ep():
     return jsonify(checkpoint_v95.scoreboard())
+
+@app.route("/api/market-cache")
+@app.route("/data/market-cache")
+def market_cache_ep():
+    return jsonify(market_cache.stats())
 
 @app.route("/api/q15-v9-4/diagnostics")
 def q15_v94_diagnostics_ep():
