@@ -6,56 +6,53 @@ and `SYNC.md` (Replit sync). Live app: `phone-dashboard.replit.app` (Reserved VM
 reliability + honest data freshness matter more than new model features.
 
 ## 🔴 Immediate next step (where we stopped)
-**Verify the `unified_loop` fix on the live Repl.** This session isolated and fixed
-the dominant stall; the only thing left is to confirm it on real hardware (the
-container can't reach `phone-dashboard.replit.app` — outbound is blocked here).
+**Cycle time is fixed; we're now fighting the last few seconds to clear the 3s
+data-age gate.** Connection-reuse + autocommit + a v91 round-trip cut are all
+shipped and **verified live**. The remaining decision is owner-facing (bottom).
 
-Diagnostic arc this session: 54s (PR #10) → ~18s residual → profiled `run_cycle`
-into sub-stages (`parent_chain` ~44s dominates) → profiled `parent_chain` into
-chain sub-stages (`unified_loop` ~33s dominates) → **fixed**: the 15M learner
-(`Adaptive15LearningStore`) opened a fresh SQLite connection on every
-`weights()` / `pattern_adjustment()` / `record_prediction()` call (~3 × 7 assets ×
-every cycle). On Replit's networked `data/` disk the file-open is the dominant
-cost. Now it reuses one persistent connection (`close()` no-op, `check_same_thread
-=False`, serialized by the existing `self._lock`). No query/value/model change.
+**VERIFIED LIVE (redeploy 08:32, ~74min uptime, steady-state):**
+- `run_cycle_timing.total` **~17.5s → 6.19s** ✅
+- `v95_analysis` **3.9s → 1.79s** ✅ (ledger conn-reuse)
+- `parent_chain` **12.6s → 3.98s** ✅
+- worst warmup cycle **75s → 6.9s** ✅ (no more cold-start freeze)
+- `data_age_seconds` **~38s → 7.41s** ⬇ — BUT still over the **3s** gate, so
+  `current_trade_decisions` is still `{AVOID_INVALID_DATA: 7}`.
 
-**Verified (redeploy 09:02):** the 15M-learner fix landed — `parent_chain` dropped
-~44s → **12.6s**, `unified_loop` folded into an 8s `v94_super_chain` bucket. BUT the
-cycle is still **~17.5s** (`run_cycle_timing.total`), so `data_age_seconds` ~38 stays
-over the 3s gate and `current_trade_decisions` is still `{AVOID_INVALID_DATA: 7}`.
-Remaining run_cycle buckets: `parent_chain` 12.6s (`v94_super_chain` 8.0s, `v91_pre_enrich`
-5.2s), `v95_analysis` 3.9s.
+Diagnostic arc: 54s (PR #10) → ~18s → profiled `run_cycle` → `parent_chain` →
+`unified_loop` (15M-learner SQLite file-opens) → connection-reuse everywhere →
+v91 round-trip cut. The dominant remaining cost is `parent_chain` (3.98s), most
+of which is **frozen v91 `pre_enrich`** Postgres round-trips.
 
-**Shipped this session (4 perf fixes, all behavior-preserving, 364 tests pass) —
-AWAITING REDEPLOY to measure:**
-1. **V9.5 ledger** (`ledger_v95.py`) — persistent SQLite connection (was the
-   `v95_analysis` ~3.9s SQLite-open cost; 15 call sites, all under `self._lock`).
+**Shipped (all behavior-preserving, 367 tests pass):**
+1. **V9.5 ledger** (`ledger_v95.py`) — persistent SQLite connection.
 2. **V9.4 context cache** (`checkpoint_v94.py`) — persistent SQLite connection +
-   new `self._cache_db_lock` guarding the 3 call sites (`_persist_candles` opened
-   the file per asset every cycle; mostly a warmup/restart cost since it only
-   writes *changed* candles and `_load_persistent_cache` is once-per-asset).
-3. **Telegram gate** (`checkpoint_v94_unified.py` `TelegramNotificationGate`) —
-   persistent SQLite connection (all sites under `self._lock`, `BEGIN IMMEDIATE`
-   txns preserved).
-4. **Postgres autocommit** (`db.py` `SignalStore._conn`) — biggest lever on
-   `v91_pre_enrich` (~5.2s). Every method runs a single statement, so autocommit
-   removes the separate COMMIT round-trip → ~halves Postgres round-trips app-wide
-   (pre-enrich does ~5 queries/asset/cycle; also helps every settlement reconcile).
+   `self._cache_db_lock`.
+3. **Telegram gate** (`checkpoint_v94_unified.py`) — persistent SQLite connection.
+4. **Postgres autocommit** (`db.py` `SignalStore._conn`) — removes the separate
+   COMMIT round-trip app-wide (also makes the v91 write→read below visible across
+   pooled connections without an explicit commit).
+5. **15M learner** (`checkpoint_v94_adaptive15.py`) — persistent SQLite connection.
+6. **v91 round-trip cut** (`checkpoint_v91.py`, owner-approved frozen-chain edit) —
+   `pre_enrich_all` was **6 Postgres round-trips/asset** (`insert_observation` +
+   `recent_observations` + `freeze_prediction` *with its read-back* + 2×
+   `get_prediction`). Now **4**: split the write (`write_prediction`) from the
+   read-back, and collapse the two per-checkpoint reads into ONE batched
+   `get_predictions_for(contract, asset, ("15M","10M"))`. No query *result*,
+   value, or model-behavior change — `frozen`/`fifteen`/`ten` are identical to
+   before (verified by `test_q15_v91_round_trips.py` + the unchanged v91–v94 suite).
 Tests: `test_q15_v95_ledger_conn_reuse`, `test_q15_v94_context_cache_conn_reuse`,
-`test_q15_v94_gate_conn_reuse`, `test_db_autocommit`.
+`test_q15_v94_gate_conn_reuse`, `test_db_autocommit`, `test_q15_v91_round_trips`.
 
-**To verify (redeploy → /api/health):** expect `v95_analysis` and `v91_pre_enrich`
-to drop and `run_cycle_timing.total` to fall well below ~17s. If `data_age_seconds`
-gets under the **3s** gate, `current_trade_decisions` stops being `AVOID_INVALID_DATA`.
-
-**If still over the gate after this:** the only remaining big lever is the *number*
-of Postgres round-trips in `v91_pre_enrich` — `pre_enrich_all` does, per asset:
-`insert_observation` + `recent_observations` + `freeze_prediction` + 2×
-`get_prediction` (15M & 10M). Collapsing the two `get_prediction` reads into one,
-or skipping the read-back of a just-frozen prediction, would cut round-trips — BUT
-that edits **frozen v91 logic** (CLAUDE.md), so it needs explicit sign-off. The
-cheaper non-code option is raising `Q15_*` `max_data_age_s` (currently 3s) so a
-~5–7s cycle still produces predictions — a behavior/risk tradeoff for the owner.
+**STILL OVER THE 3s GATE after all the above — remaining levers (owner's call):**
+- **Raise `Q15_*` `max_data_age_s`** from 3s to ~8s (env/config, no code) → a 6.2s
+  cycle produces predictions immediately. Tradeoff: alerts act on data up to ~8s
+  old. Behavior/risk decision for the owner (real money trades off these).
+- **More frozen-chain round-trip cuts** (same sign-off, MEASURE the v91 cut first):
+  bulk `insert_observation` (7 writes → 1 executemany/cycle); batch the per-asset
+  decision writes in v92/v93/v94 (`_record_decision`, ON CONFLICT no-ops that
+  still cost a round-trip each every cycle); thread v92's `get_prediction(15M)`
+  read into the v91 batched read via the snapshot.
+- Recommend: redeploy → measure the v91 cut, THEN decide gate-vs-more-surgery.
 
 ⚠️ Latent stalls of the same family (not yet triggered): the three OTHER settlement
 reconcilers (`performance.reconcile`, `window_focus.reconcile_settlements`,

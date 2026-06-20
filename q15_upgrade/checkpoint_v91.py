@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 VERSION = "q15-v9.1-unified-checks-reports"
 DISCLAIMER = "Probabilistic paper estimate only; it can be wrong. Read-only monitor — no orders are placed."
@@ -254,7 +254,10 @@ class _Persistence:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def freeze_prediction(self, row: Mapping[str, Any]) -> dict[str, Any]:
+    def write_prediction(self, row: Mapping[str, Any]) -> None:
+        """Freeze a prediction (write only). Splitting the write from the
+        read-back lets the hot pre-enrich path reuse a single batched read
+        instead of paying a round-trip per call."""
         values = (
             row["prediction_key"], row["contract_key"], row["asset"], row["checkpoint"],
             row["side"], row.get("p_yes"), row.get("evidence_status"),
@@ -276,7 +279,50 @@ class _Persistence:
                     "VALUES (?,?,?,?,?,?,?,?,?,?)", values,
                 )
                 conn.commit()
+
+    def freeze_prediction(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        self.write_prediction(row)
         return self.get_prediction(row["contract_key"], row["asset"], row["checkpoint"]) or dict(row)
+
+    @staticmethod
+    def _parse_prediction_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        if isinstance(out.get("rolling_json"), str):
+            try:
+                out["rolling"] = json.loads(out["rolling_json"])
+            except json.JSONDecodeError:
+                out["rolling"] = {}
+        return out
+
+    def get_predictions_for(
+        self, contract_key: str, asset: str, checkpoints: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch several checkpoints' frozen predictions in one round-trip.
+        Returns {checkpoint: row}. Equivalent to calling get_prediction per
+        checkpoint but collapses N reads into a single query."""
+        checkpoints = tuple(checkpoints)
+        if not checkpoints:
+            return {}
+        if self.pg:
+            placeholders = ",".join(["%s"] * len(checkpoints))
+            rows = self.store.query(
+                f"SELECT * FROM q15_v91_predictions WHERE contract_key=%s AND asset=%s "
+                f"AND checkpoint IN ({placeholders})",
+                (contract_key, asset, *checkpoints),
+            ) or []
+        else:
+            with self._lock, self._sqlite() as conn:
+                placeholders = ",".join(["?"] * len(checkpoints))
+                rows = conn.execute(
+                    f"SELECT * FROM q15_v91_predictions WHERE contract_key=? AND asset=? "
+                    f"AND checkpoint IN ({placeholders})",
+                    (contract_key, asset, *checkpoints),
+                ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            parsed = self._parse_prediction_row(row)
+            result[str(parsed.get("checkpoint"))] = parsed
+        return result
 
     def get_prediction(self, contract_key: str, asset: str, checkpoint: str) -> dict[str, Any] | None:
         if self.pg:
@@ -382,7 +428,7 @@ class CheckpointPolicyV91:
             checkpoint = _checkpoint(snap)
             side = self._prediction_side(current_side, rolling)
             prediction_key = f"{contract}|{asset}|{checkpoint}|{VERSION}"
-            frozen = self.persistence.freeze_prediction({
+            constructed = {
                 "prediction_key": prediction_key,
                 "contract_key": contract,
                 "asset": asset,
@@ -392,10 +438,20 @@ class CheckpointPolicyV91:
                 "evidence_status": rolling.status,
                 "rolling": rolling.as_dict(),
                 "created_at": now,
-            }) if checkpoint in {"15M", "10M"} else None
+            }
+            if checkpoint in {"15M", "10M"}:
+                self.persistence.write_prediction(constructed)
+            # One batched read covers the just-frozen checkpoint plus the prior
+            # one, replacing the freeze read-back and the two separate
+            # get_prediction calls (6 round-trips/asset -> 4).
+            predictions = self.persistence.get_predictions_for(contract, asset, ("15M", "10M"))
+            fifteen = predictions.get("15M")
+            ten = predictions.get("10M")
+            if checkpoint in {"15M", "10M"}:
+                frozen = predictions.get(checkpoint) or dict(constructed)
+            else:
+                frozen = None
             frozen_side = str((frozen or {}).get("side") or side).upper()
-            fifteen = self.persistence.get_prediction(contract, asset, "15M")
-            ten = self.persistence.get_prediction(contract, asset, "10M")
             if checkpoint == "15M":
                 agreement = "EARLY_ONLY"
                 final_side = frozen_side
