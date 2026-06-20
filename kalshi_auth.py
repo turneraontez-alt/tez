@@ -30,7 +30,7 @@ def _normalize_pem(raw: str) -> str:
     Handles all common storage artifacts:
     - Already correct (passthrough)
     - Escaped newlines (\\n → real newline)
-    - Leading dashes missing: "BEGIN RSA PRIVATE KEY----- <body> -----END ..."
+    - Leading/trailing dashes missing from the header or footer marker
     - Header/footer stripped entirely (raw base64 body only, spaces as separators)
     - Header present but spaces used instead of newlines throughout
     - PKCS#8 "PRIVATE KEY" header variants
@@ -57,9 +57,9 @@ def _normalize_pem(raw: str) -> str:
             pem_type = pt
             break
 
-    # 4. Strip ALL header/footer fragments (with or without leading dashes)
-    #    e.g. "BEGIN RSA PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----",
-    #         "-----END RSA PRIVATE KEY-----", "END RSA PRIVATE KEY-----"
+    # 4. Strip ALL header/footer fragments, with or without their surrounding
+    #    dashes (the BEGIN/END marker may be missing leading or trailing dashes,
+    #    or use spaces instead of newlines).
     s = _re.sub(r"-*\s*BEGIN\s+[A-Z ]+\s*-*", " ", s)
     s = _re.sub(r"-*\s*END\s+[A-Z ]+\s*-*", " ", s)
 
