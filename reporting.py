@@ -1,10 +1,10 @@
 """Hourly Telegram performance report (read-only).
 
-Once per clock hour the bot posts how it is doing: overall hit-rate (real +
-paper), the most recent hour's hit-rate, realized P&L, a breakdown of WHY the
-losing calls lost (attributed loss reasons), any learning adjustments now in
-force, and the scalp record. Delivery is deduped across the dev + prod
-instances via store.claim_event so the chat only ever gets one report per hour.
+Once per clock hour the bot posts its track record, led by the canonical V9.5
+prediction ledger: accuracy and realized paper P&L by interval (15M/10M/7M),
+pick rank (#1/#2/#3) and asset, plus the actually-sent alert record and the
+scalp line. Delivery is deduped across the dev + prod instances via
+store.claim_event so the chat only ever gets one report per hour.
 """
 import logging
 from datetime import datetime, timezone
@@ -104,24 +104,6 @@ class HourlyReporter:
             logger.error(f"hourly report failed: {e}")
 
     # -- report body ----------------------------------------------------
-    def _last_hour_stats(self):
-        rows = self.store.query(
-            "SELECT outcome, COUNT(*) AS n FROM signals "
-            "WHERE settled_at >= NOW() - INTERVAL '1 hour' "
-            "AND side IN ('YES','NO') AND outcome IN ('win','loss') "
-            "AND state IN ('ENTRY CONFIRMED','ENTRY CANDIDATE','WATCH') "
-            "GROUP BY outcome"
-        )
-        wins = losses = 0
-        for r in rows:
-            if r["outcome"] == "win":
-                wins = int(r["n"])
-            elif r["outcome"] == "loss":
-                losses = int(r["n"])
-        n = wins + losses
-        return {"wins": wins, "losses": losses, "n": n,
-                "win_rate": (wins / n) if n else None}
-
     def build_report(self):
         hh = datetime.now(timezone.utc).strftime("%H:00 UTC")
         lines = [f"\U0001f4ca <b>Hourly Report \u2014 {hh}</b>"]

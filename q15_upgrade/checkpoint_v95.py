@@ -838,11 +838,6 @@ def _humanize_v95_reasons(blocker: Any) -> str:
     return "; ".join(seen)
 
 
-def _fmt_alignment(value: Any) -> str:
-    parsed = _num(value)
-    return "n/a" if parsed is None else f"{parsed:.1f}"
-
-
 _DECISION_LABELS = {
     "ENTRY_RECOMMENDED": "ENTRY",
     "WATCH_PRICE": "price too high",

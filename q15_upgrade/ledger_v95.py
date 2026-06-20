@@ -192,7 +192,6 @@ class V95Ledger:
         self.minimum_learning_quality = self.minimum_learning_quality_by_checkpoint[self.primary_learning_checkpoint]
         self.minimum_calibration_rows = _env_int("Q15_V95_CALIBRATION_MIN_ROWS", 30, 10, 1000)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
-        self.promotion_margin = _env_float("Q15_V95_PROMOTION_BRIER_MARGIN", 0.005, 0.0, 0.10)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
         # falling back to the global challenger until then.
