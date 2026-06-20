@@ -304,6 +304,11 @@ class AssetEngine:
             "flags": flags,
             "opportunity_score": round(opportunity_score, 1),
             "last_updated": _iso_now(),
+            # Authoritative observe-time (epoch seconds). The v9.4/v9.5 staleness
+            # checks resolve "core age" from this; without it they fall back to a
+            # snapshot-wide walk that can latch onto an unrelated stale nested
+            # timestamp and wrongly trip AVOID_INVALID_DATA on otherwise-fresh data.
+            "snapshot_time": now,
             "cycling": False,
             "error": None,
 

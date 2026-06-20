@@ -826,6 +826,9 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_evidence_quality"] = analysis.get("evidence_quality")
     snapshot["q15_v9_5_trade_quality"] = analysis.get("trade_quality")
     snapshot["q15_v9_5_trade_decision"] = analysis.get("trade_decision")
+    # Surface the blocker (e.g. the AVOID_INVALID_DATA core_errors) so the exact
+    # reason a prediction is withheld is visible in /api/snapshot and the dashboard.
+    snapshot["q15_v9_5_main_blocker"] = analysis.get("main_blocker")
     snapshot["q15_v9_5_net_edge_cents"] = analysis.get("net_edge_cents")
     snapshot["q15_v9_5_ideal_entry_cents"] = analysis.get("ideal_entry_cents")
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
