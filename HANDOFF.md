@@ -84,13 +84,42 @@ refactors, `test_q15_candle_efficiency.py`):
 - `_normalize_key` (regex sub run on EVERY snapshot key, twice/asset/cycle over a
   tiny repetitive vocabulary) is now `@lru_cache`d — huge hit rate, identical out.
 
-What's LEFT is irreducible without risk: `_canonical_candles` must re-normalise
-(the SQLite-loaded cache rows lack `timestamp`/clamped hi-lo, so it's not a no-op)
-and `_walk` must scan the whole snapshot (candle lists can nest anywhere). A
-count-cap on the candle cache is NOT safe (could clip the previous-15m window the
-dual-window context needs, cadence-dependent). Remaining levers: raise
-`max_data_age_s` (owner risk call), or a default-OFF flagged fast `_canonical_candles`
-with an equivalence test (real effort).
+✅ SHIPPED (this session): the **default-OFF flagged fast `_canonical_candles`**.
+`Q15_FAST_CANONICAL_CANDLES` (off by default) routes the two v9.5 call sites
+(`build_canonical_snapshot` + the bridge) through `q15_upgrade/fast_candles.py`.
+It is byte-for-byte identical: a row is fast-normalised ONLY when every field
+resolves via a direct-alias hit (the frozen `_first_value` checks direct aliases
+before it ever walks, so a direct hit is identical regardless of nesting); any
+row that would need the walk falls back to the frozen `_normalize_candle`
+verbatim. Cached history rows have all 8 fields as direct keys, so the bulk takes
+the fast path with zero key-normalisation / walks / alias-tuple allocations.
+**~1.8x faster on the candle build, 390 tests pass.** The frozen v91..v94 chain
+is untouched. Locked by `tests/test_q15_fast_canonical_candles.py` (hand cases +
+a 400-iteration randomized fuzz comparing fast vs frozen byte-for-byte).
+NEXT for this: redeploy with the flag set → confirm `current_trade_decisions`
+candles + `v95_sub` unchanged, measure the steady-state shave.
+
+KEY REFRAME found this session: the gate's `AVOID_INVALID_DATA` keys on the
+**snapshot** `data_age_seconds = max(spot_age, book_age)` (`v5_hardening.py:52`),
+i.e. FEED age stamped at fetch time — NOT the cycle/candle compute, which runs
+after. So compute-shaving (this candle work, parallelization) does NOT move the
+gate. The ~7.4s in the notes above is the *other* field (`/api/health`
+`data_age_seconds` = `now − engine.last_update_ts`, the cycle period). The direct
+unblock is a fresher spot feed: **turn on the already-built spot WS**
+(`Q15_SPOT_WS_ENABLED=true`, all 7 assets, REST fallback) → `spot_age` sub-second
+→ gate clears without loosening the threshold or touching frozen code.
+
+NOT WORTH IT (investigated + declined this session): thread-parallelising the
+per-asset enrich/`run_cycle` chain. The residual is pure-Python candle analysis
+(no numpy/pandas) → GIL-bound, so threads give ~no speedup; the I/O is already
+batched into single all-7-asset round-trips and lock-serialised (`self._lock`),
+so parallelising would force un-batching and re-serialise on the lock. High risk
+(frozen money path), ~zero reward. True parallelism would need multiprocessing.
+
+Still-open levers: turn on spot WS (recommended, owner call), raise
+`ALERT_MAX_DATA_AGE_S`/`max_data_age_s` (owner risk call). A count-cap on the
+candle cache is NOT safe (could clip the previous-15m window the dual-window
+context needs, cadence-dependent).
 
 ## Repo state
 - Active dev branch `claude/festive-albattani-s1af1l` carries the whole arc and is
