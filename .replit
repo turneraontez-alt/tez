@@ -26,10 +26,6 @@ author = "agent"
 task = "workflow.run"
 args = "Start application"
 
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "GitHub Relay"
-
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -41,17 +37,6 @@ waitForPort = 8000
 
 [workflows.workflow.metadata]
 outputType = "webview"
-
-[[workflows.workflow]]
-name = "GitHub Relay"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python3 tools/github_relay.py"
-
-[workflows.workflow.metadata]
-outputType = "console"
 
 [userenv]
 
