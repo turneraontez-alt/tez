@@ -1,11 +1,15 @@
 ---
-name: GitHub auto-push relay
-description: How to auto-mirror this repo to GitHub given the main-agent git-write guard; the workflow-process workaround and its gotchas.
+name: GitHub auto-sync relay
+description: How to auto-sync this repo with GitHub (two-way) given the main-agent git-write guard; the workflow-process workaround and its gotchas.
 ---
 
-# GitHub auto-push relay
+# GitHub auto-sync relay
 
-To automatically upload every local change to GitHub from this project.
+To automatically sync this project with GitHub. The relay is TWO-WAY: each cycle
+it fetches GitHub, merges remote changes DOWN into the project (fast-forward when
+behind, merge commit when diverged), then pushes local changes UP. On a same-file
+conflict it aborts the merge cleanly (project untouched) and logs, never guessing.
+It logs only on pulled/pushed/conflict — silence means in sync.
 
 **Rule:** main-agent shell git *writes* (config, remote add, merge, push) are
 blocked by the environment's destructive-git guard (fails on `.git/config.lock`

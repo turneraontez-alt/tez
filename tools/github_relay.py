@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""GitHub relay: mirror local `main` commits to GitHub automatically.
+"""GitHub relay: two-way sync between local `main` and GitHub.
 
-This runs as a long-lived background workflow. Whenever the local HEAD advances
-(e.g. a Replit checkpoint commit is created), it pushes that commit to the
-configured GitHub repository.
+Runs as a long-lived background workflow. Every cycle it:
+  1. Fetches the GitHub branch.
+  2. Pulls GitHub changes DOWN into the local project (fast-forward when the
+     project is simply behind; a merge commit when both sides changed).
+  3. Pushes local changes UP to GitHub.
 
-Design notes:
-- The GitHub token is read from the environment at push time and injected into
-  the push URL in-memory only. It is never written to .git/config, never
+So anything committed here flows to GitHub, and anything pushed on GitHub flows
+back into the project automatically.
+
+Design / safety notes:
+- The GitHub token is read from the environment at run time and injected into
+  the fetch/push URL in-memory only. It is never written to .git/config, never
   committed, and is masked in all log output.
-- No git config / remote writes are performed, so this does not trip the
-  main-agent destructive-git guard. Pushes use an explicit authenticated URL.
-- Pushes are non-fast-forward safe: a diverged remote is reported, never forced.
+- No git config / remote writes are performed (explicit authenticated URL +
+  `-c credential.helper=`), so this does not trip the main-agent destructive-git
+  guard.
+- Never force-pushes. If both sides changed the SAME file, the merge would
+  conflict; in that case the relay aborts the merge cleanly (project left
+  untouched) and logs it, instead of guessing.
+- Operates on the explicit local branch ref `refs/heads/main`, never a stray
+  checked-out HEAD.
 """
 from __future__ import annotations
 
@@ -24,6 +34,11 @@ REPO = os.environ.get("GITHUB_RELAY_REPO", "turneraontez-alt/tez")
 BRANCH = os.environ.get("GITHUB_RELAY_BRANCH", "main")
 INTERVAL = max(5, int(os.environ.get("GITHUB_RELAY_INTERVAL", "20")))
 WORKDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+MERGE_IDENTITY = [
+    "-c", "user.name=github-relay",
+    "-c", "user.email=github-relay@users.noreply.github.com",
+]
 
 
 def _token() -> str | None:
@@ -41,32 +56,47 @@ def _log(msg: str) -> None:
 
 
 def _git(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args],
-        cwd=WORKDIR,
-        capture_output=True,
-        text=True,
-    )
+    return subprocess.run(["git", *args], cwd=WORKDIR, capture_output=True, text=True)
 
 
-def _branch_head() -> str | None:
-    # Read the local target branch explicitly (NOT HEAD) so we always mirror
-    # `main`, regardless of which branch happens to be checked out.
-    res = _git(["rev-parse", "--verify", f"refs/heads/{BRANCH}"])
+def _rev(ref: str) -> str | None:
+    res = _git(["rev-parse", "--verify", ref])
     return res.stdout.strip() if res.returncode == 0 else None
 
 
+def _url(token: str) -> str:
+    return f"https://x-access-token:{token}@github.com/{REPO}.git"
+
+
+def _fetch(token: str) -> tuple[bool, str]:
+    res = _git(["-c", "credential.helper=", "fetch", _url(token), BRANCH])
+    return res.returncode == 0, _mask((res.stdout + res.stderr).strip(), token)
+
+
+def _merge_remote(token: str) -> tuple[str, str]:
+    """Integrate FETCH_HEAD into local. Returns (status, detail).
+
+    status: 'ok' (merged / fast-forwarded / already up to date),
+            'conflict' (aborted, project untouched),
+            'error' (aborted, project untouched).
+    """
+    m = _git([*MERGE_IDENTITY, "merge", "--no-edit", "FETCH_HEAD"])
+    out = _mask((m.stdout + m.stderr).strip(), token)
+    if m.returncode == 0:
+        return "ok", out
+    conflicts = _git(["diff", "--name-only", "--diff-filter=U"]).stdout.strip()
+    _git(["merge", "--abort"])
+    if conflicts:
+        return "conflict", "Same file changed on both sides:\n" + conflicts
+    return "error", out
+
+
 def _push(token: str) -> tuple[bool, str]:
-    url = f"https://x-access-token:{token}@github.com/{REPO}.git"
-    # -c credential.helper= disables any inherited helper; explicit URL means no
-    # remote-tracking refs or config are written locally. Push the local branch
-    # ref explicitly so we never accidentally publish a different checked-out HEAD.
     res = _git([
         "-c", "credential.helper=",
-        "push", url, f"refs/heads/{BRANCH}:refs/heads/{BRANCH}",
+        "push", _url(token), f"refs/heads/{BRANCH}:refs/heads/{BRANCH}",
     ])
-    out = _mask((res.stdout + res.stderr).strip(), token)
-    return res.returncode == 0, out
+    return res.returncode == 0, _mask((res.stdout + res.stderr).strip(), token)
 
 
 def main() -> int:
@@ -75,38 +105,58 @@ def main() -> int:
         _log("No GH_PUSH_TOKEN / GITHUB_TOKEN in environment; relay cannot run.")
         return 1
 
-    _log(f"Watching local '{BRANCH}' -> github.com/{REPO} every {INTERVAL}s")
-    last_pushed: str | None = None
-    diverged_at: str | None = None  # local head we last logged a divergence for
+    _log(f"Two-way sync local '{BRANCH}' <-> github.com/{REPO} every {INTERVAL}s")
+    conflict_logged: str | None = None  # remote sha we last warned a conflict for
 
     while True:
         try:
-            head = _branch_head()
-            if not head:
-                if diverged_at != "__nobranch__":
-                    _log(f"local branch '{BRANCH}' not found; waiting.")
-                    diverged_at = "__nobranch__"
-            elif head != last_pushed:
-                ok, out = _push(token)
-                if ok:
-                    last_pushed = head
-                    diverged_at = None
-                    detail = "up to date" if "up-to-date" in out.lower() else "pushed"
-                    _log(f"{detail} {head[:8]}")
-                elif "non-fast-forward" in out.lower() or "fetch first" in out.lower():
-                    # Keep retrying every cycle (do NOT advance last_pushed) so the
-                    # relay resumes automatically once the remote becomes
-                    # fast-forwardable again. Log only once per distinct local head
-                    # to avoid spamming the same divergence message.
-                    if diverged_at != head:
+            local = _rev(f"refs/heads/{BRANCH}")
+            if not local:
+                _log(f"local branch '{BRANCH}' not found; waiting.")
+                time.sleep(INTERVAL)
+                continue
+
+            ok, out = _fetch(token)
+            if not ok:
+                _log("fetch failed (will retry): " + out)
+                time.sleep(INTERVAL)
+                continue
+
+            remote = _rev("FETCH_HEAD")
+
+            # --- pull GitHub changes DOWN into the project -------------------
+            if remote and remote != local:
+                status, detail = _merge_remote(token)
+                if status == "conflict":
+                    if conflict_logged != remote:
                         _log(
-                            f"remote has diverged from local {head[:8]}; NOT forcing. "
-                            "Will keep retrying; resolve the divergence to resume. "
-                            "Detail: " + out
+                            "PAUSED: GitHub and the project changed the same file, "
+                            "so I left the project untouched. Resolve it and I'll "
+                            "resume. " + detail
                         )
-                        diverged_at = head
+                        conflict_logged = remote
+                    time.sleep(INTERVAL)
+                    continue
+                if status == "error":
+                    _log("merge skipped (will retry): " + detail)
+                    time.sleep(INTERVAL)
+                    continue
+                conflict_logged = None
+                new_local = _rev(f"refs/heads/{BRANCH}")
+                if new_local and new_local != local:
+                    _log(f"pulled GitHub changes -> {new_local[:8]}")
+                    local = new_local
+
+            # --- push local changes UP to GitHub ----------------------------
+            if remote != local:
+                pok, pout = _push(token)
+                if pok:
+                    _log(f"pushed {local[:8]}")
+                elif "non-fast-forward" in pout.lower() or "fetch first" in pout.lower():
+                    # Remote moved between fetch and push; next cycle reconciles.
+                    pass
                 else:
-                    _log(f"push failed for {head[:8]}: {out}")
+                    _log(f"push failed for {local[:8]}: {pout}")
         except Exception as exc:  # never let the relay die on a transient error
             _log(f"unexpected error: {_mask(str(exc), token)}")
         time.sleep(INTERVAL)
