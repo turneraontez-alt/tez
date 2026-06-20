@@ -90,6 +90,9 @@ calibrated_edge = CalibratedEdgeEngine(store, notifier, config, learner)
 
 
 checkpoint_v95 = CheckpointPolicyV95(store)
+# Give the hourly reporter the V9.5 ledger so it can publish the interval
+# (15M/10M/7M) and pick-rank (#1/#2/#3) track record.
+reporter.v95_ledger = checkpoint_v95.ledger
 professional_v7 = ProfessionalV7Engine(store, notifier, config, learner)
 
 oos_v9 = OutOfSampleEvaluator(store)
@@ -653,6 +656,11 @@ def q15_v95_learning_ep():
 @app.route("/api/q15-v9-5/decision-stats")
 def q15_v95_decision_stats_ep():
     return jsonify(checkpoint_v95.decision_stats())
+
+@app.route("/api/q15-v9-5/scoreboard")
+@app.route("/data/q15-v9-5/scoreboard")
+def q15_v95_scoreboard_ep():
+    return jsonify(checkpoint_v95.scoreboard())
 
 @app.route("/api/q15-v9-4/diagnostics")
 def q15_v94_diagnostics_ep():

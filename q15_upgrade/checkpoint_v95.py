@@ -642,14 +642,13 @@ def analyse_v95(
     depth = _kalshi_depth(snapshot, side)
     quote_ts = canonical.feed_timestamps.get("quote")
     quote_age = None if quote_ts is None else max(0.0, canonical.observed_at - quote_ts)
-    required_edge = _env_float(
-        "Q15_V95_10M_REQUIRED_EDGE_CENTS" if canonical.checkpoint == "10M" else "Q15_V95_15M_REQUIRED_EDGE_CENTS",
-        6.0 if canonical.checkpoint == "10M" else 4.0, 0.0, 25.0,
-    )
-    minimum_probability = _env_float(
-        "Q15_V95_10M_MIN_PROBABILITY" if canonical.checkpoint == "10M" else "Q15_V95_15M_MIN_PROBABILITY",
-        0.60 if canonical.checkpoint == "10M" else 0.58, 0.50, 0.90,
-    )
+    # Per-checkpoint gates. 7M defaults mirror 10M so adding the 7-minute tracker
+    # does not change live entry behavior; both stay overridable via env.
+    _checkpoint = canonical.checkpoint if canonical.checkpoint in ("10M", "15M", "7M") else "10M"
+    _required_edge_default = {"10M": 6.0, "7M": 6.0, "15M": 4.0}.get(_checkpoint, 4.0)
+    _min_prob_default = {"10M": 0.60, "7M": 0.60, "15M": 0.58}.get(_checkpoint, 0.58)
+    required_edge = _env_float(f"Q15_V95_{_checkpoint}_REQUIRED_EDGE_CENTS", _required_edge_default, 0.0, 25.0)
+    minimum_probability = _env_float(f"Q15_V95_{_checkpoint}_MIN_PROBABILITY", _min_prob_default, 0.50, 0.90)
     minimum_quality = _env_float("Q15_V95_MIN_DATA_QUALITY", 0.55, 0.20, 0.95)
     max_spread = _env_float("Q15_V95_MAX_SPREAD_CENTS", 12.0, 1.0, 50.0)
     min_depth = _env_float("Q15_V95_MIN_DEPTH_AT_ASK", 3.0, 0.0, 10000.0)
@@ -1047,6 +1046,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             analyses: dict[str, dict[str, Any]] = {}
             output: dict[str, dict] = {}
             public_map: dict[str, dict[str, Any]] = {}
+            canonicals: dict[str, Any] = {}
             for asset_key, raw in parent_output.items():
                 if not isinstance(raw, Mapping):
                     continue
@@ -1070,7 +1070,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 apply_v95_policy(snapshot, analysis)
                 analyses[asset] = copy.deepcopy(analysis)
                 output[asset_key] = snapshot
-                if analysis.get("prediction_available") and canonical.ticker:
+                canonicals[asset] = canonical
+            ranking = rank_analyses(analyses)
+            ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
+            # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
+            # persisted with it, enabling per-rank accuracy tracking.
+            for key, snapshot in output.items():
+                asset = _asset_name(key, snapshot)
+                rank = ranks.get(asset)
+                snapshot["q15_v9_5_rank"] = rank
+                snapshot["q15_v9_5_top_pick"] = rank == 1
+                if asset not in analyses:
+                    continue
+                analysis = analyses[asset]
+                analysis["rank"] = rank
+                analysis["top_pick"] = rank == 1
+                canonical = canonicals.get(asset)
+                if canonical is not None and analysis.get("prediction_available") and canonical.ticker:
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -1087,19 +1103,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         trade_decision=str(analysis["trade_decision"]),
                         regime=str((analysis.get("regime") or {}).get("name") or "UNKNOWN"),
                         features=analysis["feature_values"], contributions=analysis["contributions"],
-                        quote=analysis["quote"],
+                        quote=analysis["quote"], rank=rank,
                     )
-                    analyses[asset]["prediction_id"] = prediction_id
-                    analyses[asset]["new_unique_prediction_recorded"] = inserted
-            ranking = rank_analyses(analyses)
-            ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
-            for key, snapshot in output.items():
-                asset = _asset_name(key, snapshot)
-                snapshot["q15_v9_5_rank"] = ranks.get(asset)
-                snapshot["q15_v9_5_top_pick"] = ranks.get(asset) == 1
-                if asset in analyses:
-                    analyses[asset]["rank"] = ranks.get(asset)
-                    analyses[asset]["top_pick"] = ranks.get(asset) == 1
+                    analysis["prediction_id"] = prediction_id
+                    analysis["new_unique_prediction_recorded"] = inserted
 
             result_events: list[Mapping[str, Any]] = []
             if self.signal_store is not None and now - self._last_reconcile_at >= 30.0:
@@ -1174,6 +1181,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def calibration_status(self) -> dict[str, Any]:
         return {"version": VERSION, "read_only": True, **self.ledger.metrics()}
 
+    def scoreboard(self) -> dict[str, Any]:
+        """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
+        return {"version": VERSION, "read_only": True, **self.ledger.scoreboard()}
+
     def learning_status(self) -> dict[str, Any]:
         return {
             "version": VERSION, "read_only": True, **self.ledger.status(),
@@ -1230,7 +1241,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 "derivatives pressure",
             ],
             "latest": self.predictions(), "calibration": self.calibration_status(),
-            "learning": self.learning_status(),
+            "learning": self.learning_status(), "scoreboard": self.ledger.scoreboard(),
         }
 
     def decision_stats(self) -> dict[str, Any]:

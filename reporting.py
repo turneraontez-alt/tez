@@ -23,15 +23,52 @@ def _rec(r):
     return f"{r['wins']}W/{r['losses']}L \u2014 {_pct(r['win_rate'])} (n={r['n']})"
 
 
+def _wl(d):
+    """Format a {right,wrong,n,accuracy} scoreboard bucket, or None if empty."""
+    n = (d or {}).get("n") or 0
+    if not n:
+        return None
+    acc = d.get("accuracy")
+    pct = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "n/a"
+    return f"{d.get('right', 0)}W/{d.get('wrong', 0)}L ({pct})"
+
+
 class HourlyReporter:
-    def __init__(self, store, notifier, config, perf, learner, scalp):
+    def __init__(self, store, notifier, config, perf, learner, scalp, v95_ledger=None):
         self.store = store
         self.notifier = notifier
         self.cfg = config
         self.perf = perf
         self.learner = learner
         self.scalp = scalp
+        # Optional: the V9.5 prediction ledger, for the interval/rank scoreboard.
+        # Set after construction in app.py since the ledger is built later.
+        self.v95_ledger = v95_ledger
         self._last_hour = None
+
+    def _scoreboard_lines(self):
+        """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None:
+            return []
+        try:
+            sb = ledger.scoreboard()
+        except Exception as e:
+            logger.warning(f"scoreboard fetch failed: {e}")
+            return []
+        if not sb.get("available") or (sb.get("overall", {}).get("n") or 0) <= 0:
+            return []
+        lines = ["\n\U0001f4c8 <b>Track record (V9.5 paper ledger)</b>"]
+        by_cp = sb.get("by_checkpoint", {})
+        interval = [f"{cp}: {_wl(by_cp.get(cp))}" for cp in ("15M", "10M", "7M") if _wl(by_cp.get(cp))]
+        if interval:
+            lines.append("By interval — " + "  ·  ".join(interval))
+        by_rank = sb.get("by_rank", {})
+        ranked = [f"{label}: {_wl(by_rank.get(key))}"
+                  for key, label in (("1", "#1"), ("2", "#2"), ("3", "#3")) if _wl(by_rank.get(key))]
+        if ranked:
+            lines.append("By pick rank — " + "  ·  ".join(ranked))
+        return lines
 
     def maybe_send(self, now):
         if not self.cfg.hourly_report_enabled or not self.notifier.enabled:
@@ -133,6 +170,8 @@ class HourlyReporter:
                 )
         except Exception:
             pass
+
+        lines.extend(self._scoreboard_lines())
 
         lines.append(f"\n<i>{DISCLAIMER}</i>")
         return "\n".join(lines)

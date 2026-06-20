@@ -523,18 +523,37 @@ def _detect_checkpoint(
             return "10M"
         if "15M" in explicit or explicit in {"15", "FIFTEEN_MINUTE"}:
             return "15M"
+        if "7M" in explicit or explicit in {"7", "SEVEN_MINUTE"}:
+            return "7M"
     combined = "\n".join(messages).upper()
     if "10M" in combined:
         return "10M"
     if "15M" in combined:
         return "15M"
+    if "7M" in combined:
+        return "7M"
+    # Time-based fallback. Boundaries are configurable; below the 10M boundary the
+    # window is treated as the 7-minute final check so its predictions are tracked
+    # separately instead of being mislabeled 10M.
+    try:
+        fifteen_boundary = float(os.environ.get("Q15_V95_15M_BOUNDARY_SECONDS", "660") or 660)
+        seven_boundary = float(os.environ.get("Q15_V95_7M_BOUNDARY_SECONDS", "480") or 480)
+    except (TypeError, ValueError):
+        fifteen_boundary, seven_boundary = 660.0, 480.0
     times = []
     now = time.time()
     for snapshot in snapshots.values():
         seconds = _seconds_remaining(snapshot, now)
         if seconds is not None:
             times.append(seconds)
-    return "15M" if times and max(times) >= 660.0 else "10M"
+    if not times:
+        return "10M"
+    longest = max(times)
+    if longest >= fifteen_boundary:
+        return "15M"
+    if longest >= seven_boundary:
+        return "10M"
+    return "7M"
 
 
 @dataclass(frozen=True)

@@ -83,6 +83,12 @@ def _parse_ts(value: Any) -> float | None:
         return None
 
 
+# Checkpoints whose predictions are recorded and graded for accuracy. 10M/15M
+# also carry shadow weight-learning; 7M is accuracy-tracked only by default.
+TRACKED_CHECKPOINTS = ("15M", "10M", "7M")
+LEARNING_CHECKPOINTS = ("10M", "15M")
+
+
 CHAMPION_WEIGHTS: dict[str, float] = {
     "intercept": 0.0,
     "momentum": 0.34,
@@ -107,25 +113,33 @@ class V95Ledger:
         primary = str(os.environ.get("Q15_V95_PRIMARY_LEARNING_CHECKPOINT", "10M")).strip().upper()
         self.primary_learning_checkpoint = primary if primary in {"10M", "15M"} else "10M"
         legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
+        # 7M is tracked and graded for accuracy alongside 15M/10M, but its weight
+        # learning is observational by default (like 15M). Enabling it requires the
+        # challenger weight tables to admit '7M' — see _initialize.
         self.learning_enabled_by_checkpoint = {
             "10M": _env_bool("Q15_V95_10M_SHADOW_LEARNING", legacy_enabled),
             "15M": _env_bool("Q15_V95_15M_SHADOW_LEARNING", False),
+            "7M": _env_bool("Q15_V95_7M_SHADOW_LEARNING", False),
         }
         self.learning_rate_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_LEARNING_RATE", 0.05, 0.001, 0.20),
             "15M": _env_float("Q15_V95_15M_SHADOW_LEARNING_RATE", 0.02, 0.001, 0.20),
+            "7M": _env_float("Q15_V95_7M_SHADOW_LEARNING_RATE", 0.05, 0.001, 0.20),
         }
         self.per_result_cap_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_MAX_DELTA", 0.015, 0.001, 0.05),
             "15M": _env_float("Q15_V95_15M_SHADOW_MAX_DELTA", 0.008, 0.001, 0.05),
+            "7M": _env_float("Q15_V95_7M_SHADOW_MAX_DELTA", 0.015, 0.001, 0.05),
         }
         self.total_drift_cap_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_MAX_DRIFT", 0.35, 0.05, 1.0),
             "15M": _env_float("Q15_V95_15M_SHADOW_MAX_DRIFT", 0.20, 0.05, 1.0),
+            "7M": _env_float("Q15_V95_7M_SHADOW_MAX_DRIFT", 0.35, 0.05, 1.0),
         }
         self.minimum_learning_quality_by_checkpoint = {
             "10M": _env_float("Q15_V95_10M_SHADOW_MIN_QUALITY", 0.55, 0.0, 1.0),
             "15M": _env_float("Q15_V95_15M_SHADOW_MIN_QUALITY", 0.65, 0.0, 1.0),
+            "7M": _env_float("Q15_V95_7M_SHADOW_MIN_QUALITY", 0.55, 0.0, 1.0),
         }
         # Backward-compatible public attributes now describe the primary learner.
         self.shadow_learning_enabled = self.learning_enabled_by_checkpoint[self.primary_learning_checkpoint]
@@ -178,6 +192,7 @@ class V95Ledger:
                     trade_quality REAL NOT NULL,
                     trade_decision TEXT NOT NULL,
                     regime TEXT NOT NULL,
+                    rank INTEGER,
                     feature_json TEXT NOT NULL,
                     contribution_json TEXT NOT NULL,
                     quote_json TEXT NOT NULL,
@@ -236,8 +251,10 @@ class V95Ledger:
                 );
                 """
             )
+            # Migrate older ledgers that predate the rank column.
+            self._ensure_column(connection, "predictions", "rank", "rank INTEGER")
             now = time.time()
-            for checkpoint in ("10M", "15M"):
+            for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
                     connection.execute(
                         "INSERT OR IGNORE INTO checkpoint_challenger_weights(checkpoint,name,base_value,value,updated_at) VALUES(?,?,?,?,?)",
@@ -246,9 +263,15 @@ class V95Ledger:
             connection.commit()
 
     @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        existing = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    @staticmethod
     def _checkpoint(value: Any) -> str:
         checkpoint = str(value or "").strip().upper()
-        return checkpoint if checkpoint in {"10M", "15M"} else "10M"
+        return checkpoint if checkpoint in TRACKED_CHECKPOINTS else "10M"
 
     def learning_enabled(self, checkpoint: str) -> bool:
         return bool(self.learning_enabled_by_checkpoint[self._checkpoint(checkpoint)])
@@ -272,11 +295,16 @@ class V95Ledger:
                           conservative_probability: float, data_quality: float, evidence_quality: float,
                           trade_quality: float, trade_decision: str, regime: str,
                           features: Mapping[str, Any], contributions: Mapping[str, Any],
-                          quote: Mapping[str, Any]) -> tuple[str, bool]:
-        checkpoint = str(checkpoint).upper()
+                          quote: Mapping[str, Any], rank: int | None = None) -> tuple[str, bool]:
+        checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
             return prediction_id, False
+        rank_value = None
+        try:
+            rank_value = int(rank) if rank is not None else None
+        except (TypeError, ValueError):
+            rank_value = None
         with self._lock, closing(self._connect()) as connection:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO predictions(
@@ -284,14 +312,14 @@ class V95Ledger:
                        created_at,close_time,predicted_side,raw_yes_probability,
                        calibrated_yes_probability,challenger_yes_probability,baseline_yes_probability,
                        selected_probability,conservative_probability,data_quality,evidence_quality,
-                       trade_quality,trade_decision,regime,feature_json,contribution_json,quote_json)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       trade_quality,trade_decision,regime,rank,feature_json,contribution_json,quote_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     prediction_id, MODEL_VERSION, FEATURE_SCHEMA_VERSION, ticker, asset, checkpoint,
                     created_at, close_time, predicted_side, raw_yes_probability,
                     calibrated_yes_probability, challenger_yes_probability, baseline_yes_probability,
                     selected_probability, conservative_probability, data_quality, evidence_quality,
-                    trade_quality, trade_decision, regime, _json(dict(features)),
+                    trade_quality, trade_decision, regime, rank_value, _json(dict(features)),
                     _json(dict(contributions)), _json(dict(quote)),
                 ),
             )
@@ -616,6 +644,47 @@ class V95Ledger:
             "scope": "asset" if asset_rows and len(asset_rows) >= self.minimum_calibration_rows else "checkpoint",
         }
 
+    @staticmethod
+    def _win_loss(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        n = len(selected)
+        right = sum(1 for row in selected if int(row["correct"] or 0) == 1)
+        return {
+            "right": right, "wrong": n - right, "n": n,
+            "accuracy": round(right / n, 4) if n else None,
+        }
+
+    @staticmethod
+    def _rank_bucket(row: Mapping[str, Any]) -> str:
+        try:
+            value = int(row["rank"]) if row["rank"] is not None else None
+        except (TypeError, ValueError, IndexError, KeyError):
+            value = None
+        return str(value) if value in (1, 2, 3) else "other"
+
+    def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Right/wrong/accuracy by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
+        by_checkpoint = {cp: self._win_loss([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
+        by_rank = {
+            label: self._win_loss([r for r in rows if self._rank_bucket(r) == label])
+            for label in ("1", "2", "3", "other")
+        }
+        return {"overall": self._win_loss(rows), "by_checkpoint": by_checkpoint, "by_rank": by_rank}
+
+    def scoreboard(self) -> dict[str, Any]:
+        """User-facing record: how often each interval and each rank was right/wrong."""
+        if not self._available:
+            return {"available": False, "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT checkpoint, correct, rank FROM predictions "
+                "WHERE model_version=? AND official_result IS NOT NULL",
+                (MODEL_VERSION,),
+            ))
+        return {
+            "available": True, "model_version": MODEL_VERSION,
+            "intervals": TRACKED_CHECKPOINTS, **self._scoreboard_rows(rows),
+        }
+
     def metrics(self) -> dict[str, Any]:
         if not self._available:
             return {"available": False, "error": self._last_error}
@@ -639,7 +708,7 @@ class V95Ledger:
                 "baseline_logloss": sum(float(row["baseline_logloss"]) for row in selected) / len(selected),
             }
         overall = aggregate(rows)
-        by_checkpoint = {cp: aggregate([r for r in rows if r["checkpoint"] == cp]) for cp in ("15M", "10M")}
+        by_checkpoint = {cp: aggregate([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
         by_regime: dict[str, Any] = {}
         for regime in sorted({str(r["regime"]) for r in rows}):
             by_regime[regime] = aggregate([r for r in rows if r["regime"] == regime])
@@ -678,6 +747,7 @@ class V95Ledger:
         return {
             "available": True, "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "overall": overall, "by_checkpoint": by_checkpoint, "by_regime": by_regime,
+            "scoreboard": self._scoreboard_rows(rows),
             "calibration_bands": bins, "promotion_candidate": bool(primary["candidate"]),
             "promotion_reason": str(primary["reason"]), "promotion_by_checkpoint": promotion_by_checkpoint,
             "primary_learning_checkpoint": self.primary_learning_checkpoint,
@@ -773,6 +843,7 @@ class V95Ledger:
                    SUM(CASE WHEN official_result IS NOT NULL THEN 1 ELSE 0 END) resolved,
                    SUM(CASE WHEN checkpoint='15M' THEN 1 ELSE 0 END) fifteen,
                    SUM(CASE WHEN checkpoint='10M' THEN 1 ELSE 0 END) ten,
+                   SUM(CASE WHEN checkpoint='7M' THEN 1 ELSE 0 END) seven,
                    SUM(CASE WHEN learning_applied=1 THEN 1 ELSE 0 END) learned
                    FROM predictions WHERE model_version=?""",
                 (MODEL_VERSION,),
@@ -793,6 +864,7 @@ class V95Ledger:
             "unique_predictions": int(counts["total"] or 0), "unique_resolved": int(counts["resolved"] or 0),
             "fifteen_minute_predictions": int(counts["fifteen"] or 0),
             "ten_minute_predictions": int(counts["ten"] or 0),
+            "seven_minute_predictions": int(counts["seven"] or 0),
             "shadow_updates_applied": int(counts["learned"] or 0),
             "champion_weights": dict(CHAMPION_WEIGHTS),
             "challenger_weights": {checkpoint: self.challenger_weights(checkpoint) for checkpoint in ("10M", "15M")},
