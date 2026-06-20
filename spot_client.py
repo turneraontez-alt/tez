@@ -41,6 +41,19 @@ def _max_stale_seconds():
         return 30.0
 
 
+def _ws_spot(asset):
+    """Fresh websocket tick for ``asset`` in get_spot() shape, or None.
+
+    Imported lazily to avoid an import cycle and to keep the websocket feed
+    entirely optional. Never raises: any problem falls through to the REST path.
+    """
+    try:
+        from spot_ws import get_ws_spot
+        return get_ws_spot(asset)
+    except Exception:
+        return None
+
+
 def get_spot(asset):
     """Return {ok, price, bid, ask, ts, source, quote} for an asset.
 
@@ -48,6 +61,15 @@ def get_spot(asset):
     still within the staleness budget, flagged with ``stale``/``stale_age_seconds``
     so downstream surfaces can see it is a fallback.
     """
+    # Optional low-latency path: prefer a fresh public-exchange websocket tick
+    # when Q15_SPOT_WS_ENABLED is set. Returns None otherwise, so the default
+    # REST behaviour below is unchanged; a per-asset stale/missing tick also
+    # falls through to REST + last-good.
+    ws = _ws_spot(asset)
+    if ws is not None:
+        with _LAST_GOOD_LOCK:
+            _LAST_GOOD[asset] = (time.time(), dict(ws))
+        return ws
     result = _fetch_spot(asset)
     now = time.time()
     if result.get("ok") and result.get("price"):
