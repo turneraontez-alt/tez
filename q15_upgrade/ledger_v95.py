@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from q15_upgrade import flip_risk
+
 logger = logging.getLogger(__name__)
 
 VERSION = "q15-v9.5.1-ledger-v2-10m-primary"
@@ -401,6 +403,24 @@ class V95Ledger:
             # when manipulation is suspected. Additive; old rows read NULL/0.
             self._ensure_column(connection, "predictions", "manipulation_suspected", "manipulation_suspected INTEGER DEFAULT 0")
             self._ensure_column(connection, "predictions", "manipulation_reason", "manipulation_reason TEXT")
+            # Flip-risk overlay: the point-in-time manipulation/flip-risk score and
+            # confidence observed AT this checkpoint (used to learn what score
+            # precedes a prediction flip). Recorded live; never back-filled.
+            self._ensure_column(connection, "predictions", "flip_risk_score", "flip_risk_score REAL")
+            self._ensure_column(connection, "predictions", "flip_risk_confidence", "flip_risk_confidence REAL")
+            self._ensure_column(connection, "predictions", "flip_evidence_count", "flip_evidence_count INTEGER")
+            # Warning-performance log: one row per HIGH FLIP RISK alert that fired,
+            # reconciled against whether the frozen prediction actually flipped.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS flip_warnings(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_version TEXT NOT NULL, asset TEXT NOT NULL, checkpoint TEXT NOT NULL,
+                    ticker TEXT NOT NULL, direction TEXT NOT NULL,
+                    risk_score REAL, flip_probability REAL, confidence REAL, created_at REAL NOT NULL,
+                    resolved INTEGER DEFAULT 0, flip_occurred INTEGER, advance_seconds REAL, realized_cents REAL,
+                    UNIQUE(model_version, ticker, checkpoint, direction)
+                )"""
+            )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
@@ -485,7 +505,10 @@ class V95Ledger:
                           costs: Mapping[str, Any] | None = None,
                           confidence_grade: str | None = None,
                           manipulation_suspected: bool = False,
-                          manipulation_reason: str | None = None) -> tuple[str, bool]:
+                          manipulation_reason: str | None = None,
+                          flip_risk_score: float | None = None,
+                          flip_risk_confidence: float | None = None,
+                          flip_evidence_count: int | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
@@ -514,8 +537,9 @@ class V95Ledger:
                        trade_quality,trade_decision,regime,rank,entry_ask_cents,entry_cost_cents,
                        feature_json,contribution_json,quote_json,
                        confidence_grade,original_predicted_side,changed_before_close,
-                       manipulation_suspected,manipulation_reason)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
+                       manipulation_suspected,manipulation_reason,
+                       flip_risk_score,flip_risk_confidence,flip_evidence_count)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)""",
                 (
                     prediction_id, MODEL_VERSION, FEATURE_SCHEMA_VERSION, ticker, asset, checkpoint,
                     created_at, close_time, predicted_side, raw_yes_probability,
@@ -526,10 +550,35 @@ class V95Ledger:
                     (str(confidence_grade).upper() if confidence_grade else None), predicted_side,
                     1 if manipulation_suspected else 0,
                     (str(manipulation_reason) or None) if manipulation_reason else None,
+                    _num(flip_risk_score), _num(flip_risk_confidence),
+                    int(flip_evidence_count) if flip_evidence_count is not None else None,
                 ),
             )
             connection.commit()
             return prediction_id, cursor.rowcount == 1
+
+    def frozen_prediction(self, ticker: str, checkpoint: str) -> dict[str, Any] | None:
+        """The frozen (first-recorded) side + flip-risk score for (ticker, checkpoint).
+
+        Used to detect a confirmed flip — when a later checkpoint's frozen side
+        differs from an earlier one for the same contract. Returns None if that
+        checkpoint was never recorded for the ticker."""
+        if not self._available or not ticker:
+            return None
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT predicted_side, flip_risk_score, flip_risk_confidence FROM predictions "
+                "WHERE model_version=? AND checkpoint=? AND ticker=?",
+                (MODEL_VERSION, checkpoint, str(ticker)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "side": str(row["predicted_side"] or "").upper() or None,
+            "flip_risk_score": _num(row["flip_risk_score"]),
+            "flip_risk_confidence": _num(row["flip_risk_confidence"]),
+        }
 
     def note_prediction_revision(self, *, ticker: str, checkpoint: str, current_side: str) -> bool:
         """Flag that the live predicted side drifted from the locked prediction
@@ -1192,6 +1241,18 @@ class V95Ledger:
             label: self._win_loss([r for r in rows if self._rank_bucket(r) == label])
             for label in ("1", "2", "3", "other")
         }
+        # Rank record split by interval — "how the #1/#2/#3 pick fares within each
+        # checkpoint", so e.g. the 10M top pick can be judged on its own merits
+        # rather than blended across all intervals.
+        rank_by_checkpoint = {
+            cp: {
+                label: self._win_loss(
+                    [r for r in rows if r["checkpoint"] == cp and self._rank_bucket(r) == label]
+                )
+                for label in ("1", "2", "3")
+            }
+            for cp in TRACKED_CHECKPOINTS
+        }
         assets = sorted({str(r["asset"]) for r in rows})
         by_asset = {a: self._win_loss([r for r in rows if str(r["asset"]) == a]) for a in assets}
         # How the top pick (#1) fares per coin — "which coins the #1 pick wins on".
@@ -1202,7 +1263,8 @@ class V95Ledger:
         }
         return {
             "overall": self._win_loss(rows), "by_checkpoint": by_checkpoint,
-            "by_rank": by_rank, "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
+            "by_rank": by_rank, "rank_by_checkpoint": rank_by_checkpoint,
+            "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
             "by_manipulation": self._by_manipulation(rows),
         }
 
@@ -1222,6 +1284,265 @@ class V95Ledger:
             "available": True, "model_version": MODEL_VERSION,
             "intervals": TRACKED_CHECKPOINTS, "priority_interval": self.primary_learning_checkpoint,
             **self._scoreboard_rows(rows),
+        }
+
+    # ------------------------------------------------------------------ flip risk
+    @staticmethod
+    def _flip_observations(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+        """Point-in-time flip observations from resolved contracts.
+
+        For each ticker, walks the frozen sides 15M -> 10M -> 7M -> resolution and
+        emits one observation per consecutive transition: the EARLIER checkpoint's
+        side + recorded flip-risk score, and whether the side flipped at the next
+        stage. The score is the one observed AT the earlier checkpoint, so it never
+        uses information from after the (potential) flip. Direction is keyed by the
+        earlier side ("NO → YES" = a NO prediction that could flip to YES).
+        """
+        order = ("15M", "10M", "7M")
+        by_ticker: dict[str, dict[str, Any]] = {}
+        result_of: dict[str, str] = {}
+        for r in rows:
+            tk = str(r["ticker"])
+            cp = str(r["checkpoint"])
+            by_ticker.setdefault(tk, {})[cp] = {
+                "side": str(_row_get(r, "predicted_side") or "").upper(),
+                "score": _num(_row_get(r, "flip_risk_score")),
+                "asset": str(r["asset"]),
+            }
+            res = str(_row_get(r, "official_result") or "").upper()
+            if res in {"YES", "NO"}:
+                result_of[tk] = res
+
+        out: list[dict[str, Any]] = []
+
+        def _emit(ticker: str, checkpoint: str, earlier: Mapping[str, Any], later_side: str) -> None:
+            e_side = earlier["side"]
+            if e_side not in {"YES", "NO"} or later_side not in {"YES", "NO"}:
+                return
+            if earlier["score"] is None:
+                return  # no live score recorded at that checkpoint -> cannot learn
+            direction = f"{e_side} → {'NO' if e_side == 'YES' else 'YES'}"
+            out.append({
+                "ticker": ticker, "checkpoint": checkpoint, "asset": earlier["asset"],
+                "direction": direction, "score": float(earlier["score"]),
+                "flipped": 1 if e_side != later_side else 0,
+            })
+
+        for tk, cps in by_ticker.items():
+            present = [c for c in order if c in cps]
+            for earlier, later in zip(order, order[1:]):
+                if earlier in cps and later in cps:
+                    _emit(tk, earlier, cps[earlier], cps[later]["side"])
+            if present and tk in result_of:
+                last = present[-1]
+                _emit(tk, last, cps[last], result_of[tk])
+        return out
+
+    @staticmethod
+    def _flip_scope_stats(observations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Bucketed flip-rate curve + learned threshold for one scope."""
+        n = len(observations)
+        flipped_scores = [float(o["score"]) for o in observations if o["flipped"]]
+        buckets: dict[str, dict[str, Any]] = {}
+        for label in flip_risk.BUCKET_ORDER:
+            in_bucket = [o for o in observations if flip_risk.bucket_label(o["score"]) == label]
+            if in_bucket:
+                flips = sum(int(o["flipped"]) for o in in_bucket)
+                buckets[label] = {
+                    "n": len(in_bucket), "flips": flips,
+                    "flip_rate": round(flips / len(in_bucket), 4),
+                }
+        target = _env_float("Q15_V95_FLIP_TARGET_RATE", 0.40, 0.0, 1.0)
+        min_bucket_n = _env_int("Q15_V95_FLIP_BUCKET_MIN_N", 5, 1, 1000)
+        threshold = None
+        for label in flip_risk.BUCKET_ORDER:  # lowest bucket whose flip-rate clears target
+            b = buckets.get(label)
+            if b and b["n"] >= min_bucket_n and b["flip_rate"] >= target:
+                threshold = float(label.split("-")[0])
+                break
+        mode_bucket = max(
+            ((lbl, b) for lbl, b in buckets.items() if b["flips"]),
+            key=lambda kv: kv[1]["flips"], default=(None, None),
+        )[0]
+        flipped_scores_sorted = sorted(flipped_scores)
+        median = (flipped_scores_sorted[len(flipped_scores_sorted) // 2] if flipped_scores_sorted else None)
+        return {
+            "samples": n, "flips": len(flipped_scores),
+            "avg_score_before_flip": round(sum(flipped_scores) / len(flipped_scores), 1) if flipped_scores else None,
+            "median_score_before_flip": median,
+            "mode_bucket_before_flip": mode_bucket,
+            "threshold": threshold, "buckets": buckets,
+        }
+
+    def flip_stats(self) -> dict[str, Any]:
+        """Learned flip statistics from resolved contracts only.
+
+        Returns, per (checkpoint, direction): overall + per-asset bucketed flip
+        rates, learned thresholds, and sample sizes. Uses ONLY the score recorded
+        live at each checkpoint — never future candles or the final result — so it
+        is an honest "what risk level preceded a flip" estimate. Cached against the
+        data version (bumped on every resolution)."""
+        if not self._available:
+            return {"available": False, "error": self._last_error}
+        with self._lock:
+            version = self._data_version
+            cached = getattr(self, "_flip_stats_cache", None)
+            if self._cache_enabled and cached and cached[0] == version:
+                return cached[1]
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT ticker, checkpoint, asset, predicted_side, official_result, flip_risk_score "
+                "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
+                (MODEL_VERSION,),
+            ))
+        observations = self._flip_observations(rows)
+        directions = ("YES → NO", "NO → YES")
+        out: dict[str, Any] = {}
+        for cp in TRACKED_CHECKPOINTS:
+            out[cp] = {}
+            for direction in directions:
+                scoped = [o for o in observations if o["checkpoint"] == cp and o["direction"] == direction]
+                by_asset = {}
+                for asset in sorted({o["asset"] for o in scoped}):
+                    by_asset[asset] = self._flip_scope_stats([o for o in scoped if o["asset"] == asset])
+                out[cp][direction] = {
+                    "overall": self._flip_scope_stats(scoped),
+                    "by_asset": by_asset,
+                }
+        result = {"available": True, "model_version": MODEL_VERSION,
+                  "total_observations": len(observations), "by_checkpoint": out}
+        if self._cache_enabled:
+            with self._lock:
+                if self._data_version == version:
+                    self._flip_stats_cache = (version, result)
+        return result
+
+    def record_flip_warning(self, *, asset: str, checkpoint: str, ticker: str, direction: str,
+                            risk_score: float, flip_probability: float | None,
+                            confidence: float, now: float) -> bool:
+        """Log a HIGH FLIP RISK alert for later true/false-positive scoring.
+
+        One row per (ticker, checkpoint, direction); duplicates are ignored so the
+        warning-performance precision is not inflated by re-fires."""
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            cur = connection.execute(
+                """INSERT OR IGNORE INTO flip_warnings(
+                       model_version,asset,checkpoint,ticker,direction,
+                       risk_score,flip_probability,confidence,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (MODEL_VERSION, str(asset), checkpoint, str(ticker), str(direction),
+                 _num(risk_score), _num(flip_probability), _num(confidence), float(now)),
+            )
+            connection.commit()
+            return cur.rowcount == 1
+
+    def reconcile_flip_warnings(self) -> int:
+        """Score each fired warning against whether the prediction actually flipped.
+
+        A warning is a true positive if a flip observation matching its ticker /
+        checkpoint / direction exists once the contract resolved; advance time is
+        measured to the contract close. Resolve-time only — never retrains on open
+        contracts. Returns the number newly reconciled."""
+        if not self._available:
+            return 0
+        with self._lock, closing(self._connect()) as connection:
+            pending = list(connection.execute(
+                "SELECT * FROM flip_warnings WHERE model_version=? AND resolved=0", (MODEL_VERSION,),
+            ))
+            if not pending:
+                return 0
+            pred_rows = list(connection.execute(
+                "SELECT ticker, checkpoint, asset, predicted_side, official_result, flip_risk_score, "
+                "close_time, realized_cents FROM predictions "
+                "WHERE model_version=? AND official_result IS NOT NULL", (MODEL_VERSION,),
+            ))
+            obs = self._flip_observations(pred_rows)
+            flips = {(o["ticker"], o["checkpoint"], o["direction"]) for o in obs if o["flipped"]}
+            close_by_ticker: dict[str, float] = {}
+            realized_by_ticker: dict[str, float] = {}
+            resolved_tickers: set[str] = set()
+            for r in pred_rows:
+                tk = str(r["ticker"])
+                resolved_tickers.add(tk)
+                ct = _num(_row_get(r, "close_time"))
+                if ct is not None:
+                    close_by_ticker[tk] = ct
+                rc = _num(_row_get(r, "realized_cents"))
+                if rc is not None:
+                    realized_by_ticker[tk] = rc
+            count = 0
+            for w in pending:
+                tk = str(w["ticker"])
+                if tk not in resolved_tickers:
+                    continue  # contract not settled yet
+                occurred = (tk, str(w["checkpoint"]), str(w["direction"])) in flips
+                close_t = close_by_ticker.get(tk)
+                advance = (close_t - float(w["created_at"])) if close_t is not None else None
+                realized = realized_by_ticker.get(tk)
+                connection.execute(
+                    "UPDATE flip_warnings SET resolved=1,flip_occurred=?,advance_seconds=?,realized_cents=? WHERE id=?",
+                    (1 if occurred else 0, advance, realized, int(w["id"])),
+                )
+                count += 1
+            connection.commit()
+            return count
+
+    def flip_warning_performance(self) -> dict[str, Any]:
+        """Precision / detection-rate / advance-time / P&L of fired flip warnings.
+
+        Broken down by checkpoint, direction, asset, and risk-score bucket. Missed
+        flips = actual flips with no warning logged."""
+        if not self._available:
+            return {"available": False, "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            warnings = list(connection.execute(
+                "SELECT * FROM flip_warnings WHERE model_version=? AND resolved=1", (MODEL_VERSION,),
+            ))
+            pred_rows = list(connection.execute(
+                "SELECT ticker, checkpoint, asset, predicted_side, official_result, flip_risk_score "
+                "FROM predictions WHERE model_version=? AND official_result IS NOT NULL", (MODEL_VERSION,),
+            ))
+        all_flips = [o for o in self._flip_observations(pred_rows) if o["flipped"]]
+        warned_keys = {(str(w["ticker"]), str(w["checkpoint"]), str(w["direction"])) for w in warnings if int(w["flip_occurred"] or 0)}
+
+        def _agg(ws: Sequence[sqlite3.Row], flips: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            alerts = len(ws)
+            correct = sum(int(w["flip_occurred"] or 0) for w in ws)
+            false = alerts - correct
+            actual = len(flips)
+            detected = sum(1 for f in flips if (f["ticker"], f["checkpoint"], f["direction"]) in warned_keys)
+            advances = [float(w["advance_seconds"]) for w in ws if w["advance_seconds"] is not None and int(w["flip_occurred"] or 0)]
+            pnl = [float(w["realized_cents"]) for w in ws if w["realized_cents"] is not None]
+            return {
+                "alerts": alerts, "correct": correct, "false": false,
+                "precision": round(correct / alerts, 4) if alerts else None,
+                "actual_flips": actual, "detected": detected, "missed": actual - detected,
+                "detection_rate": round(detected / actual, 4) if actual else None,
+                "avg_advance_seconds": round(sum(advances) / len(advances), 1) if advances else None,
+                "realized_total_cents": round(sum(pnl), 2) if pnl else 0.0,
+            }
+
+        by_checkpoint = {cp: _agg([w for w in warnings if str(w["checkpoint"]) == cp],
+                                  [f for f in all_flips if f["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
+        directions = ("YES → NO", "NO → YES")
+        by_direction = {d: _agg([w for w in warnings if str(w["direction"]) == d],
+                                [f for f in all_flips if f["direction"] == d]) for d in directions}
+        assets = sorted({str(w["asset"]) for w in warnings} | {str(f["asset"]) for f in all_flips})
+        by_asset = {a: _agg([w for w in warnings if str(w["asset"]) == a],
+                            [f for f in all_flips if str(f["asset"]) == a]) for a in assets}
+        by_bucket = {}
+        for label in flip_risk.BUCKET_ORDER:
+            ws = [w for w in warnings if w["risk_score"] is not None and flip_risk.bucket_label(float(w["risk_score"])) == label]
+            if ws:
+                by_bucket[label] = _agg(ws, [])
+        return {
+            "available": True, "model_version": MODEL_VERSION,
+            "overall": _agg(warnings, all_flips),
+            "by_checkpoint": by_checkpoint, "by_direction": by_direction,
+            "by_asset": by_asset, "by_score_bucket": by_bucket,
         }
 
     @staticmethod

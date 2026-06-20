@@ -98,23 +98,30 @@ class HourlyReporter:
         pnl_s = f" · P/L {pnl:+.0f}¢" if (isinstance(pnl, (int, float)) and overall.get("pnl_n")) else ""
         headline = f"Settled {overall['n']} · {acc_s} right{pnl_s}"
 
-        by_cp, by_rank, by_asset = sb.get("by_checkpoint", {}), sb.get("by_rank", {}), sb.get("by_asset", {})
+        by_cp, by_asset = sb.get("by_checkpoint", {}), sb.get("by_asset", {})
+        # Rank record for the primary (10M) interval on its own — the #1/#2/#3 pick
+        # judged within 10M rather than blended across every interval.
+        rank_10m = (sb.get("rank_by_checkpoint", {}) or {}).get("10M", {})
+        # Each group is (optional section header, rows). placeholder=True keeps the
+        # 10M rank rows visible (0-0 — —) before they settle.
         groups = [
-            [self._sb_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")],
-            [self._sb_row(f"#{k} pick", by_rank.get(k)) for k in ("1", "2", "3")],
-            [self._sb_row(a, d) for a, d in sorted(
+            (None, [self._sb_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")]),
+            ("10M RANK PERFORMANCE", [self._sb_row(f"#{k} pick", rank_10m.get(k), placeholder=True) for k in ("1", "2", "3")]),
+            (None, [self._sb_row(a, d) for a, d in sorted(
                 ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
-                key=lambda kv: kv[1]["n"], reverse=True)[:5]],
+                key=lambda kv: kv[1]["n"], reverse=True)[:5]]),
         ]
         body = [f"{'':<8}{'W-L':>5}{'Acc':>6}{'P/L':>7}"]
-        for group in groups:
+        for header, group in groups:
             rows = [r for r in group if r]
             if rows:
                 body.append("")
+                if header:
+                    body.append(header)
                 body.extend(rows)
         table = ["<b>Track record</b> (paper, after fees)", "<pre>", *body, "</pre>"]
         # Only mention the footnote if some bucket is actually flagged thin.
-        if any("*" in (r or "") for group in groups for r in group):
+        if any("*" in (r or "") for _header, group in groups for r in group):
             table.append("<i>* under 10 settled — not yet reliable</i>")
         return [headline, ""] + table + self._manipulation_lines(sb)
 
@@ -145,6 +152,49 @@ class HourlyReporter:
         if by_reason:
             parts = [f"{r} {d.get('right', 0)}-{d.get('wrong', 0)} {_acc(d)}" for r, d in by_reason.items()]
             out.append("by tell: " + " · ".join(parts))
+        return out
+
+    def _flip_warning_lines(self):
+        """MANIPULATION WARNING PERFORMANCE — precision, detection rate, advance
+        time and P&L of fired HIGH FLIP RISK warnings, plus the learned flip-rate
+        calibration by score bucket. Empty until warnings have been reconciled."""
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None:
+            return []
+        try:
+            perf = ledger.flip_warning_performance()
+            stats = ledger.flip_stats()
+        except Exception as e:
+            logger.warning(f"flip performance fetch failed: {e}")
+            return []
+        o = perf.get("overall") or {}
+        out = []
+        if o.get("alerts"):
+            def _s(v, suffix=""):
+                return f"{v}{suffix}" if isinstance(v, (int, float)) else "—"
+            adv = o.get("avg_advance_seconds")
+            adv_s = f"{int(adv)//60}m {int(adv)%60:02d}s" if isinstance(adv, (int, float)) else "—"
+            pnl = o.get("realized_total_cents")
+            out += [
+                "", "⚠ <b>MANIPULATION WARNING PERFORMANCE</b>",
+                f"Alerts: {o.get('alerts', 0)} · {o.get('correct', 0)} correct / {o.get('false', 0)} false "
+                f"· precision {_pct(o.get('precision'))}",
+                f"Flips: {o.get('detected', 0)}/{o.get('actual_flips', 0)} detected "
+                f"({_pct(o.get('detection_rate'))}) · {o.get('missed', 0)} missed",
+                f"Avg advance {adv_s} · P/L {pnl:+.0f}¢" if isinstance(pnl, (int, float)) else f"Avg advance {adv_s}",
+            ]
+        # Learned flip-rate curve for the primary interval (10M), both directions,
+        # so you can see what risk score has historically preceded a flip.
+        if stats.get("available"):
+            for direction in ("NO → YES", "YES → NO"):
+                scope = (stats.get("by_checkpoint", {}).get("10M", {}) or {}).get(direction, {}).get("overall", {})
+                buckets = scope.get("buckets") or {}
+                if scope.get("samples"):
+                    curve = " · ".join(
+                        f"{lbl}:{_pct(b['flip_rate'])}"
+                        for lbl, b in buckets.items() if b.get("n")
+                    )
+                    out += ["", f"10M {direction} flip-rate by risk ({scope.get('samples')} obs): {curve or '—'}"]
         return out
 
     def maybe_send(self, now):
@@ -180,6 +230,9 @@ class HourlyReporter:
 
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
         lines.extend(self._scoreboard_table())
+
+        # Flip-risk warning performance (precision / detection / advance / P&L).
+        lines.extend(self._flip_warning_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:
