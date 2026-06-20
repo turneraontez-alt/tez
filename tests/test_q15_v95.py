@@ -389,18 +389,22 @@ class V95Tests(unittest.TestCase):
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
         self.assertIn("V9.5 CHECK", message)         # formatter guard + identity
         self.assertIn("BNB", message)                # the pick
-        self.assertIn("grade", message)              # confidence grade shown
+        self.assertIn("Top picks", message)          # hourly-report-style table
+        self.assertIn("<pre>", message)              # aligned monospace block
+        self.assertIn("Best:", message)              # the one-line headline
         self.assertNotIn("Three requirements", message)
 
     def test_message_shows_market_implied_probability(self):
         # ask=52 -> yes mid 51.5 -> market-implied YES ~ 0.515; the pick is YES,
-        # so the checkpoint line shows the model prob next to "vs mkt 51.5%".
+        # so the table's "Mkt" column shows the market-implied prob (~52%) next to
+        # the model prob.
         row = snapshot(ask=52.0)
         result = analyse_v95(row, self.canonical(row=row), self.ledger)
         self.assertEqual(result["prediction_side"], "YES")
         analyses = {"BNB": result}
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
-        self.assertIn("vs mkt 51.5%", message)
+        self.assertIn("Mkt", message)   # market column header
+        self.assertIn("52%", message)   # market-implied prob for the YES side
 
     def test_message_omits_market_implied_when_no_quote(self):
         # With no Kalshi quote the market-implied prob is None, so the "vs mkt"

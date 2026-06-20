@@ -166,6 +166,29 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertIn("#1 pick", text)
         self.assertIn("67%", text)
 
+    def test_all_three_checkpoints_shown_even_when_empty(self):
+        # 15M has settled rows; 10M/7M have none yet. All three must still appear
+        # (10M/7M as zeroed placeholders) so the user can see they're tracked.
+        sb = {
+            "available": True,
+            "overall": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667},
+            "by_checkpoint": {"15M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {},
+        }
+        text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
+        self.assertIn("15M", text)
+        self.assertIn("10M", text)   # placeholder row, previously hidden
+        self.assertIn("7M", text)    # placeholder row, previously hidden
+        self.assertIn("0-0", text)   # the zeroed "awaiting data" marker
+
+    def test_header_is_eastern_time(self):
+        reporter = reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=None)
+        header = reporting._eastern_header()
+        # Eastern, not UTC, and carries an AM/PM + tz label.
+        self.assertNotIn("UTC", header)
+        self.assertTrue(("AM" in header) or ("PM" in header))
+        self.assertTrue(header.endswith("EST") or header.endswith("EDT"))
+
     def test_empty_shows_building_history(self):
         sb = {"available": True, "overall": {"n": 0}, "by_checkpoint": {}, "by_rank": {}}
         lines = self._reporter(_FakeLedger(sb))._scoreboard_table()

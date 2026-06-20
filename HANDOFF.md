@@ -9,7 +9,46 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" -q` first. Tests: `python3 -m pytest tests/ -q`
 → **435 passed, 4 skipped**.
 
-## ✅ Shipped this session (branch `claude/hand-off-report-ezzh3s`, merged to `main`)
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — Telegram UX + alert dedup
+Verified live first: speedup (~4.5s → ~2.3–2.6s) and the checkpoint-label fix
+(saw `7M` in `/predictions`, impossible under the old all-`15M` bug).
+1. **Checkpoint alert restyled to the hourly-report look** (`build_v95_message`,
+   `checkpoint_v95.py`). Bold header (keeps `V9.5 CHECK` + `ENTRY/NO ENTRY`),
+   one-line headline, a `<pre>` monospace table (asset · side · model P · market
+   P · edge), an `ask→max` economics line per live entry, unavailable picks
+   listed below. `augment_telegram_message` (`calibrated_edge.py`) now skips any
+   `V9.5 CHECK` message so the clean table isn't followed by a `V9 TRADE QUALITY`
+   block.
+2. **Eastern time on the report** (`reporting.py`): header renders
+   `America/New_York` (auto EST/EDT) via `_eastern_header`; `tzdata` added to
+   `requirements.txt`. Dedup/claim key stays UTC (whole-hour offset → same firing
+   moment).
+3. **Hourly scoreboard always shows 15M/10M/7M** (`_sb_row(..., placeholder=True)`
+   for the checkpoint group) — empty buckets render `0-0  —  —` instead of
+   vanishing, so 10M/7M are visible as they start accumulating.
+4. **"4 alerts at the 10m mark" → exactly one, only once decided**
+   (`checkpoint_v95.py`). Root cause: `_notification_identity` keyed the dedup on
+   the top-ranked **ticker**, which churns as edges jitter → a fresh key + send
+   per leader. Now keyed per **(checkpoint, 15-min market window)**
+   (`Q15_V95_SINGLE_ALERT_PER_CHECKPOINT`, default ON). Plus a stability gate
+   `_decision_settled`: holds the alert until the top-3 (asset/side/entry)
+   signature is stable for `Q15_V95_DECISION_STABILITY_CYCLES` (default 3) cycles,
+   with a force-send fallback as the band closes
+   (`Q15_V95_DECISION_FORCE_MARGIN_SECONDS`, default 60). NOTE: a genuine
+   WATCH→ENTRY upgrade after the first send still re-fires (intentional — don't
+   miss a real entry); only jitter is suppressed.
+5. **Hourly report "14 min late"**: scheduling code is correct (fires every ~1s at
+   the UTC boundary). Owner confirmed Always-On, so cause is restarts. Added
+   send-time logging (`:NN past the hour`) + a restart catch-up
+   (`Q15_HOURLY_CATCHUP_MINUTES`, default 5) so a restart shortly after the hour
+   still delivers (claim_event keeps it idempotent). Watch the logs to confirm.
+
+Tests: `447 passed, 4 skipped`. New: `test_q15_v95_single_alert.py`; updated
+checkpoint-message + scoreboard + calibrated-edge tests for the new format.
+**Still TODO on Replit:** set `Q15_ALERT_LEVEL_10M=all` / `_7M=all` in Secrets to
+actually receive the 10m/7m checks (else muted as `NO ENTRY YET` under `balanced`).
+
+## ✅ Shipped prior session (branch `claude/hand-off-report-ezzh3s`, merged to `main`)
 1. **THE FIX — 10m/7m checkpoints never fired** (`checkpoint_v95.py`,
    `test_q15_v95_checkpoint_time_authoritative.py`). Root cause: `_detect_checkpoint`
    (inherited, frozen) consults a recursive snapshot key-walk + the buffered

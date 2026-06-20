@@ -67,10 +67,34 @@ class TestDegradedV95Message(unittest.TestCase):
         self.assertTrue(analysis.get("prediction_available"))
         analyses = {"BNB": analysis}
         msg = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
-        self.assertIn("BNB YES", msg)        # the pick + side
+        self.assertIn("BNB YES", msg)        # the pick + side (in the headline)
         self.assertIn("ENTRY", msg)          # the action
         self.assertIn("edge", msg)           # the economics
         self.assertNotIn("no prediction", msg)
+        self.assertNotIn("None", msg)
+
+    def test_message_uses_hourly_report_style_table(self):
+        # Two healthy picks should render the aligned <pre> monospace table that
+        # mirrors the hourly report's look, plus the required header markers.
+        good_a = snapshot(asset="BNB", checkpoint="10M", ask=52.0, target=100.0, spot=101.0)
+        good_b = snapshot(asset="BTC", checkpoint="10M", ask=48.0, target=100.0, spot=101.0)
+        analyses = {
+            "BNB": _analyse(good_a, "BNB", self.ledger),
+            "BTC": _analyse(good_b, "BTC", self.ledger),
+        }
+        msg = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
+        # Header invariants (suppression + formatter keys).
+        self.assertIn("V9.5 CHECK", msg)
+        self.assertTrue(("NO ENTRY YET" in msg) or ("ENTRY RECOMMENDED" in msg))
+        # Hourly-report-style table.
+        self.assertIn("<pre>", msg)
+        self.assertIn("</pre>", msg)
+        self.assertIn("Top picks", msg)
+        self.assertIn("Side", msg)
+        self.assertIn("Edge", msg)
+        self.assertIn("Best:", msg)          # the one-line headline
+        # Must NOT carry the hourly-report reroute marker.
+        self.assertNotIn("Hourly Report —", msg)
         self.assertNotIn("None", msg)
 
 

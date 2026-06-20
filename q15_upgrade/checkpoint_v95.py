@@ -930,6 +930,12 @@ def _fmt_probability(value: Any) -> str:
     return "n/a" if parsed is None else f"{parsed * 100:.1f}%"
 
 
+def _pct0(value: Any) -> str:
+    """Whole-percent formatter for the compact monospace checkpoint table."""
+    parsed = _num(value)
+    return "—" if parsed is None else f"{parsed * 100:.0f}%"
+
+
 def _fmt_cents(value: Any, signed: bool = False) -> str:
     parsed = _num(value)
     if parsed is None:
@@ -989,39 +995,84 @@ def _c(value: Any, signed: bool = False) -> str:
 
 
 def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None) -> str:
+    """Render the checkpoint alert in the hourly-report house style.
+
+    A bold header, a one-line headline, then a compact ``<pre>`` monospace table
+    of the top picks (asset / side / model prob / market prob / edge) — the same
+    aesthetic as ``reporting.HourlyReporter._scoreboard_table``. Live entries get
+    a highlighted ask→max economics line below the table (the detail you'd act
+    on); unavailable picks are listed below it so the columns never break.
+
+    The header deliberately keeps ``V9.5 CHECK`` (formatter guard) and the
+    ``ENTRY RECOMMENDED`` / ``NO ENTRY YET`` markers (alert-suppression keys on
+    them). It must NOT carry the ``Hourly Report —`` marker (that would reroute
+    it past the reformatters).
+    """
     any_entry = any(bool(row.get("entry_allowed")) for row in analyses.values())
     emoji = "✅" if any_entry else "👀"
     state = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
-    medals = ["🥇", "🥈", "🥉"]
-    # Header keeps "V9.5 CHECK" (formatter guard) and the ENTRY/NO ENTRY markers
-    # (alert-suppression classification).
     lines = [f"{emoji} <b>{checkpoint} V9.5 CHECK · {state}</b>"]
-    for index, row in enumerate(ranking[:3]):
-        asset = str(row["asset"])
-        analysis = analyses[asset]
-        medal = medals[index] if index < 3 else f"{index + 1}."
-        side = analysis.get("prediction_side") or "—"
-        if not analysis.get("prediction_available"):
-            lines.append(f"{medal} <b>{asset}</b> — no prediction")
-            lines.append(f"   ⛔ {_humanize_v95_reasons(analysis.get('main_blocker'))}")
-            continue
-        regime = (analysis.get("regime") or {}).get("name") or "—"
-        prob = _fmt_probability(analysis.get("selected_probability"))
-        # Market-implied prob for the selected side (invert the YES-implied for a
-        # NO pick) so the model-vs-market gap shows at a glance; omit if no quote.
-        market_yes = _num(analysis.get("market_implied_yes_probability"))
-        market_for_side = None if market_yes is None else (market_yes if side == "YES" else 1.0 - market_yes)
-        mkt = "" if market_for_side is None else f" vs mkt {_fmt_probability(market_for_side)}"
-        grade = analysis.get("confidence_grade") or "—"
-        ask = _c((analysis.get("quote") or {}).get("ask_cents"))
-        net = analysis.get("net_edge_cents")
-        lines.append(f"{medal} <b>{asset} {side}</b> — {prob}{mkt} · grade {grade} · {regime}")
-        if analysis.get("entry_allowed"):
-            lines.append(f"   ✅ ENTRY · edge {_c(net, signed=True)} · ask {ask} → max {_c(analysis.get('ideal_entry_cents'))}")
+
+    top = list(ranking[:3])
+    available = [r for r in top if analyses.get(str(r["asset"]), {}).get("prediction_available")]
+    unavailable = [r for r in top if not analyses.get(str(r["asset"]), {}).get("prediction_available")]
+
+    # One-line headline from the top-ranked available pick.
+    if available:
+        lead = available[0]
+        a = analyses[str(lead["asset"])]
+        side = a.get("prediction_side") or "—"
+        net = a.get("net_edge_cents")
+        if a.get("entry_allowed"):
+            lines.append(f"Best: {lead['asset']} {side} · edge {_c(net, signed=True)}")
+        elif net is not None:
+            need = a.get("required_edge_cents")
+            lines.append(
+                f"Best: {lead['asset']} {side} {_pct0(a.get('selected_probability'))} · "
+                f"edge {_c(net, signed=True)} (need {_c(need)}) — holding"
+            )
         else:
-            reason = _decision_label(analysis.get("trade_decision"))
-            edge = f"edge {_c(net, signed=True)} (need {_c(analysis.get('required_edge_cents'))})" if net is not None else "no executable edge"
-            lines.append(f"   👀 {reason} · {edge} · ask {ask}")
+            lines.append(f"Best: {lead['asset']} {side} {_pct0(a.get('selected_probability'))} · no executable edge — holding")
+    else:
+        lines.append("No prediction available this cycle")
+
+    # Aligned monospace table of the available picks (model vs market + edge).
+    if available:
+        body = [f"{'':<6}{'Side':>5}{'P':>6}{'Mkt':>6}{'Edge':>7}"]
+        for row in available:
+            asset = str(row["asset"])
+            a = analyses[asset]
+            side = a.get("prediction_side") or "—"
+            prob = _pct0(a.get("selected_probability"))
+            # Market-implied prob for the selected side (invert YES-implied for a NO pick).
+            market_yes = _num(a.get("market_implied_yes_probability"))
+            market_for_side = None if market_yes is None else (market_yes if side == "YES" else 1.0 - market_yes)
+            mkt = _pct0(market_for_side)
+            edge = _c(a.get("net_edge_cents"), signed=True)
+            body.append(f"{asset:<6}{side:>5}{prob:>6}{mkt:>6}{edge:>7}")
+        lines.append("")
+        lines.append("<b>Top picks</b>")
+        lines.append("<pre>")
+        lines.extend(body)
+        lines.append("</pre>")
+
+    # Entry economics — only for live entries; the actionable detail.
+    for row in available:
+        asset = str(row["asset"])
+        a = analyses[asset]
+        if a.get("entry_allowed"):
+            ask = _c((a.get("quote") or {}).get("ask_cents"))
+            lines.append(
+                f"✅ {asset} entry — ask {ask} → max {_c(a.get('ideal_entry_cents'))} · "
+                f"edge {_c(a.get('net_edge_cents'), signed=True)}"
+            )
+
+    # Unavailable picks below the table so the aligned columns stay clean.
+    for row in unavailable:
+        asset = str(row["asset"])
+        a = analyses[asset]
+        lines.append(f"⛔ {asset} — no prediction ({_humanize_v95_reasons(a.get('main_blocker'))})")
+
     if result_events:
         marks = "  ".join(f"{e.get('asset')} {'✅' if e.get('correct') else '❌'}" for e in result_events[:4])
         lines.append(f"Recent results — {marks}")
@@ -1030,17 +1081,43 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
     return text if len(text) <= 4000 else text[:3990] + "…"
 
 
+# Lower seconds-remaining boundary of each checkpoint band (mirrors
+# _resolve_checkpoint): a band "closes" when the clock drops below this.
+_CHECKPOINT_BAND_LOWER = {"15M": 660.0, "10M": 480.0, "7M": 0.0}
+
+
+def _decision_signature(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple:
+    """Identity of the current verdict — the top-3 (asset, side, entry?) tuple.
+
+    Used to decide when the model has "made up its mind": the alert is held
+    until this signature is stable across several cycles, so leader/edge jitter
+    early in a checkpoint band no longer produces a burst of alerts.
+    """
+    out = []
+    for row in ranking[:3]:
+        asset = str(row.get("asset"))
+        a = analyses.get(asset, {})
+        out.append((asset, a.get("prediction_side"), bool(a.get("entry_allowed"))))
+    return tuple(out)
+
+
 def _notification_identity(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], now: float) -> tuple[str, str, str]:
-    top = ranking[0] if ranking else {}
-    ticker = str(top.get("ticker") or "UNKNOWN")
-    # Kalshi ticker is the stable contract identity.  Do not derive a key from
-    # a moving `now + seconds_remaining` estimate; that can cross a rounding
-    # boundary and create duplicate Telegram sends one second apart.
-    if ticker and ticker != "UNKNOWN":
-        event_key = f"{VERSION}|{checkpoint}|{ticker}"
+    # One alert per (checkpoint, 15-minute market window): all assets share the
+    # XX:00/15/30/45 boundaries, so `now // 900` is identical for every cycle and
+    # every asset within a market. Keying on this — instead of the top-ranked
+    # ticker, which churns as probabilities/edges jitter and used to mint a fresh
+    # key (and a duplicate send) per leader — collapses the burst to a single
+    # alert. Disable via Q15_V95_SINGLE_ALERT_PER_CHECKPOINT=false.
+    if _env_bool("Q15_V95_SINGLE_ALERT_PER_CHECKPOINT", True):
+        event_key = f"{VERSION}|{checkpoint}|W{int(now // 900)}"
     else:
-        window = 900 if checkpoint == "15M" else 600
-        event_key = f"{VERSION}|{checkpoint}|UNKNOWN|{int(now // window)}"
+        top = ranking[0] if ranking else {}
+        ticker = str(top.get("ticker") or "UNKNOWN")
+        if ticker and ticker != "UNKNOWN":
+            event_key = f"{VERSION}|{checkpoint}|{ticker}"
+        else:
+            window = 900 if checkpoint == "15M" else 600
+            event_key = f"{VERSION}|{checkpoint}|UNKNOWN|{int(now // window)}"
     has_entry = any(bool(analysis.get("entry_allowed")) for analysis in analyses.values())
     state = "ENTRY_RECOMMENDED" if has_entry else "WATCH"
     fingerprint = hashlib.sha256(json.dumps({
@@ -1181,6 +1258,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._latest_ranking_v95: list[dict[str, Any]] = []
         self._latest_public: dict[str, dict[str, Any]] = {}
         self._last_checkpoint_v95 = "UNKNOWN"
+        # Per (checkpoint, market-window) verdict-stability tracker so an alert is
+        # only emitted once the decision has held steady for a few cycles.
+        self._decision_stability: dict[tuple[str, int], dict[str, Any]] = {}
         self._last_reconcile: dict[str, Any] = {}
         self._last_market_reconcile: dict[str, Any] = {}
         self._run_cycle_timing: dict[str, Any] = {}
@@ -1320,7 +1400,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # Discard all parent V9.4 messages. V9.5 owns the final state machine.
             deferred.suppress_all(generated_message=message is not None)
             sent = failed = 0
-            if message:
+            if message and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
                 event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
                 previous = self.ledger.notification_state(event_key)
                 state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
@@ -1380,6 +1460,47 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     snapshot["new_entry_allowed"] = False
             deferred.suppress_all(generated_message=False)
             return parent_output
+
+    def _decision_settled(self, checkpoint: str, analyses: Mapping[str, Mapping[str, Any]],
+                          ranking: Sequence[Mapping[str, Any]], snapshots: Mapping[str, Any],
+                          now: float) -> bool:
+        """Hold the alert until the verdict has "made up its mind".
+
+        The top-3 (asset/side/entry) signature must repeat for
+        ``Q15_V95_DECISION_STABILITY_CYCLES`` consecutive cycles before the alert
+        is allowed out, so early-band leader/edge jitter no longer produces a
+        burst. A fallback forces a single send as the checkpoint band closes, so
+        a verdict that never fully settles still yields exactly one alert.
+        No-op (always settled) when single-alert gating is disabled.
+        """
+        if not _env_bool("Q15_V95_SINGLE_ALERT_PER_CHECKPOINT", True):
+            return True
+        window_id = int(now // 900)
+        key = (checkpoint, window_id)
+        signature = _decision_signature(analyses, ranking)
+        entry = self._decision_stability.get(key)
+        if entry and entry.get("signature") == signature:
+            entry["count"] += 1
+        else:
+            entry = {"signature": signature, "count": 1}
+            self._decision_stability[key] = entry
+        # Keep the tracker bounded — drop windows more than two markets old.
+        if len(self._decision_stability) > 32:
+            for stale in [k for k in self._decision_stability if k[1] < window_id - 2]:
+                self._decision_stability.pop(stale, None)
+        required = int(_env_float("Q15_V95_DECISION_STABILITY_CYCLES", 3.0, 1.0, 120.0))
+        if entry["count"] >= required:
+            return True
+        # Fallback: emit once as the band is about to close (mirrors the
+        # seconds-remaining boundaries _resolve_checkpoint classifies on).
+        times = [_seconds_remaining(s, now) for s in snapshots.values() if isinstance(s, Mapping)]
+        times = [t for t in times if t is not None]
+        if times:
+            lower = _CHECKPOINT_BAND_LOWER.get(checkpoint, 0.0)
+            margin = _env_float("Q15_V95_DECISION_FORCE_MARGIN_SECONDS", 60.0, 0.0, 300.0)
+            if max(times) <= lower + margin:
+                return True
+        return False
 
     def predictions(self) -> dict[str, Any]:
         with self._v95_lock:
