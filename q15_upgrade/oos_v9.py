@@ -194,17 +194,21 @@ class OutOfSampleEvaluator:
     def _postgres_rows(self) -> list[dict[str, Any]]:
         if not bool(getattr(self.store, "enabled", False)) or not hasattr(self.store, "query"):
             return []
-        queries = (
-            "SELECT * FROM q15_ten_minute_reviews WHERE status='RESOLVED' AND actual_side IN ('YES','NO') ORDER BY predicted_at ASC",
-            "SELECT * FROM q15_10m_reviews WHERE status='RESOLVED' AND actual_side IN ('YES','NO') ORDER BY predicted_at ASC",
-        )
-        for query in queries:
-            try:
-                rows = self.store.query(query)
-                if rows:
-                    return [dict(row) for row in rows]
-            except Exception:
+        # These review tables may never have been created. Querying a missing
+        # relation makes SignalStore.query log "relation does not exist" and roll
+        # back the txn every cycle. to_regclass() returns NULL (no error) for an
+        # absent relation, so we probe existence first and only SELECT what's there.
+        candidate_tables = ("q15_ten_minute_reviews", "q15_10m_reviews")
+        for table in candidate_tables:
+            probe = self.store.query("SELECT to_regclass(%s) AS reg", (table,))
+            if not probe or dict(probe[0]).get("reg") is None:
                 continue
+            rows = self.store.query(
+                f"SELECT * FROM {table} WHERE status='RESOLVED' "
+                "AND actual_side IN ('YES','NO') ORDER BY predicted_at ASC"
+            )
+            if rows:
+                return [dict(row) for row in rows]
         return []
 
     def _sqlite_rows(self) -> list[dict[str, Any]]:
