@@ -1,72 +1,60 @@
-# Syncing Replit to GitHub (`main` is the source of truth)
+# Syncing the Replit project and GitHub `main`
 
-The site runs on Replit, but **GitHub `main` is the single source of truth**.
-To pull new GitHub updates into the Repl you do **not** delete anything — you
-just overwrite tracked files. Run this in the Replit **Shell**.
+Two mechanisms keep the Repl and GitHub `main` in sync. **The GitHub Relay is
+the normal one and runs automatically — you rarely touch anything.** `./sync.sh`
+is now only a manual recovery override.
 
-## The one-command way (recommended)
+## 1. The GitHub Relay (automatic, two-way) — the normal path
+
+A background workflow (`tools/github_relay.py`, started in parallel with the app
+by `.replit`) syncs **both directions every ~20s**:
+
+- **GitHub → Repl:** new commits on `main` (e.g. a merged PR) are *merged* down
+  into the Repl automatically.
+- **Repl → GitHub:** anything committed locally on the Repl is pushed up to
+  `main`.
+
+It uses a real `git merge` (never a destructive reset, never a force-push). If
+the **same file** changed on both sides it can't auto-resolve, so it **pauses
+and leaves the project untouched**, logging the conflicting files in the
+*GitHub Relay* console — resolve those and it resumes.
+
+Requirements: a `GH_PUSH_TOKEN` (or `GITHUB_TOKEN`) Secret with **Contents:
+Read+Write**. Without it the relay logs "cannot run" and does nothing.
+
+**What this means day to day:**
+- After a PR is merged, the Repl picks up the new code within ~20s — **no manual
+  sync needed.** You still **Stop ▸ Run** to load it into the running app
+  (`python3 app.py` does not hot-reload).
+- ⚠️ The relay pushes **anything committed on the Repl straight to `main`,
+  bypassing pull-request review.** Be deliberate about what you commit on the
+  Repl. For model/behaviour changes prefer a branch + PR — the champion weights
+  are FROZEN and promotion is meant to be manual and significance-tested.
+
+## 2. `./sync.sh` — manual override (force the Repl to match GitHub)
+
+Use this **only** to force the Repl to exactly match GitHub `main` — e.g. to
+recover when the relay is paused on a conflict and you want **GitHub to win**:
 
 ```bash
-./sync.sh            # public repo
-./sync.sh <TOKEN>    # private repo: pass a fine-grained PAT (Contents: Read)
+./sync.sh            # public fetch
+./sync.sh <TOKEN>    # private repo: fine-grained PAT, Contents: Read
+BRANCH=some-branch ./sync.sh   # match a non-main branch
 ```
 
-`sync.sh` fetches GitHub, hard-resets **tracked** files to match it, reinstalls
-deps, and prints the new commit. Your `.env`, Replit Secrets, and `data/` are
-gitignored, so they are never touched. When it finishes: **Stop ▸ Run** (or
-republish the deployment).
+⚠️ **Destructive:** it `git reset --hard`s tracked files to GitHub, discarding
+any local-only commits the relay has not pushed yet. Your `.env`, Replit
+Secrets, and `data/` are gitignored and untouched. After it runs: **Stop ▸ Run**.
 
-If you ever need to sync a different branch:
-
-```bash
-BRANCH=some-branch ./sync.sh
-```
-
+> To resolve a relay conflict by *merging* both sides instead of discarding
+> local work, run `python3 tools/github_reconcile.py` (one-shot merge + push).
+>
 > First time only, if the shell says `permission denied`: `chmod +x sync.sh`.
 
-## One-time note on auth
-This Repl has no `origin` remote pointing at GitHub, so we fetch the URL
-directly. If the repo is **private**, create a token first:
-GitHub → Settings → Developer settings → Personal access tokens → Fine-grained →
-repo access to `tez`, permission **Contents: Read** → generate → copy it. Pass
-it to `./sync.sh <TOKEN>`, or export it as `GITHUB_TOKEN` first.
+## Token note
 
-## Manual steps (what `sync.sh` does, if you'd rather paste it yourself)
-
-```bash
-# 1) Fetch GitHub's main directly (no permanent remote; token not stored in config).
-git fetch https://github.com/turneraontez-alt/tez.git main
-#    If it errors asking for credentials (private repo), use the token:
-#    git fetch https://YOUR_TOKEN@github.com/turneraontez-alt/tez.git main
-
-# 2) Make every TRACKED file exactly match GitHub
-#    (removes deleted files, adds new ones, updates the rest).
-git reset --hard FETCH_HEAD
-
-# 3) Reinstall dependencies, then restart the app (Stop ▸ Run).
-pip install -r requirements.txt
-
-# 4) Verify — the latest GitHub commit should be at the top.
-git log -1
-```
-
-## Safety
-
-- `reset --hard` only moves **tracked** files. Your `.env`, Replit **Secrets**,
-  and the `data/` folder (SQLite/runtime state) are gitignored and untouched.
-- **Do not run `git clean -fdx`** — the `-x` would delete gitignored files,
-  including your secrets and database. Plain `reset --hard` is enough; you do not
-  need `clean` to match GitHub's code.
-- The previous Replit state is auto-saved by Replit's `gitsafe-backup`, so an
-  overwrite is recoverable.
-
-## Avoiding re-divergence (important)
-
-The Replit Agent makes its own commits when it edits code, which silently
-diverges the Repl from GitHub. To keep `main` authoritative, either:
-
-- use the Replit Agent **only to run** the app, not to edit code, **or**
-- if the Agent makes a change you want to keep, **push it to GitHub** so both
-  stay in sync.
-
-Otherwise you will have to re-run the overwrite above every time.
+Both the relay and `sync.sh` authenticate with a GitHub token read from the
+environment and injected into the fetch/push URL **in memory only** — never
+written to `.git/config`, never committed, masked in logs. For the relay set
+`GH_PUSH_TOKEN` (Contents: Read+Write); for a private-repo `sync.sh` pull,
+Contents: Read is enough.

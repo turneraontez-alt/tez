@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 #
-# sync.sh — Make this Replit exactly match GitHub (the single source of truth),
-# WITHOUT deleting your secrets or runtime data.
+# sync.sh — Force this Replit to exactly match GitHub, WITHOUT deleting your
+# secrets or runtime data.
+#
+# NOTE: This Repl also runs an automatic two-way GitHub Relay
+# (tools/github_relay.py), which normally keeps the Repl and GitHub `main` in
+# sync on its own. You usually do NOT need this script. Use it only as a manual
+# override to force the Repl to match GitHub (e.g. to recover when the relay is
+# paused on a conflict and you want GitHub to win). It is DESTRUCTIVE: the hard
+# reset below discards local-only commits the relay has not pushed yet. See
+# SYNC.md.
 #
 # Run it in the Replit **Shell**:
 #
