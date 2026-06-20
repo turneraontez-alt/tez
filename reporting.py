@@ -68,6 +68,15 @@ class HourlyReporter:
                   for key, label in (("1", "#1"), ("2", "#2"), ("3", "#3")) if _wl(by_rank.get(key))]
         if ranked:
             lines.append("By pick rank — " + "  ·  ".join(ranked))
+        # By asset, busiest first, capped so the line stays readable.
+        by_asset = sb.get("by_asset", {})
+        asset_items = sorted(
+            ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
+            key=lambda kv: kv[1]["n"], reverse=True,
+        )[:6]
+        asset_parts = [f"{a}: {_wl(d)}" for a, d in asset_items if _wl(d)]
+        if asset_parts:
+            lines.append("By asset — " + "  ·  ".join(asset_parts))
         return lines
 
     def maybe_send(self, now):

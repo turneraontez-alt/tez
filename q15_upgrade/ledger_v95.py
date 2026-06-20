@@ -662,21 +662,32 @@ class V95Ledger:
         return str(value) if value in (1, 2, 3) else "other"
 
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
-        """Right/wrong/accuracy by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
+        """Right/wrong/accuracy by interval (15M/10M/7M), pick rank (#1/#2/#3), and asset."""
         by_checkpoint = {cp: self._win_loss([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
         by_rank = {
             label: self._win_loss([r for r in rows if self._rank_bucket(r) == label])
             for label in ("1", "2", "3", "other")
         }
-        return {"overall": self._win_loss(rows), "by_checkpoint": by_checkpoint, "by_rank": by_rank}
+        assets = sorted({str(r["asset"]) for r in rows})
+        by_asset = {a: self._win_loss([r for r in rows if str(r["asset"]) == a]) for a in assets}
+        # How the top pick (#1) fares per coin — "which coins the #1 pick wins on".
+        rank1 = [r for r in rows if self._rank_bucket(r) == "1"]
+        top_pick_by_asset = {
+            a: self._win_loss([r for r in rank1 if str(r["asset"]) == a])
+            for a in sorted({str(r["asset"]) for r in rank1})
+        }
+        return {
+            "overall": self._win_loss(rows), "by_checkpoint": by_checkpoint,
+            "by_rank": by_rank, "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
+        }
 
     def scoreboard(self) -> dict[str, Any]:
-        """User-facing record: how often each interval and each rank was right/wrong."""
+        """User-facing record: how often each interval, rank, and asset was right/wrong."""
         if not self._available:
             return {"available": False, "error": self._last_error}
         with self._lock, closing(self._connect()) as connection:
             rows = list(connection.execute(
-                "SELECT checkpoint, correct, rank FROM predictions "
+                "SELECT checkpoint, correct, rank, asset FROM predictions "
                 "WHERE model_version=? AND official_result IS NOT NULL",
                 (MODEL_VERSION,),
             ))

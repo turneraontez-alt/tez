@@ -59,6 +59,33 @@ class TestLedgerScoreboard(unittest.TestCase):
         self.assertEqual(sb["by_rank"]["2"]["right"], 1)
         self.assertEqual(sb["by_rank"]["3"]["wrong"], 1)
 
+    def test_scoreboard_breaks_down_by_asset(self):
+        led = _mk_ledger()
+        # ETH #1 right, ETH #1 wrong, BTC #1 right, SOL #2 right
+        for t, asset, cp, side, rank, res in [
+            ("E1", "ETH", "10M", "YES", 1, "YES"),
+            ("E2", "ETH", "10M", "YES", 1, "NO"),
+            ("B1", "BTC", "10M", "YES", 1, "YES"),
+            ("S1", "SOL", "7M", "NO", 2, "NO"),
+        ]:
+            led.record_prediction(
+                ticker=t, asset=asset, checkpoint=cp, created_at=time.time(),
+                close_time=time.time() + 600, predicted_side=side,
+                raw_yes_probability=0.7, calibrated_yes_probability=0.7, challenger_yes_probability=0.7,
+                baseline_yes_probability=0.6, selected_probability=0.7, conservative_probability=0.65,
+                data_quality=0.8, evidence_quality=0.7, trade_quality=0.7,
+                trade_decision="ENTRY_RECOMMENDED", regime="NORMAL",
+                features={"momentum": 0.3}, contributions={"momentum": 0.2}, quote={"ask_cents": 50}, rank=rank,
+            )
+            led.resolve_ticker(t, res)
+        sb = led.scoreboard()
+        self.assertEqual(sb["by_asset"]["ETH"], {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
+        self.assertEqual(sb["by_asset"]["BTC"]["right"], 1)
+        # top_pick (#1) per coin: ETH 1/2, BTC 1/1; SOL was rank #2 so excluded
+        self.assertEqual(sb["top_pick_by_asset"]["ETH"], {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
+        self.assertEqual(sb["top_pick_by_asset"]["BTC"]["accuracy"], 1.0)
+        self.assertNotIn("SOL", sb["top_pick_by_asset"])
+
     def test_status_counts_7m(self):
         led = _mk_ledger()
         _record(led, "S-7", "7M", "YES", 1)
