@@ -193,6 +193,11 @@ class V95Ledger:
         self.minimum_calibration_rows = _env_int("Q15_V95_CALIBRATION_MIN_ROWS", 30, 10, 1000)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         self.promotion_margin = _env_float("Q15_V95_PROMOTION_BRIER_MARGIN", 0.005, 0.0, 0.10)
+        # Regime-aware challenger: a per-(checkpoint, regime) weight set that
+        # specializes once a regime has enough of its own resolved results,
+        # falling back to the global challenger until then.
+        self.regime_learning_enabled = _env_bool("Q15_V95_REGIME_CHALLENGER", True)
+        self.minimum_regime_updates = _env_int("Q15_V95_REGIME_MIN_UPDATES", 30, 5, 5000)
         self._available = True
         self._last_error: str | None = None
         try:
@@ -269,6 +274,17 @@ class V95Ledger:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY(checkpoint, name)
                 );
+                CREATE TABLE IF NOT EXISTS regime_challenger_weights (
+                    checkpoint TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    base_value REAL NOT NULL,
+                    value REAL NOT NULL,
+                    grad_sq REAL NOT NULL DEFAULT 0,
+                    updates INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(checkpoint, regime, name)
+                );
                 CREATE TABLE IF NOT EXISTS checkpoint_challenger_updates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     checkpoint TEXT NOT NULL CHECK(checkpoint IN ('10M','15M')),
@@ -325,11 +341,36 @@ class V95Ledger:
     def learning_enabled(self, checkpoint: str) -> bool:
         return bool(self.learning_enabled_by_checkpoint[self._checkpoint(checkpoint)])
 
-    def challenger_weights(self, checkpoint: str | None = None) -> dict[str, float]:
+    @staticmethod
+    def _regime_key(regime: Any) -> str:
+        return (str(regime or "UNKNOWN").strip().upper() or "UNKNOWN")
+
+    def challenger_weights(self, checkpoint: str | None = None, regime: str | None = None) -> dict[str, float]:
+        """Weights for the shadow challenger.
+
+        When a regime is supplied and its per-regime challenger has matured
+        (>= minimum_regime_updates resolved results), the regime-specialized
+        weights are returned; otherwise the global checkpoint challenger is used.
+        """
         checkpoint = self._checkpoint(checkpoint or self.primary_learning_checkpoint)
         if not self._available:
             return dict(CHAMPION_WEIGHTS)
         with self._lock, closing(self._connect()) as connection:
+            if self.regime_learning_enabled and regime:
+                key = self._regime_key(regime)
+                regime_weights = {
+                    str(row["name"]): float(row["value"])
+                    for row in connection.execute(
+                        "SELECT name,value FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+                        (checkpoint, key),
+                    )
+                }
+                maturity = connection.execute(
+                    "SELECT updates FROM regime_challenger_weights WHERE checkpoint=? AND regime=? AND name='intercept'",
+                    (checkpoint, key),
+                ).fetchone()
+                if regime_weights and maturity is not None and int(maturity["updates"] or 0) >= self.minimum_regime_updates:
+                    return regime_weights
             rows = connection.execute(
                 "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=? ORDER BY name",
                 (checkpoint,),
@@ -636,6 +677,13 @@ class V95Ledger:
                     "UPDATE checkpoint_challenger_weights SET value=?,grad_sq=?,updates=updates+1,updated_at=? WHERE checkpoint=? AND name=?",
                     (next_value, grad_sq, now, checkpoint, name),
                 )
+            # Mirror the same gradient step into the per-regime challenger so it
+            # specializes to the market condition this result occurred in.
+            if self.regime_learning_enabled:
+                self._update_regime_weights(
+                    connection, checkpoint, row["regime"], features, error,
+                    sample_weight, learning_rate, per_result_cap, total_drift_cap, now,
+                )
             connection.execute(
                 "INSERT INTO checkpoint_challenger_updates(checkpoint,prediction_id,created_at,error,sample_weight,delta_json,before_json,after_json) VALUES(?,?,?,?,?,?,?,?)",
                 (checkpoint, prediction_id, now, error, sample_weight, _json(deltas), _json(before), _json(after)),
@@ -643,6 +691,52 @@ class V95Ledger:
             connection.execute("UPDATE predictions SET learning_applied=1 WHERE prediction_id=?", (prediction_id,))
             connection.commit()
             return True
+
+    def _update_regime_weights(self, connection: sqlite3.Connection, checkpoint: str, regime: Any,
+                               features: Mapping[str, Any], error: float, sample_weight: float,
+                               learning_rate: float, per_result_cap: float, total_drift_cap: float,
+                               now: float) -> None:
+        key = self._regime_key(regime)
+        rows = list(connection.execute(
+            "SELECT * FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+            (checkpoint, key),
+        ))
+        if not rows:
+            # Warm-start from the current global challenger; regularize toward the
+            # frozen champion (base_value) just like the global challenger does.
+            global_values = {
+                str(r["name"]): float(r["value"])
+                for r in connection.execute(
+                    "SELECT name,value FROM checkpoint_challenger_weights WHERE checkpoint=?", (checkpoint,)
+                )
+            }
+            for name, base in CHAMPION_WEIGHTS.items():
+                connection.execute(
+                    "INSERT OR IGNORE INTO regime_challenger_weights(checkpoint,regime,name,base_value,value,updated_at) VALUES(?,?,?,?,?,?)",
+                    (checkpoint, key, name, base, global_values.get(name, base), now),
+                )
+            rows = list(connection.execute(
+                "SELECT * FROM regime_challenger_weights WHERE checkpoint=? AND regime=? ORDER BY name",
+                (checkpoint, key),
+            ))
+        for item in rows:
+            name = str(item["name"])
+            base = float(item["base_value"])
+            current = float(item["value"])
+            x = 1.0 if name == "intercept" else float(features.get(name, 0.0) or 0.0)
+            if name != "intercept" and abs(x) < 1e-12:
+                continue  # feature absent this row; don't touch its weight or count
+            gradient = sample_weight * error * x - 0.002 * (current - base)
+            grad_sq = float(item["grad_sq"] or 0.0) + gradient * gradient
+            step = learning_rate * gradient / math.sqrt(1.0 + grad_sq)
+            delta = _clamp(step, -per_result_cap, per_result_cap)
+            next_value = _clamp(current + delta, base - total_drift_cap, base + total_drift_cap)
+            # Always advance the update count (intercept's count = the regime's
+            # resolved-sample count, which gates maturity) even on a zero step.
+            connection.execute(
+                "UPDATE regime_challenger_weights SET value=?,grad_sq=?,updates=updates+1,updated_at=? WHERE checkpoint=? AND regime=? AND name=?",
+                (next_value, grad_sq, now, checkpoint, key, name),
+            )
 
     def pattern_similarity(self, features: Mapping[str, float], provisional_side: str, checkpoint: str = "10M") -> dict[str, Any]:
         """Checkpoint-specific winner/loser similarity; diagnostic at 10 rows and shadow-only at 30."""
@@ -1023,6 +1117,18 @@ class V95Ledger:
                 ).fetchone()[0] or 0)
                 for checkpoint in ("10M", "15M")
             }
+            regime_rows = list(connection.execute(
+                "SELECT checkpoint, regime, MAX(CASE WHEN name='intercept' THEN updates ELSE 0 END) AS results "
+                "FROM regime_challenger_weights GROUP BY checkpoint, regime ORDER BY results DESC"
+            ))
+        regime_challengers = [
+            {
+                "checkpoint": str(r["checkpoint"]), "regime": str(r["regime"]),
+                "results": int(r["results"] or 0),
+                "active": int(r["results"] or 0) >= self.minimum_regime_updates,
+            }
+            for r in regime_rows
+        ]
         return {
             "available": True, "path": str(self.path), "version": VERSION,
             "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -1038,6 +1144,9 @@ class V95Ledger:
             "learning_rate_by_checkpoint": dict(self.learning_rate_by_checkpoint),
             "minimum_learning_quality_by_checkpoint": dict(self.minimum_learning_quality_by_checkpoint),
             "shadow_updates_by_checkpoint": updates_by_checkpoint,
+            "regime_learning_enabled": self.regime_learning_enabled,
+            "minimum_regime_updates": self.minimum_regime_updates,
+            "regime_challengers": regime_challengers,
             "shadow_learning_enabled": self.shadow_learning_enabled, "production_weights_frozen": True,
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,

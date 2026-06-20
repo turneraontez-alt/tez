@@ -622,7 +622,7 @@ def analyse_v95(
     shadow_calibrated_yes = _clamp(float(calibration["probability"]), 0.01, 0.99)
     production_calibration_enabled = _env_bool("Q15_V95_PRODUCTION_CALIBRATION_ENABLED", False)
     calibrated_yes = shadow_calibrated_yes if production_calibration_enabled and calibration.get("active") else raw_yes
-    challenger_weights = ledger.challenger_weights(canonical.checkpoint) if ledger else CHAMPION_WEIGHTS
+    challenger_weights = ledger.challenger_weights(canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _model_probability(structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
     pattern = ledger.pattern_similarity(feature_values, provisional_side, canonical.checkpoint) if ledger else {"active": False, "shadow_adjustment": 0.0}
