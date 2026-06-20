@@ -1063,6 +1063,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._last_reconcile: dict[str, Any] = {}
         self._last_market_reconcile: dict[str, Any] = {}
         self._run_cycle_timing: dict[str, Any] = {}
+        self._slowest_run_cycle: dict[str, Any] | None = None
         self._last_reconcile_at = 0.0
         # Optional Kalshi client (set by the app) so predictions can be settled
         # directly from official results, not only via the signals table.
@@ -1101,9 +1102,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             output: dict[str, dict] = {}
             public_map: dict[str, dict[str, Any]] = {}
             canonicals: dict[str, Any] = {}
+            # Coarse sub-timers (accumulated across assets) so a v95_analysis
+            # spike can be attributed to deepcopy vs canonical-build vs
+            # model-eval vs ledger-write without guessing.
+            _sub = {"deepcopy": 0.0, "build": 0.0, "analyse": 0.0}
             for asset_key, raw in parent_output.items():
                 if not isinstance(raw, Mapping):
                     continue
+                _s = time.monotonic()
                 snapshot = copy.deepcopy(dict(raw))
                 asset = _asset_name(asset_key, snapshot)
                 cached = self._candles(asset) if hasattr(self, "_candles") else []
@@ -1116,17 +1122,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         context = candidate
                 public = self.market_data.snapshot(asset, now)
                 public_map[asset] = copy.deepcopy(public)
+                _sub["deepcopy"] += time.monotonic() - _s
+                _s = time.monotonic()
                 canonical = build_canonical_snapshot(
                     snapshot, asset=asset, checkpoint=checkpoint, now=now,
                     cached_candles=cached, context=context, public=public,
                 )
+                _sub["build"] += time.monotonic() - _s
+                _s = time.monotonic()
                 analysis = analyse_v95(snapshot, canonical, self.ledger)
                 apply_v95_policy(snapshot, analysis)
+                _sub["analyse"] += time.monotonic() - _s
                 analyses[asset] = copy.deepcopy(analysis)
                 output[asset_key] = snapshot
                 canonicals[asset] = canonical
             ranking = rank_analyses(analyses)
             ranks = {str(row["asset"]): int(row["rank"]) for row in ranking}
+            _s_record = time.monotonic()
             # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
             # persisted with it, enabling per-rank accuracy tracking.
             for key, snapshot in output.items():
@@ -1162,7 +1174,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
 
+            _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
+            _t["v95_sub"] = {k: round(v, 3) for k, v in _sub.items()}
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
@@ -1214,8 +1228,24 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _LATEST_LEDGER.clear(); _LATEST_LEDGER.update(copy.deepcopy(ledger_status))
                 _LATEST_CHECKPOINT = checkpoint
             _t["total"] = round(time.monotonic() - _rc_start, 3)
-            _t["other"] = round(max(0.0, _t["total"] - sum(v for k, v in _t.items() if k != "total")), 3)
+            _t["other"] = round(max(0.0, _t["total"] - sum(
+                v for k, v in _t.items() if k != "total" and isinstance(v, (int, float))
+            )), 3)
             self._run_cycle_timing = _t
+            # Latch the worst cycle's FULL breakdown atomically (run-cycle buckets
+            # + chain sub-stages + v95 sub-timers together) so a slow cycle can be
+            # attributed exactly, instead of reading two out-of-sync timing dicts.
+            try:
+                threshold = float(os.environ.get("Q15_V95_SLOW_CYCLE_SECONDS", "10"))
+            except (TypeError, ValueError):
+                threshold = 10.0
+            prev = (self._slowest_run_cycle or {}).get("run_cycle_timing", {}).get("total", 0.0)
+            if _t["total"] >= threshold and _t["total"] >= float(prev or 0.0):
+                self._slowest_run_cycle = {
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "run_cycle_timing": copy.deepcopy(_t),
+                    "parent_chain_timing": copy.deepcopy(getattr(self, "_chain_timing", {})),
+                }
             return output
         except Exception as exc:
             self._errors += 1
@@ -1275,6 +1305,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
             "run_cycle_timing": copy.deepcopy(self._run_cycle_timing),
             "parent_chain_timing": copy.deepcopy(getattr(self, "_chain_timing", {})),
+            "slowest_run_cycle": copy.deepcopy(self._slowest_run_cycle),
             "last_checkpoint": self._last_checkpoint_v95,
             "telegram_sent": self._telegram_sent_v95,
             "telegram_failed": self._telegram_failed_v95,

@@ -12,8 +12,22 @@ signal is settled as a hypothetical ("paper") trade, even when no alert was
 actually sent, so the bot keeps learning while you are not trading.
 """
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
+
+
+def _reconcile_budget_seconds() -> float:
+    """Wall-clock budget for a single settlement reconcile pass. A batch of
+    slow Kalshi get_market lookups for recently-closed-but-unsettled markets
+    can otherwise monopolise the ~1s refresh loop; leftover tickers are retried
+    next cycle. Shared default across all reconcilers."""
+    try:
+        return min(60.0, max(0.5, float(os.environ.get("Q15_RECONCILE_BUDGET_SECONDS", "4"))))
+    except (TypeError, ValueError):
+        return 4.0
+
 
 SETTLED_STATUSES = ("settled", "finalized", "determined", "closed")
 
@@ -85,8 +99,10 @@ class PerformanceTracker:
                 by_ticker.setdefault(t, []).append(row)
 
         calls = 0
+        budget = _reconcile_budget_seconds()
+        started = time.monotonic()
         for ticker, rows in by_ticker.items():
-            if calls >= max_calls:
+            if calls >= max_calls or time.monotonic() - started > budget:
                 break
             try:
                 m = self.client.get_market(ticker)

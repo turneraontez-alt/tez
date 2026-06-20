@@ -441,8 +441,15 @@ class LearningEngine:
         for row in end_predictions:
             by_ticker.setdefault(row.get("ticker"), {"decisions": [], "predictions": []})["predictions"].append(row)
         calls = 0
+        # Wall-clock budget so a batch of slow Kalshi lookups can't monopolise
+        # the refresh loop; leftover tickers are retried on the next cycle.
+        try:
+            budget = min(60.0, max(0.5, float(os.environ.get("Q15_RECONCILE_BUDGET_SECONDS", "4"))))
+        except (TypeError, ValueError):
+            budget = 4.0
+        started = time.monotonic()
         for ticker, grouped in by_ticker.items():
-            if not ticker or calls >= self.v4.max_reconcile_calls:
+            if not ticker or calls >= self.v4.max_reconcile_calls or time.monotonic() - started > budget:
                 break
             try:
                 market = client.get_market(ticker)

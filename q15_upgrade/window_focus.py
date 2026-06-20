@@ -490,8 +490,13 @@ class TwoWindowFocusManager:
                 if close_ts is not None and close_ts <= now + 2:
                     pending.append(cycle)
         calls = 0
+        # Wall-clock budget so a batch of slow Kalshi lookups for
+        # recently-closed-but-unsettled markets can't monopolise the refresh
+        # loop; ungraded cycles are retried next pass.
+        budget = _float("Q15_RECONCILE_BUDGET_SECONDS", 4.0)
+        started = time.monotonic()
         for cycle in pending:
-            if calls >= self.settings.max_reconcile_calls:
+            if calls >= self.settings.max_reconcile_calls or time.monotonic() - started > budget:
                 break
             ticker = cycle.get("ticker")
             try:

@@ -60,13 +60,25 @@ Tests: `test_q15_v95_ledger_conn_reuse`, `test_q15_v94_context_cache_conn_reuse`
   v91 `recent_observations` per-group read with a Postgres window function.
 - Recommend: redeploy → measure → if still over, flip `max_data_age_s` first.
 
-⚠️ Latent stalls of the same family (not yet triggered): the three OTHER settlement
-reconcilers (`performance.reconcile`, `window_focus.reconcile_settlements`,
-`learning.reconcile`) are still bound only by call-count (max 12), NOT wall-clock —
-the pre-PR-#10 pattern that caused the 54s freeze. They run as their own watchdog
-stages (`perf`/`focus_settlement`/`learning_reconcile`). If the watchdog ever names
-one, port the PR-#10 wall-clock-budget pattern to it (leftover tickers retry next
-cycle).
+✅ FIXED (was the latent stall family): the three OTHER settlement reconcilers
+(`performance.reconcile`, `window_focus.reconcile_settlements`,
+`learning.reconcile`) now carry the same wall-clock budget as the v95 one
+(`Q15_RECONCILE_BUDGET_SECONDS`, default 4s) — a batch of slow Kalshi lookups
+for recently-closed-but-unsettled markets (common right after a restart, when a
+backlog of predictions awaits settlement) can no longer monopolise the refresh
+loop; leftover tickers retry next cycle. Tests: `test_q15_reconcile_budget.py`.
+
+🔬 DIAGNOSTIC for the residual ~50s spike: the live `run_cycle_timing` (53s,
+`parent_chain` 32s + `v95_analysis` 15s) and `parent_chain_timing` (fast) in the
+same dump were captured **non-atomically** (different cycles), so they couldn't
+be cross-read. v95 now latches `slowest_run_cycle` in `/api/health` — an atomic
+snapshot (run-cycle buckets + chain sub-stages + a new `v95_sub` breakdown of
+deepcopy/build/analyse/record) of the worst cycle ≥ `Q15_V95_SLOW_CYCLE_SECONDS`
+(default 10s). **Next slow dump: read `slowest_run_cycle` to pinpoint the spike**
+(neither `parent_chain` nor `v95_analysis` calls Kalshi, so the spike is compute
+or `data/` SQLite I/O — likely Replit networked-disk or CPU-throttle stalls; the
+`v95_sub` split will say which). Do NOT speculatively rewrite frozen v94 internals
+before this snapshot names the stage.
 
 ## Repo state
 - Active dev branch `claude/festive-albattani-s1af1l` carries the whole arc and is
@@ -106,7 +118,9 @@ cycle).
 `Q15_SPOT_WS_ENABLED` / `Q15_SPOT_WS_MAX_AGE_SECONDS` (3) ·
 `Q15_CYCLE_WATCHDOG_SECONDS` (10) · `Q15_WATCHDOG_ALERT_ENABLED` (on) /
 `_SECONDS` (20) / `_WARMUP_SECONDS` (60) / `_COOLDOWN_SECONDS` (600) ·
-`Q15_V95_RECONCILE_BUDGET_SECONDS` (4).
+`Q15_V95_RECONCILE_BUDGET_SECONDS` (4) · `Q15_RECONCILE_BUDGET_SECONDS` (4, shared
+wall-clock budget for the perf/window-focus/learning settlement reconcilers) ·
+`Q15_V95_SLOW_CYCLE_SECONDS` (10, latches the `slowest_run_cycle` health snapshot).
 
 ## Workflow & sync
 - Develop on `claude/beautiful-lamport-mrwnwm` → PR into `main` → merge when green
