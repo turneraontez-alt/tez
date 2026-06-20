@@ -36,3 +36,8 @@ waitForPort = 8000
 
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[userenv]
+
+[userenv.shared]
+KALSHI_WS_ENABLED = "true"
