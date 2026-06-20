@@ -393,6 +393,12 @@ class TwoWindowFocusManager:
             for asset, snap in live.items():
                 by_close[str(snap.get("close_time") or "")][asset] = snap
             for close_key, group in by_close.items():
+                if not close_key:
+                    # A live market without a close_time cannot be identified or
+                    # deduplicated (its claim key would collapse to an empty
+                    # suffix, e.g. "q15-two-window:7m:"). Skip until close_time is
+                    # populated rather than emit a degenerate shared claim.
+                    continue
                 self._rebuild_rankings(close_key, group)
                 self._maybe_notify(close_key, group, now)
 
@@ -1345,6 +1351,8 @@ class TwoWindowFocusManager:
     def _maybe_notify(self, close_key: str, snapshots: Mapping[str, dict], now: float) -> None:
         if not self.settings.telegram_enabled or self.notifier is None or not getattr(self.notifier, "enabled", False):
             return
+        if not close_key:
+            return  # no close_time -> cannot build a unique per-market claim key
         seconds_values = [_num(snap.get("seconds_remaining")) for snap in snapshots.values()]
         seconds_values = [value for value in seconds_values if value is not None]
         if not seconds_values:
