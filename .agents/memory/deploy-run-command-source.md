@@ -1,29 +1,35 @@
 ---
 name: Deploy run command source
-description: Why a Reserved VM deploy reports "cannot find run command" and how the run command is sourced in this repl.
+description: Why this repl's deploy reports "could not find run command" and what actually resolves it.
 ---
 
-# Deployment "cannot find run command"
+# Deployment "could not find run command" (this repl)
 
-In this Agent-managed repl (`.replit` holds only `[agent]`; direct `.replit`
-edits are blocked), the deployment's run command is sourced from the primary
-**"Start application" workflow**, not from a user-editable field in the
-Publishing tab. The Publishing UI here does NOT expose a Run command box.
+This is a **classic (non-artifact) repl** — there are NO `artifact.toml` /
+`.replit-artifact/` files anywhere (the `artifacts/kalshi-monitor` dir is just a
+stale copy of the app and was never registered; `listArtifacts()` is empty).
+So the artifact.toml deploy path does NOT apply here.
 
-**Symptom:** Publish fails with "cannot find run command" when no
-"Start application" workflow exists (e.g. only an unrelated workflow like the
-mockup-sandbox preview is configured).
+`.replit` `[deployment]` had `deploymentTarget = "cloudrun"` (autoscale) and
+**no `run` line** → autoscale strictly requires a run command, so publish fails
+with "could not find run command."
 
-**Fix:** create the run workflow with the workflows tool:
-`configureWorkflow({ name: "Start application", command: "python3 app.py", waitForPort: 8000, outputType: "webview" })`.
-`python3` resolves via the venv at `.pythonlibs/bin/python3` (it is on PATH for
-workflows/deploy even when a bare shell check sometimes misreports it). The app
-binds `PORT` (default 8000), host 0.0.0.0.
+## What I canNOT do
+- Edit `.replit` directly — blocked ("run commands owned by a different tool").
+- `deployConfig()` callback — does NOT exist (probed: undefined).
+- `verifyAndReplaceArtifactToml` — needs an existing artifact.toml; none exist.
+- `createArtifact` — has no Python type.
+- Change deployment type — UI-only, user must do it.
 
-**Why:** the deploy run command is derived from the primary workflow. No
-workflow → nothing to run → the publish step errors out before building.
+## What DOES resolve it
+- The deploy run command for a Reserved VM comes from the **run-button
+  workflow**. `configureWorkflow({name:"Start application", command:"python3 app.py", waitForPort:8000})`
+  adds that workflow to `.replit` `[workflows]` (this DID write `.replit` via
+  the allowed tool). The app needs **Reserved VM** (always-on refresh loop,
+  in-memory state, WS) — NOT autoscale/cloudrun.
+- **User action required:** in the Publishing UI, set Deployment type =
+  **Reserved VM** (not Autoscale) and publish. Autoscale is what forces the
+  missing `[deployment].run`; Reserved VM uses the workflow command.
 
-**How to apply:** if a deploy "cannot find run command", first check
-`listWorkflows()`; if there's no "Start application" workflow, create one with
-the real run command. This app needs **Reserved VM** (always-on refresh loop,
-in-memory state, single process) — not Autoscale.
+**Why:** agent has no tool to write `[deployment].run`; the only lever is the
+workflow (for VM) + the user choosing VM in the UI.
