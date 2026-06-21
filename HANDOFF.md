@@ -25,12 +25,19 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session — per-interval minimum-gap backstop (caps duplicate reports)
-**On the branch, deploy-pending.** Owner still saw multiple 15M/10M/7M reports after the
-always-deliver change (muting had been hiding them). The per-(interval, window) lock is sound
-within one process+DB, so the remaining single-process cause is an unstable window key (a
-contract-mapping flip near the :00/:15/:30/:45 boundary) or a restart re-fire. Added a
-restart-surviving backstop independent of the window key.
+## ✅ Shipped THIS session — fix duplicate report every ~minute (don't unlock on send FAILURE) + min-gap backstop
+**On the branch, deploy-pending.** Owner clarified: SINGLE deployment, one report arriving
+roughly every minute — a resend loop, not multiple instances. **Root cause:**
+`_send_ranked_panel` released the report lock on ANY `not delivered`, including an ambiguous send
+FAILURE (HTTP timeout / 429 rate-limit). On a 429 the message often DID reach Telegram, but we
+read it as failed, unlocked, and re-sent next cycle — throttled by the rate limit to ~one
+duplicate per minute. **Fix:** unlock ONLY on an intentional MUTE (nothing was sent); on a
+failure KEEP the lock (one attempt per window). Still warns on handled-but-not-delivered. Tests:
+`test_failed_send_keeps_lock_no_resend_loop`, `test_muted_send_releases_lock_for_retry`.
+
+Plus a defense-in-depth **per-interval minimum-gap backstop** independent of the window key (for
+the other single-process cause — an unstable window key from a contract-mapping flip near a
+:00/:15/:30/:45 boundary, or a restart re-fire):
 
 - `V95Ledger.last_official_report_at(interval)` = `MAX(locked_at)` over `official_report_lock`
   for that interval (all windows). `_send_ranked_panel` now refuses to send the SAME interval's

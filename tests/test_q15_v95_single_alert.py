@@ -163,6 +163,7 @@ class TestRankedReportWindowGuard(unittest.TestCase):
         def __init__(self):
             self.locked = False
             self.lock_calls = 0
+            self.unlock_calls = 0
             self.last_report = None
 
         def report_locked(self, *a, **k):
@@ -172,6 +173,10 @@ class TestRankedReportWindowGuard(unittest.TestCase):
             self.lock_calls += 1
             self.locked = True
             return True
+
+        def unlock_official_report(self, *a, **k):
+            self.unlock_calls += 1
+            self.locked = False
 
         def last_official_report_at(self, interval):
             return self.last_report
@@ -188,6 +193,7 @@ class TestRankedReportWindowGuard(unittest.TestCase):
         obj = CheckpointPolicyV95.__new__(CheckpointPolicyV95)
         obj.ledger = ledger
         obj._decision_settled = lambda *a, **k: True  # isolate the window guard
+        obj._warn_throttle = {}                        # for _throttled_warn on muted/failed
         return obj
 
     def test_no_send_or_lock_when_settlement_window_unknown(self):
@@ -218,6 +224,51 @@ class TestRankedReportWindowGuard(unittest.TestCase):
         self.assertEqual((sent, failed), (0, 0))
         self.assertEqual(notifier.sent, 0)   # duplicate blocked before any send
         self.assertEqual(led.lock_calls, 0)  # and before claiming a (new) window lock
+
+    def _analyses_available(self):
+        return {"BTC": {"prediction_available": True, "prediction_side": "YES",
+                        "yes_probability": 0.7, "selected_probability": 0.7,
+                        "trade_decision": "PREDICTION_ONLY", "feature_values": {},
+                        "quote": {}, "manipulation": {}, "flip_risk": {}, "calibration": {}}}
+
+    def _send_with_result_notifier(self, *, delivered, muted):
+        n = type("N", (), {})()
+        n.sent = 0
+
+        def swr(_msg):
+            n.sent += 1
+            return {"ok": (delivered or muted), "delivered": delivered,
+                    "muted": muted, "message_id": (1 if delivered else None)}
+        n.send_with_result = swr
+        return n
+
+    def test_failed_send_keeps_lock_no_resend_loop(self):
+        # An ambiguous failure (timeout / 429) must NOT release the lock — that
+        # caused one duplicate report per minute. One attempt per window.
+        led = self._Ledger()
+        n = self._send_with_result_notifier(delivered=False, muted=False)
+        obj = self._policy(led)
+        canon = type("C", (), {"settlement_time": NOW + 600.0, "ticker": "T-BTC"})()
+        sent, failed = obj._send_ranked_panel(
+            "10M", self._analyses_available(), [{"asset": "BTC"}], {"BTC": canon}, {}, n, NOW,
+        )
+        self.assertEqual(sent, 0)
+        self.assertEqual(n.sent, 1)            # exactly one attempt
+        self.assertEqual(led.lock_calls, 1)    # claimed
+        self.assertEqual(led.unlock_calls, 0)  # NOT released -> no resend next cycle
+        self.assertTrue(led.locked)            # lock still held
+
+    def test_muted_send_releases_lock_for_retry(self):
+        # An intentional mute sent nothing -> safe to release so a later cycle retries.
+        led = self._Ledger()
+        n = self._send_with_result_notifier(delivered=False, muted=True)
+        obj = self._policy(led)
+        canon = type("C", (), {"settlement_time": NOW + 600.0, "ticker": "T-BTC"})()
+        obj._send_ranked_panel(
+            "10M", self._analyses_available(), [{"asset": "BTC"}], {"BTC": canon}, {}, n, NOW,
+        )
+        self.assertEqual(led.unlock_calls, 1)
+        self.assertFalse(led.locked)
 
 
 if __name__ == "__main__":
