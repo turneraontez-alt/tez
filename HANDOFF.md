@@ -13,7 +13,8 @@ Tests: `python3 -m pytest tests/ -q` → **574 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
-see CLAUDE.md "Merge policy"). `main` is the deploy branch (GitHub Relay syncs it
+see CLAUDE.md "Merge policy"). **HANDOFF.md is refreshed automatically as part of
+every such change** (this section + the "Shipped" entries) — no need to be asked. `main` is the deploy branch (GitHub Relay syncs it
 to/from the Repl). **The one gate is a data-safety guard:** before merging, `git
 fetch origin main` and inspect commits that exist ONLY on `main` (`git log --stat
 origin/main ^<branch>`); if any add/modify real file content (NOT the empty
