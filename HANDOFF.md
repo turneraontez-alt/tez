@@ -25,8 +25,9 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/monitor-challenger-shadow-system-y4yu2p`) — Challenger Shadow vs Your System rework + RESET
-**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+## ✅ Shipped THIS session (branch `claude/monitor-challenger-shadow-system-y4yu2p`, MERGED to `main`) — Challenger Shadow vs Your System rework + RESET
+**Merged to `main` (owner-approved) — deploy-pending (needs a Repl restart to pick up
+the `model_version` v1→v2 reset).**
 Owner: fix/reactivate the "CHALLENGER SHADOW vs YOUR SYSTEM" comparison — it must
 not stay dormant/empty/one-pick — to 3 ranked picks per interval across ALL THREE
 intervals (15M/10M/7M), a clearly-graded end-result call, all-time per-rank/per-
