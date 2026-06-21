@@ -115,11 +115,16 @@ class ChallengerConfig:
 
     # -- persistence --
     db_path: str = field(default_factory=lambda: _str("Q15_CHALLENGER_DB", "data/q15_challenger_shadow_v1.sqlite3"))
-    # Bumped v1 -> v2 to RESET the visible Shadow-vs-Your-System comparison: all
-    # scoring keys on model_version, so the old "challenger-v1" rows survive in the
-    # same SQLite file as an internal PRE-RESET archive (debug only) while the new
-    # comparison starts empty. Override with Q15_CHALLENGER_MODEL_VERSION.
-    model_version: str = field(default_factory=lambda: _str("Q15_CHALLENGER_MODEL_VERSION", "challenger-v2"))
+    # The model_version doubles as the RESET key for the visible
+    # Shadow-vs-Your-System comparison: every scoring query filters on it, so
+    # bumping the version starts the new comparison completely empty while every
+    # prior version's rows survive untouched in the same SQLite file as an internal
+    # PRE-RESET archive (debug only) — never deleted, never mixed into the new
+    # visible stats. Bumped v1 -> v2 -> v3 (each bump is one reset-on-deploy); the
+    # v3 comparison only grades predictions recorded after the new version goes
+    # live (its reset_at is stamped on first record). Override with
+    # Q15_CHALLENGER_MODEL_VERSION.
+    model_version: str = field(default_factory=lambda: _str("Q15_CHALLENGER_MODEL_VERSION", "challenger-v3"))
 
     # -- reset / comparison window --
     # Optional explicit reset timestamp (epoch seconds, UTC). When unset (0) the

@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **809 passed, 4 skipped** (12 skipped in a
+Tests: `python3 -m pytest tests/ -q` → **832 passed, 4 skipped** (12 skipped in a
 bare container where `flask`/`websockets` aren't installed; skip count varies with
 cffi/crypto availability).
 
@@ -25,7 +25,35 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/monitor-challenger-shadow-system-y4yu2p`) — official interval reports: 3 ranked picks + report-frequency lock (prompt sections 1 & 2)
+## ✅ Shipped THIS session (branch `claude/shadow-system-reset-aeilgv`) — RESET the Challenger Shadow vs Your System comparison on deploy
+**On the branch, deploy-pending (needs a Repl restart to pick up the `model_version`
+v2→v3 reset).** Owner: reset the visible "CHALLENGER SHADOW vs YOUR SYSTEM" comparison
+on this deploy — all Shadow + Your-System wins/losses/win-rates/samples/last-window/
+#1·#2·#3 rank records (separately for 15M/10M/7M) back to zero; grade only predictions
+made AFTER the reset; clear dormant/incomplete/duplicate/mis-formatted rows from the
+visible record; keep the old raw data archived (PRE-RESET) for debugging; show
+`Comparison reset: <ts>` and `0W–0L | N/A` until the first new prediction settles; keep
+the three-pick 15M/10M/7M format. Read-only/observational throughout; frozen champion
+untouched.
+
+- **Reset = one model_version bump** (`config.py`): default `Q15_CHALLENGER_MODEL_VERSION`
+  `challenger-v2`→`challenger-v3`. Every scoring query (`ranked_comparison`,
+  `ranked_by_checkpoint`, `latest_window_cases`, `latest_window_end_results`,
+  `comparison`, `scoreboard`) filters on `model_version`, so v3 starts completely empty
+  while ALL prior-version rows (v1 + v2) survive untouched in the same SQLite file as an
+  internal PRE-RESET archive — never deleted, never mixed in. Dormant/incomplete/
+  duplicate/mis-formatted rows are pre-reset rows by construction → excluded from the new
+  visible record. `ledger.reset_marker` stamps v3's reset instant on its first record
+  (shown as `Comparison reset: <UTC>`); only post-reset predictions are graded. The
+  3-pick 15M/10M/7M report format (`REPORT_CHECKPOINTS`, `report_message`) is unchanged
+  and already shows `0W–0L | N/A` per interval until the first v3 case settles. No env
+  override active (`.env.example` line documents the new default, commented out).
+- **Tests** (`tests/test_challenger_runner.py`, +2): pin the default `model_version` to
+  `challenger-v3` (a forgotten reset / accidental edit now fails loudly) and verify a
+  fresh v3 record is empty while v1+v2 rows stay archived in the file and a new
+  post-reset prediction starts the comparison. Full suite **832 passed, 4 skipped**.
+
+## ✅ Shipped (branch `claude/monitor-challenger-shadow-system-y4yu2p`) — official interval reports: 3 ranked picks + report-frequency lock (prompt sections 1 & 2)
 **On the branch, deploy-pending.** Completes the two remaining sections of the original
 prompt — the *official* checkpoint reports (the rest was the read-only challenger
 comparison, already merged). Touches the live alert path; gated + test-backed; the

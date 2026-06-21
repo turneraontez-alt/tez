@@ -181,6 +181,40 @@ class RankedComparisonTest(unittest.TestCase):
         rk = r.ranked()
         self.assertEqual(rk["n_cases"], 0)  # pre-reset row excluded from the record
 
+    def test_default_model_version_is_v3_reset(self):
+        # The default model_version is the reset key: pinning it makes an accidental
+        # edit (or a forgotten reset-on-deploy) fail loudly rather than silently
+        # keep scoring the old comparison.
+        self.assertEqual(ChallengerConfig.from_env().model_version, "challenger-v3")
+
+    def test_v3_reset_archives_prior_versions(self):
+        # Fresh v3 comparison: settled rows from BOTH prior versions (v1 and v2)
+        # stay archived in the same file and never enter the new visible record.
+        tmp = tempfile.mkdtemp()
+        cfg = _cfg(tmp).with_overrides(model_version="challenger-v3")
+        r = ShadowRunner(cfg)
+        self._insert(r, asset="BTC", checkpoint="10M", close=900, chal=0.9, ctrl=0.9,
+                     official="YES", mv="challenger-v1")
+        self._insert(r, asset="ETH", checkpoint="15M", close=900, chal=0.9, ctrl=0.9,
+                     official="YES", mv="challenger-v2")
+        # No v3 rows yet -> the visible record is empty across every interval.
+        rk = r.ledger.ranked_comparison(model_version="challenger-v3")
+        self.assertEqual(rk["n_cases"], 0)
+        rbc = r.ledger.ranked_by_checkpoint(model_version="challenger-v3")
+        for cp in ("15M", "10M", "7M"):
+            self.assertEqual(rbc["by_checkpoint"][cp]["challenger"]["total"]["accuracy"], None)
+            self.assertEqual(rbc["by_checkpoint"][cp]["native"]["total"]["accuracy"], None)
+        # The pre-reset rows are still in the file (archived, not deleted).
+        for mv in ("challenger-v1", "challenger-v2"):
+            (cnt,) = r.ledger._conn.execute(
+                "SELECT COUNT(*) FROM shadow_predictions WHERE model_version=?", (mv,)
+            ).fetchone()
+            self.assertEqual(cnt, 1)
+        # A new post-reset prediction is what starts the fresh comparison.
+        self._insert(r, asset="SOL", checkpoint="10M", close=1800, chal=0.8, ctrl=0.8,
+                     official="YES", mv="challenger-v3")
+        self.assertEqual(r.ledger.ranked_comparison(model_version="challenger-v3")["n_cases"], 1)
+
     def test_empty_report_shows_reset_and_zero(self):
         tmp = tempfile.mkdtemp()
         r = ShadowRunner(_cfg(tmp))
