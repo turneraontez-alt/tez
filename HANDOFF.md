@@ -23,8 +23,8 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`) — review-fix batch (NOT merged)
-**On the branch, not merged to `main`** (session was scoped to push only this branch).
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — review-fix batch
+**Merged to `main` — not yet deployed (needs a Repl reboot to take effect).**
 Ran a fresh fan-out review (decision engine 7/10, learning 6.5/10, app+loop 6.5/10,
 overall **7.0/10**), then implemented the Highest/Medium/Polish fixes it surfaced.
 Every model-behavior change is flag-gated; shadow-only changes never touch frozen
