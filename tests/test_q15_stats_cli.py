@@ -86,6 +86,10 @@ class StatsCliTest(unittest.TestCase):
         self.assertIn("OFFICIAL RECORD", out)
         self.assertIn("FACTOR LAB", out)
         self.assertIn("wick", out)
+        # challenger section renders + degrades gracefully (no shadow DB in temp env)
+        self.assertIn("CHALLENGER", out)
+        self.assertIn("online weights", out)
+        self.assertIn("scripts/challenger_eval.py", out)
 
 
 if __name__ == "__main__":
