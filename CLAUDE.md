@@ -34,6 +34,25 @@ checkpoints, sends Telegram alerts, and learns from officially settled results.
 layers (~7k lines). v95 subclasses the chain:
 `v95 → v94_unified → v94 → v93 → v92 → v91`. They work; skip them otherwise.
 
+## Merge policy (standing authorization — every session)
+The owner has authorized auto-merging finished work to `main` in **all** sessions.
+After completing a task and confirming the full suite passes
+(`python3 -m pytest tests/ -q`), merge the working branch into `main` and push —
+no need to ask each time. `main` is the deploy branch (GitHub Relay syncs it
+to/from the Repl). Procedure:
+1. `git fetch origin main` first (Relay pushes empty "Published your App" commits
+   to `main`; fetching avoids non-FF surprises).
+2. **Data-safety guard (the only gate): never let a merge delete existing data.**
+   Inspect `git log --stat origin/main ^<branch>` for commits that exist only on
+   `main`. If any of them *add or modify file content* (new data — not the empty
+   "Published your App" commits), the merge MUST preserve it: merge `origin/main`
+   in first / resolve keeping that content, and verify the merge diff removes no
+   `main`-only lines or files. If a merge would drop data that exists only on
+   `main`, STOP and tell the owner instead of merging.
+3. Merge with `--no-ff` and push `main`, then return to the working branch.
+Only merge when tests are green and the data-safety guard passes; otherwise stay
+on the branch and report why.
+
 ## Invariants (do not break)
 - Read-only. Nothing touches a real exchange order.
 - Production "champion" model weights are FROZEN. Only the observational shadow
