@@ -23,6 +23,61 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap
+**Merged — not yet deployed (needs a Repl reboot).** Phases 2 (shadow 0–100 score on
+the panel) and 3 (entry recheck + manipulation grading rule) are still TODO; see the
+multi-phase plan below. Phase 1 is complete + green (637 passed, 4 skipped).
+Owner-approved multi-phase rework (decisions locked): **(1)** compact unified panel
+sent EVERY checkpoint (reverses `Q15_V95_SEND_ONLY_ON_ENTRY`) carrying the YES/NO
+call + compact records + manipulation + graduated entry guidance; **(2)** a 0–100
+entry score (30 dir-conf / 25 edge / 20 wick / 15 momentum / 10 manip) as a
+**shadow** overlay first (does NOT drive live entries until it earns OOS lift —
+champion stays frozen); **(3)** entry RECHECK = extend the existing `entry_followups`
+(ENTER NOW / KEEP WAITING / SKIP ENTRY) + manipulation grading. Records display
+compact W-L/% **with a low-n marker** (Wilson-backed). WATCH states must read clearly
+as "not an entry" and show the prior call (e.g. "now YES, was NO at 15M") — each
+interval graded on its OWN sent call (no retroactive regrade).
+
+**Layout (locked with owner):** hourly report UNCHANGED. Live 15M/10M/7M panels are
+forward-looking only (manipulation + prediction w/ WATCH clarity + prior-side flip +
+graduated entry guidance), NO W-L. A single END-OF-CYCLE RECAP fires once after a
+contract settles: per-interval hit/miss + flips + predictability + the entry result +
+manipulation call + the RUNNING official totals. Records show W-L/% with a low-n marker.
+
+**Done so far (Phase-1 FOUNDATION + FORMATTERS, committed to branch, inert until wired):**
+- `notifier.send_with_result()` → `{ok, delivered, muted, message_id}` + `last_message_id`;
+  `send()` stays a bool wrapper. Muted = handled-but-NOT-delivered (no message_id).
+- Ledger `sent_predictions` immutable table + `record_sent_prediction(...)` (rejects
+  no-message_id and sent_at≥close_time) + `official_scoreboard()` (15M/10M/7M YES/NO/Total,
+  entry, manipulation; graded vs settled outcome via join; Wilson low_n flags; insert-only).
+- `q15_upgrade/panels_v95.py` — pure `build_checkpoint_panel()` + `build_cycle_recap()`
+  (single `<pre>`, keeps `V9.5 CHECK` marker, flip/WATCH clarity, running-record block).
+- Tests: `test_q15_official_record.py`, `test_q15_notifier_message_id.py`, `test_q15_panels.py` (+24).
+**WIRED (live, default ON via `Q15_V95_COMPACT_PANEL`; legacy entry-only path preserved
+under the flag):** `checkpoint_v95._send_compact_panel` sends the forward-looking panel
+for the top-ranked pick once per checkpoint+window (reuses the reserve/settle dedup),
+maps analysis → panel (manipulation block, prediction w/ prior-side flip, graduated entry
+state from `trade_decision`), and on a real delivery writes the immutable official record
+from the Telegram message_id: `interval` always, `entry` + slot/pushed/follow-up when the
+pick is ENTRY_RECOMMENDED, `manipulation` (direction-after) when flagged. Muted = no
+message_id = not official. `build_compact_checkpoint_panel` + helpers do the mapping.
+Tests: `test_q15_v95.py::test_compact_panel_writes_official_record`, reworked
+`test_no_entry_checkpoint_panel_behaviour`. Suite 632 → 633.
+
+**RECAP (live, gated `Q15_V95_CYCLE_RECAP` default ON):** on settlement,
+`checkpoint_v95._send_cycle_recaps` fires ONE `CYCLE CLOSED` recap per settled ticker
+(deduped via a `recap:<ticker>` reservation), built from `ledger.contract_recap()` —
+per-interval hit/miss + flips + entry result + manipulation call, graded only on what was
+officially delivered — rendered via `panels_v95.build_cycle_recap` with the running
+`official_scoreboard` totals. `format_telegram_message` bypasses `CYCLE CLOSED` so the
+recap is never re-rendered by the legacy chain. Suite 633 → **637**.
+
+**Next — Phase 2:** the 0–100 entry score (30 dir-conf / 25 edge / 20 wick / 15 momentum /
+10 manip) as a SHADOW value shown on the panel (does NOT drive live entries; champion
+frozen) + the WAIT target range. **Phase 3:** retrofit `entry_followups` into the
+ENTER NOW / KEEP WAITING / SKIP ENTRY recheck (price/trigger-driven) + the manipulation
+grading rule (default: direction-after vs settled outcome — confirm with owner).
+
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
 **Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip
 removal: a full audit found Telegram delivery used **3 different formats**. The

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -361,12 +362,12 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
             cp95._LATEST_LEDGER.clear()
             cp95._LATEST_CHECKPOINT = "UNKNOWN"
 
-    def test_no_entry_checkpoint_is_muted(self):
-        # A pricey ask -> no executable edge -> no recommended entry. With the
-        # default entry-only delivery, NO checkpoint alert should be sent even
-        # after the decision settles over several cycles.
-        now = time.time()
-
+    def test_no_entry_checkpoint_panel_behaviour(self):
+        # A pricey ask -> no executable edge -> no recommended entry. Under the
+        # default compact panel, a forward-looking panel STILL goes out every
+        # checkpoint (deduped to one), but as a NON-entry state — never
+        # ENTER NOW / ENTRY RECOMMENDED. The legacy entry-only muting is preserved
+        # behind Q15_V95_COMPACT_PANEL=false.
         class FM:
             def update(self, snaps, now, wsh):
                 return snaps
@@ -375,17 +376,29 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
             def enrich_all(self, snaps, now, wsh):
                 return snaps
 
-        notifier = self.FakeNotifier()
-        for i in range(5):
-            snaps = {"BNB": self._snapshot(asset="BNB", checkpoint="10M", ask=98.0,
-                                           target=100.0, spot=101.0)}
-            for s in snaps.values():
-                s["seconds_remaining"] = 600
-                s["underlying_candles_5s"] = self._candles()[-12:]
-                s["close_time"] = now + 600
-            self.policy.run_cycle(dict(snaps), now + i, {}, FM(), CE(), notifier)
-        checkpoint_msgs = [m for m in notifier.messages if "V9.5 CHECK" in m]
-        self.assertEqual(checkpoint_msgs, [])  # no entry -> muted entirely
+        def _run(base_now, env):
+            notifier = self.FakeNotifier()
+            with patch.dict(os.environ, env):
+                for i in range(5):
+                    snaps = {"BNB": self._snapshot(asset="BNB", checkpoint="10M", ask=98.0,
+                                                   target=100.0, spot=101.0)}
+                    for s in snaps.values():
+                        s["seconds_remaining"] = 600
+                        s["underlying_candles_5s"] = self._candles()[-12:]
+                        s["close_time"] = base_now + 600
+                    self.policy.run_cycle(dict(snaps), base_now + i, {}, FM(), CE(), notifier)
+            return [m for m in notifier.messages if "V9.5 CHECK" in m]
+
+        # New default (compact ON): exactly one panel, and it is NOT an entry.
+        compact_msgs = _run(time.time(), {})
+        self.assertEqual(len(compact_msgs), 1)
+        self.assertNotIn("ENTER NOW", compact_msgs[0])
+        self.assertNotIn("ENTRY RECOMMENDED", compact_msgs[0])
+
+        # Legacy entry-only muting still available behind the flag (distinct
+        # market window so the dedup ledger from the run above can't interfere).
+        legacy_msgs = _run(time.time() + 5000, {"Q15_V95_COMPACT_PANEL": "false"})
+        self.assertEqual(legacy_msgs, [])
 
     def test_cycle_buckets_seven_minute_and_persists_rank(self):
         now = time.time()

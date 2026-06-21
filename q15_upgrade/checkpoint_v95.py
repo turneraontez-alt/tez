@@ -51,6 +51,7 @@ from .checkpoint_v94_unified import (
     format_telegram_message as _format_v94_message,
 )
 from . import flip_risk
+from . import panels_v95
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,
@@ -1430,6 +1431,107 @@ def build_followup_message(checkpoint: str, asset: str, recommended_side: str,
     return header + "\n<pre>\n" + "\n".join(body) + "\n</pre>"
 
 
+# --- compact checkpoint-panel mapping (forward-looking V9.5 CHECK push) --------
+_PRIOR_CHECKPOINT = {"10M": "15M", "7M": "10M"}
+
+_ENTRY_STATE_BY_DECISION = {
+    "ENTRY_RECOMMENDED": panels_v95.ENTRY_RECOMMENDED,
+    "WATCH_PRICE": panels_v95.WAIT,
+    "WATCH_CONFIDENCE": panels_v95.WATCH,
+    "WATCH_DATA_QUALITY": panels_v95.WATCH,
+    "WATCH_LIQUIDITY": panels_v95.WATCH,
+    "WATCH_TIME": panels_v95.WATCH,
+    "PREDICTION_ONLY": panels_v95.NO_ENTRY,
+    "AVOID_INVALID_DATA": panels_v95.NO_ENTRY,
+}
+
+_WATCH_REASON_BY_BLOCKER = {
+    "conservative_probability_below_threshold": "directional confidence not yet sufficient",
+    "data_quality_below_threshold": "data coverage too thin to commit",
+    "spread_too_wide": "spread too wide to enter",
+    "insufficient_depth_at_ask": "not enough resting size at the ask",
+    "stale_kalshi_quote": "Kalshi quote is stale",
+    "too_little_time_remaining": "too little time left in the contract",
+}
+
+
+def _direction_after_side(analysis: Mapping[str, Any]) -> str | None:
+    """The side a flagged manipulation is expected to settle toward — the gradable
+    'direction after'. Prefers the flip-risk monitored direction ('NO → YES'),
+    falling back to the manipulation lean."""
+    fr = analysis.get("flip_risk") or {}
+    monitored = str(fr.get("direction_monitored") or "")
+    if "→" in monitored:
+        tail = monitored.split("→")[-1].strip().upper()
+        if tail in {"YES", "NO"}:
+            return tail
+    lean = str((analysis.get("manipulation") or {}).get("lean") or "").upper()
+    return lean if lean in {"YES", "NO"} else None
+
+
+def _panel_manipulation(analysis: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Map the read-only manipulation/flip signals into the panel's MANIPULATION
+    block, or None when nothing is flagged. ``risk`` is a 0..100 number."""
+    fr = analysis.get("flip_risk") or {}
+    manip = analysis.get("manipulation") or {}
+    score = fr.get("score")
+    if score is None:
+        score = manip.get("score")
+    suspected = bool(manip.get("suspected")) or (score is not None and float(score) >= 60.0)
+    if not suspected or score is None:
+        return None
+    score = float(score)
+    level = "HIGH" if score >= 60.0 else "MEDIUM" if score >= 35.0 else "LOW"
+    reasons = list(manip.get("reasons") or [])
+    if not reasons and fr.get("primary_reason"):
+        reasons = [str(fr.get("primary_reason"))]
+    return {
+        "risk": score,
+        "level": level,
+        "type": ", ".join(str(r) for r in reasons) if reasons else None,
+        "direction_after": _direction_after_side(analysis),
+        "entry_effect": "WAIT",
+    }
+
+
+def _panel_entry(analysis: Mapping[str, Any], entry_state: str) -> dict[str, Any]:
+    """Entry-guidance detail block (target/trigger for WAIT, reason for WATCH)."""
+    quote = analysis.get("quote") or {}
+    ask = _num(quote.get("ask_cents"))
+    ideal = _num(analysis.get("ideal_entry_cents"))
+    if entry_state == panels_v95.WAIT:
+        return {
+            "current_price": ask,
+            "max_price": ideal,
+            "trigger": "price at/below the maximum, or a rejection wick / momentum turn",
+        }
+    if entry_state in (panels_v95.ENTER_NOW, panels_v95.ENTRY_RECOMMENDED):
+        return {"current_price": ask, "max_price": ideal}
+    if entry_state == panels_v95.WATCH:
+        blocker = str(analysis.get("main_blocker") or "")
+        return {"reason": _WATCH_REASON_BY_BLOCKER.get(blocker, blocker or "not actionable yet")}
+    return {}
+
+
+def build_compact_checkpoint_panel(checkpoint: str, asset: str,
+                                   analysis: Mapping[str, Any],
+                                   prior_side: str | None) -> str:
+    """Assemble the forward-looking V9.5 CHECK panel for one (asset, checkpoint)."""
+    side = str(analysis.get("prediction_side") or "")
+    yes_p = _num(analysis.get("yes_probability"))
+    if yes_p is not None and side.upper() == "NO":
+        side_prob = 1.0 - yes_p
+    else:
+        side_prob = yes_p
+    entry_state = _ENTRY_STATE_BY_DECISION.get(str(analysis.get("trade_decision")), panels_v95.NO_ENTRY)
+    return panels_v95.build_checkpoint_panel(
+        checkpoint=checkpoint, asset=asset, side=side, probability=side_prob,
+        prior_side=prior_side, prior_checkpoint=_PRIOR_CHECKPOINT.get(str(checkpoint).upper()),
+        manipulation=_panel_manipulation(analysis),
+        entry_state=entry_state, entry=_panel_entry(analysis, entry_state),
+    )
+
+
 def _best_pick(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple[str, Mapping[str, Any]] | None:
     """The single highest-confidence prediction this cycle.
 
@@ -1864,63 +1966,74 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 top_entry_ticker is not None
                 and self.ledger.followup_already_sent(top_entry_ticker, checkpoint)
             )
-            message = build_v95_message(
-                checkpoint, analyses, ranking, ledger_status, result_events,
-                followup_remaining=followup_remaining,
-            ) if ranking else None
-            # Discard all parent V9.4 messages. V9.5 owns the final state machine.
-            deferred.suppress_all(generated_message=message is not None)
             sent = failed = 0
-            # Validation guard: never ship an alert whose top BEST ENTRY disagrees
-            # with rank #1 of the detailed ranking.
-            consistent = _best_entry_consistent(analyses, ranking)
-            if not consistent:
-                logger.error("V9.5 best-entry mismatch — suppressing alert (top != detail rank #1)")
-            # Entry-only delivery (default ON): when nothing qualifies as a
-            # recommended entry, do not send the checkpoint alert at all — so you
-            # only ever get messaged on an actual entry. This hard-mutes every
-            # "NO ENTRY" checkpoint regardless of the notifier alert level; the
-            # full picture is still on the dashboard. Flip / follow-up alerts are
-            # separate and unaffected.
-            entry_only = _env_bool("Q15_V95_SEND_ONLY_ON_ENTRY", True)
-            no_entry_muted = entry_only and best_entry is None
-            # One active prediction per timeframe: if a different, still-open
-            # contract already holds this checkpoint's slot, do not push a second
-            # prediction for the same time frame — leave the active one untouched.
-            one_active = _env_bool("Q15_V95_ONE_ACTIVE_PER_TIMEFRAME", True)
-            slot_locked = bool(
-                one_active and top_entry_ticker is not None
-                and self.ledger.pushed_slot_blocks(checkpoint, top_entry_ticker, now)
-            )
-            if message and consistent and not slot_locked and not no_entry_muted and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
-                event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
-                previous = self.ledger.notification_state(event_key)
-                state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
-                permit_key = self.ledger.reserve_notification(
-                    event_key=event_key, checkpoint=checkpoint, state=state,
-                    fingerprint=fingerprint, now=now,
+            # COMPACT PANEL (default ON): one forward-looking V9.5 CHECK panel for
+            # the top-ranked pick every checkpoint, with the immutable official
+            # record written from the delivered Telegram message_id. The legacy
+            # multi-asset entry-only alert is preserved under the flag for rollback.
+            if _env_bool("Q15_V95_COMPACT_PANEL", True):
+                deferred.suppress_all(generated_message=bool(ranking))
+                sent, failed = self._send_compact_panel(
+                    checkpoint, analyses, ranking, canonicals, parent_output, notifier, now,
                 )
-                if permit_key:
-                    fresh = _BufferedNotifier(notifier)
-                    sent, failed, _ = fresh.flush(message)
-                    self.ledger.complete_notification(event_key=permit_key, success=sent > 0 and failed == 0, now=now)
-                    # On a delivered entry recommendation, claim the timeframe slot,
-                    # mark the prediction pushed (separate pushed accuracy), and arm
-                    # the one follow-up check for this contract+interval.
-                    if sent > 0 and top_entry_ticker is not None:
-                        self.ledger.claim_pushed_slot(checkpoint, top_entry_ticker, top_entry_close, now)
-                        self.ledger.mark_pushed(top_entry_ticker, checkpoint)
-                        if (_env_bool("Q15_V95_ENTRY_FOLLOWUP_ENABLED", True)
-                                and checkpoint in _followup_checkpoints()):
-                            self.ledger.arm_entry_followup(
-                                ticker=top_entry_ticker, checkpoint=checkpoint,
-                                asset=str(top_entry_asset or ""), side=str(top_entry_side or ""),
-                                now=now, delay=_env_float("Q15_V95_FOLLOWUP_DELAY_SECONDS", 120.0, 15.0, 600.0),
-                            )
-                else:
+            else:
+                message = build_v95_message(
+                    checkpoint, analyses, ranking, ledger_status, result_events,
+                    followup_remaining=followup_remaining,
+                ) if ranking else None
+                # Discard all parent V9.4 messages. V9.5 owns the final state machine.
+                deferred.suppress_all(generated_message=message is not None)
+                # Validation guard: never ship an alert whose top BEST ENTRY disagrees
+                # with rank #1 of the detailed ranking.
+                consistent = _best_entry_consistent(analyses, ranking)
+                if not consistent:
+                    logger.error("V9.5 best-entry mismatch — suppressing alert (top != detail rank #1)")
+                # Entry-only delivery: when nothing qualifies as a recommended entry,
+                # do not send the checkpoint alert at all. Flip / follow-up alerts are
+                # separate and unaffected.
+                entry_only = _env_bool("Q15_V95_SEND_ONLY_ON_ENTRY", True)
+                no_entry_muted = entry_only and best_entry is None
+                # One active prediction per timeframe: if a different, still-open
+                # contract already holds this checkpoint's slot, do not push a second
+                # prediction for the same time frame — leave the active one untouched.
+                one_active = _env_bool("Q15_V95_ONE_ACTIVE_PER_TIMEFRAME", True)
+                slot_locked = bool(
+                    one_active and top_entry_ticker is not None
+                    and self.ledger.pushed_slot_blocks(checkpoint, top_entry_ticker, now)
+                )
+                if message and consistent and not slot_locked and not no_entry_muted and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+                    event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
+                    previous = self.ledger.notification_state(event_key)
+                    state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
+                    permit_key = self.ledger.reserve_notification(
+                        event_key=event_key, checkpoint=checkpoint, state=state,
+                        fingerprint=fingerprint, now=now,
+                    )
+                    if permit_key:
+                        fresh = _BufferedNotifier(notifier)
+                        sent, failed, _ = fresh.flush(message)
+                        self.ledger.complete_notification(event_key=permit_key, success=sent > 0 and failed == 0, now=now)
+                        # On a delivered entry recommendation, claim the timeframe slot,
+                        # mark the prediction pushed (separate pushed accuracy), and arm
+                        # the one follow-up check for this contract+interval.
+                        if sent > 0 and top_entry_ticker is not None:
+                            self.ledger.claim_pushed_slot(checkpoint, top_entry_ticker, top_entry_close, now)
+                            self.ledger.mark_pushed(top_entry_ticker, checkpoint)
+                            if (_env_bool("Q15_V95_ENTRY_FOLLOWUP_ENABLED", True)
+                                    and checkpoint in _followup_checkpoints()):
+                                self.ledger.arm_entry_followup(
+                                    ticker=top_entry_ticker, checkpoint=checkpoint,
+                                    asset=str(top_entry_asset or ""), side=str(top_entry_side or ""),
+                                    now=now, delay=_env_float("Q15_V95_FOLLOWUP_DELAY_SECONDS", 120.0, 15.0, 600.0),
+                                )
+                    else:
+                        self._telegram_suppressed_v95 += 1
+                elif slot_locked or not consistent or no_entry_muted:
                     self._telegram_suppressed_v95 += 1
-            elif slot_locked or not consistent or no_entry_muted:
-                self._telegram_suppressed_v95 += 1
+            # End-of-cycle recap: one close-out per contract that just settled.
+            rc_sent, rc_failed = self._send_cycle_recaps(result_events, notifier, now)
+            sent += rc_sent
+            failed += rc_failed
             # Fire any due follow-up checks (exactly one per contract+interval).
             fu_sent, fu_failed = self._dispatch_entry_followups(canonicals, analyses, notifier, now)
             flip_sent += fu_sent
@@ -2057,6 +2170,147 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             for stale in [k for k in self._prediction_trend if k[2] < window_id - 2]:
                 self._prediction_trend.pop(stale, None)
         return marker
+
+    def _send_compact_panel(self, checkpoint: str, analyses: Mapping[str, Any],
+                            ranking: Sequence[Mapping[str, Any]], canonicals: Mapping[str, Any],
+                            parent_output: Mapping[str, Any], notifier: Any,
+                            now: float) -> tuple[int, int]:
+        """Send the forward-looking compact panel for the top-ranked pick, once per
+        checkpoint+window, and write the immutable OFFICIAL record from the
+        delivered Telegram message_id.
+
+        Records written on a real delivery (message_id present, sent before close):
+          * 'interval' — the YES/NO call for this checkpoint (always);
+          * 'entry'    — when the pick is an ENTRY_RECOMMENDED (also fires the
+                         existing slot/pushed/follow-up accounting);
+          * 'manipulation' — the gradable 'direction after' when a watch is flagged.
+        A muted send returns no message_id, so it is handled (no retry) but never
+        enters the official record. Returns (sent, failed)."""
+        if not ranking:
+            return 0, 0
+        if not self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+            return 0, 0
+        top = ranking[0]
+        asset = str(top.get("asset"))
+        analysis = analyses.get(asset) or {}
+        canon = canonicals.get(asset)
+        ticker = (canon.ticker if canon is not None else analysis.get("ticker"))
+        close_time = (canon.settlement_time if canon is not None else None)
+
+        event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
+        previous = self.ledger.notification_state(event_key)
+        state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
+        permit_key = self.ledger.reserve_notification(
+            event_key=event_key, checkpoint=checkpoint, state=state, fingerprint=fingerprint, now=now,
+        )
+        if not permit_key:
+            self._telegram_suppressed_v95 += 1
+            return 0, 0
+
+        prior_cp = _PRIOR_CHECKPOINT.get(str(checkpoint).upper())
+        prior_side = None
+        if ticker and prior_cp:
+            prior_side = (self.ledger.frozen_prediction(str(ticker), prior_cp) or {}).get("side")
+        message = build_compact_checkpoint_panel(checkpoint, asset, analysis, prior_side)
+
+        if hasattr(notifier, "send_with_result"):
+            result = notifier.send_with_result(message)
+        else:  # legacy/bare notifier: treat a truthy send as handled, no message_id
+            ok = bool(notifier.send(message)) if notifier is not None else False
+            result = {"ok": ok, "delivered": ok and getattr(notifier, "last_message_id", None) is not None,
+                      "message_id": getattr(notifier, "last_message_id", None)}
+        handled = bool(result.get("ok"))
+        delivered = bool(result.get("delivered"))
+        self.ledger.complete_notification(event_key=permit_key, success=handled, now=now)
+
+        if delivered and ticker:
+            mid = result.get("message_id")
+            decision = str(analysis.get("trade_decision") or "")
+            manip_prob = (analysis.get("flip_risk") or {}).get("score")
+            self.ledger.record_sent_prediction(
+                contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="interval",
+                predicted_side=analysis.get("prediction_side"), probability=analysis.get("yes_probability"),
+                manipulation_probability=manip_prob, entry_decision=decision,
+                sent_at=now, close_time=close_time, message_id=mid,
+            )
+            if decision == "ENTRY_RECOMMENDED":
+                self.ledger.record_sent_prediction(
+                    contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="entry",
+                    predicted_side=analysis.get("prediction_side"), probability=analysis.get("yes_probability"),
+                    manipulation_probability=manip_prob, entry_decision=decision,
+                    sent_at=now, close_time=close_time, message_id=mid,
+                )
+                self.ledger.claim_pushed_slot(checkpoint, str(ticker), close_time, now)
+                self.ledger.mark_pushed(str(ticker), checkpoint)
+                if (_env_bool("Q15_V95_ENTRY_FOLLOWUP_ENABLED", True)
+                        and checkpoint in _followup_checkpoints()):
+                    self.ledger.arm_entry_followup(
+                        ticker=str(ticker), checkpoint=checkpoint, asset=asset,
+                        side=str(analysis.get("prediction_side") or ""), now=now,
+                        delay=_env_float("Q15_V95_FOLLOWUP_DELAY_SECONDS", 120.0, 15.0, 600.0),
+                    )
+            manip_side = _direction_after_side(analysis)
+            if _panel_manipulation(analysis) and manip_side:
+                self.ledger.record_sent_prediction(
+                    contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="manipulation",
+                    predicted_side=manip_side, probability=analysis.get("yes_probability"),
+                    manipulation_probability=manip_prob, entry_decision=decision,
+                    sent_at=now, close_time=close_time, message_id=mid,
+                )
+        return (1 if delivered else 0), (0 if handled else 1)
+
+    @staticmethod
+    def _recap_close_label(close_time: Any) -> str:
+        try:
+            if close_time is None:
+                return ""
+            return datetime.fromtimestamp(float(close_time), tz=timezone.utc).strftime("%H:%M")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return ""
+
+    def _send_cycle_recaps(self, result_events: Sequence[Mapping[str, Any]],
+                           notifier: Any, now: float) -> tuple[int, int]:
+        """Fire the single END-OF-CYCLE recap for each contract that just settled.
+        Deduped per ticker via a ``recap:<ticker>`` reservation; built only from
+        what was officially delivered for that contract. Returns (sent, failed)."""
+        if not _env_bool("Q15_V95_CYCLE_RECAP", True) or not result_events:
+            return 0, 0
+        sent = failed = 0
+        seen: set[str] = set()
+        for ev in result_events:
+            ticker = str((ev or {}).get("ticker") or "")
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            permit = self.ledger.reserve_notification(
+                event_key=f"recap:{ticker}", checkpoint="RECAP",
+                state="RESULT_RESOLVED", fingerprint=ticker, now=now,
+            )
+            if not permit:
+                continue
+            recap = self.ledger.contract_recap(ticker)
+            if recap is None or not recap.get("intervals"):
+                # Nothing was officially sent for this contract -> no recap; mark
+                # handled so it is not retried every cycle.
+                self.ledger.complete_notification(event_key=permit, success=True, now=now)
+                continue
+            message = panels_v95.build_cycle_recap(
+                asset=recap["asset"], close_label=self._recap_close_label(recap.get("close_time")),
+                result=recap["result"], intervals=recap["intervals"], flips=recap.get("flips"),
+                entry_result=recap.get("entry"), manipulation_result=recap.get("manipulation"),
+                official=self.ledger.official_scoreboard(),
+            )
+            if hasattr(notifier, "send_with_result"):
+                res = notifier.send_with_result(message)
+            else:
+                ok = bool(notifier.send(message)) if notifier is not None else False
+                res = {"ok": ok, "delivered": ok}
+            self.ledger.complete_notification(event_key=permit, success=bool(res.get("ok")), now=now)
+            if res.get("delivered"):
+                sent += 1
+            elif not res.get("ok"):
+                failed += 1
+        return sent, failed
 
     def _process_flip_risk(self, snapshot: MutableMapping[str, Any], asset: str, checkpoint: str,
                            ticker: str, analysis: Mapping[str, Any], flip_learned: Mapping[str, Any],
@@ -2306,7 +2560,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
 def format_telegram_message(text: Any) -> str:
     message = str(text or "")
     upper = message.upper()
-    if "V9.5 CHECK" in message:
+    # V9.5 CHECK panels and the CYCLE CLOSED recap render their own clean layout;
+    # never re-render them through the legacy reformatter chain.
+    if "V9.5 CHECK" in message or "CYCLE CLOSED" in message:
         return message
     with _LATEST_LOCK:
         analyses = copy.deepcopy(_LATEST_ANALYSES)
