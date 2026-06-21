@@ -6,3 +6,9 @@ id = "uY1gwKOqEDIL-B9-tfTMt"
 uri = "file://health_snapshot.json"
 type = "unspecified"
 title = "health_snapshot.json — full /api/health"
+
+[[outputs]]
+id = "uc6I4FR48jdaa8pdSSlRv"
+uri = "file://v95_ledger_snapshot.json"
+type = "unspecified"
+title = "v95_ledger_snapshot.json — v9.5 ledger read-only"
