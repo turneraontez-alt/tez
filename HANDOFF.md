@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **913 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **924 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
 ## ⚙️ Merge policy (NEW — applies every session)
@@ -23,6 +23,34 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session — Background shadow-signal experiment (5 new signals + continuous A/B)
+**On branch `claude/updated-review-2x7wyr`.** Adds five experimental signals computed from data the
+system ALREADY collects, recorded next to each prediction, and graded by a continuous, significance-
+tested **out-of-sample** A/B that answers "would this signal improve the probability?" — WITHOUT
+touching the frozen champion or the live probability. Read-only, default-OFF (`Q15_V95_SHADOW_SIGNALS_ENABLED`).
+Suite **924 passed, 4 skipped** (+11 in `tests/test_shadow_signals.py`).
+- **New module `q15_upgrade/shadow_signals.py`:** `compute_signals(analysis, canonical)` →
+  five YES-oriented signals in [-1,1]: `order_flow_persistence` (#5), `book_resiliency` (#6, wick-
+  rejection replenishment proxy), `prediction_stability` (#14, flip-risk → confidence), `entropy_noise`
+  (#17, return-sign Shannon entropy → confidence), `regime_transition` (#18b, regime-boundary proximity
+  → confidence). `evaluate(rows)` fits a 1-parameter logistic *adjustment* on top of the champion prob
+  and measures the **out-of-sample** Brier reduction (time-ordered train/test split) with a paired
+  t-test; `build_report_lines`/`scores_to_dict` render it. All pure/deterministic (no clock/IO).
+- **Storage:** new additive `predictions.shadow_signal_json` column (validated `_ensure_column`
+  migration), written only on fresh insert in the SAME isolated-column pattern as `shadow_factor_json`
+  — never in `feature_json`, so it can never reach champion/challenger/calibration. Backward-compatible.
+- **Recording:** `record_prediction(..., shadow_signals=...)`; `run_cycle` computes them when the flag
+  is on (guarded; a compute failure can't break recording). `ledger.resolved_shadow_signal_rows()` +
+  `ledger.shadow_signal_experiment()` grade settled rows oldest-first.
+- **Reporting/dashboard:** compact "🧪 Experimental signals" block in the hourly Telegram report
+  (`notifications/reporting.py`, default-OFF) + new endpoint `/api/q15-v9-5/shadow-signals`.
+- **Promotion stays manual.** A signal is flagged a promotion candidate only when its out-of-sample
+  Brier reduction clears the floor AND the paired t-test is significant; nothing is auto-applied.
+- **Files:** `q15_upgrade/shadow_signals.py` (new), `q15_upgrade/ledger_v95.py`,
+  `q15_upgrade/checkpoint_v95.py`, `notifications/reporting.py`, `app.py`,
+  `tests/test_shadow_signals.py` (new, 11). **Env:** `Q15_V95_SHADOW_SIGNALS_ENABLED` (default OFF)
+  + `_MIN_ROWS`/`_TRAIN_FRACTION`/`_BRIER_FLOOR`/`_ALPHA`/`_RECENT_CANDLES` tunables.
 
 ## ✅ Shipped THIS session — Updated-review fixes (Highest / Medium / Polish)
 **On branch `claude/updated-review-2x7wyr` (not merged to main — session is branch-scoped).**

@@ -521,6 +521,12 @@ class V95Ledger:
             # their known feature names, so this can never perturb a live decision.
             # Additive; old rows read NULL.
             self._ensure_column(connection, "predictions", "shadow_factor_json", "shadow_factor_json TEXT")
+            # SHADOW SIGNALS: the five experimental, YES-oriented signals graded by
+            # the background A/B (see q15_upgrade/shadow_signals.py). Stored in their
+            # own column, never in feature_json, so they can never reach the frozen
+            # champion/challenger/calibration; they only exist to be graded against
+            # the settled outcome. Additive; old rows read NULL.
+            self._ensure_column(connection, "predictions", "shadow_signal_json", "shadow_signal_json TEXT")
             # One active pushed prediction per timeframe: the contract currently
             # occupying each checkpoint's slot, held until it closes so a second
             # prediction for the same time frame is never pushed while one is live.
@@ -711,6 +717,7 @@ class V95Ledger:
                           flip_risk_confidence: float | None = None,
                           flip_evidence_count: int | None = None,
                           shadow_factors: Mapping[str, Any] | None = None,
+                          shadow_signals: Mapping[str, Any] | None = None,
                           snapshot_id: str | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
@@ -764,6 +771,13 @@ class V95Ledger:
                 connection.execute(
                     "UPDATE predictions SET shadow_factor_json=? WHERE prediction_id=?",
                     (_json(dict(shadow_factors)), prediction_id),
+                )
+            # Experimental shadow signals land in their own isolated column in the
+            # same transaction, only on a fresh insert (never overwrites a lock).
+            if inserted and shadow_signals:
+                connection.execute(
+                    "UPDATE predictions SET shadow_signal_json=? WHERE prediction_id=?",
+                    (_json(dict(shadow_signals)), prediction_id),
                 )
             connection.commit()
         if inserted:
@@ -2097,6 +2111,64 @@ class V95Ledger:
                 "realized_cents": _num(_row_get(row, "realized_cents")),
             })
         return out
+
+    def resolved_shadow_signal_rows(self, checkpoint: str | None = None) -> list[dict[str, Any]]:
+        """Read-only export for the experimental shadow-signal A/B: per settled row,
+        the calibrated YES probability the live system used, the settled outcome, and
+        the recorded experimental signals. Ordered oldest-first so the A/B can do a
+        genuine time-ordered train/test split. Nothing here feeds a live decision."""
+        if not self._available:
+            return []
+        query = (
+            "SELECT checkpoint, calibrated_yes_probability, official_result, shadow_signal_json "
+            "FROM predictions WHERE model_version=? AND official_result IN ('YES','NO') "
+            "AND shadow_signal_json IS NOT NULL"
+        )
+        args: list[Any] = [MODEL_VERSION]
+        if checkpoint:
+            query += " AND checkpoint=?"
+            args.append(self._checkpoint(checkpoint))
+        query += " ORDER BY created_at ASC"
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(query, tuple(args)))
+        out: list[dict[str, Any]] = []
+        dropped = 0  # accumulated unlocked; folded into the counter under the lock
+        for row in rows:
+            try:
+                signals = json.loads(str(row["shadow_signal_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                dropped += 1
+                continue
+            champion_yes = _num(_row_get(row, "calibrated_yes_probability"))
+            if champion_yes is None or not isinstance(signals, dict):
+                continue
+            out.append({
+                "checkpoint": row["checkpoint"],
+                "champion_yes": champion_yes,
+                "outcome": 1 if str(row["official_result"]) == "YES" else 0,
+                "signals": signals,
+            })
+        if dropped:
+            with self._lock:
+                self._dropped_feature_rows += dropped
+        return out
+
+    def shadow_signal_experiment(self, checkpoint: str | None = None) -> dict[str, Any]:
+        """Run the background A/B: for each experimental signal, does it improve the
+        probability out of sample? Returns a JSON-friendly summary for the report and
+        /api. Read-only; never promotes anything (promotion stays manual)."""
+        from q15_upgrade import shadow_signals
+        config = shadow_signals.SignalConfig.from_env()
+        rows = self.resolved_shadow_signal_rows(checkpoint)
+        scores = shadow_signals.evaluate(rows, config)
+        return {
+            "available": True,
+            "enabled": config.enabled,
+            "model_version": MODEL_VERSION,
+            "rows_considered": len(rows),
+            "min_rows": config.min_rows,
+            "signals": shadow_signals.scores_to_dict(scores),
+        }
 
     def scoreboard(self) -> dict[str, Any]:
         """User-facing record: how often each interval, rank, and asset was right/wrong."""

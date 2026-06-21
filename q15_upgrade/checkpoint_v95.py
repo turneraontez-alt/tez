@@ -53,6 +53,7 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import shadow_factors as cross_asset
 from . import shadow_economics
+from . import shadow_signals
 from .money import clamp_price_cents, round_edge_cents
 from notifications import manipulation_alert
 from notifications import panels_v95
@@ -2307,6 +2308,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 cross_asset.compute_market(analyses)
                 if _env_bool("Q15_V95_SHADOW_FACTORS_ENABLED", True) else None
             )
+            # Experimental shadow-signal config, resolved once per batch (default-OFF).
+            _signals_cfg = shadow_signals.SignalConfig.from_env()
             # ONE shared frozen-snapshot id for this interval's batch. Every asset
             # in this cycle is scored from the same `now` freeze and the same data,
             # and BOTH systems (champion + shadow) are recorded from this single
@@ -2364,6 +2367,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         cross_asset.for_asset(asset, analysis, shadow_market)
                         if shadow_market is not None else None
                     )
+                    # Experimental shadow signals (default-OFF): computed from data
+                    # already on the analysis/canonical, recorded for the background
+                    # A/B only. Never touches the champion or the live probability;
+                    # a computation failure must not break the recording path.
+                    signals_row = None
+                    if _signals_cfg is not None and _signals_cfg.enabled:
+                        try:
+                            signals_row = shadow_signals.compute_signals(analysis, canonical, _signals_cfg)
+                            analysis["shadow_signals"] = signals_row
+                        except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+                            logger.debug("shadow signal compute skipped for %s: %s", asset, exc)
+                            signals_row = None
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -2388,6 +2403,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
                         flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
                         shadow_factors=xfactors_row,
+                        shadow_signals=signals_row,
                         snapshot_id=snapshot_id,
                     )
                     snapshot["q15_v9_5_snapshot_id"] = snapshot_id
@@ -3245,6 +3261,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def scoreboard(self) -> dict[str, Any]:
         """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
         return {"version": VERSION, "read_only": True, **self.ledger.scoreboard()}
+
+    def shadow_signal_experiment(self) -> dict[str, Any]:
+        """Background A/B for the five experimental signals: out-of-sample Brier
+        change vs the champion, with significance. Read-only; promotion is manual."""
+        return {"version": VERSION, "read_only": True, **self.ledger.shadow_signal_experiment()}
 
     def accuracy_report(self) -> dict[str, Any]:
         """Honest accuracy / promotion-readiness readout over the ledger metrics."""

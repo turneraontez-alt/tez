@@ -174,6 +174,28 @@ class HourlyReporter:
             logger.warning(f"shadow economics A/B skipped: {e}")
             return []
 
+    def _shadow_signal_lines(self):
+        """Compact experimental-signal A/B for the hourly report: per signal, the
+        out-of-sample Brier change vs the champion, significance, and sample size.
+        Read-only; never affects live decisions. Silent when disabled, no ledger,
+        or not enough settled rows carrying recorded signals yet."""
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "shadow_signal_experiment"):
+            return []
+        try:
+            from q15_upgrade import shadow_signals
+            cfg = shadow_signals.SignalConfig.from_env()
+            if not cfg.enabled:
+                return []
+            rows = ledger.resolved_shadow_signal_rows()
+            if not rows:
+                return []
+            scores = shadow_signals.evaluate(rows, cfg)
+            return shadow_signals.build_report_lines(scores)
+        except Exception as e:
+            logger.warning(f"shadow signal A/B skipped: {e}")
+            return []
+
     @staticmethod
     def _pushed_vs_background_lines(sb):
         """Two separate records: predictions actually PUSHED to the user vs every
@@ -366,6 +388,11 @@ class HourlyReporter:
         # Entry-economics shadow A/B: live price gate vs a stricter cost-aware gate,
         # graded on the same settled trades. Read-only; live recs are unchanged.
         body.extend(self._shadow_economics_lines())
+
+        # Experimental-signal A/B: do the five background signals (flow persistence,
+        # book resiliency, stability, low-noise, regime stability) improve the
+        # probability out of sample? Read-only; default-OFF; promotion stays manual.
+        body.extend(self._shadow_signal_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:
