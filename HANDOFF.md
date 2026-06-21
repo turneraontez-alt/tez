@@ -9,7 +9,8 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **742 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **720 passed, 12 skipped** in this
+container (skip count varies with cffi/crypto availability; +7 added this session).
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -80,6 +81,41 @@ signals only.
   it stops mirroring the market mid. **Decision held for evidence:** run
   `scripts/challenger_eval.py` on the Repl first — split per-checkpoint only if those
   splits actually beat POOLED out-of-sample.
+
+## ✅ Shipped (branch `claude/updated-review-vy09iw`) — updated-review fixes
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Ran a fresh fan-out `updated-review` (held at **7.5/10** — no code had moved since
+the prior review), then implemented every actionable item. Adversarial verification
+again collapsed several fan-out "criticals" (the calibration `_data_version` cache
+re-checks under lock before storing at `ledger_v95.py:1591`; both `target`-division
+sites already guard `0` via `and target`; the per-checkpoint alert-level env read
+already `.strip().lower()`s at `notifier.py:114`) — those were left untouched. Suite
+**713 → 720 passed, 12 skipped** (+7). All changes `Q15_*`-gated and reversible.
+
+- **Highest — stale-spot fails closed honestly** (`v5_hardening.apply_snapshot_freshness`):
+  the bounded last-good fallback re-stamps `ts=now` for candle continuity, which let a
+  stale underlying read as fresh past the freshness gate. Now (default-ON
+  `Q15_V5_GATE_STALE_SPOT`) the gate honors `original_ts`, so a 25s-old price reports its
+  TRUE age and trips `spot_stale_…` → `v5_data_valid=False`. Tests in
+  `test_q15_v5_fail_closed.py` (+3: gated true-age, within-budget still valid, gate-off
+  legacy path).
+- **Medium — public-price freshness is tunable** (`checkpoint_v95.build_canonical_snapshot`):
+  the previously-hardcoded `exp(-(age-5)/30)` is now `Q15_V95_PUBLIC_PRICE_GRACE_SECONDS` /
+  `Q15_V95_PUBLIC_PRICE_DECAY_SECONDS` (named honestly — tau is an e-folding constant, NOT
+  a half-life). Test asserts a tighter decay lowers `data_quality` for the same snapshot.
+- **Medium — ECE in the scoreboard** (`ledger_v95.metrics`): added
+  `expected_calibration_error` = count-weighted mean |predicted−actual| over the 50–100%
+  bands (observational only, never steers a decision). Tests in
+  `test_q15_learning_scoreboard.py` (+2: 0.20 ECE case, None without resolved rows).
+- **Medium — in-flight TTL + executor shutdown** (`app._harvest_and_submit`, `refresh_loop`):
+  a permanently hung fetch is now cancelled/dropped past `Q15_FETCH_INFLIGHT_TTL_S` (60s)
+  so `inflight` can't grow unbounded; `inflight` now maps `asset -> (Future, submitted_at)`.
+  The pool is shut down on the bounded-test return and via `atexit` for the forever-loop.
+  Test in `test_app_fetch_inflight.py` (+1: abandon-and-replace past TTL).
+- **Polish — return-coordinate contract** (`checkpoint_v95._multi_horizon_returns`):
+  documented the candle=log / public=simple-fractional contract and now drop a public
+  return outside (−1, 1) (percent-scaled / already-log) before `log1p`, which would
+  otherwise raise/-inf. Test in `test_q15_v95.py` (+1, plus the freshness test = +2 there).
 
 ## ✅ Shipped earlier (branch `claude/read-hand-off-719tb9`) — updated-review fixes
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**

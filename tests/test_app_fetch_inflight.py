@@ -102,6 +102,29 @@ class TestHarvestAndSubmit(unittest.TestCase):
         self.assertIn("ETH", results, "a sibling failure must not lose the good result")
         self.assertEqual(inflight, {})
 
+    def test_hung_request_is_abandoned_past_ttl(self):
+        # A permanently hung upstream must not accumulate in-flight entries forever:
+        # past the TTL it is dropped from tracking so a fresh request can replace it.
+        active = {"BTC": {"ticker": "B"}}
+        inflight = {}
+        release = threading.Event()
+
+        def submit(asset, market, when):
+            release.wait(10)  # hang until released
+            return {"asset": asset, "ticker": market["ticker"]}
+
+        # Cycle 1 at t=0: submit, doesn't finish within the tiny deadline.
+        appmod._harvest_and_submit(self.executor, inflight, active, 0.0, 0.02, submit, stale_ttl=5.0)
+        self.assertIn("BTC", inflight)
+        self.assertEqual(inflight["BTC"][1], 0.0, "submit time tracked alongside the future")
+
+        # Cycle 2 at t=10 (> ttl): the hung request is abandoned and re-submitted.
+        appmod._harvest_and_submit(self.executor, inflight, active, 10.0, 0.02, submit, stale_ttl=5.0)
+        self.assertIn("BTC", inflight, "a fresh request takes the abandoned slot")
+        self.assertEqual(inflight["BTC"][1], 10.0, "in-flight entry was replaced, not duplicated")
+        release.set()
+        time.sleep(0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

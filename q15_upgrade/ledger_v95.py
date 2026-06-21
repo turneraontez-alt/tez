@@ -2187,6 +2187,16 @@ class V95Ledger:
                     "mean_predicted": sum(float(r["selected_probability"]) for r in chosen) / len(chosen),
                     "actual_win_rate": sum(int(r["correct"] or 0) for r in chosen) / len(chosen),
                 })
+        # Expected Calibration Error: count-weighted mean |predicted - actual| over
+        # the populated bins. The canonical second-order calibration stat alongside
+        # Brier/log-loss; observational only (never steers a live decision). Bands
+        # only span [50%, 100%) — the selected side's probability is always >= 0.5 —
+        # so this is the ECE of the chosen-side confidence.
+        _ece_n = sum(b["count"] for b in bins)
+        ece = (
+            sum(b["count"] * abs(b["mean_predicted"] - b["actual_win_rate"]) for b in bins) / _ece_n
+            if _ece_n else None
+        )
         alpha = _env_float("Q15_V95_PROMOTION_ALPHA", 0.05, 0.0001, 0.5)
         promotion_by_checkpoint: dict[str, dict[str, Any]] = {}
         for checkpoint in LEARNING_CHECKPOINTS:
@@ -2221,7 +2231,8 @@ class V95Ledger:
             "available": True, "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "overall": overall, "by_checkpoint": by_checkpoint, "by_regime": by_regime,
             "scoreboard": self._scoreboard_rows(rows),
-            "calibration_bands": bins, "promotion_candidate": bool(primary["candidate"]),
+            "calibration_bands": bins, "expected_calibration_error": ece,
+            "promotion_candidate": bool(primary["candidate"]),
             "promotion_reason": str(primary["reason"]), "promotion_by_checkpoint": promotion_by_checkpoint,
             "primary_learning_checkpoint": self.primary_learning_checkpoint,
             "automatic_promotion": False, "minimum_promotion_rows": self.minimum_promotion_rows,
