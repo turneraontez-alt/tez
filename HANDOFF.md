@@ -26,7 +26,7 @@ delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
 ## ✅ Shipped THIS session — Shadow vs Yours: synchronized snapshot + Eastern Time + reset
-**On the branch, deploy-pending.** Builds on the window-grading repair below.
+**Merged to main (7e474f0), deploy-pending (Relay syncs main → Repl).** Builds on the window-grading repair below.
 - **Simultaneous predictions / shared frozen snapshot:** both systems are already scored from one
   `record_prediction` call (champion features/quote → shadow `observe`); made it auditable by
   threading a shared `snapshot_id` (`f"{checkpoint}@{int(now)}"`, computed once per interval batch
@@ -53,7 +53,7 @@ delete data that only exists on `main`, STOP and report. (This already caught a
   **893 passed, 4 skipped**. Read-only shadow only; no model/decision change.
 
 ## ✅ Shipped THIS session — Challenger Shadow vs Your System window-grading repair
-**On the branch, deploy-pending.** The deployed report showed Your System as `0W–0L | N/A`
+**Merged to main (7e474f0), deploy-pending (Relay syncs main → Repl).** The deployed report showed Your System as `0W–0L | N/A`
 everywhere and Shadow with only one 15M pick (ranks #2/#3 and the 10M/7M intervals missing).
 - **Root cause (Shadow ranks/intervals collapsing):** the production canonical stores
   `close_time = now + seconds_remaining` (`checkpoint_v95.py:329`) — a per-asset, per-cycle
