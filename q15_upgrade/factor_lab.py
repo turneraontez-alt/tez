@@ -202,13 +202,15 @@ def _analyse_factor(name: str, rows: Sequence[Mapping[str, Any]], *,
 def _combos(factors: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]], *,
             deadzone: float, top_n: int, min_samples: int) -> list[dict[str, Any]]:
     """Agreeing-pair reliability among the top factors: rows where both factors
-    fired the SAME side, graded against the final result."""
+    fired the SAME side, graded against the final result. Each pair also carries a
+    per-interval (15M/10M/7M) breakdown so the owner can see where it is strongest."""
     names = [str(f["name"]) for f in factors[:top_n]]
     out: list[dict[str, Any]] = []
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             a, b = names[i], names[j]
             pairs: list[tuple[str, str]] = []
+            by_interval: dict[str, list[tuple[str, str]]] = {iv: [] for iv in INTERVALS}
             for row in rows:
                 feats = row.get("features")
                 if not isinstance(feats, Mapping):
@@ -218,11 +220,19 @@ def _combos(factors: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, An
                 if la is None or lb is None or la != lb:
                     continue
                 result = str(row.get("result") or "").upper()
-                if result in ("YES", "NO"):
-                    pairs.append((la, result))
+                if result not in ("YES", "NO"):
+                    continue
+                pairs.append((la, result))
+                iv = str(row.get("checkpoint") or "").upper()
+                if iv in by_interval:
+                    by_interval[iv].append((la, result))
             if len(pairs) >= max(2, min_samples // 2):
                 block = _reliability_block(pairs)
-                out.append({"factors": [a, b], **block})
+                out.append({
+                    "factors": [a, b], **block,
+                    "by_interval": {iv: _reliability_block(p)
+                                    for iv, p in by_interval.items() if p},
+                })
     out.sort(key=lambda c: (c["reliability_lb"], c["fired"]), reverse=True)
     return out
 
@@ -322,10 +332,16 @@ def format_report(report: Mapping[str, Any], *, top: int = 12, detail: bool = Fa
                 lines.append(f"      blocked: {', '.join(f['promotion']['reasons'])}")
     combos = report.get("combinations", [])
     if combos:
-        lines.append("  strongest agreeing combinations:")
+        lines.append("  strongest agreeing combinations (overall · then by interval):")
         for c in combos[:5]:
             lines.append(f"    {' + '.join(c['factors'])}: "
                          f"{_pct(c['reliability'])}({_pct(c['reliability_lb'])} LB) over {c['fired']}")
+            by_iv = c.get("by_interval") or {}
+            parts = []
+            for iv in INTERVALS:
+                b = by_iv.get(iv)
+                parts.append(f"{iv} {_pct(b['reliability'])}({b['fired']})" if b else f"{iv} —")
+            lines.append(f"        {'  '.join(parts)}")
     ready = report.get("promotion_ready") or []
     lines.append(f"  promotion-ready (shadow, NOT applied): "
                  f"{', '.join(ready) if ready else 'none yet'}")
