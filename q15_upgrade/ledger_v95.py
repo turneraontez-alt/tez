@@ -675,7 +675,8 @@ class V95Ledger:
                           flip_risk_score: float | None = None,
                           flip_risk_confidence: float | None = None,
                           flip_evidence_count: int | None = None,
-                          shadow_factors: Mapping[str, Any] | None = None) -> tuple[str, bool]:
+                          shadow_factors: Mapping[str, Any] | None = None,
+                          snapshot_id: str | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
@@ -734,7 +735,7 @@ class V95Ledger:
             self._shadow_observe(
                 ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=created_at,
                 close_time=close_time, control_prob_yes=raw_yes_probability,
-                features=features, quote=quote,
+                features=features, quote=quote, snapshot_id=snapshot_id,
             )
         return prediction_id, inserted
 
@@ -759,6 +760,19 @@ class V95Ledger:
                 runner.mark_native_sent(str(ticker), str(checkpoint))
         except Exception as exc:
             self._note_shadow_error("mark_sent", exc)
+
+    def _shadow_mark_failed(self, ticker: str, checkpoint: str, error: str) -> None:
+        """Tell the shadow that Your System's official send for (ticker, checkpoint)
+        FAILED. The shadow keeps the generated pick as a background DELIVERY_FAILED
+        row (out of the visible win/loss totals) with the exact error, so it is not
+        silently lost. Read-only wrt production; never raises into the alert path."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                runner.mark_native_delivery_failed(str(ticker), str(checkpoint), str(error))
+        except Exception as exc:
+            self._note_shadow_error("mark_failed", exc)
 
     def _shadow_resolve(self, events) -> None:
         try:

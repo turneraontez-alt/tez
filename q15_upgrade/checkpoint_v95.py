@@ -1519,6 +1519,17 @@ def _iso_from_epoch(epoch: float) -> str:
         return datetime.now(timezone.utc).isoformat()
 
 
+def _eastern_label(epoch: float) -> str:
+    """Visible Eastern-Time label (America/Detroit, EDT/EST) for a unix epoch.
+    Display only — the stored ISO field stays UTC for DB/API consistency."""
+    try:
+        from .timez import fmt_eastern
+        return fmt_eastern(float(epoch))
+    except (TypeError, ValueError, OSError, OverflowError):
+        from .timez import fmt_eastern
+        return fmt_eastern(time.time())
+
+
 def _best_entry(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple[str, Mapping[str, Any]] | None:
     """The single recommended BEST ENTRY: rank #1 of the qualifying entries.
 
@@ -2233,6 +2244,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 cross_asset.compute_market(analyses)
                 if _env_bool("Q15_V95_SHADOW_FACTORS_ENABLED", True) else None
             )
+            # ONE shared frozen-snapshot id for this interval's batch. Every asset
+            # in this cycle is scored from the same `now` freeze and the same data,
+            # and BOTH systems (champion + shadow) are recorded from this single
+            # record_prediction call — so stamping one id here proves they ran on the
+            # same snapshot, same contract list, same information cutoff, same
+            # prediction time. The id is locked with the first (INSERT-OR-IGNORE)
+            # write; later cycles in the band never overwrite it.
+            snapshot_id = f"{checkpoint}@{int(now)}"
             # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
             # persisted with it, enabling per-rank accuracy tracking.
             for key, snapshot in output.items():
@@ -2259,6 +2278,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
                 snapshot["q15_v9_5_selected_probability"] = analysis.get("selected_probability")
                 snapshot["q15_v9_5_prediction_timestamp"] = _iso_from_epoch(now)
+                # Additive Eastern-Time display field for the dashboard (the ISO
+                # field above stays UTC for storage/DB consistency / API parsing).
+                snapshot["q15_v9_5_prediction_timestamp_eastern"] = _eastern_label(now)
                 snapshot["q15_v9_5_seconds_remaining"] = seconds_left
                 snapshot["q15_v9_5_stability"] = stability
                 snapshot["q15_v9_5_expired"] = expired
@@ -2303,7 +2325,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
                         flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
                         shadow_factors=xfactors_row,
+                        snapshot_id=snapshot_id,
                     )
+                    snapshot["q15_v9_5_snapshot_id"] = snapshot_id
+                    analysis["snapshot_id"] = snapshot_id
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
                     # Flag (without mutating the graded prediction) when the live
@@ -2795,6 +2820,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # saw as one duplicate report per minute. One attempt per window.
             if bool(result.get("muted")):
                 self.ledger.unlock_official_report(str(checkpoint), window_close, now)
+            else:
+                # A genuine (non-mute) failure: the official report was generated but
+                # not delivered. Record each generated pick as DELIVERY_FAILED in the
+                # shadow ledger with the exact error, so Your System's prediction is
+                # preserved as background (out of the visible totals) and auditable —
+                # never silently lost. Retry stays governed by the existing lock /
+                # min-gap policy above (the lock is intentionally kept on failure).
+                err = (str(result.get("error") or getattr(notifier, "last_error", None)
+                           or ("handled_no_message_id" if handled else "send_failed")))
+                mark_failed = getattr(self.ledger, "_shadow_mark_failed", None)
+                if callable(mark_failed):
+                    for pick in picks:
+                        p_asset = str(pick.get("asset"))
+                        p_canon = canonicals.get(p_asset)
+                        p_ticker = p_canon.ticker if p_canon is not None else (analyses.get(p_asset) or {}).get("ticker")
+                        if p_ticker:
+                            mark_failed(str(p_ticker), str(checkpoint), err)
             if handled:
                 self._throttled_warn(
                     f"ranked_handled_not_delivered:{checkpoint}",
@@ -2867,7 +2909,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         try:
             if close_time is None:
                 return ""
-            return datetime.fromtimestamp(float(close_time), tz=timezone.utc).strftime("%H:%M")
+            # Visible close label in Eastern Time (EDT/EST), e.g. "14:30 EDT".
+            from .timez import fmt_eastern_hm
+            return fmt_eastern_hm(float(close_time))
         except (TypeError, ValueError, OSError, OverflowError):
             return ""
 

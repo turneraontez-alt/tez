@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     resolved_at REAL,
     hypothetical_pnl_cents REAL,
     native_sent INTEGER NOT NULL DEFAULT 0,
+    native_delivery_status TEXT,
+    native_delivery_error TEXT,
+    native_delivery_at REAL,
+    snapshot_id TEXT,
     UNIQUE(model_version, contract, checkpoint)
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_resolved ON shadow_predictions(checkpoint, official_result);
@@ -62,6 +66,30 @@ CREATE TABLE IF NOT EXISTS shadow_meta (
 
 # Intervals graded in the Shadow-vs-Your-System comparison, most-distant first.
 REPORT_CHECKPOINTS: tuple[str, ...] = ("15M", "10M", "7M")
+
+# Length of a Kalshi crypto window. Real contract closes land on exact 15-minute
+# wall-clock boundaries, which are exact multiples of this in epoch seconds.
+WINDOW_SECONDS: float = 900.0
+
+
+def _window_id(close: Any) -> int | None:
+    """The 15-minute window index a close timestamp belongs to.
+
+    The production canonical stores ``close_time`` as ``now + seconds_remaining``
+    (an estimate re-measured every cycle and per asset), so two predictions for the
+    SAME contract — different assets in one window, or the same asset at 15M/10M/7M
+    — can carry close timestamps that differ by a few seconds. Bucketing by the
+    NEAREST boundary (``round(close/900)``) collapses that jitter back to the one
+    true window, so every asset in a window groups together (enabling ranks #2/#3)
+    and an asset's three checkpoints never split across adjacent windows. Returns
+    None for a missing/invalid close.
+    """
+    if close is None:
+        return None
+    try:
+        return int(round(float(close) / WINDOW_SECONDS))
+    except (TypeError, ValueError):
+        return None
 
 
 class ShadowLedger:
@@ -81,24 +109,88 @@ class ShadowLedger:
         if "native_sent" not in cols:
             self._conn.execute(
                 "ALTER TABLE shadow_predictions ADD COLUMN native_sent INTEGER NOT NULL DEFAULT 0")
+        # Delivery-status audit columns (added after native_sent). They record WHY a
+        # Your System pick is/ isn't in the visible record: 'SENT' (delivered before
+        # close → counts) vs 'DELIVERY_FAILED' (generated but the send failed → stays
+        # background, with the exact error preserved). Nullable so legacy rows stay
+        # valid and simply carry no delivery audit.
+        for name, ddl in (
+            ("native_delivery_status", "ADD COLUMN native_delivery_status TEXT"),
+            ("native_delivery_error", "ADD COLUMN native_delivery_error TEXT"),
+            ("native_delivery_at", "ADD COLUMN native_delivery_at REAL"),
+            # Shared frozen-snapshot id: both systems (challenger + control) are
+            # scored from the SAME snapshot per interval, and that snapshot id is
+            # stamped on the paired row so the simultaneity is auditable.
+            ("snapshot_id", "ADD COLUMN snapshot_id TEXT"),
+        ):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE shadow_predictions {ddl}")
 
     def close(self) -> None:
         self._conn.close()
 
     # ---- "Your System" sent-before-close marker (official grading rule) ----
     def mark_native_sent(self, contract: str, checkpoint: str,
-                         model_version: str = "challenger-v1") -> bool:
+                         model_version: str = "challenger-v1",
+                         delivered_at: float | None = None) -> bool:
         """Flag the native (Your System) prediction for (contract, checkpoint) as
-        delivered before close, so it counts in the VISIBLE record. Idempotent: a
-        re-mark or a no-matching-row call is a harmless no-op (the row stays
-        background)."""
+        delivered before close, so it counts in the VISIBLE record. Also stamps the
+        delivery-status audit ('SENT' + timestamp, clearing any prior failure).
+        Idempotent: a re-mark or a no-matching-row call is a harmless no-op (the row
+        stays background)."""
         cur = self._conn.execute(
-            "UPDATE shadow_predictions SET native_sent=1 "
+            "UPDATE shadow_predictions SET native_sent=1, native_delivery_status='SENT', "
+            "native_delivery_error=NULL, native_delivery_at=? "
             "WHERE model_version=? AND contract=? AND checkpoint=? AND native_sent=0",
-            (model_version, str(contract), str(checkpoint)),
+            (delivered_at if delivered_at is not None else time.time(),
+             model_version, str(contract), str(checkpoint)),
         )
         self._conn.commit()
         return cur.rowcount > 0
+
+    def mark_native_delivery_failed(self, contract: str, checkpoint: str, error: str,
+                                    model_version: str = "challenger-v1",
+                                    failed_at: float | None = None) -> bool:
+        """Record that Your System GENERATED a prediction for (contract, checkpoint)
+        but the official send FAILED. The row stays background (native_sent=0, never
+        in the visible win/loss totals), but the exact error and time are preserved
+        so the prediction is auditable and not silently lost. Never overwrites a row
+        already marked SENT (a real delivery wins). Idempotent on the error text."""
+        cur = self._conn.execute(
+            "UPDATE shadow_predictions SET native_delivery_status='DELIVERY_FAILED', "
+            "native_delivery_error=?, native_delivery_at=? "
+            "WHERE model_version=? AND contract=? AND checkpoint=? AND native_sent=0",
+            (str(error)[:500], failed_at if failed_at is not None else time.time(),
+             model_version, str(contract), str(checkpoint)),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def delivery_audit(self, model_version: str = "challenger-v1") -> dict[str, int]:
+        """Counts of native delivery outcomes for observability: how many generated
+        Your System picks were SENT, failed (DELIVERY_FAILED), or are still pending
+        (no status yet — generated this window, not yet sent/closed)."""
+        rows = self._conn.execute(
+            "SELECT COALESCE(native_delivery_status,'PENDING') AS s, COUNT(*) AS n "
+            "FROM shadow_predictions WHERE model_version=? GROUP BY s",
+            (model_version,),
+        ).fetchall()
+        out = {"SENT": 0, "DELIVERY_FAILED": 0, "PENDING": 0}
+        for r in rows:
+            out[str(r["s"])] = int(r["n"])
+        return out
+
+    def archived_versions(self, current_model_version: str) -> list[str]:
+        """Model versions present in the file OTHER than the current one — the
+        PRE-SYNCHRONIZED-RESET archive. These rows are retained for debugging /
+        background research and are NEVER scored into the current visible record
+        (every scoring query filters on the current model_version)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT model_version FROM shadow_predictions WHERE model_version<>? "
+            "ORDER BY model_version",
+            (current_model_version,),
+        ).fetchall()
+        return [str(r["model_version"]) for r in rows]
 
     # ---- reset marker (so the report can show "Comparison reset: <UTC>") ----
     def reset_marker(self, model_version: str, configured_reset_at: float = 0.0) -> float:
@@ -140,6 +232,7 @@ class ShadowLedger:
         close_time: float | None = None,
         model_version: str = "challenger-v1",
         lineage: dict | None = None,
+        snapshot_id: str | None = None,
     ) -> int | None:
         dec = prediction.decision
         total_cost = dec.costs.total_cents if (dec and dec.costs) else None
@@ -171,6 +264,7 @@ class ShadowLedger:
             json.dumps(getattr(prediction, "ood_reasons", [])),
             json.dumps(lineage or {}),
             None, None, None,
+            snapshot_id,
         )
         try:
             cur = self._conn.execute(
@@ -181,8 +275,8 @@ class ShadowLedger:
                  edge_vs_market, net_edge_cents, recommendation, side, executable_ask_cents,
                  total_cost_cents, hypothetical_size_fraction, top_factors_json, warnings_json,
                  feature_json, ood_score, ood_reasons_json, lineage_json,
-                 official_result, resolved_at, hypothetical_pnl_cents)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 official_result, resolved_at, hypothetical_pnl_cents, snapshot_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             self._conn.commit()
@@ -290,7 +384,13 @@ class ShadowLedger:
         cases: dict[tuple, list] = {}
         for r in rows:
             close = r["close_time"] if r["close_time"] is not None else r["created_at"]
-            key = (str(r["checkpoint"]), round(float(close)))
+            # Bucket by the 15-minute window (nearest boundary), NOT the exact close
+            # second — otherwise per-asset/per-cycle close jitter shatters one window
+            # into singleton cases, leaving only rank #1 and dropping intervals.
+            wid = _window_id(close)
+            if wid is None:
+                continue
+            key = (str(r["checkpoint"]), wid)
             cases.setdefault(key, []).append(r)
         return cases
 
@@ -422,10 +522,13 @@ class ShadowLedger:
         cases = self._resolved_cases(model_version)
         if not cases:
             return {"close": None, "checkpoints": {}}
-        latest_close = max(close for (_cp, close) in cases)
-        out = {"close": latest_close, "checkpoints": {}}
-        for (cp, close), rows in cases.items():
-            if close != latest_close:
+        # Case keys are (checkpoint, window_id); the latest window is the max id.
+        # The true contract close = window_id * 900 (the 15-min boundary), a valid
+        # epoch the report renders as HH:MM.
+        latest_wid = max(wid for (_cp, wid) in cases)
+        out = {"close": float(latest_wid) * WINDOW_SECONDS, "checkpoints": {}}
+        for (cp, wid), rows in cases.items():
+            if wid != latest_wid:
                 continue
             out["checkpoints"][cp] = {
                 "challenger": self._rank(rows, "challenger_prob_yes")[:top_k],
@@ -459,16 +562,19 @@ class ShadowLedger:
 
         def _window(r):
             close = r["close_time"] if r["close_time"] is not None else r["created_at"]
-            return int(float(close) // 900)
+            return _window_id(close)
 
-        latest = max(_window(r) for r in rows)
+        windows = [w for w in (_window(r) for r in rows) if w is not None]
+        if not windows:
+            return {"close": None, "checkpoints": list(checkpoints), "assets": []}
+        latest = max(windows)
         want = set(checkpoints)
         by_asset: dict[str, dict] = {}
-        close_ts = None
+        # Display close = the window's true 15-min boundary, stable across assets.
+        close_ts = float(latest) * WINDOW_SECONDS
         for r in rows:
             if _window(r) != latest or str(r["checkpoint"]) not in want:
                 continue
-            close_ts = r["close_time"] if r["close_time"] is not None else r["created_at"]
             official = str(r["official_result"]).upper()
             a = by_asset.setdefault(str(r["asset"]), {
                 "asset": str(r["asset"]), "official": official, "checkpoints": {}})

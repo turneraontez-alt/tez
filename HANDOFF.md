@@ -25,6 +25,61 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — Shadow vs Yours: synchronized snapshot + Eastern Time + reset
+**On the branch, deploy-pending.** Builds on the window-grading repair below.
+- **Simultaneous predictions / shared frozen snapshot:** both systems are already scored from one
+  `record_prediction` call (champion features/quote → shadow `observe`); made it auditable by
+  threading a shared `snapshot_id` (`f"{checkpoint}@{int(now)}"`, computed once per interval batch
+  in `run_cycle`) through `record_prediction → _shadow_observe → runner.observe → ledger.record`,
+  stamped on the paired `shadow_predictions` row (+`snapshot_id` column, migrated). Neither system
+  fetches newer data; the id locks with the first INSERT-OR-IGNORE write. Also exposed on the
+  snapshot as `q15_v9_5_snapshot_id`.
+- **Eastern Time (America/Detroit, DST-aware):** new `q15_upgrade/timez.py` (EDT in summer / EST in
+  winter via IANA zone — never a fixed offset). All VISIBLE comparison times now render Eastern with
+  the EDT/EST label: report reset timestamp, LAST WINDOW label, the recap close label
+  (`_recap_close_label`), and an additive dashboard field `q15_v9_5_prediction_timestamp_eastern`.
+  **UTC stays internal** (storage, contract matching, the existing ISO field, window bucketing by
+  epoch) — display-only conversion; the contract-close instant and interval timing are unchanged
+  (verified: `to_eastern(ts).timestamp()==ts`).
+- **Synchronized reset:** comparison `model_version` bumped `challenger-v3 → challenger-v4`. The v4
+  visible record starts empty (counts only post-reset predictions); v1/v2/v3 rows stay archived in
+  the same file as **PRE-SYNCHRONIZED-RESET** (never scored — every query filters on model_version),
+  surfaced via `ledger.archived_versions()` and labelled in the report. Post-reset banner now shows
+  exactly: `Comparison reset: <Eastern EDT/EST>` · `Synchronization: Same snapshot and prediction
+  time` · `Time zone: America/Detroit` · `Shadow: 0W–0L | N/A` · `Your System: 0W–0L | N/A`.
+- **Files:** `q15_upgrade/timez.py` (new), `q15_upgrade/challenger/{ledger,runner,config}.py`,
+  `q15_upgrade/ledger_v95.py`, `q15_upgrade/checkpoint_v95.py`. **DB:** `shadow_predictions`
+  +`snapshot_id` (migrated). New tests `tests/test_challenger_sync_tz_reset.py` (9). Full suite
+  **893 passed, 4 skipped**. Read-only shadow only; no model/decision change.
+
+## ✅ Shipped THIS session — Challenger Shadow vs Your System window-grading repair
+**On the branch, deploy-pending.** The deployed report showed Your System as `0W–0L | N/A`
+everywhere and Shadow with only one 15M pick (ranks #2/#3 and the 10M/7M intervals missing).
+- **Root cause (Shadow ranks/intervals collapsing):** the production canonical stores
+  `close_time = now + seconds_remaining` (`checkpoint_v95.py:329`) — a per-asset, per-cycle
+  ESTIMATE. The shadow ledger bucketed grading cases by the EXACT close second (`round(close)`),
+  so a few seconds of per-asset/per-cycle jitter shattered each window into singleton cases →
+  only rank #1 of one asset survived and whole intervals vanished. Reproduced (`n_cases=10`
+  instead of 3) and fixed: cases now bucket by the NEAREST 15-minute boundary
+  (`_window_id = round(close/900)`; true Kalshi closes are exact multiples of 900s) in
+  `_resolved_cases`, `latest_window_cases`, `latest_window_end_results`. Result: 3 cases, all
+  three intervals show ranks #1/#2/#3 for both systems.
+- **Your System delivery status (was: invisible/blank):** added `native_delivery_status` /
+  `native_delivery_error` / `native_delivery_at` columns (migrated, backward-compatible). A
+  delivered pick is stamped `SENT` (counts in the visible record); a FAILED official send is now
+  recorded as background `DELIVERY_FAILED` with the exact error (out of the visible win/loss
+  totals, never silently lost) — wired from the ranked-panel non-mute failure branch via
+  `V95Ledger._shadow_mark_failed` → `runner.mark_native_delivery_failed`. The report footer shows
+  a delivery audit (`N sent · N failed · N pending`) so an empty "Yours" is explained honestly.
+- **Confirmed already-correct (no fabricated changes):** Shadow records EVERY observed pick (no
+  strict confidence gate — low-confidence picks are ranked, not suppressed); a 15M never blocks
+  10M/7M (independent `UNIQUE(model_version,contract,checkpoint)` rows + independent cases);
+  resolve settles all checkpoints per ticker; restart preserves rows and never re-grades.
+- **Files:** `q15_upgrade/challenger/ledger.py`, `q15_upgrade/challenger/runner.py`,
+  `q15_upgrade/ledger_v95.py`, `q15_upgrade/checkpoint_v95.py`. **DB table:** `shadow_predictions`
+  (+3 nullable columns, migrated). New `tests/test_challenger_window_repair.py` (8 tests). Full
+  suite **884 passed, 4 skipped**. NOT a model change; read-only shadow only.
+
 ## ✅ Shipped THIS session — "updated review" robustness/observability fixes (branch claude/updated-review-99rj6l)
 **Merged to main, deploy-pending.** Implemented
 every item from the fresh code review, all read-only + backward-compatible (no schema changes):

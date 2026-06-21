@@ -19,6 +19,7 @@ from .config import ChallengerConfig
 from .harness import train_predictor
 from .ledger import REPORT_CHECKPOINTS, ShadowLedger
 from .lineage import lineage_record
+from ..timez import TZ_NAME, fmt_eastern, fmt_eastern_hm
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,8 @@ class ShadowRunner:
     # ---- live hooks (never raise into production) ----
     def observe(self, *, ticker: str, asset: str, checkpoint: str, created_at: float,
                 close_time: float | None, control_prob_yes: float | None,
-                features: Mapping[str, Any], quote: Mapping[str, Any]) -> None:
+                features: Mapping[str, Any], quote: Mapping[str, Any],
+                snapshot_id: str | None = None) -> None:
         try:
             snap = _build_snapshot(features, quote)
             pred = self.predictor.predict(snap)
@@ -94,11 +96,16 @@ class ShadowRunner:
                 pred.prob_yes = round(float(control_prob_yes), 6)
                 pred.prob_no = round(1.0 - float(control_prob_yes), 6)
             calib = getattr(self.predictor.calibrator, "name", "identity")
+            # Shadow scores from EXACTLY the champion's frozen features + quote +
+            # created_at for this interval, and the shared snapshot_id is stamped on
+            # the paired row — so both systems demonstrably ran on the same snapshot,
+            # same information cutoff, same prediction time. No newer data is fetched.
             self.ledger.record(
                 pred, asset=asset, contract=ticker, checkpoint=checkpoint,
                 control_prob_yes=control_prob_yes, created_at=created_at,
                 close_time=close_time, model_version=self.config.model_version,
                 lineage=lineage_record(self.config, calibrator_version=calib),
+                snapshot_id=snapshot_id,
             )
         except Exception:
             logger.exception("challenger shadow observe failed (ignored)")
@@ -114,6 +121,25 @@ class ShadowRunner:
         except Exception:
             logger.exception("challenger shadow mark_native_sent failed (ignored)")
             return False
+
+    def mark_native_delivery_failed(self, ticker: str, checkpoint: str, error: str) -> bool:
+        """Record that Your System generated this pick but the official send failed.
+        The row stays background (out of the visible totals) with the exact error
+        preserved. Never raises into the production send path."""
+        try:
+            return self.ledger.mark_native_delivery_failed(
+                str(ticker), str(checkpoint), str(error),
+                model_version=self.config.model_version)
+        except Exception:
+            logger.exception("challenger shadow mark_native_delivery_failed failed (ignored)")
+            return False
+
+    def delivery_audit(self) -> dict:
+        try:
+            return self.ledger.delivery_audit(model_version=self.config.model_version)
+        except Exception:
+            logger.exception("challenger shadow delivery_audit failed (ignored)")
+            return {"SENT": 0, "DELIVERY_FAILED": 0, "PENDING": 0}
 
     def resolve(self, ticker: str, checkpoint: str, official_result: str,
                 resolved_at: float | None = None) -> None:
@@ -188,24 +214,36 @@ class ShadowRunner:
         cps = list(REPORT_CHECKPOINTS)
         rk = self.ledger.ranked_comparison(model_version=mv, top_k=top_k, native_sent_only=sent_only)
 
-        reset_s = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(self.reset_at))
+        # All visible timestamps are Eastern (America/Detroit), DST-aware: the label
+        # reads EDT in summer, EST in winter — never a fixed offset. UTC stays
+        # internal (storage, contract matching); only the DISPLAY is converted.
+        reset_s = fmt_eastern(self.reset_at)  # e.g. "2026-06-21 14:53 EDT"
         body: list[str] = [
             "Shadow test · read-only · never trades",
             "Picks ranked by confidence; #1 = most confident",
             "Correct = the predicted side matched the final result",
             f"Comparison reset: {reset_s}",
+            "Synchronization: Same snapshot and prediction time",
+            f"Time zone: {TZ_NAME}",
         ]
 
         if not rk["n_cases"]:
-            body += ["", "No settled cases since reset yet.", "0W–0L | N/A"]
+            # Post-reset, pre-data: the exact required banner. Both systems start at
+            # 0W–0L | N/A and only predictions created after reset_at will count.
+            body += ["", "No settled cases since reset yet.",
+                     "Shadow: 0W–0L | N/A", "Your System: 0W–0L | N/A"]
+            archived = self.ledger.archived_versions(mv)
+            if archived:
+                body += ["", f"Pre-reset archive (PRE-SYNCHRONIZED-RESET, excluded): "
+                             f"{', '.join(archived)}"]
             return (f"<b>{CHALLENGER_REPORT_MARKER} vs YOUR SYSTEM</b>\n"
                     f"<pre>{chr(10).join(body)}</pre>")
 
         # ---- LAST WINDOW: three ranked picks per interval, side by side ----
         win = self.ledger.latest_window_cases(model_version=mv, top_k=top_k, native_sent_only=sent_only)
         if win["close"]:
-            when = time.strftime("%H:%M", time.gmtime(win["close"]))
-            body += ["", f"LAST WINDOW · {when} UTC"]
+            when = fmt_eastern_hm(win["close"])  # "HH:MM EDT" / "HH:MM EST"
+            body += ["", f"LAST WINDOW · {when}"]
             for cp in cps:
                 picks = win["checkpoints"].get(cp)
                 if not picks:
@@ -278,6 +316,21 @@ class ShadowRunner:
         learning = ("on (training on its own results)" if self.info.get("fitted")
                     else "warming up — need more settled cases")
         body += ["", f"Winner: {winner}", f"Learning: {learning}"]
+
+        # Your System delivery audit — explains an empty "Yours" record honestly:
+        # SENT picks count; DELIVERY_FAILED were generated but the send failed (kept
+        # as background with the error); PENDING are generated but not yet sent/closed.
+        audit = self.ledger.delivery_audit(model_version=mv)
+        body += [f"Your System delivery: {audit['SENT']} sent · "
+                 f"{audit['DELIVERY_FAILED']} failed · {audit['PENDING']} pending"]
+        if audit["SENT"] == 0 and (audit["DELIVERY_FAILED"] or audit["PENDING"]):
+            body += ["Yours shows — because no official report has been delivered yet "
+                     "(picks generated; delivery not confirmed)."]
+
+        archived = self.ledger.archived_versions(mv)
+        if archived:
+            body += ["", f"Pre-reset archive (PRE-SYNCHRONIZED-RESET, excluded): "
+                         f"{', '.join(archived)}"]
 
         return (f"<b>{CHALLENGER_REPORT_MARKER} vs YOUR SYSTEM</b>\n"
                 f"<pre>{chr(10).join(body)}</pre>")
