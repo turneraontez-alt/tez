@@ -1634,6 +1634,7 @@ def _direction_after_side(analysis: Mapping[str, Any]) -> str | None:
     return lean if lean in {"YES", "NO"} else None
 
 
+_RANKED_PICK_COUNT = 3    # the official interval report shows exactly three ranks
 _PANEL_RISK_HIGH = 60.0   # 0..100 panel scale
 _PANEL_RISK_MEDIUM = 35.0
 
@@ -1704,6 +1705,102 @@ def build_compact_checkpoint_panel(checkpoint: str, asset: str,
         manipulation=_panel_manipulation(analysis),
         entry_state=entry_state, entry=_panel_entry(analysis, entry_state),
     )
+
+
+def _entry_score(analysis: Mapping[str, Any]) -> float | None:
+    """0–100 composite ENTRY SCORE — a read-only SHADOW overlay (does NOT drive
+    the live entry decision; the champion stays frozen). Combines signals the
+    system already calculates with the documented weights
+    (30 direction-confidence / 25 edge / 20 wick / 15 momentum / 10 manipulation),
+    each mapped to 0..1 then weighted. Returns None when the prediction is
+    unavailable so the panel shows '—' rather than a fabricated number.
+
+    Component mapping (each clamped to 0..1):
+      dir-conf = |selected_probability − 0.5| × 2   (decisiveness of the call)
+      edge     = net_edge_cents / EDGE_CAP          (clamped ≥ 0)
+      wick     = |wick feature|                     (price-action magnitude)
+      momentum = |momentum feature|
+      manip    = 1 − manipulation_risk/100          (less suspected = higher)
+    """
+    if not analysis.get("prediction_available"):
+        return None
+    sel = _num(analysis.get("selected_probability"))
+    if sel is None:
+        return None
+    fv = analysis.get("feature_values") or {}
+    edge_cap = _env_float("Q15_V95_ENTRY_SCORE_EDGE_CAP", 10.0, 1.0, 100.0)
+    dir_conf = _clamp(abs(sel - 0.5) * 2.0, 0.0, 1.0)
+    edge = _clamp((_num(analysis.get("net_edge_cents"), 0.0) or 0.0) / edge_cap, 0.0, 1.0)
+    wick = _clamp(abs(_num(fv.get("wick"), 0.0) or 0.0), 0.0, 1.0)
+    momentum = _clamp(abs(_num(fv.get("momentum"), 0.0) or 0.0), 0.0, 1.0)
+    manip_block = _panel_manipulation(analysis) or {}
+    manip_risk = _num(manip_block.get("risk"))
+    manip = 1.0 - _clamp((manip_risk or 0.0) / 100.0, 0.0, 1.0)
+    score = 30.0 * dir_conf + 25.0 * edge + 20.0 * wick + 15.0 * momentum + 10.0 * manip
+    return round(_clamp(score, 0.0, 100.0), 1)
+
+
+def _feature_status(value: float | None, side: str, *, pos: str, neg: str,
+                    threshold: float = 0.05) -> str:
+    """A short, honest qualitative tag for a signed feature relative to the
+    predicted side: supportive when it leans the side's way, against when it
+    opposes, neutral otherwise — with the raw value shown for transparency."""
+    v = _num(value)
+    if v is None:
+        return "—"
+    yes_lean = v if str(side).upper() == "YES" else -v
+    tag = pos if yes_lean > threshold else neg if yes_lean < -threshold else "neutral"
+    return f"{tag} ({v:+.2f})"
+
+
+def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten one ranked analysis into the panel pick contract (every field the
+    official report shows). Pure mapping — no I/O, no decisions."""
+    side = str(analysis.get("prediction_side") or "")
+    yes_p = _num(analysis.get("yes_probability"))
+    no_p = None if yes_p is None else 1.0 - yes_p
+    confidence = yes_p if side.upper() == "YES" else (None if yes_p is None else 1.0 - yes_p)
+    manip = _panel_manipulation(analysis) or {}
+    fv = analysis.get("feature_values") or {}
+    quote = analysis.get("quote") or {}
+    decision = str(analysis.get("trade_decision") or "")
+    return {
+        "rank": rank,
+        "asset": asset,
+        "side": side,
+        "confidence": confidence,
+        "yes_prob": yes_p,
+        "no_prob": no_p,
+        "entry_score": _entry_score(analysis),
+        "manipulation_prob": _num(manip.get("risk")),
+        "price_cents": _num(quote.get("ask_cents")),
+        "rec_low": None,
+        "rec_high": None,
+        "max_cents": _num(analysis.get("ideal_entry_cents")),
+        "wick_status": _feature_status(fv.get("wick"), side, pos="supportive", neg="against"),
+        "flow_status": (f"flow {(_num(fv.get('flow')) or 0.0):+.2f} · "
+                        f"mom {(_num(fv.get('momentum')) or 0.0):+.2f}"),
+        "edge_cents": _num(analysis.get("net_edge_cents")),
+        "decision": decision,
+        "is_entry": decision == "ENTRY_RECOMMENDED",
+    }
+
+
+def _build_ranked_picks(analyses: Mapping[str, Mapping[str, Any]],
+                        ranking: Sequence[Mapping[str, Any]], top_k: int = 3) -> list[dict[str, Any]]:
+    """Top-k picks in the existing executable-trade ranking order (the same order
+    the detail renders), each fully extracted. Fewer than k available picks are
+    left short so the panel shows '—' for the missing ranks."""
+    picks: list[dict[str, Any]] = []
+    for r in ranking:
+        asset = str(r.get("asset"))
+        analysis = analyses.get(asset) or {}
+        if not analysis.get("prediction_available"):
+            continue
+        picks.append(_extract_pick(len(picks) + 1, asset, analysis))
+        if len(picks) >= top_k:
+            break
+    return picks
 
 
 def _best_pick(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple[str, Mapping[str, Any]] | None:
@@ -2168,9 +2265,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # multi-asset entry-only alert is preserved under the flag for rollback.
             if _env_bool("Q15_V95_COMPACT_PANEL", True):
                 deferred.suppress_all(generated_message=bool(ranking))
-                sent, failed = self._send_compact_panel(
-                    checkpoint, analyses, ranking, canonicals, parent_output, notifier, now,
-                )
+                # RANKED PANEL (default ON): one locked official report per interval
+                # carrying the top-3 ranked picks. Falls back to the single-pick
+                # compact panel under the flag for rollback.
+                if _env_bool("Q15_V95_RANKED_PANEL", True):
+                    sent, failed = self._send_ranked_panel(
+                        checkpoint, analyses, ranking, canonicals, parent_output, notifier, now,
+                    )
+                else:
+                    sent, failed = self._send_compact_panel(
+                        checkpoint, analyses, ranking, canonicals, parent_output, notifier, now,
+                    )
             else:
                 message = build_v95_message(
                     checkpoint, analyses, ranking, ledger_status, result_events,
@@ -2496,6 +2601,123 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     sent_at=now, close_time=close_time, message_id=mid,
                 )
         return (1 if delivered else 0), (0 if handled else 1)
+
+    def _send_ranked_panel(self, checkpoint: str, analyses: Mapping[str, Any],
+                           ranking: Sequence[Mapping[str, Any]], canonicals: Mapping[str, Any],
+                           parent_output: Mapping[str, Any], notifier: Any,
+                           now: float) -> tuple[int, int]:
+        """Send the OFFICIAL interval report — exactly ONE per (interval, 15-min
+        window), carrying the top-3 ranked picks with every field — then write the
+        immutable official record for each delivered pick.
+
+        Report-frequency lock (section 1): once an interval's report is delivered
+        for a window it is locked; later cycles continue analysing in the background
+        but never resend or replace it. The lock is CLAIMED before the send (so a
+        second process can't double-send) and RELEASED only if the send did not
+        deliver, so a muted/failed send retries next cycle. Returns (sent, failed).
+        """
+        if not ranking:
+            return 0, 0
+        if not self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+            return 0, 0
+        # Window close basis = the top-ranked pick's contract close (all assets in
+        # the checkpoint share the 15-min window).
+        top_asset = str(ranking[0].get("asset"))
+        top_canon = canonicals.get(top_asset)
+        window_close = top_canon.settlement_time if top_canon is not None else None
+
+        if self.ledger.report_locked(str(checkpoint), window_close, now):
+            return 0, 0  # already officially reported this interval+window — no resend
+        picks = _build_ranked_picks(analyses, ranking, top_k=_RANKED_PICK_COUNT)
+        if not picks:
+            return 0, 0
+
+        # Claim the lock BEFORE sending (cross-process dedup). If another process
+        # already claimed it this window, stand down.
+        if not self.ledger.lock_official_report(str(checkpoint), window_close, now, message_id=None):
+            return 0, 0
+
+        message = panels_v95.build_ranked_checkpoint_panel(
+            checkpoint=checkpoint, picks=picks, top_k=_RANKED_PICK_COUNT)
+        if hasattr(notifier, "send_with_result"):
+            result = notifier.send_with_result(message)
+        else:
+            ok = bool(notifier.send(message)) if notifier is not None else False
+            result = {"ok": ok, "delivered": ok and getattr(notifier, "last_message_id", None) is not None,
+                      "message_id": getattr(notifier, "last_message_id", None)}
+        handled = bool(result.get("ok"))
+        delivered = bool(result.get("delivered"))
+
+        if not delivered:
+            # Muted / failed -> not official. Release the claim so the next cycle
+            # can retry; surface a handled-but-undelivered send (throttled).
+            self.ledger.unlock_official_report(str(checkpoint), window_close, now)
+            if handled:
+                self._throttled_warn(
+                    f"ranked_handled_not_delivered:{checkpoint}",
+                    "v95 ranked report handled but not delivered (no message_id) for "
+                    "checkpoint=%s — no official record written", checkpoint, now=now,
+                )
+            return 0, (0 if handled else 1)
+
+        mid = result.get("message_id")
+        # The report WAS delivered: the normal check for this interval reached the
+        # owner (manipulation-alert gate condition 2). Headline = the top pick.
+        top_analysis = analyses.get(top_asset) or {}
+        self._normal_check[str(checkpoint)] = manipulation_alert.NormalCheck(
+            checkpoint=str(checkpoint), delivered=True, asset=top_asset,
+            side=top_analysis.get("prediction_side"),
+            action=str(top_analysis.get("trade_decision") or "") or None, at=now,
+        )
+
+        entry_armed = False
+        for pick in picks:
+            asset = str(pick["asset"])
+            analysis = analyses.get(asset) or {}
+            canon = canonicals.get(asset)
+            ticker = canon.ticker if canon is not None else analysis.get("ticker")
+            close_time = canon.settlement_time if canon is not None else None
+            if not ticker:
+                continue
+            decision = str(analysis.get("trade_decision") or "")
+            manip_prob = pick.get("manipulation_prob")
+            # Your System counts this delivered pick in the visible shadow record.
+            self.ledger._shadow_mark_sent(str(ticker), str(checkpoint))
+            self.ledger.record_sent_prediction(
+                contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="interval",
+                predicted_side=analysis.get("prediction_side"), probability=analysis.get("yes_probability"),
+                manipulation_probability=manip_prob, entry_decision=decision,
+                sent_at=now, close_time=close_time, message_id=mid,
+            )
+            if decision == "ENTRY_RECOMMENDED":
+                self.ledger.record_sent_prediction(
+                    contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="entry",
+                    predicted_side=analysis.get("prediction_side"), probability=analysis.get("yes_probability"),
+                    manipulation_probability=manip_prob, entry_decision=decision,
+                    sent_at=now, close_time=close_time, message_id=mid,
+                )
+                # One active entry per timeframe: arm slot/follow-up for the
+                # highest-ranked entry only (the rest are recorded, not armed).
+                if not entry_armed:
+                    entry_armed = True
+                    self.ledger.claim_pushed_slot(checkpoint, str(ticker), close_time, now)
+                    self.ledger.mark_pushed(str(ticker), checkpoint)
+                    if (_env_bool("Q15_V95_ENTRY_FOLLOWUP_ENABLED", True)
+                            and checkpoint in _followup_checkpoints()):
+                        self.ledger.arm_entry_followup(
+                            ticker=str(ticker), checkpoint=checkpoint, asset=asset,
+                            side=str(analysis.get("prediction_side") or ""), now=now,
+                            delay=_env_float("Q15_V95_FOLLOWUP_DELAY_SECONDS", 120.0, 15.0, 600.0),
+                        )
+            manip_side = _direction_after_side(analysis)
+            if _panel_manipulation(analysis) and manip_side:
+                self.ledger.record_sent_prediction(
+                    contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="manipulation",
+                    predicted_side=manip_side, probability=analysis.get("yes_probability"),
+                    manipulation_probability=manip_prob, entry_decision=decision,
+                    sent_at=now, close_time=close_time, message_id=mid,
+                )
+        return 1, 0
 
     @staticmethod
     def _recap_close_label(close_time: Any) -> str:
