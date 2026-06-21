@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **742 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **783 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -23,7 +23,48 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/read-hand-off-719tb9`) — updated-review fixes
+## ✅ Shipped THIS session (branch `claude/kalshi-monitor-ui-telegram-w8db7a`) — UI cleanup + Telegram presentation layer
+**On the branch, NOT merged to `main` (this session's git instructions pin work to
+the feature branch and forbid pushing elsewhere without explicit permission),
+deploy-pending.** Presentation-only — **no model/prediction/schema changes**. Suite
+**742 → 783 passed, 4 skipped** (+41).
+
+- **New shared Telegram presentation layer** (`telegram_format.py`): pure, fully
+  tested formatting helpers so every builder speaks one dialect — `format_pct`
+  (0..1 → "62%"), `format_cents`/`format_price` (magnitude-aware), `format_countdown`/
+  `format_age`, `freshness()` (missing age ⇒ NOT trusted, never silently fresh),
+  `divergence()` (Coinbase/OKX gap in bps; half-up feed ⇒ no false alarm),
+  timezone-aware `format_timestamp`/`now_label` (injectable clock), `escape_html`,
+  and `clamp_for_telegram` (4096-char backstop). No I/O, no engine state.
+- **Hourly report** (`reporting.py`): now ends with a **timezone-aware generation
+  timestamp** ("Generated 3:07:42 PM EDT") — the header only carried the clock hour,
+  so a late/duplicate delivery was ambiguous. `_pct` now routes through the shared
+  formatter; the panel body is clamped under Telegram's limit. The canonical
+  `Hourly Report —` marker and single `<pre>` panel are preserved (notifier keys on
+  them). Tests: `test_telegram_report_generated_footer.py`.
+- **Dashboard cleanup** (`templates/index.html`, single file, all class names + JS
+  `data-r` refs preserved so functionality is unchanged): consolidated CSS into a
+  **design-token system** (spacing/radius/type scales + semantic state aliases
+  positive/negative/neutral/stale/warning/critical), raised muted-text contrast,
+  **responsive card grid** (`minmax` auto-fill + a 380px breakpoint), a prominent
+  **connection/data-health banner** (`#conn-banner`, idempotent, plain-text only) that
+  distinguishes *disconnected* (fetch error) from *stale feeds* (>8s), a per-card
+  **freshness pill**, timezone-labelled "Updated" clock, and accessibility passes
+  (`:focus-visible`, real `type="button"`, aria-live status/alert regions,
+  `prefers-reduced-motion`). Error text is `esc()`-escaped before innerHTML.
+- **Tests added** (+41): `test_telegram_format.py` (helper contract incl. missing/NaN/
+  escaping/length/tz), `test_telegram_report_generated_footer.py`,
+  `test_notifier_delivery.py` (success/429-rate-limit/timeout/invalid-JSON/token-redaction/
+  dedup — fake `requests`, no network/clock), `test_dashboard_ui.py` (route 200 +
+  no-cache, tokens, loading/empty/stale/disconnected/error states, a11y, responsive,
+  safe rendering, no leaked Jinja).
+- **Deliberately NOT touched:** notifier transport core (its broad `except Exception`
+  is intentional — a delivery must never crash the refresh loop; it is not a bare
+  `except:` and the token is redacted), and the heavily-tested checkpoint alert
+  format strings (changing them risks the suppression/marker invariants). The new
+  helpers are the shared vocabulary those builders can adopt incrementally.
+
+## ✅ Shipped earlier (branch `claude/read-hand-off-719tb9`) — updated-review fixes
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Ran a fresh fan-out `updated-review` (overall **7.5/10**, up from 7.0), then
 adversarially verified every "critical/high" finding — the three headline bugs all

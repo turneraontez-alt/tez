@@ -10,6 +10,8 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
+import telegram_format as tf
+
 try:  # stdlib on 3.9+; needs the `tzdata` wheel on a bare container.
     from zoneinfo import ZoneInfo
     _EASTERN = ZoneInfo("America/New_York")
@@ -41,7 +43,24 @@ def _eastern_header():
 
 
 def _pct(x):
-    return f"{x * 100:.0f}%" if isinstance(x, (int, float)) else "n/a"
+    # Shared formatter so the hourly report, checkpoint alerts and dashboard all
+    # speak the same percentage dialect (0..1 fraction -> "62%", missing -> n/a).
+    return tf.format_pct(x)
+
+
+def _generated_line():
+    """Exact report-generation time in US Eastern, e.g. 'Generated 3:07:42 PM EDT'.
+
+    The top header carries only the clock hour (':00'); this footer pins the
+    precise minute/second a report was built — and always names the timezone — so
+    a late or duplicated delivery is unambiguous. Falls back to a fixed EST offset
+    only when the tz database is unavailable.
+    """
+    if _EASTERN is not None:
+        local = datetime.now(_EASTERN)
+    else:  # pragma: no cover - exercised only without tzdata
+        local = datetime.now(timezone(timedelta(hours=-5), "EST"))
+    return "Generated " + local.strftime("%I:%M:%S %p %Z").lstrip("0")
 
 
 class HourlyReporter:
@@ -391,5 +410,12 @@ class HourlyReporter:
             pass
 
         body.append("")
+        body.append(_generated_line())
         body.append(DISCLAIMER)
-        return header + "\n<pre>\n" + "\n".join(body) + "\n</pre>"
+        # Backstop: never emit a message past Telegram's 4096-char hard limit.
+        # The header lives outside the <pre> panel; clamp the panel body so a
+        # rare overflow degrades to a clipped-but-valid message, not an API 400.
+        panel = tf.clamp_for_telegram(
+            "\n".join(body), limit=4096 - len(header) - len("\n<pre>\n\n</pre>")
+        )
+        return header + "\n<pre>\n" + panel + "\n</pre>"

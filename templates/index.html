@@ -7,141 +7,202 @@
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
-    --bg: #0a0a0f; --card: #12121a; --card2: #1a1a26; --border: #2a2a3a;
-    --green: #00e676; --red: #ff1744; --yellow: #ffd600; --orange: #ff9100;
-    --blue: #40c4ff; --purple: #ce93d8; --text: #e0e0e0; --muted: #666688; --label: #9999bb;
+    /* ---- Surfaces & lines ---- */
+    --bg: #0a0a0f; --card: #12121a; --card2: #1a1a26; --inset: #0d0d18;
+    --border: #2a2a3a; --border-strong: #3a3a4e;
+    /* ---- Signal colours (used as a *supporting* cue, never the only one) ---- */
+    --green: #00e676; --red: #ff5370; --yellow: #ffd600; --orange: #ff9100;
+    --blue: #40c4ff; --purple: #ce93d8;
+    /* ---- Semantic state aliases ---- */
+    --positive: var(--green); --negative: var(--red); --neutral: var(--muted);
+    --warning: var(--yellow); --critical: var(--red); --stale: var(--orange);
+    --info: var(--blue);
+    /* ---- Text (raised contrast so 9–11px labels stay legible on dark) ---- */
+    --text: #e8e8ef; --muted: #9a9ab8; --label: #b4b4d0; --faint: #7a7a98;
+    /* ---- Spacing scale ---- */
+    --s1: 4px; --s2: 6px; --s3: 8px; --s4: 10px; --s5: 12px; --s6: 14px; --s7: 18px; --s8: 22px;
+    /* ---- Radius scale ---- */
+    --r-sm: 6px; --r-md: 8px; --r-lg: 10px; --r-xl: 14px; --r-pill: 999px;
+    /* ---- Type scale ---- */
+    --fz-micro: 9px; --fz-cap: 10px; --fz-sm: 11px; --fz-base: 13px; --fz-md: 14px;
+    --fz-lg: 15px; --fz-xl: 22px; --fz-xxl: 24px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
-    font-size: 14px; min-height: 100vh; padding-bottom: 40px; }
-  header { background: #0d0d18; border-bottom: 1px solid var(--border); padding: 12px 16px;
+    font-size: var(--fz-md); line-height: 1.4; min-height: 100vh; padding-bottom: 40px;
+    -webkit-font-smoothing: antialiased; }
+  /* Visible keyboard focus everywhere (accessibility). */
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: var(--r-sm); }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+  header { background: var(--inset); border-bottom: 1px solid var(--border); padding: var(--s5) var(--s6);
     position: sticky; top: 0; z-index: 100; display: flex; align-items: center;
-    justify-content: space-between; gap: 8px; }
-  .header-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
-  header h1 { font-size: 15px; font-weight: 700; color: var(--blue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background 0.3s; }
+    justify-content: space-between; gap: var(--s3); }
+  .header-left { display: flex; align-items: center; gap: var(--s4); flex: 1; min-width: 0; }
+  header h1 { font-size: var(--fz-lg); font-weight: 700; color: var(--blue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background 0.3s; }
   .status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .status-dot.stale { background: var(--yellow); }
-  .status-dot.error { background: var(--red); }
-  .btn-copy { background: #1e1e2e; border: 1px solid var(--border); color: var(--blue);
-    padding: 7px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
-    flex-shrink: 0; white-space: nowrap; }
+  .status-dot.stale { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+  .status-dot.error { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .btn-copy { background: #1e1e2e; border: 1px solid var(--border-strong); color: var(--blue);
+    padding: var(--s2) var(--s5); border-radius: var(--r-md); font-size: var(--fz-base); font-weight: 600; cursor: pointer;
+    flex-shrink: 0; white-space: nowrap; transition: border-color 0.2s, color 0.2s; }
+  .btn-copy:hover { border-color: var(--blue); }
   .btn-copy.copied { color: var(--green); border-color: var(--green); }
-  #last-refresh { font-size: 11px; color: var(--muted); white-space: nowrap; }
-  .mode-note { font-size: 10px; color: var(--muted); padding: 6px 14px 0; text-align: center; }
-  .cards { padding: 12px; display: flex; flex-direction: column; gap: 14px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; transition: border-color 0.3s; }
-  .card.stale { border-color: #3a3a00; }
-  .card-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 10px; background: var(--card2); gap: 8px; }
-  .asset-name { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
-  .ticker { font-size: 10px; color: var(--muted); margin-top: 2px; word-break: break-all; }
+  #last-refresh { font-size: var(--fz-sm); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  /* Connection / data-health banner — the single, prominent place that tells a
+     glancing operator the feed is degraded, stale or offline. */
+  .conn-banner { display: flex; align-items: center; gap: var(--s3); justify-content: center;
+    padding: var(--s3) var(--s6); font-size: var(--fz-base); font-weight: 600; text-align: center;
+    border-bottom: 1px solid transparent; }
+  .conn-banner[hidden] { display: none; }
+  .conn-banner.warn { background: #2a2400; color: var(--yellow); border-bottom-color: #443300; }
+  .conn-banner.error { background: #2a0d14; color: var(--red); border-bottom-color: #4a1622; }
+  .conn-banner .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+  .mode-note { font-size: var(--fz-cap); color: var(--faint); padding: var(--s2) var(--s6) 0; text-align: center; }
+
+  /* Responsive multi-column grid: one column on phones, more as width allows. */
+  .cards { padding: var(--s5); display: grid; gap: var(--s6);
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); align-items: start; }
+  .cards > .loading-card { grid-column: 1 / -1; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-xl);
+    overflow: hidden; transition: border-color 0.3s; }
+  .card.stale { border-color: var(--stale); }
+  .card-header { display: flex; align-items: flex-start; justify-content: space-between; padding: var(--s5) var(--s6) var(--s4); background: var(--card2); gap: var(--s3); }
+  .asset-name { font-size: var(--fz-xl); font-weight: 800; letter-spacing: -0.5px; }
+  .ticker { font-size: var(--fz-cap); color: var(--muted); margin-top: 2px; word-break: break-all; }
   .countdown { text-align: right; flex-shrink: 0; }
-  .countdown-time { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
-  .countdown-label { font-size: 10px; color: var(--muted); text-align: right; }
+  .countdown-time { font-size: var(--fz-xxl); font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+  .countdown-label { font-size: var(--fz-cap); color: var(--muted); text-align: right; }
   .countdown-time.urgent { color: var(--red); }
   .countdown-time.warning { color: var(--yellow); }
-  .card-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
-  .section-title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 5px; }
-  .entry-banner { border-radius: 10px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 700; }
-  .entry-CONFIRMED { background: #002a14; border: 1px solid #00e676; color: var(--green); }
-  .entry-WATCH { background: #2a2400; border: 1px solid #ffd600; color: var(--yellow); }
-  .entry-REVERSAL { background: #2a1500; border: 1px solid #ff9100; color: var(--orange); }
-  .entry-TOOLATE { background: #2a0010; border: 1px solid #ff1744; color: var(--red); }
+  .card-body { padding: var(--s5) var(--s6); display: flex; flex-direction: column; gap: var(--s4); }
+
+  /* A small, reusable freshness pill shown on a stale card. */
+  .freshness { display: inline-flex; align-items: center; gap: var(--s1); font-size: var(--fz-micro);
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 6px;
+    border-radius: var(--r-pill); background: #2a1500; color: var(--stale); border: 1px solid #4a2a00; margin-left: var(--s2); }
+
+  .section-title { font-size: var(--fz-cap); color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: var(--s1); }
+  .entry-banner { border-radius: var(--r-lg); padding: var(--s4) var(--s5); display: flex; align-items: center; justify-content: space-between; gap: var(--s3); font-weight: 700; }
+  .entry-CONFIRMED { background: #002a14; border: 1px solid var(--green); color: var(--green); }
+  .entry-WATCH { background: #2a2400; border: 1px solid var(--yellow); color: var(--yellow); }
+  .entry-REVERSAL { background: #2a1500; border: 1px solid var(--orange); color: var(--orange); }
+  .entry-TOOLATE { background: #2a0010; border: 1px solid var(--red); color: var(--red); }
   .entry-NONE { background: #16161f; border: 1px solid var(--border); color: var(--muted); }
-  .entry-status-txt { font-size: 14px; }
-  .entry-econ { font-size: 10px; font-weight: 600; text-align: right; opacity: 0.9; }
-  .chart-wrap { background: #0d0d18; border-radius: 10px; padding: 8px 6px 4px; }
-  .chart-legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 6px 2px; font-size: 9px; color: var(--muted); }
+  .entry-status-txt { font-size: var(--fz-md); }
+  .entry-econ { font-size: var(--fz-cap); font-weight: 600; text-align: right; opacity: 0.92; font-variant-numeric: tabular-nums; }
+  .chart-wrap { background: var(--inset); border-radius: var(--r-lg); padding: var(--s3) var(--s2) var(--s1); }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: var(--s4); padding: var(--s1) var(--s2) 2px; font-size: var(--fz-micro); color: var(--muted); }
   .chart-legend span b { font-weight: 700; }
   .chart { width: 100%; height: 170px; }
-  .pattern-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: #0d0d18; border-radius: 8px; padding: 8px 10px; }
-  .pattern-name { font-size: 14px; font-weight: 700; }
+  .pattern-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); background: var(--inset); border-radius: var(--r-md); padding: var(--s3) var(--s4); }
+  .pattern-name { font-size: var(--fz-md); font-weight: 700; }
   .pat-bull { color: var(--green); }
   .pat-bear { color: var(--red); }
   .pat-neu { color: var(--muted); }
-  .pattern-detail { font-size: 10px; color: var(--muted); margin-top: 2px; }
-  .conf-badge { font-size: 11px; font-weight: 800; padding: 4px 8px; border-radius: 6px; font-variant-numeric: tabular-nums; }
-  .conf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
-  .conf-item { display: flex; align-items: center; gap: 6px; font-size: 10px; }
+  .pattern-detail { font-size: var(--fz-cap); color: var(--muted); margin-top: 2px; }
+  .conf-badge { font-size: var(--fz-sm); font-weight: 800; padding: var(--s1) var(--s3); border-radius: var(--r-sm); font-variant-numeric: tabular-nums; }
+  .conf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s1) var(--s4); }
+  .conf-item { display: flex; align-items: center; gap: var(--s2); font-size: var(--fz-cap); }
   .conf-item .lbl { color: var(--label); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .conf-bar { width: 44px; height: 5px; background: #20202e; border-radius: 3px; overflow: hidden; flex-shrink: 0; }
   .conf-bar i { display: block; height: 100%; background: var(--blue); }
   .conf-num { width: 22px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .confirm-list { display: flex; flex-wrap: wrap; gap: 5px; }
-  .confirm-chip { font-size: 10px; padding: 3px 7px; border-radius: 20px; background: #002210; color: var(--green); border: 1px solid #004420; }
-  .confirm-none { font-size: 10px; color: var(--muted); }
-  .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .kv-box { background: #0d0d18; border-radius: 8px; padding: 7px 9px; }
-  .kv-label { font-size: 9px; color: var(--muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .kv-val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .confirm-list { display: flex; flex-wrap: wrap; gap: var(--s2); }
+  .confirm-chip { font-size: var(--fz-cap); padding: 3px 7px; border-radius: var(--r-pill); background: #002210; color: var(--green); border: 1px solid #004420; }
+  .confirm-none { font-size: var(--fz-cap); color: var(--muted); }
+  .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+  .kv-box { background: var(--inset); border-radius: var(--r-md); padding: var(--s2) var(--s4); }
+  .kv-label { font-size: var(--fz-micro); color: var(--muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kv-val { font-size: var(--fz-lg); font-weight: 700; font-variant-numeric: tabular-nums; }
   /* V9.5 prediction card */
-  .pred-card { background:#0d0d18; border:1px solid #23233a; border-radius:10px; padding:9px 11px; margin-top:8px; }
-  .pred-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:7px; }
-  .pred-interval { font-size:10px; font-weight:700; background:#1b1b2e; color:var(--blue); padding:2px 7px; border-radius:6px; letter-spacing:0.5px; }
-  .pred-side { font-size:15px; font-weight:800; letter-spacing:0.5px; }
-  .pred-grade { font-size:11px; font-weight:700; color:var(--yellow); cursor:help; }
-  .pred-stab { font-size:11px; color:var(--muted); margin-left:auto; }
-  .pred-probs { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; }
-  .pred-meta { display:flex; justify-content:space-between; gap:8px; font-size:10px; color:var(--muted); margin-top:6px; }
-  .price-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; }
-  .price-box { background: #0d0d18; border-radius: 8px; padding: 6px 4px; text-align: center; }
-  .price-label { font-size: 9px; color: var(--muted); margin-bottom: 2px; }
-  .price-value { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pred-card { background: var(--inset); border: 1px solid var(--border-strong); border-radius: var(--r-lg); padding: var(--s3) var(--s5); margin-top: var(--s3); }
+  .pred-top { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s2); }
+  .pred-interval { font-size: var(--fz-cap); font-weight: 700; background: #1b1b2e; color: var(--blue); padding: 2px 7px; border-radius: var(--r-sm); letter-spacing: 0.5px; }
+  .pred-side { font-size: var(--fz-lg); font-weight: 800; letter-spacing: 0.5px; }
+  .pred-grade { font-size: var(--fz-sm); font-weight: 700; color: var(--yellow); cursor: help; }
+  .pred-stab { font-size: var(--fz-sm); color: var(--muted); margin-left: auto; }
+  .pred-probs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--s2); }
+  .pred-meta { display: flex; justify-content: space-between; gap: var(--s3); font-size: var(--fz-cap); color: var(--muted); margin-top: var(--s2); }
+  .price-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: var(--s2); }
+  .price-box { background: var(--inset); border-radius: var(--r-md); padding: var(--s2) var(--s1); text-align: center; }
+  .price-label { font-size: var(--fz-micro); color: var(--muted); margin-bottom: 2px; }
+  .price-value { font-size: var(--fz-lg); font-weight: 700; font-variant-numeric: tabular-nums; }
   .price-yes { color: var(--green); } .price-no { color: var(--red); }
-  .flow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .imb-track { height: 8px; background: #20202e; border-radius: 4px; position: relative; overflow: hidden; margin-top: 4px; }
+  .flow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+  .imb-track { height: 8px; background: #20202e; border-radius: var(--s1); position: relative; overflow: hidden; margin-top: var(--s1); }
   .imb-track i { position: absolute; top: 0; bottom: 0; }
-  .liq-row { display: flex; justify-content: space-between; font-size: 10px; margin-top: 3px; }
-  .trades-list { display: flex; flex-direction: column; gap: 4px; }
-  .trade-row { display: flex; align-items: center; gap: 6px; background: #0d0d18; border-radius: 6px; padding: 5px 8px; font-size: 11px; }
+  .liq-row { display: flex; justify-content: space-between; font-size: var(--fz-cap); margin-top: 3px; }
+  .trades-list { display: flex; flex-direction: column; gap: var(--s1); }
+  .trade-row { display: flex; align-items: center; gap: var(--s2); background: var(--inset); border-radius: var(--r-sm); padding: var(--s2) var(--s3); font-size: var(--fz-sm); }
   .trade-large { border-left: 2px solid var(--yellow); }
-  .trade-cnt { font-weight: 700; font-size: 13px; min-width: 44px; }
-  .trade-price-yes { color: var(--green); font-weight: 600; min-width: 34px; }
-  .trade-side { font-size: 10px; flex: 1; }
+  .trade-cnt { font-weight: 700; font-size: var(--fz-base); min-width: 44px; font-variant-numeric: tabular-nums; }
+  .trade-price-yes { color: var(--green); font-weight: 600; min-width: 34px; font-variant-numeric: tabular-nums; }
+  .trade-side { font-size: var(--fz-cap); flex: 1; }
   .side-yes { color: var(--green); } .side-no { color: var(--red); }
-  .large-badge { background: var(--yellow); color: #000; font-size: 9px; font-weight: 800; padding: 1px 4px; border-radius: 3px; }
-  .block-badge { background: var(--purple); color: #000; font-size: 9px; font-weight: 800; padding: 1px 4px; border-radius: 3px; }
-  .trade-time { color: var(--muted); font-size: 10px; }
-  .no-trades { color: var(--muted); font-size: 11px; text-align: center; padding: 8px; }
-  .warns { display: flex; flex-direction: column; gap: 4px; }
-  .warn { font-size: 10px; padding: 4px 8px; border-radius: 6px; background: #241c00; color: var(--yellow); border: 1px solid #443300; }
+  .large-badge { background: var(--yellow); color: #000; font-size: var(--fz-micro); font-weight: 800; padding: 1px 4px; border-radius: 3px; }
+  .block-badge { background: var(--purple); color: #000; font-size: var(--fz-micro); font-weight: 800; padding: 1px 4px; border-radius: 3px; }
+  .trade-time { color: var(--muted); font-size: var(--fz-cap); font-variant-numeric: tabular-nums; }
+  .no-trades { color: var(--muted); font-size: var(--fz-sm); text-align: center; padding: var(--s3); }
+  .warns { display: flex; flex-direction: column; gap: var(--s1); }
+  .warn { font-size: var(--fz-cap); padding: var(--s1) var(--s3); border-radius: var(--r-sm); background: #241c00; color: var(--yellow); border: 1px solid #443300; }
   .stat-row { display: flex; justify-content: space-between; align-items: center; }
-  .stat-label { font-size: 11px; color: var(--label); }
-  .stat-value { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat-label { font-size: var(--fz-sm); color: var(--label); }
+  .stat-value { font-size: var(--fz-base); font-weight: 600; font-variant-numeric: tabular-nums; }
   .spread-tight { color: var(--green); } .spread-wide { color: var(--red); }
   .change-pos { color: var(--green); } .change-neg { color: var(--red); } .change-neu { color: var(--muted); }
-  .upcoming-body, .cycling-body { padding: 22px 14px; text-align: center; }
-  .upcoming-msg { font-size: 14px; font-weight: 600; color: var(--blue); margin-bottom: 8px; }
-  .upcoming-big { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
-  .upcoming-sub { font-size: 11px; color: var(--muted); }
+  .upcoming-body, .cycling-body { padding: var(--s8) var(--s6); text-align: center; }
+  .upcoming-msg { font-size: var(--fz-md); font-weight: 600; color: var(--blue); margin-bottom: var(--s3); }
+  .upcoming-big { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; margin-bottom: var(--s2); }
+  .upcoming-sub { font-size: var(--fz-sm); color: var(--muted); }
   .cycling-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); display: inline-block; animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
   .loading-card { padding: 30px; text-align: center; color: var(--muted); }
-  .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 8px; }
+  .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: var(--s3); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .disclaimer { font-size: 9px; color: var(--muted); text-align: center; padding: 8px 14px 2px; font-style: italic; }
+  .disclaimer { font-size: var(--fz-micro); color: var(--muted); text-align: center; padding: var(--s3) var(--s6) 2px; font-style: italic; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1e1e2e;
-    border: 1px solid var(--green); color: var(--green); padding: 10px 20px; border-radius: 20px;
-    font-size: 13px; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
+    border: 1px solid var(--green); color: var(--green); padding: var(--s4) var(--s7); border-radius: var(--r-pill);
+    font-size: var(--fz-base); font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
   .toast.show { opacity: 1; }
+
+  /* Tighten padding on narrow phones so cards keep their information density. */
+  @media (max-width: 380px) {
+    .cards { padding: var(--s3); gap: var(--s4); }
+    .card-body { padding: var(--s4) var(--s4); }
+    .price-grid { grid-template-columns: 1fr 1fr; }
+  }
+  /* Respect users who ask for reduced motion: drop spin/pulse, keep meaning. */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important; }
+  }
 </style>
 </head>
 <body>
 <header>
   <div class="header-left">
-    <div class="status-dot" id="status-dot"></div>
+    <div class="status-dot" id="status-dot" aria-hidden="true"></div>
     <h1>Kalshi 15-Min Crypto</h1>
-    <span id="last-refresh">Last updated: –</span>
+    <span id="last-refresh" role="status" aria-live="polite">Last updated: –</span>
   </div>
-  <button class="btn-copy" id="btn-copy" onclick="copySummary()">Copy</button>
+  <button class="btn-copy" id="btn-copy" type="button" aria-label="Copy dashboard summary to clipboard" onclick="copySummary()">Copy</button>
 </header>
-<div class="mode-note" id="mode-note"></div>
-<div class="cards" id="cards">
-  <div class="loading-card"><div class="spinner"></div><div>Loading markets…</div></div>
+<div class="conn-banner" id="conn-banner" role="alert" aria-live="assertive" hidden>
+  <span class="dot" aria-hidden="true"></span><span id="conn-banner-text"></span>
 </div>
+<div class="mode-note" id="mode-note"></div>
+<main class="cards" id="cards" aria-label="Per-asset market monitor">
+  <div class="loading-card"><div class="spinner" aria-hidden="true"></div><div>Loading markets…</div></div>
+</main>
 <div class="disclaimer">All patterns, confidence scores, fair values and entry signals are ESTIMATES from public data — not confirmed signals and not financial advice.</div>
-<div class="toast" id="toast">Copied!</div>
+<div class="toast" id="toast" role="status" aria-live="polite">Copied!</div>
 
 <script>
 const REFRESH_MS = 1000;
@@ -155,8 +216,27 @@ function fmtUsd(v){ if(v===null||v===undefined) return '–'; const n=Number(v);
 function fmtPct(v,d=2){ if(v===null||v===undefined) return '–'; const n=Number(v); return (n>0?'+':'')+n.toFixed(d)+'%'; }
 function fmtCountdown(s){ if(s===null||s===undefined) return '–:––'; if(s>=3600){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return `${h}h${String(m).padStart(2,'0')}`;} const m=Math.floor(s/60),x=s%60; return `${m}:${String(x).padStart(2,'0')}`; }
 function fmtClock(ts){ if(!ts) return ''; try{ return new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch(e){return '';} }
-function isStale(d){ if(!d.last_updated) return false; return (Date.now()-new Date(d.last_updated).getTime())/1000 > 8; }
+function dataAge(d){ if(!d.last_updated) return null; const a=(Date.now()-new Date(d.last_updated).getTime())/1000; return Number.isFinite(a)?a:null; }
+function isStale(d){ const a=dataAge(d); return a!=null && a>8; }
+function staleLabel(d){ const a=dataAge(d); return a==null ? 'stale' : ('stale '+Math.round(a)+'s'); }
 function modeOf(d){ return d.market_state || (d.cycling?'cycling':((d.error&&!d.ticker)?'none':'live')); }
+function nowClock(){ try{ return new Date().toLocaleTimeString('en-US',{hour12:false,timeZoneName:'short'}); }catch(e){ return new Date().toLocaleTimeString('en-US',{hour12:false}); } }
+
+// Single source of truth for the connection / data-health banner. state is one
+// of 'warn' | 'error' | null (clear). The message is plain text (textContent),
+// so dynamic detail can never inject markup. Idempotent: it only writes the DOM
+// when the state actually changes, so the assertive aria-live region is not
+// re-announced to screen readers on every 1s poll.
+let _connKey = '';
+function setConnState(state, msg){
+  const b=document.getElementById('conn-banner'); if(!b) return;
+  const key = (state||'')+'|'+(msg||'');
+  if (key === _connKey) return;
+  _connKey = key;
+  if(!state){ b.hidden=true; b.className='conn-banner'; return; }
+  b.hidden=false; b.className='conn-banner '+state;
+  document.getElementById('conn-banner-text').textContent=msg||'';
+}
 
 const CONF_LABELS = {
   wick_quality:'Wick', target_location:'Target', volume_confirmation:'Volume',
@@ -224,7 +304,7 @@ function buildLiveScaffold(asset){
   el.className = 'card';
   el.innerHTML = `
     <div class="card-header">
-      <div><div class="asset-name">${asset}</div><div class="ticker" data-r="ticker">–</div></div>
+      <div><div class="asset-name">${asset} <span class="freshness" data-r="fresh" hidden>stale</span></div><div class="ticker" data-r="ticker">–</div></div>
       <div class="countdown"><div class="countdown-time" data-r="cd">–:––</div><div class="countdown-label">to close</div></div>
     </div>
     <div class="card-body">
@@ -465,7 +545,9 @@ function updateLiveCard(mgr, d){
   const w = d.data_quality_warnings||[];
   R.warnWrap.innerHTML = w.length ? `<div class="section-title">Data quality</div><div class="warns">${w.map(x=>`<div class="warn">⚠ ${x}</div>`).join('')}</div>` : '';
 
-  mgr.el.className = 'card ' + (isStale(d)?'stale':'');
+  const stale = isStale(d);
+  mgr.el.className = 'card ' + (stale?'stale':'');
+  if (R.fresh){ if(stale){ R.fresh.hidden=false; R.fresh.textContent = staleLabel(d); } else { R.fresh.hidden=true; } }
   updateChart(mgr, d);
 }
 
@@ -522,11 +604,19 @@ function renderAll(data){
     container.appendChild(mgr.el); // re-append in sorted order (preserves chart)
   });
 
-  const anyStale = data.some(isStale);
+  const staleCards = data.filter(isStale);
   const anyLive = data.some(d=>modeOf(d)==='live');
   const dot = document.getElementById('status-dot');
-  dot.className = 'status-dot ' + (anyStale?'stale':'live');
-  document.getElementById('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString('en-US',{hour12:false});
+  dot.className = 'status-dot ' + (staleCards.length?'stale':'live');
+  document.getElementById('last-refresh').textContent = 'Updated ' + nowClock();
+  // We just rendered, so the connection itself is healthy; surface any stale
+  // feeds prominently, otherwise clear the banner.
+  if (staleCards.length){
+    const n = staleCards.length;
+    setConnState('warn', '⚠ '+n+' feed'+(n>1?'s':'')+' stale (>8s old) — values may be behind the market');
+  } else {
+    setConnState(null);
+  }
   document.getElementById('mode-note').textContent = anyLive
     ? 'REST polling mode · underlying = public spot proxy (CF Benchmark feed unavailable)'
     : 'No live 15-min markets right now · REST polling mode · spot proxy';
@@ -538,13 +628,17 @@ async function fetchData(){
     if(!r.ok) throw new Error('HTTP '+r.status);
     const data = await r.json();
     lastData = data;
+    // The fetch succeeded, so the connection is healthy: clear any disconnect
+    // banner now. renderAll may re-raise it to a stale-data warning below.
+    setConnState(null);
     renderAll(data);
   }catch(e){
     document.getElementById('status-dot').className = 'status-dot error';
-    document.getElementById('last-refresh').textContent = 'Error: '+e.message;
+    document.getElementById('last-refresh').textContent = 'Disconnected — '+nowClock();
+    setConnState('error', '⚠ Disconnected from server ('+e.message+') — showing last known values');
     if(!lastData.length){
       document.getElementById('cards').innerHTML =
-        '<div class="loading-card"><div style="font-size:16px">⚠ Could not load data</div><div style="font-size:12px;opacity:.7;margin-top:8px">'+e.message+'</div></div>';
+        '<div class="loading-card"><div style="font-size:16px">⚠ Could not load data</div><div style="font-size:12px;opacity:.7;margin-top:8px">'+esc(e.message)+'</div></div>';
     }
   }
 }
