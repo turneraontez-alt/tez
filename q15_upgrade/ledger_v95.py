@@ -492,6 +492,13 @@ class V95Ledger:
             # background. Lets the scoreboard keep pushed-only accuracy separate
             # from the full background record. Default 0 = background.
             self._ensure_column(connection, "predictions", "pushed", "pushed INTEGER NOT NULL DEFAULT 0")
+            # SHADOW FACTORS: extra decision-time signals (e.g. cross-asset /
+            # correlated-movement) recorded for the read-only factor lab ONLY. Kept
+            # in a SEPARATE column so they never touch feature_json — the frozen
+            # champion, challenger, calibration, and pattern overlay all read only
+            # their known feature names, so this can never perturb a live decision.
+            # Additive; old rows read NULL.
+            self._ensure_column(connection, "predictions", "shadow_factor_json", "shadow_factor_json TEXT")
             # One active pushed prediction per timeframe: the contract currently
             # occupying each checkpoint's slot, held until it closes so a second
             # prediction for the same time frame is never pushed while one is live.
@@ -655,7 +662,8 @@ class V95Ledger:
                           manipulation_reason: str | None = None,
                           flip_risk_score: float | None = None,
                           flip_risk_confidence: float | None = None,
-                          flip_evidence_count: int | None = None) -> tuple[str, bool]:
+                          flip_evidence_count: int | None = None,
+                          shadow_factors: Mapping[str, Any] | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
@@ -701,8 +709,15 @@ class V95Ledger:
                     int(flip_evidence_count) if flip_evidence_count is not None else None,
                 ),
             )
-            connection.commit()
             inserted = cursor.rowcount == 1
+            # Shadow factors land in their isolated column in the SAME transaction,
+            # only on a fresh insert (never overwrites a locked prediction).
+            if inserted and shadow_factors:
+                connection.execute(
+                    "UPDATE predictions SET shadow_factor_json=? WHERE prediction_id=?",
+                    (_json(dict(shadow_factors)), prediction_id),
+                )
+            connection.commit()
         if inserted:
             self._shadow_observe(
                 ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=created_at,
@@ -1883,7 +1898,7 @@ class V95Ledger:
         query = (
             "SELECT created_at, checkpoint, asset, regime, predicted_side, "
             "official_result, changed_before_close, correct, selected_probability, "
-            "feature_json FROM predictions WHERE model_version=? "
+            "feature_json, shadow_factor_json FROM predictions WHERE model_version=? "
             "AND official_result IS NOT NULL"
         )
         params: list[Any] = [MODEL_VERSION]
@@ -1901,6 +1916,15 @@ class V95Ledger:
                 continue
             if not isinstance(features, dict):
                 continue
+            # Merge the isolated shadow factors (cross-asset, etc.) so the lab grades
+            # them alongside the champion features. They are namespaced (``x_*``) by
+            # the producer, so they cannot collide with a champion feature name.
+            try:
+                shadow = json.loads(str(row["shadow_factor_json"] or "{}"))
+                if isinstance(shadow, dict):
+                    features = {**features, **shadow}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
             out.append({
                 "created_at": float(row["created_at"]),
                 "checkpoint": str(row["checkpoint"]).upper(),

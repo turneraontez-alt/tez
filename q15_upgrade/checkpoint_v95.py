@@ -53,6 +53,7 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import manipulation_alert
 from . import panels_v95
+from . import shadow_factors as cross_asset
 from . import shadow_economics
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
@@ -2209,6 +2210,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             flip_sent = flip_failed = 0
             self._manip_candidates = []  # rebuilt every cycle by _process_flip_risk
             _s_record = time.monotonic()
+            # Broad-market / cross-asset context for this cycle, computed ONCE from
+            # every analysis (read-only shadow factors for the factor lab; recorded
+            # in an isolated column, never fed to the champion). Default-ON; the
+            # flag is a pure rollback switch.
+            shadow_market = (
+                cross_asset.compute_market(analyses)
+                if _env_bool("Q15_V95_SHADOW_FACTORS_ENABLED", True) else None
+            )
             # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
             # persisted with it, enabling per-rank accuracy tracking.
             for key, snapshot in output.items():
@@ -2251,6 +2260,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     and float(analysis.get("data_quality") or 0.0) >= min_record_dq
                 )
                 if record_ok:
+                    xfactors_row = (
+                        cross_asset.for_asset(asset, analysis, shadow_market)
+                        if shadow_market is not None else None
+                    )
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -2274,6 +2287,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         flip_risk_score=(analysis.get("flip_risk") or {}).get("score"),
                         flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
                         flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
+                        shadow_factors=xfactors_row,
                     )
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
