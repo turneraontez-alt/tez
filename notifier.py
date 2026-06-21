@@ -94,6 +94,17 @@ def _is_performance_report(text):
     return _PERF_REPORT_MARKER in str(text or "")
 
 
+# The read-only challenger-shadow accuracy report is pre-formatted and explicitly
+# requested by the owner; deliver it as-is (skip the reformatters + suppression),
+# like the canonical hourly report. Keyed on its header marker.
+_CHALLENGER_REPORT_MARKER = "CHALLENGER SHADOW"
+
+
+def _is_challenger_report(text):
+    head = next((ln for ln in str(text or "").splitlines() if ln.strip()), "")
+    return _CHALLENGER_REPORT_MARKER in head.upper()
+
+
 def _alert_level(checkpoint=None):
     """Effective verbosity level. A per-checkpoint override (e.g. for 10M/7M)
     takes precedence over the global Q15_ALERT_LEVEL when set."""
@@ -162,14 +173,15 @@ class TelegramNotifier:
     def send(self, text):
         if not self.enabled:
             return False
-        if _is_performance_report(text):
-            # Deliver the canonical performance report as built. The reformatter
-            # chain would otherwise strip its stats down to zeros / "n/a".
+        challenger_report = _is_challenger_report(text)
+        if _is_performance_report(text) or challenger_report:
+            # Deliver the canonical performance report / challenger-shadow report
+            # as built. The reformatter chain would otherwise strip their stats.
             text = str(text or "")
         else:
             text = augment_telegram_message(text)
             text = professionalize_telegram_message(text)
-        if should_suppress_alert(text):
+        if not challenger_report and should_suppress_alert(text):
             # Muted by Q15_ALERT_LEVEL (or a per-checkpoint override). Report
             # success so the outbox marks the message durably handled (no retry);
             # nothing is sent to Telegram.

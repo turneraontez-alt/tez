@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **635 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **641 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -81,6 +81,21 @@ as a SHADOW model, built to be promoted to primary with one switch.
   (-496c/295) despite 67% acc — SOL/DOGE/XRP bleed, BNB/ETH/BTC positive. 15M is the weak
   checkpoint (51.6%), 7M strong (76.8%). Row-level export still needed to train/eval the
   challenger for real (aggregate can't reconstruct per-row features).
+- **Challenger is now WIRED LIVE as a read-only SHADOW and ENABLED** (`.replit`:
+  `Q15_CHALLENGER_ENABLED=true`, `Q15_CHALLENGER_AS_PRIMARY=false`). Hooks live in
+  `ledger_v95.record_prediction` (→ `runner.observe`, on each NEW unique prediction)
+  and `resolve_ticker` (→ `runner.resolve`, on settlement). `runner.py` records a
+  PAIRED challenger prediction beside the champion (champion `raw_yes_probability` =
+  control), grades on settlement, **re-trains from its own settled rows every
+  `Q15_CHALLENGER_REFIT_EVERY`=10 resolutions ("learns as it goes")**, and at each
+  15-min window boundary emits a Telegram **`CHALLENGER SHADOW`** report =
+  challenger-vs-current accuracy overall + by checkpoint. Cold start mirrors the
+  champion (parity) then diverges as it learns. `notifier.send` delivers the
+  `CHALLENGER SHADOW` header as-is (skips reformatters + suppression). app loop
+  drains+sends the report each cycle. **Zero overhead + byte-identical production
+  when disabled** (`get_runner()` returns None fast; all hooks try/except). NOT
+  primary — never drives live output. Needs a Repl reboot to pick up `.replit`.
+  Tests: `test_challenger_runner.py` (6). Suite: **641 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 **Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3

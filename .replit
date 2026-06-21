@@ -66,3 +66,9 @@ Q15_V94_UNIFIED_ENABLED = "false"
 Q15_ALERT_LEVEL_10M = "all"
 Q15_ALERT_LEVEL_7M = "all"
 Q15_V95_PROFILE_FEATURES = "true"
+# Read-only challenger SHADOW: runs beside the champion, records paired
+# predictions, learns from its own settled results, and reports per-15-min
+# accuracy (challenger vs current system). NOT primary — never drives live
+# output (Q15_CHALLENGER_AS_PRIMARY stays false).
+Q15_CHALLENGER_ENABLED = "true"
+Q15_CHALLENGER_AS_PRIMARY = "false"

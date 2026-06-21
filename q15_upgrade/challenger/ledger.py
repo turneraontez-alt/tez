@@ -215,6 +215,39 @@ class ShadowLedger:
         return out
 
 
+    def comparison(self, model_version: str = "challenger-v1") -> dict[str, Any]:
+        """Paired challenger-vs-control accuracy, overall and by checkpoint.
+
+        Control = the production champion's probability stored alongside each
+        shadow prediction, so this is strictly paired on identical contracts.
+        """
+        rows = list(self._conn.execute(
+            "SELECT checkpoint, challenger_prob_yes, control_prob_yes, official_result "
+            "FROM shadow_predictions WHERE model_version=? AND official_result IS NOT NULL",
+            (model_version,),
+        ))
+
+        def _acc(subset):
+            n = len(subset)
+            if n == 0:
+                return {"n": 0, "challenger_accuracy": None, "current_accuracy": None}
+            cy = sum(1 for r in subset
+                     if (float(r["challenger_prob_yes"]) >= 0.5) == (str(r["official_result"]).upper() == "YES"))
+            ctl = [r for r in subset if r["control_prob_yes"] is not None]
+            cu = sum(1 for r in ctl
+                     if (float(r["control_prob_yes"]) >= 0.5) == (str(r["official_result"]).upper() == "YES"))
+            return {
+                "n": n,
+                "challenger_accuracy": round(cy / n, 4),
+                "current_accuracy": round(cu / len(ctl), 4) if ctl else None,
+            }
+
+        out = {"overall": _acc(rows), "by_checkpoint": {}}
+        for cp in sorted({str(r["checkpoint"]) for r in rows}):
+            out["by_checkpoint"][cp] = _acc([r for r in rows if str(r["checkpoint"]) == cp])
+        return out
+
+
 def _prob_metrics(p: list[float], y: list[int], bins: int = 10) -> dict[str, Any]:
     n = len(p)
     brier = sum((pi - yi) ** 2 for pi, yi in zip(p, y)) / n

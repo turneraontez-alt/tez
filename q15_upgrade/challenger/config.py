@@ -79,6 +79,11 @@ class ChallengerConfig:
 
     # -- training / validation --
     min_train_rows: int = field(default_factory=lambda: _int("Q15_CHALLENGER_MIN_TRAIN_ROWS", 200))
+    # Re-train the shadow from its own resolved rows every N resolutions
+    # ("learns as it goes"). 0 disables online refit.
+    refit_every: int = field(default_factory=lambda: _int("Q15_CHALLENGER_REFIT_EVERY", 10))
+    # Emit the per-15-min accuracy comparison (challenger vs current system).
+    report_enabled: bool = field(default_factory=lambda: _bool("Q15_CHALLENGER_REPORT", True))
     n_splits: int = field(default_factory=lambda: _int("Q15_CHALLENGER_WF_SPLITS", 4))
     embargo_seconds: float = field(default_factory=lambda: _float("Q15_CHALLENGER_EMBARGO_SECONDS", 900.0))
     horizon_seconds: float = field(default_factory=lambda: _float("Q15_CHALLENGER_HORIZON_SECONDS", 900.0))

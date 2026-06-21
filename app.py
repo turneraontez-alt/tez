@@ -523,6 +523,17 @@ def refresh_loop(max_cycles=None):
             ct.safe("scalp", scalp_engine.evaluate, deep_snaps, now)
             ct.safe("focus_settlement", focus_manager.reconcile_settlements, now)
             ct.safe("report", reporter.maybe_send, now)
+            # Read-only challenger shadow: deliver the per-15-min accuracy
+            # comparison (challenger vs current system). No-op when disabled.
+            try:
+                from q15_upgrade.challenger.runner import get_runner as _challenger_runner
+                _cr = _challenger_runner()
+                if _cr is not None:
+                    _cr_msg = _cr.drain_report()
+                    if _cr_msg:
+                        notifier.send(_cr_msg)
+            except Exception:
+                logger.debug("challenger shadow report skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)
