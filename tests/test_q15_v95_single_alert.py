@@ -163,6 +163,7 @@ class TestRankedReportWindowGuard(unittest.TestCase):
         def __init__(self):
             self.locked = False
             self.lock_calls = 0
+            self.last_report = None
 
         def report_locked(self, *a, **k):
             return self.locked
@@ -171,6 +172,9 @@ class TestRankedReportWindowGuard(unittest.TestCase):
             self.lock_calls += 1
             self.locked = True
             return True
+
+        def last_official_report_at(self, interval):
+            return self.last_report
 
     class _Notifier:
         def __init__(self):
@@ -197,6 +201,23 @@ class TestRankedReportWindowGuard(unittest.TestCase):
         self.assertEqual((sent, failed), (0, 0))
         self.assertEqual(notifier.sent, 0)   # nothing delivered under a bogus window
         self.assertEqual(led.lock_calls, 0)  # and no lock claimed under it
+
+    def test_min_gap_blocks_a_duplicate_within_the_window(self):
+        led = self._Ledger()
+        led.last_report = NOW - 60.0       # an official report went out 60s ago
+        notifier = self._Notifier()
+        obj = self._policy(led)
+        canon = type("C", (), {"settlement_time": NOW + 600.0, "ticker": "T-BTC"})()
+        os.environ["Q15_V95_REPORT_MIN_GAP_SECONDS"] = "600"
+        try:
+            sent, failed = obj._send_ranked_panel(
+                "10M", _analyses(), _ranking(), {"BTC": canon}, {}, notifier, NOW,
+            )
+        finally:
+            del os.environ["Q15_V95_REPORT_MIN_GAP_SECONDS"]
+        self.assertEqual((sent, failed), (0, 0))
+        self.assertEqual(notifier.sent, 0)   # duplicate blocked before any send
+        self.assertEqual(led.lock_calls, 0)  # and before claiming a (new) window lock
 
 
 if __name__ == "__main__":

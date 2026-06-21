@@ -210,6 +210,17 @@ class ReportLockTest(unittest.TestCase):
         # same interval, next 15-min window -> independent
         self.assertTrue(led.lock_official_report("10M", 1_700_001_800.0, now, message_id=3))
 
+    def test_last_official_report_at_tracks_latest_per_interval(self):
+        led = self._ledger()
+        self.assertIsNone(led.last_official_report_at("10M"))
+        led.lock_official_report("10M", 1_700_000_900.0, 1_700_000_600.0, message_id=1)
+        self.assertEqual(led.last_official_report_at("10M"), 1_700_000_600.0)
+        # a later window for the same interval advances the max
+        led.lock_official_report("10M", 1_700_001_800.0, 1_700_001_500.0, message_id=2)
+        self.assertEqual(led.last_official_report_at("10M"), 1_700_001_500.0)
+        # a different interval is independent
+        self.assertIsNone(led.last_official_report_at("7M"))
+
 
 if __name__ == "__main__":
     unittest.main()
