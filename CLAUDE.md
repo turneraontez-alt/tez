@@ -5,6 +5,12 @@ Read-only paper-trading monitor for Kalshi 15-minute crypto binaries
 checkpoints, sends Telegram alerts, and learns from officially settled results.
 **It never places, modifies, or cancels a real order.**
 
+## Engineering standard (read for any code change)
+- `ENGINEERING_GUIDELINES.md` — the staff-engineer meta-prompt. Apply its
+  substantive rules (failure modes, idempotency, stale-feed/WebSocket handling,
+  `Decimal` for prices, parameterized SQL, narrow exception handling,
+  deterministic tests, adversarial self-review) on every implementation task.
+
 ## Run / test
 - Tests are the source of truth for behavior: `python3 -m pytest tests/ -q`
   (31 test files). Add/adjust a test with every behavior change.
