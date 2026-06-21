@@ -708,6 +708,18 @@ class V95Ledger:
         except Exception:
             logger.debug("challenger shadow observe skipped", exc_info=True)
 
+    def _shadow_mark_sent(self, ticker: str, checkpoint: str) -> None:
+        """Tell the shadow that Your System's prediction for (ticker, checkpoint)
+        was delivered before close, so it counts in the visible Shadow-vs-Yours
+        record. Read-only wrt production; never raises into the alert path."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                runner.mark_native_sent(str(ticker), str(checkpoint))
+        except Exception:
+            logger.debug("challenger shadow mark_sent skipped", exc_info=True)
+
     def _shadow_resolve(self, events) -> None:
         try:
             from q15_upgrade.challenger.runner import get_runner

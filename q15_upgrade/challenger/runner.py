@@ -103,6 +103,18 @@ class ShadowRunner:
         except Exception:
             logger.exception("challenger shadow observe failed (ignored)")
 
+    def mark_native_sent(self, ticker: str, checkpoint: str) -> bool:
+        """Record that Your System's prediction for (ticker, checkpoint) was
+        delivered before close, so it counts in the visible record. Called from
+        the production panel-send path on a real Telegram delivery; never raises
+        into that path. Returns True if a background row was promoted to sent."""
+        try:
+            return self.ledger.mark_native_sent(str(ticker), str(checkpoint),
+                                                model_version=self.config.model_version)
+        except Exception:
+            logger.exception("challenger shadow mark_native_sent failed (ignored)")
+            return False
+
     def resolve(self, ticker: str, checkpoint: str, official_result: str,
                 resolved_at: float | None = None) -> None:
         try:
@@ -132,10 +144,12 @@ class ShadowRunner:
             return r
 
     def comparison(self) -> dict:
-        return self.ledger.comparison(model_version=self.config.model_version)
+        return self.ledger.comparison(model_version=self.config.model_version,
+                                      native_sent_only=self.config.native_sent_only)
 
     def ranked(self, top_k: int = 3) -> dict:
-        return self.ledger.ranked_comparison(model_version=self.config.model_version, top_k=top_k)
+        return self.ledger.ranked_comparison(model_version=self.config.model_version, top_k=top_k,
+                                             native_sent_only=self.config.native_sent_only)
 
     # Only these three symbols are used in the graded cells (no bare X/+/-).
     _OK, _BAD, _NONE = "✓", "✗", "—"
@@ -170,8 +184,9 @@ class ShadowRunner:
         ✓ / ✗ / — only. Scored strictly on predictions recorded under this
         model_version (post-reset)."""
         mv = self.config.model_version
+        sent_only = self.config.native_sent_only
         cps = list(REPORT_CHECKPOINTS)
-        rk = self.ledger.ranked_comparison(model_version=mv, top_k=top_k)
+        rk = self.ledger.ranked_comparison(model_version=mv, top_k=top_k, native_sent_only=sent_only)
 
         reset_s = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(self.reset_at))
         body: list[str] = [
@@ -187,7 +202,7 @@ class ShadowRunner:
                     f"<pre>{chr(10).join(body)}</pre>")
 
         # ---- LAST WINDOW: three ranked picks per interval, side by side ----
-        win = self.ledger.latest_window_cases(model_version=mv, top_k=top_k)
+        win = self.ledger.latest_window_cases(model_version=mv, top_k=top_k, native_sent_only=sent_only)
         if win["close"]:
             when = time.strftime("%H:%M", time.gmtime(win["close"]))
             body += ["", f"LAST WINDOW · {when} UTC"]
@@ -203,7 +218,8 @@ class ShadowRunner:
                     body.append(f"#{i+1} Shadow: {c} | Yours: {n}")
 
         # ---- END-RESULT CALL: all three ranks across all three intervals ----
-        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=tuple(cps))
+        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=tuple(cps),
+                                                   native_sent_only=sent_only)
         if er["assets"]:
             body += ["", "END-RESULT CALL · 15M, 10M & 7M",
                      "✓ = correct | ✗ = wrong | — = no official prediction"]
@@ -225,7 +241,8 @@ class ShadowRunner:
                     body.append(_interval_line(cp, a["checkpoints"].get(cp, {}).get("native")))
 
         # ---- ALL-TIME RANK RESULTS: per rank/interval + combined totals ----
-        rbc = self.ledger.ranked_by_checkpoint(model_version=mv, top_k=top_k, checkpoints=tuple(cps))
+        rbc = self.ledger.ranked_by_checkpoint(model_version=mv, top_k=top_k, checkpoints=tuple(cps),
+                                               native_sent_only=sent_only)
 
         def _record_block(model_key, title):
             lines = ["", title]
