@@ -9,7 +9,7 @@ from unittest.mock import patch
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-import telegram.notifier as notif
+import notifications.notifier as notif
 
 
 class _Resp:

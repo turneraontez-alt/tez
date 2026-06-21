@@ -7,8 +7,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-import telegram.notifier as notifier_mod
-from telegram.notifier import _is_performance_report
+import notifications.notifier as notifier_mod
+from notifications.notifier import _is_performance_report
 
 # The canonical hourly performance report exactly as reporting.HourlyReporter
 # builds it: the em-dash header plus the per-segment breakdown.

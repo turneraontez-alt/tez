@@ -15,16 +15,16 @@ from spot_client import get_spot
 import cycle_watchdog
 from q15_upgrade.orderbook import parse_orderbook, OrderbookTracker
 from analysis import AssetEngine
-from telegram.alert_config import AlertConfig
+from notifications.alert_config import AlertConfig
 from db import SignalStore
-from telegram.notifier import TelegramNotifier
-from telegram.outbox_v9 import ReliableTelegramOutbox  # Q15_V9_RELIABLE_ALERTS
+from notifications.notifier import TelegramNotifier
+from notifications.outbox_v9 import ReliableTelegramOutbox  # Q15_V9_RELIABLE_ALERTS
 from q15_upgrade.oos_v9 import OutOfSampleEvaluator  # Q15_V9_OOS
 from q15_upgrade.signals import SignalEngine
 from performance import PerformanceTracker
 from q15_upgrade.learning import LearningEngine
 from scalp import ScalpEngine
-from telegram.reporting import HourlyReporter
+from notifications.reporting import HourlyReporter
 from q15_upgrade.runtime import Q15Runtime, attach_orderbook_levels
 from q15_upgrade.store_patch import patch_store
 from q15_upgrade.hybrid_data import HybridMarketData
