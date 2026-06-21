@@ -16,7 +16,7 @@ from q15_upgrade.calibrated_edge import (
     directional_vote_metrics,
 )
 from q15_upgrade.oos_v9 import OutOfSampleEvaluator
-from q15_upgrade.outbox_v9 import ReliableTelegramOutbox
+from telegram.outbox_v9 import ReliableTelegramOutbox
 
 
 class FakeNotifier:

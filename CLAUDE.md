@@ -30,8 +30,14 @@ checkpoints, sends Telegram alerts, and learns from officially settled results.
   Platt calibration, shadow challenger (global + per-regime), the scoreboard
   (accuracy / P&L / Wilson CIs by interval, rank, asset) and significance-tested
   promotion. SQLite at `data/`.
-- `reporting.py` — hourly Telegram report (leads with the ledger scoreboard).
-- `notifier.py` — Telegram delivery + alert suppression (`should_suppress_alert`).
+- `telegram/` — **all PURE Telegram code in one package**: `notifier.py` (delivery +
+  `should_suppress_alert`), `outbox_v9.py` (reliable retry outbox), `reporting.py`
+  (hourly report), `panels_v95.py` (checkpoint/ranked/recap panels),
+  `manipulation_alert.py`, `alert_config.py`. NOTE: the legacy `format_telegram_message`
+  reformatter chain still lives in the FROZEN `q15_upgrade/checkpoint_v9{1..5}.py` (its
+  formatting is welded into frozen decision logic — can't be moved without editing frozen
+  code). The hourly-report builders `q15_upgrade/{setup_miner,shadow_economics,
+  accuracy_report}.py` are learning/analysis modules (a report method only) so they stay.
 - `q15_upgrade/window_focus.py` — two-window (15m/10m/7m) live controller:
   EV ranking, the cross-checkpoint side veto, checkpoint alerts, self-review.
 - `performance.py`, `db.py` — Postgres `signals` store + settlement stats.

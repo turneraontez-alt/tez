@@ -51,10 +51,10 @@ from .checkpoint_v94_unified import (
     format_telegram_message as _format_v94_message,
 )
 from . import flip_risk
-from . import manipulation_alert
-from . import panels_v95
 from . import shadow_factors as cross_asset
 from . import shadow_economics
+from telegram import manipulation_alert
+from telegram import panels_v95
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,

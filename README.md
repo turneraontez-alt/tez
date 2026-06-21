@@ -119,12 +119,17 @@ python3 -m pytest -q
 
 ```
 app.py                  Flask app + refresh loop
-notifier.py             Telegram notifier (outbox wrapper)
 db.py                   PostgreSQL signal store
+telegram/               All pure Telegram code (one package)
+  notifier.py           Telegram delivery + suppression
+  outbox_v9.py          Reliable Telegram outbox
+  reporting.py          Hourly performance report
+  panels_v95.py         V9.5 checkpoint/ranked/recap panels
+  manipulation_alert.py Manipulation alert
+  alert_config.py       Alert thresholds
 q15_upgrade/
   window_focus.py       15m/10m/7m checkpoints + DIP alert
   checkpoint_v95.py     V9.5 checkpoint logic
-  outbox_v9.py          Reliable Telegram outbox
   calibrated_edge.py    Edge model (read-only overlay)
   learning_store.py     Shadow learning store
   signals.py            Signal engine

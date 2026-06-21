@@ -111,7 +111,7 @@ class TestFollowupVerdict(unittest.TestCase):
         self.assertIn("FOLLOW-UP — BTC 10M", msg)
         self.assertIn("Recommended side: NO", msg)
         # The header carries an actionable marker so the notifier won't mute it.
-        import notifier
+        import telegram.notifier as notifier
         self.assertFalse(notifier.should_suppress_alert(msg, level="balanced"))
 
 
