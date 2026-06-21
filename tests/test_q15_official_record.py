@@ -129,5 +129,39 @@ class OfficialScoreboardTest(unittest.TestCase):
         self.assertEqual((manip["right"], manip["wrong"]), (1, 1))
 
 
+class ContractRecapTest(unittest.TestCase):
+    def test_recap_reflects_sent_calls_flips_entry_and_manipulation(self):
+        led = _mk_ledger()
+        # One contract predicted NO at 15M, YES at 10M and 7M; settles YES.
+        for cp, side in (("15M", "NO"), ("10M", "YES"), ("7M", "YES")):
+            _resolve(led, "BTC-1", cp, side, "YES")
+        for cp, side, mid in (("15M", "NO", 1), ("10M", "YES", 2), ("7M", "YES", 3)):
+            _send(led, "BTC-1", cp, side, mid=mid)
+        _send(led, "BTC-1", "10M", "YES", record_type="entry", mid=4, entry_decision="ENTRY_RECOMMENDED")
+        _send(led, "BTC-1", "10M", "YES", record_type="manipulation", mid=5, manip=68.0)
+        recap = led.contract_recap("BTC-1")
+        self.assertEqual(recap["result"], "YES")
+        self.assertEqual([iv["interval"] for iv in recap["intervals"]], ["15M", "10M", "7M"])
+        self.assertEqual([iv["hit"] for iv in recap["intervals"]], [False, True, True])
+        self.assertIn("NO → YES at 10M", recap["flips"])
+        self.assertEqual(recap["entry"]["outcome"], "WIN")
+        self.assertTrue(recap["manipulation"]["correct"])
+
+    def test_recap_none_when_nothing_sent(self):
+        led = _mk_ledger()
+        _resolve(led, "X", "10M", "YES", "YES")  # analyzed + settled, never sent
+        self.assertIsNone(led.contract_recap("X"))
+
+    def test_recap_no_flip_when_side_steady(self):
+        led = _mk_ledger()
+        for cp in ("15M", "10M"):
+            _resolve(led, "ETH-2", cp, "YES", "NO")  # both YES, settles NO -> both miss
+        for cp, mid in (("15M", 1), ("10M", 2)):
+            _send(led, "ETH-2", cp, "YES", mid=mid)
+        recap = led.contract_recap("ETH-2")
+        self.assertIsNone(recap["flips"])
+        self.assertEqual([iv["hit"] for iv in recap["intervals"]], [False, False])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -559,6 +559,42 @@ class V95Tests(unittest.TestCase):
         self.assertEqual(str(rows[0]["interval"]), "10M")
         self.assertIsNotNone(rows[0]["message_id"])
 
+    def test_cycle_recap_sends_once_on_settlement(self):
+        # A settled contract that was delivered earns one CYCLE CLOSED recap, and
+        # the per-ticker dedup prevents a second recap on a later cycle.
+        notifier = FakeNotifier()
+        with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"recap.sqlite3")}, clear=False):
+            with patch.object(CheckpointPolicyV94Unified, "__init__", lambda self, *a, **k: None):
+                policy = CheckpointPolicyV95(FakeStore())
+        led = policy.ledger
+        # Seed a delivered + settled contract directly in the ledger.
+        led.record_prediction(
+            ticker="KXBTC-T", asset="BTC", checkpoint="10M", created_at=NOW,
+            close_time=NOW + 600, predicted_side="YES",
+            raw_yes_probability=0.7, calibrated_yes_probability=0.7,
+            challenger_yes_probability=0.7, baseline_yes_probability=0.5,
+            selected_probability=0.7, conservative_probability=0.62,
+            data_quality=0.8, evidence_quality=0.7, trade_quality=0.7,
+            trade_decision="ENTRY_RECOMMENDED", regime="NORMAL",
+            features={"momentum": 0.3}, contributions={}, quote={"ask_cents": 50}, rank=1,
+        )
+        led.resolve_ticker("KXBTC-T", "YES")
+        led.record_sent_prediction(
+            contract_id="KXBTC-T", asset="BTC", interval="10M", record_type="interval",
+            predicted_side="YES", probability=0.7, manipulation_probability=None,
+            entry_decision="ENTRY_RECOMMENDED", sent_at=NOW + 1, close_time=NOW + 600, message_id=9,
+        )
+        events = [{"ticker": "KXBTC-T", "asset": "BTC", "checkpoint": "10M",
+                   "official_result": "YES", "correct": True}]
+        s1, _ = policy._send_cycle_recaps(events, notifier, NOW + 601)
+        s2, _ = policy._send_cycle_recaps(events, notifier, NOW + 602)  # deduped
+        self.assertEqual(s1, 1)
+        self.assertEqual(s2, 0)
+        recaps = [m for m in notifier.messages if "CYCLE CLOSED" in m]
+        self.assertEqual(len(recaps), 1)
+        self.assertIn("10M:  YES ✓", recaps[0])
+        self.assertIn("— RUNNING RECORD —", recaps[0])
+
     def test_policy_records_unique_prediction(self):
         notifier = FakeNotifier()
         with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"policy2.sqlite3")}, clear=False):

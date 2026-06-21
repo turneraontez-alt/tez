@@ -764,6 +764,61 @@ class V95Ledger:
         result["manipulation"] = _graded("manipulation", None, None)
         return result
 
+    def contract_recap(self, ticker: str) -> dict[str, Any] | None:
+        """Per-contract close-out for a SETTLED contract, built only from what was
+        actually delivered (the sent_predictions for this ticker) graded against
+        the settled outcome. Returns the per-interval hit/miss, the side flips, the
+        entry result, and the manipulation call — or None if nothing was sent for
+        this contract or it has not settled."""
+        if not self._available or not ticker:
+            return None
+        order = {"15M": 0, "10M": 1, "7M": 2}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                """SELECT s.interval AS interval, s.record_type AS record_type,
+                          s.predicted_side AS side, s.asset AS asset,
+                          p.official_result AS result, p.realized_cents AS realized,
+                          p.close_time AS close_time
+                   FROM sent_predictions s
+                   JOIN predictions p
+                     ON p.model_version = s.model_version AND p.ticker = s.contract_id
+                    AND p.checkpoint = s.interval
+                   WHERE s.model_version = ? AND s.contract_id = ?
+                     AND p.official_result IS NOT NULL""",
+                (MODEL_VERSION, str(ticker)),
+            ))
+        if not rows:
+            return None
+        result = str(rows[0]["result"]).upper()
+        asset = str(rows[0]["asset"])
+        close_time = _num(_row_get(rows[0], "close_time"))
+        ordered = sorted(
+            ({"interval": str(r["interval"]).upper(), "side": str(r["side"] or "").upper(),
+              "hit": str(r["side"] or "").upper() == result}
+             for r in rows if str(r["record_type"]) == "interval"),
+            key=lambda iv: order.get(iv["interval"], 9),
+        )
+        # Side flips across the ordered intervals.
+        changes = []
+        seq = [(iv["interval"], iv["side"]) for iv in ordered if iv["side"] in ("YES", "NO")]
+        for (_, a), (cp_b, b) in zip(seq, seq[1:]):
+            if a != b:
+                changes.append(f"{a} → {b} at {cp_b}")
+        flips = (f"{'; '.join(changes)} ({len(changes)})") if changes else None
+        entry = None
+        manip = None
+        for r in rows:
+            rt = str(r["record_type"])
+            side = str(r["side"] or "").upper()
+            if rt == "entry" and entry is None:
+                entry = {"checkpoint": str(r["interval"]).upper(), "decision": "ENTRY RECOMMENDED",
+                         "outcome": "WIN" if side == result else "LOSS",
+                         "cents": _num(_row_get(r, "realized"))}
+            elif rt == "manipulation" and manip is None:
+                manip = {"flagged": True, "type": None, "correct": side == result}
+        return {"ticker": str(ticker), "asset": asset, "result": result, "close_time": close_time,
+                "intervals": ordered, "flips": flips, "entry": entry, "manipulation": manip}
+
     def pushed_slot_blocks(self, checkpoint: str, ticker: str, now: float) -> bool:
         """True if a DIFFERENT, still-open contract already holds this timeframe's
         active slot — i.e. pushing now would be a second prediction for the same

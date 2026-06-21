@@ -2030,6 +2030,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         self._telegram_suppressed_v95 += 1
                 elif slot_locked or not consistent or no_entry_muted:
                     self._telegram_suppressed_v95 += 1
+            # End-of-cycle recap: one close-out per contract that just settled.
+            rc_sent, rc_failed = self._send_cycle_recaps(result_events, notifier, now)
+            sent += rc_sent
+            failed += rc_failed
             # Fire any due follow-up checks (exactly one per contract+interval).
             fu_sent, fu_failed = self._dispatch_entry_followups(canonicals, analyses, notifier, now)
             flip_sent += fu_sent
@@ -2254,6 +2258,59 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     sent_at=now, close_time=close_time, message_id=mid,
                 )
         return (1 if delivered else 0), (0 if handled else 1)
+
+    @staticmethod
+    def _recap_close_label(close_time: Any) -> str:
+        try:
+            if close_time is None:
+                return ""
+            return datetime.fromtimestamp(float(close_time), tz=timezone.utc).strftime("%H:%M")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return ""
+
+    def _send_cycle_recaps(self, result_events: Sequence[Mapping[str, Any]],
+                           notifier: Any, now: float) -> tuple[int, int]:
+        """Fire the single END-OF-CYCLE recap for each contract that just settled.
+        Deduped per ticker via a ``recap:<ticker>`` reservation; built only from
+        what was officially delivered for that contract. Returns (sent, failed)."""
+        if not _env_bool("Q15_V95_CYCLE_RECAP", True) or not result_events:
+            return 0, 0
+        sent = failed = 0
+        seen: set[str] = set()
+        for ev in result_events:
+            ticker = str((ev or {}).get("ticker") or "")
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            permit = self.ledger.reserve_notification(
+                event_key=f"recap:{ticker}", checkpoint="RECAP",
+                state="RESULT_RESOLVED", fingerprint=ticker, now=now,
+            )
+            if not permit:
+                continue
+            recap = self.ledger.contract_recap(ticker)
+            if recap is None or not recap.get("intervals"):
+                # Nothing was officially sent for this contract -> no recap; mark
+                # handled so it is not retried every cycle.
+                self.ledger.complete_notification(event_key=permit, success=True, now=now)
+                continue
+            message = panels_v95.build_cycle_recap(
+                asset=recap["asset"], close_label=self._recap_close_label(recap.get("close_time")),
+                result=recap["result"], intervals=recap["intervals"], flips=recap.get("flips"),
+                entry_result=recap.get("entry"), manipulation_result=recap.get("manipulation"),
+                official=self.ledger.official_scoreboard(),
+            )
+            if hasattr(notifier, "send_with_result"):
+                res = notifier.send_with_result(message)
+            else:
+                ok = bool(notifier.send(message)) if notifier is not None else False
+                res = {"ok": ok, "delivered": ok}
+            self.ledger.complete_notification(event_key=permit, success=bool(res.get("ok")), now=now)
+            if res.get("delivered"):
+                sent += 1
+            elif not res.get("ok"):
+                failed += 1
+        return sent, failed
 
     def _process_flip_risk(self, snapshot: MutableMapping[str, Any], asset: str, checkpoint: str,
                            ticker: str, analysis: Mapping[str, Any], flip_learned: Mapping[str, Any],
@@ -2503,7 +2560,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
 def format_telegram_message(text: Any) -> str:
     message = str(text or "")
     upper = message.upper()
-    if "V9.5 CHECK" in message:
+    # V9.5 CHECK panels and the CYCLE CLOSED recap render their own clean layout;
+    # never re-render them through the legacy reformatter chain.
+    if "V9.5 CHECK" in message or "CYCLE CLOSED" in message:
         return message
     with _LATEST_LOCK:
         analyses = copy.deepcopy(_LATEST_ANALYSES)
