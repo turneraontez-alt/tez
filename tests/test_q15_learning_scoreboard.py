@@ -174,7 +174,10 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertIn("Track record", text)
         self.assertIn("Settled 8 ·", text)
         self.assertIn("right", text)
-        self.assertIn("<pre>", text)
+        # The scoreboard helper now returns plain content; build_report owns the
+        # single <pre> panel (see test_full_report_is_one_pre_panel).
+        self.assertNotIn("<pre>", text)
+        self.assertNotIn("<b>", text)
         # aligned rows for interval and rank
         self.assertIn("15M", text)
         self.assertIn("7M", text)
@@ -215,6 +218,26 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertIn("10M", text)   # placeholder row, previously hidden
         self.assertIn("7M", text)    # placeholder row, previously hidden
         self.assertIn("0-0", text)   # the zeroed "awaiting data" marker
+
+    def test_full_report_is_one_pre_panel(self):
+        # The whole report body renders inside a single <pre> panel; only the bold
+        # "Hourly Report —" header (reformatter-bypass marker) stays outside it.
+        sb = {
+            "available": True,
+            "overall": {"right": 5, "wrong": 3, "n": 8, "accuracy": 0.625, "realized_total_cents": 12, "pnl_n": 8},
+            "by_checkpoint": {"10M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+        text = self._reporter(_FakeLedger(sb)).build_report()
+        self.assertEqual(text.count("<pre>"), 1)
+        self.assertEqual(text.count("</pre>"), 1)
+        # Header is outside the panel and keeps the canonical marker.
+        head, _, panel = text.partition("<pre>")
+        self.assertIn("Hourly Report —", head)
+        self.assertNotIn("<pre>", head)
+        # Body content lives inside the panel.
+        self.assertIn("Track record", panel)
+        self.assertIn("Settled 8", panel)
 
     def test_header_is_eastern_time(self):
         reporter = reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=None)
