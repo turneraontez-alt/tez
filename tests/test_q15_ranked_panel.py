@@ -22,7 +22,8 @@ from q15_upgrade.checkpoint_v95 import (
 
 def _analysis(*, side="YES", yes=0.72, sel=0.72, edge=6.0, ideal=44.0, ask=43.0,
               wick=0.30, momentum=0.20, flow=0.10, decision="ENTRY_RECOMMENDED",
-              available=True):
+              available=True, flip_score=None, flip_dir=None, manip_score=0.0,
+              cal_rows=None):
     return {
         "prediction_available": available,
         "prediction_side": side,
@@ -33,8 +34,10 @@ def _analysis(*, side="YES", yes=0.72, sel=0.72, edge=6.0, ideal=44.0, ask=43.0,
         "trade_decision": decision,
         "feature_values": {"wick": wick, "momentum": momentum, "flow": flow},
         "quote": {"ask_cents": ask},
-        "manipulation": {"suspected": False, "reasons": [], "score": 0.0},
-        "flip_risk": {},
+        "manipulation": {"suspected": False, "reasons": [], "score": manip_score},
+        "flip_risk": ({} if flip_score is None else
+                      {"score": flip_score, "direction_monitored": flip_dir}),
+        "calibration": ({} if cal_rows is None else {"rows": cal_rows}),
     }
 
 
@@ -104,37 +107,72 @@ class BuildRankedPicksTest(unittest.TestCase):
 
 
 class RankedPanelFormatTest(unittest.TestCase):
-    def test_three_picks_all_fields_and_markers(self):
+    def test_compact_picks_and_decision_block(self):
         picks = [
-            _extract_pick(1, "BTC", _analysis(side="YES", decision="ENTRY_RECOMMENDED")),
-            _extract_pick(2, "SOL", _analysis(side="NO", decision="PREDICTION_ONLY")),
-            _extract_pick(3, "XRP", _analysis(side="YES", decision="WATCH_PRICE")),
+            _extract_pick(1, "SOL", _analysis(side="NO", yes=0.28, decision="WATCH_PRICE",
+                                              manip_score=0.43, cal_rows=42)),
+            _extract_pick(2, "BTC", _analysis(side="YES", yes=0.66, decision="ENTRY_RECOMMENDED")),
+            _extract_pick(3, "XRP", _analysis(side="NO", yes=0.39, decision="PREDICTION_ONLY")),
         ]
         msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="10M", picks=picks)
         # marker preservation (suppression + per-checkpoint level key)
         self.assertIn("V9.5 CHECK", msg)
-        self.assertIn("10M", msg)
-        self.assertIn("ENTRY RECOMMENDED", msg)  # at least one entry -> actionable
-        # one <pre> body
+        self.assertIn("10M CHECK", msg)
+        self.assertIn("ENTRY RECOMMENDED", msg)  # BTC is an entry -> actionable
         self.assertEqual(msg.count("<pre>"), 1)
-        # three ranks with medals + every required field label
+        # three compact ranked lines: medal · asset · side · settle confidence
         for medal in ("🥇", "🥈", "🥉"):
             self.assertIn(medal, msg)
-        for label in ("Confidence:", "P(Yes)", "P(No)", "Entry score:", "Manipulation:",
-                      "Price:", "max", "Wick/PA:", "Flow/Mom:", "Edge:", "Decision:"):
+        self.assertIn("🥇 SOL NO — 72%", msg)   # confidence is on the predicted (NO) side
+        self.assertIn("🥈 BTC YES — 66%", msg)
+        # one decision block keyed to the headline (#1 = SOL)
+        for label in ("Flip risk:", "Manipulation:", "Entry:", "Best entry:",
+                      "Main reason:", "Sample:"):
             self.assertIn(label, msg)
+        self.assertIn("Entry: WAIT", msg)        # SOL decision WATCH_PRICE -> WAIT
+        self.assertIn("Manipulation: 43%", msg)
+        self.assertIn("Best entry: ≤44¢", msg)
+        self.assertIn("Sample: 42", msg)
+        # the verbose per-pick dump is gone
+        for gone in ("P(Yes)", "Entry score:", "Wick/PA:", "Flow/Mom:", "Decision:"):
+            self.assertNotIn(gone, msg)
+
+    def test_flip_arrow_only_when_high_and_opposite(self):
+        # low flip risk -> bare percent, no arrow
+        low = [_extract_pick(1, "BTC", _analysis(side="YES", decision="PREDICTION_ONLY",
+                                                 flip_score=20.0, flip_dir="YES → NO"))]
+        self.assertIn("Flip risk: 20%", panels_v95.build_ranked_checkpoint_panel(
+            checkpoint="15M", picks=low))
+        self.assertNotIn("→", panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=low))
+        # high flip risk toward the opposite side -> arrow shows the genuine target
+        high = [_extract_pick(1, "BTC", _analysis(side="YES", decision="PREDICTION_ONLY",
+                                                  flip_score=64.0, flip_dir="YES → NO"))]
+        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=high)
+        self.assertIn("Flip risk: 64% → NO", msg)
+
+    def test_manipulation_wait_flag_when_high(self):
+        picks = [_extract_pick(1, "BTC", _analysis(side="YES", decision="WATCH_PRICE",
+                                                   manip_score=0.71))]
+        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="7M", picks=picks)
+        self.assertIn("Manipulation: 71% — WAIT", msg)
 
     def test_missing_rank_renders_dash_not_invented(self):
         picks = [_extract_pick(1, "BTC", _analysis(decision="PREDICTION_ONLY"))]
         msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="7M", picks=picks)
-        self.assertIn("#2 —", msg)
-        self.assertIn("#3 —", msg)
+        self.assertIn("🥈 —", msg)
+        self.assertIn("🥉 —", msg)
 
     def test_no_entry_marker_when_nothing_recommended(self):
         picks = [_extract_pick(1, "BTC", _analysis(decision="PREDICTION_ONLY"))]
         msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=picks)
         self.assertIn("NO ENTRY YET", msg)
         self.assertNotIn("ENTRY RECOMMENDED", msg)
+        self.assertIn("Entry: SKIP", msg)        # PREDICTION_ONLY -> SKIP
+
+    def test_sample_dash_when_no_calibration(self):
+        picks = [_extract_pick(1, "BTC", _analysis(decision="PREDICTION_ONLY"))]
+        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=picks)
+        self.assertIn("Sample: —", msg)
 
 
 class ReportLockTest(unittest.TestCase):

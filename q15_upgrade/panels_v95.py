@@ -147,17 +147,40 @@ def build_checkpoint_panel(*, checkpoint: str, asset: str, side: str,
 # --------------------------------------------------------------------------- #
 _MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
+# Display thresholds (0..100). The flip "→ SIDE" target is only shown once the
+# genuine-flip risk is high enough to matter; manipulation is flagged as
+# entry-affecting ("— WAIT") only once it is high. Both keep the panel quiet
+# until a number actually changes the decision.
+_FLIP_ARROW_MIN = 35.0
+_MANIP_WAIT_MIN = 60.0
+
+
+def _num100(value: Any) -> str:
+    """Format a 0..100 number as a whole-percent string, or em-dash."""
+    try:
+        if value is None:
+            return "—"
+        return f"{float(value):.0f}%"
+    except (TypeError, ValueError):
+        return "—"
+
 
 def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[str, Any] | None],
                                   top_k: int = 3) -> str:
-    """Render the official interval report: exactly ``top_k`` ranked picks.
+    """Render the official interval report: the three ranked FINAL-OUTCOME picks
+    plus one compact decision block.
 
-    Each pick (highest confidence first) is a fully-extracted mapping carrying
-    every field the system already calculates:
-    ``{rank, asset, side, confidence, yes_prob, no_prob, entry_score,
-       manipulation_prob, price_cents, rec_low, rec_high, max_cents, wick_status,
-       flow_status, edge_cents, decision, is_entry}``. A ``None`` slot (fewer than
-    ``top_k`` valid assets) renders as ``—`` — never an invented pick.
+    Each visible line answers only the questions that matter for the close:
+    the three most-likely settled sides (``asset side — confidence``, #1 first),
+    then a single decision block keyed to the headline (#1) pick — genuine-flip
+    risk, temporary-manipulation risk, the ENTER/WAIT/SKIP call, the best entry
+    price, the one strongest reason, and the calibration sample. All the detailed
+    feature/edge/calibration math stays in the background. A ``None`` slot (fewer
+    than ``top_k`` valid assets) renders as ``—`` — never an invented pick.
+
+    Each pick is a fully-extracted mapping (see ``checkpoint_v95._extract_pick``):
+    ``{rank, asset, side, confidence, flip_prob, flip_side, manip_prob,
+       entry_label, best_entry_max, main_reason, sample, is_entry, ...}``.
 
     The header keeps the ``V9.5 CHECK`` marker and an actionable/non-actionable
     marker (``ENTRY RECOMMENDED`` / ``NO ENTRY YET``) the suppression chain keys
@@ -166,37 +189,50 @@ def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[st
     cp = str(checkpoint).upper()
     any_entry = any(bool(p and p.get("is_entry")) for p in picks)
     marker = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
-    header = f"🔎 <b>V9.5 CHECK — {_esc(cp)} · TOP {top_k} — {marker}</b>"
+    header = f"🔎 <b>V9.5 CHECK — {_esc(cp)} · {marker}</b>"
 
-    body: list[str] = ["Ranked by confidence · #1 = most confident", ""]
+    body: list[str] = [f"{_esc(cp)} CHECK", ""]
+
+    # --- the three ranked final-outcome picks (most likely settled side first) ---
     for rank in range(1, top_k + 1):
         pick = picks[rank - 1] if rank - 1 < len(picks) else None
         medal = _MEDALS.get(rank, f"#{rank}")
         if not pick:
-            body.append(f"{medal} #{rank} —")
-            body.append("")
+            body.append(f"{medal} —")
             continue
-        body.append(f"{medal} #{rank} {_esc(pick.get('asset'))} · {_side(pick.get('side'))}")
-        body.append(f"Confidence: {_pct(pick.get('confidence'), digits=0)}")
-        body.append(f"P(Yes) {_pct(pick.get('yes_prob'), digits=0)} · "
-                    f"P(No) {_pct(pick.get('no_prob'), digits=0)}")
-        es = pick.get("entry_score")
-        body.append(f"Entry score: {'—' if es is None else f'{float(es):.0f}/100'}")
-        mp = pick.get("manipulation_prob")
-        body.append(f"Manipulation: {'—' if mp is None else f'{float(mp):.0f}%'}")
-        rec = "—"
-        lo, hi = pick.get("rec_low"), pick.get("rec_high")
-        if lo is not None and hi is not None:
-            rec = f"{_cents(lo)}–{_cents(hi)}"
-        elif pick.get("max_cents") is not None:
-            rec = f"≤{_cents(pick.get('max_cents'))}"
-        body.append(f"Price: {_cents(pick.get('price_cents'))} · rec {rec} · "
-                    f"max {_cents(pick.get('max_cents'))}")
-        body.append(f"Wick/PA: {_esc(pick.get('wick_status') or '—')}")
-        body.append(f"Flow/Mom: {_esc(pick.get('flow_status') or '—')}")
-        body.append(f"Edge: {_cents(pick.get('edge_cents'))}")
-        body.append(f"Decision: {_esc(pick.get('decision') or '—')}")
+        body.append(f"{medal} {_esc(pick.get('asset'))} {_side(pick.get('side'))} "
+                    f"— {_pct(pick.get('confidence'), digits=0)}")
+
+    # --- one decision block, keyed to the headline (#1) pick ---
+    head = next((p for p in picks if p), None)
+    if head:
         body.append("")
+        flip = head.get("flip_prob")
+        flip_line = f"Flip risk: {_num100(flip)}"
+        flip_side = _side(head.get("flip_side"))
+        if flip is not None and flip_side != "—":
+            try:
+                if float(flip) >= _FLIP_ARROW_MIN:
+                    flip_line += f" → {flip_side}"
+            except (TypeError, ValueError):
+                pass
+        body.append(flip_line)
+
+        manip = head.get("manip_prob")
+        manip_line = f"Manipulation: {_num100(manip)}"
+        try:
+            if manip is not None and float(manip) >= _MANIP_WAIT_MIN:
+                manip_line += " — WAIT"
+        except (TypeError, ValueError):
+            pass
+        body.append(manip_line)
+
+        body.append(f"Entry: {_esc(head.get('entry_label') or '—')}")
+        be = head.get("best_entry_max")
+        body.append(f"Best entry: {('≤' + _cents(be)) if be is not None else '—'}")
+        body.append(f"Main reason: {_esc(head.get('main_reason') or '—')}")
+        sample = head.get("sample")
+        body.append(f"Sample: {int(sample) if sample is not None else '—'}")
 
     return header + "\n<pre>\n" + "\n".join(body).rstrip() + "\n</pre>"
 

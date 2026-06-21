@@ -9,9 +9,9 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **832 passed, 4 skipped** (12 skipped in a
-bare container where `flask`/`websockets` aren't installed; skip count varies with
-cffi/crypto availability).
+Tests: `python3 -m pytest tests/ -q` → **805 passed, 12 skipped** in a bare
+container (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully
+installed; ~832/4 in a complete env).
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -25,7 +25,36 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/shadow-system-reset-aeilgv`) — RESET the Challenger Shadow vs Your System comparison on deploy
+## ✅ Shipped THIS session (branch `claude/prediction-system-rebuild-ogptop`) — compact final-outcome interval reports
+**On the branch, deploy-pending.** Reworked the visible 15M/10M/7M CHECK report from the
+verbose per-pick dump into the compact, final-outcome format the owner asked for:
+"communicate simply, analyze deeply in the background." The detailed
+learning/grading/calibration/shadow machinery is untouched — only the *visible* surface
+changed. Read-only + frozen-champion invariants intact.
+
+- **Compact report** (`panels_v95.build_ranked_checkpoint_panel`): header keeps the
+  `V9.5 CHECK` + `ENTRY RECOMMENDED`/`NO ENTRY YET` suppression markers; body is now just
+  the three ranked final-outcome picks (`🥇 SOL NO — 72%`, confidence = P(settles on the
+  predicted side)) plus ONE decision block keyed to the headline (#1) pick: `Flip risk`
+  (with `→ SIDE` only when ≥35 and toward the opposite side), `Manipulation` (with
+  `— WAIT` only when ≥60), `Entry` (ENTER/WAIT/SKIP), `Best entry` (`≤max¢`), one
+  `Main reason`, and `Sample`. The old per-pick P(Yes)/entry-score/wick/flow/edge/decision
+  lines are gone from the visible report. Missing rank → `—` (never invented).
+- **Final-outcome framing** (`checkpoint_v95._extract_pick` + helpers): each pick now also
+  carries `flip_prob`/`flip_side` (genuine-flip risk = flip-risk score; target = monitored
+  opposite side), `manip_prob` (temporary-manipulation = the manipulation block's own 0..1
+  score rescaled — kept DISTINCT from flip risk), `entry_label` (ENTER/WAIT/SKIP via
+  `_ENTRY_LABEL_BY_DECISION`), `best_entry_max`, `main_reason` (`_main_reason`: strongest
+  side-aligned feature, else "<SIDE> most likely at close" — no invented number), and
+  `sample` (calibration rows). Detail fields the record path/shadow overlays read are
+  retained, so grading, the official record, the one-report-per-window lock, restart
+  protection, and the shadow comparison are unchanged.
+- **Tests** (`tests/test_q15_ranked_panel.py`): rewrote the panel-format suite for the
+  compact layout + new fields (flip arrow gating, manipulation `— WAIT`, ENTER/WAIT/SKIP,
+  `Sample: —` when no calibration, confidence oriented to the predicted side). Full suite
+  **805 passed, 12 skipped**; `import app` starts the refresh loop cleanly.
+
+## ✅ Shipped (branch `claude/shadow-system-reset-aeilgv`) — RESET the Challenger Shadow vs Your System comparison on deploy
 **On the branch, deploy-pending (needs a Repl restart to pick up the `model_version`
 v2→v3 reset).** Owner: reset the visible "CHALLENGER SHADOW vs YOUR SYSTEM" comparison
 on this deploy — all Shadow + Your-System wins/losses/win-rates/samples/last-window/

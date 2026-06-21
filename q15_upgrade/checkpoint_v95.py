@@ -1610,6 +1610,29 @@ _ENTRY_STATE_BY_DECISION = {
     "AVOID_INVALID_DATA": panels_v95.NO_ENTRY,
 }
 
+# Visible entry trichotomy (ENTER / WAIT / SKIP) — deliberately separate from the
+# final-outcome prediction. ENTER only on a live recommendation; WAIT when price
+# is the sole blocker (the call is right, the price isn't); SKIP for every other
+# not-yet-actionable state. A pick can stay YES/NO while reading SKIP.
+_ENTRY_LABEL_BY_DECISION = {
+    "ENTRY_RECOMMENDED": "ENTER",
+    "WATCH_PRICE": "WAIT",
+    "WATCH_CONFIDENCE": "SKIP",
+    "WATCH_DATA_QUALITY": "SKIP",
+    "WATCH_LIQUIDITY": "SKIP",
+    "WATCH_TIME": "SKIP",
+    "PREDICTION_ONLY": "SKIP",
+    "AVOID_INVALID_DATA": "SKIP",
+}
+
+# One short, honest headline reason per dominant side-aligned feature.
+_REASON_FEATURE_PHRASE = {
+    "wick": "wick rejection favors {side}",
+    "momentum": "momentum favors {side}",
+    "flow": "order flow favors {side}",
+    "book": "book imbalance favors {side}",
+}
+
 _WATCH_REASON_BY_BLOCKER = {
     "conservative_probability_below_threshold": "directional confidence not yet sufficient",
     "data_quality_below_threshold": "data coverage too thin to commit",
@@ -1753,9 +1776,44 @@ def _feature_status(value: float | None, side: str, *, pos: str, neg: str,
     return f"{tag} ({v:+.2f})"
 
 
+def _main_reason(analysis: Mapping[str, Any], side: str) -> str:
+    """One short, honest headline reason for the final-outcome call: the strongest
+    side-aligned feature this cycle, or a neutral 'most likely at close' when no
+    single feature stands out. Never invents a number — purely qualitative."""
+    s = str(side or "").upper()
+    if s not in {"YES", "NO"}:
+        return "prediction unavailable"
+    fv = analysis.get("feature_values") or {}
+    best_key: str | None = None
+    best_mag = 0.10  # ignore near-zero / weak leans
+    for key in ("wick", "momentum", "flow", "book"):
+        v = _num(fv.get(key))
+        if v is None:
+            continue
+        aligned = v if s == "YES" else -v   # YES-signed feature -> side-aligned magnitude
+        if aligned > best_mag:
+            best_key, best_mag = key, aligned
+    if best_key is not None:
+        return _REASON_FEATURE_PHRASE[best_key].format(side=s)
+    return f"{s} most likely at close"
+
+
+def _flip_target_side(analysis: Mapping[str, Any], side: str) -> str | None:
+    """The opposite settled side a genuine flip would move toward ('NO → YES' =>
+    'YES'), or None when there is no monitored opposite-side target."""
+    fr = analysis.get("flip_risk") or {}
+    monitored = str(fr.get("direction_monitored") or "")
+    if "→" in monitored:
+        tail = monitored.split("→")[-1].strip().upper()
+        if tail in {"YES", "NO"} and tail != str(side).upper():
+            return tail
+    return None
+
+
 def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one ranked analysis into the panel pick contract (every field the
-    official report shows). Pure mapping — no I/O, no decisions."""
+    """Flatten one ranked analysis into the panel pick contract — the fields the
+    compact official report shows plus the detail fields the record path / shadow
+    overlays still read. Pure mapping — no I/O, no decisions."""
     side = str(analysis.get("prediction_side") or "")
     yes_p = _num(analysis.get("yes_probability"))
     no_p = None if yes_p is None else 1.0 - yes_p
@@ -1764,6 +1822,15 @@ def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[st
     fv = analysis.get("feature_values") or {}
     quote = analysis.get("quote") or {}
     decision = str(analysis.get("trade_decision") or "")
+    # Genuine-flip risk (0..100) is the flip-risk score; temporary-manipulation
+    # risk (0..100) is the manipulation block's own 0..1 score rescaled, falling
+    # back to the blended panel risk. The two are kept distinct on purpose.
+    flip = analysis.get("flip_risk") or {}
+    manip_block = analysis.get("manipulation") or {}
+    manip_score01 = _num(manip_block.get("score"))
+    manip_display = manip_score01 * 100.0 if manip_score01 is not None else _num(manip.get("risk"))
+    cal = analysis.get("calibration") or {}
+    sample = int(cal["rows"]) if _num(cal.get("rows")) is not None else None
     return {
         "rank": rank,
         "asset": asset,
@@ -1771,6 +1838,15 @@ def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[st
         "confidence": confidence,
         "yes_prob": yes_p,
         "no_prob": no_p,
+        # compact decision block (headline pick)
+        "flip_prob": _num(flip.get("score")),
+        "flip_side": _flip_target_side(analysis, side),
+        "manip_prob": manip_display,
+        "entry_label": _ENTRY_LABEL_BY_DECISION.get(decision, "SKIP"),
+        "best_entry_max": _num(analysis.get("ideal_entry_cents")),
+        "main_reason": _main_reason(analysis, side),
+        "sample": sample,
+        # detail fields retained for the record path + shadow overlays
         "entry_score": _entry_score(analysis),
         "manipulation_prob": _num(manip.get("risk")),
         "price_cents": _num(quote.get("ask_cents")),
