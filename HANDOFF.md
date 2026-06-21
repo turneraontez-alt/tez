@@ -5,10 +5,64 @@ and `SYNC.md` (Replit sync). Live app on Replit (`python3 app.py`). **The owner
 trades REAL money manually off the alerts**, so reliability + honest data
 freshness + honest accuracy measurement matter more than new model features.
 
-⚠️ Fresh container: `pytest` and `websockets` are NOT preinstalled →
-`pip install pytest "websockets>=12.0" -q` first. The app-level tests also need
-`flask` (+ a working `cryptography`/`cffi`); without them those two files skip.
-Tests: `python3 -m pytest tests/ -q` → **486 passed, 4 skipped**.
+⚠️ Fresh container: `pytest`/`websockets`/`flask` are NOT preinstalled →
+`pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
+may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
+(else the two app-level test files error on collection instead of skipping).
+Tests: `python3 -m pytest tests/ -q` → **545 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-handoff-ipxm5a`, MERGED to `main` @ `6e7a524`)
+**Not yet deployed — needs a Repl reboot to take effect.** Order of work:
+
+1. **Review-hardening** (closed the prior review's gaps): extracted + unit-tested
+   the loop's rollover/in-flight logic (`_fetch_result_is_current`,
+   `_resolve_cached_detail`, `_harvest_and_submit` in `app.py`); None-contract
+   fixes (`analysis.ingest_trades`, `spot_client` WS `ok`+`price` gate);
+   `_two_sided_p` returns 1.0 (not 0.0) for non-finite t; top-level `ledger`
+   block in `/api/health`; fixed two leaky test teardowns.
+2. **Model-improvement flags flipped DEFAULT-ON + scoreboard RESET** (owner-directed):
+   `Q15_V95_REGIME_AWARE_ANCHOR`, `Q15_V95_EVIDENCE_COVERAGE_PENALTY` (0.0→0.08),
+   `Q15_V95_PRODUCTION_CALIBRATION_ENABLED`, `Q15_V95_15M_SHADOW_LEARNING` are now
+   ON in code. **`MODEL_VERSION` bumped `…-v1`→`q15-v9.5.2-…-v2`** to start the
+   scoreboard fresh (non-destructive; everything keys on `model_version`).
+   ⚠️ **7M shadow learning stays OFF** — the `checkpoint_challenger_*` tables'
+   CHECK constraint only admits `'10M'/'15M'`; enabling 7M raises IntegrityError
+   on every 7M resolution. Needs a `'7M'` schema migration first.
+3. **Manipulation tracking** (`_manipulation_signal` in `checkpoint_v95.py`): a
+   read-only suspected-manipulation flag (pin / order-wall absorption / cross-
+   exchange divergence) recorded per prediction, broken down in the scoreboard
+   (`by_manipulation` suspected-vs-clean + by-tell), tagged on the checkpoint
+   alert. Gated `Q15_V95_MANIPULATION_*` (default ON). Owner chose to KEEP it
+   (retire later via `Q15_V95_MANIPULATION_ALERT_TAG=false` once flip-risk matures).
+4. **Hourly report `10M RANK PERFORMANCE` section** + ledger `rank_by_checkpoint`
+   (rank #1/#2/#3 within each interval, not blended).
+5. **Flip-risk subsystem** (the big one — new module `q15_upgrade/flip_risk.py`):
+   measures whether the FROZEN prediction is at risk of flipping. Three SEPARATE
+   values — 0-100 manipulation/flip RISK score + confidence (missing data lowers
+   confidence, never the score), learned flip PROBABILITY (historical flip rate of
+   the score's bucket), learned THRESHOLD (per checkpoint/direction/asset, ≥30-sample
+   gate → overall fallback). Flip = frozen 15M≠10M, 10M≠7M, or resolution-opposite;
+   YES→NO and NO→YES separate. Point-in-time learning from resolved contracts only
+   (`ledger.flip_stats`/`_flip_observations`/`flip_warnings` table). Gated alert
+   state machine (threshold + 3-obs persistence + ≥2 evidence categories + flip-prob
+   + confidence + 90s cooldown + hysteresis + re-arm); NORMAL/WATCH silent, only
+   HIGH FLIP RISK + CONFIRMED FLIP send. Dashboard block + `MANIPULATION WARNING
+   PERFORMANCE` report section. **Posture: HIGH FLIP RISK alerts are DORMANT until
+   a learned threshold exists** (`Q15_V95_FLIP_ALERTS_REQUIRE_LEARNED` ON) — so
+   nothing fires until ~30 flips accrue (days). All `Q15_V95_FLIP_*`, default ON.
+6. **Single-panel Telegram layout** for BOTH the checkpoint alert and the hourly
+   report: the whole body now renders inside ONE `<pre>` block; only the bold
+   title / `Hourly Report —` header stays outside (markers + reformatter-bypass).
+
+🔴 **Immediate next step: reboot the Repl** to deploy all of the above. Then bake —
+the fresh scoreboard + flip history must accumulate (≥30 settled per checkpoint /
+per flip direction) before the new defaults can be judged or HIGH FLIP RISK alerts
+can fire. Judge on skill-vs-market / calibration ECE / realized cents, not raw %.
+
+📊 **Optional: old-deployment history.** Owner has prior-deployment data; if sent,
+treat as PRIOR-VERSION reference (audit + calibration fit), NOT folded into the
+freshly-reset board (it's under the old `MODEL_VERSION`/config and has no
+historical flip-risk scores, so it can't bootstrap flip-learning).
 
 ## ✅ Shipped (branch `claude/read-handoff-e79js5`) — alerts, UI, learning priority
 Four-part request — fewer/expiring alerts, consistent UI, richer prediction
