@@ -155,10 +155,50 @@ class HourlyReporter:
             out.append("by tell: " + " · ".join(parts))
         return out
 
-    def _flip_warning_lines(self):
-        """MANIPULATION WARNING PERFORMANCE — precision, detection rate, advance
-        time and P&L of fired HIGH FLIP RISK warnings, plus the learned flip-rate
-        calibration by score bucket. Empty until warnings have been reconciled."""
+    @staticmethod
+    def _flip_row(label, agg, placeholder=False):
+        """A flip-warning row mapped onto the SAME grid as ``_sb_row``:
+        correct-false becomes W-L, precision becomes Acc, realized cents P/L."""
+        a = agg or {}
+        n = a.get("alerts") or 0
+        if not n:
+            if placeholder:
+                return f"{label:<8}{'0-0':>5}{'—':>6}{'—':>7}"
+            return None
+        d = {
+            "n": n,
+            "right": a.get("correct", 0),
+            "wrong": a.get("false", 0),
+            "accuracy": a.get("precision"),
+            "realized_total_cents": a.get("realized_total_cents"),
+            "pnl_n": 1 if a.get("realized_total_cents") else 0,
+            "low_n": n < 10,
+        }
+        return HourlyReporter._sb_row(label, d)
+
+    @staticmethod
+    def _flip_rate_curve(stats):
+        """Learned flip-rate-by-risk for the primary (10M) interval, both
+        directions, as an aligned mini-table (risk bucket · obs · flip rate) —
+        same left-label/right-number grammar as the interval scoreboard."""
+        if not stats.get("available"):
+            return []
+        out = []
+        for direction in ("NO → YES", "YES → NO"):
+            scope = (stats.get("by_checkpoint", {}).get("10M", {}) or {}).get(direction, {}).get("overall", {})
+            rows = [(lbl, b) for lbl, b in (scope.get("buckets") or {}).items() if b.get("n")]
+            if not rows:
+                continue
+            out += ["", f"LEARNED FLIP RATE · 10M {direction.replace(' ', '')} ({scope.get('samples')} obs)",
+                    f"{'risk':<8}{'obs':>5}{'flip':>7}"]
+            out += [f"{lbl:<8}{b['n']:>5}{_pct(b['flip_rate']):>7}" for lbl, b in rows]
+        return out
+
+    def _flip_scoreboard(self):
+        """Flip-warning track record in the SAME aligned table the interval
+        scoreboard uses: a W-L/Acc/P-L grid by checkpoint, direction and asset
+        (precision stands in for accuracy, correct-false for W-L), followed by
+        the learned flip-rate-by-risk curve. Empty until a warning settles."""
         ledger = getattr(self, "v95_ledger", None)
         if ledger is None:
             return []
@@ -169,34 +209,43 @@ class HourlyReporter:
             logger.warning(f"flip performance fetch failed: {e}")
             return []
         o = perf.get("overall") or {}
-        out = []
-        if o.get("alerts"):
-            def _s(v, suffix=""):
-                return f"{v}{suffix}" if isinstance(v, (int, float)) else "—"
-            adv = o.get("avg_advance_seconds")
-            adv_s = f"{int(adv)//60}m {int(adv)%60:02d}s" if isinstance(adv, (int, float)) else "—"
-            pnl = o.get("realized_total_cents")
-            out += [
-                "", "⚠ MANIPULATION WARNING PERFORMANCE",
-                f"Alerts: {o.get('alerts', 0)} · {o.get('correct', 0)} correct / {o.get('false', 0)} false "
-                f"· precision {_pct(o.get('precision'))}",
-                f"Flips: {o.get('detected', 0)}/{o.get('actual_flips', 0)} detected "
-                f"({_pct(o.get('detection_rate'))}) · {o.get('missed', 0)} missed",
-                f"Avg advance {adv_s} · P/L {pnl:+.0f}¢" if isinstance(pnl, (int, float)) else f"Avg advance {adv_s}",
-            ]
-        # Learned flip-rate curve for the primary interval (10M), both directions,
-        # so you can see what risk score has historically preceded a flip.
-        if stats.get("available"):
-            for direction in ("NO → YES", "YES → NO"):
-                scope = (stats.get("by_checkpoint", {}).get("10M", {}) or {}).get(direction, {}).get("overall", {})
-                buckets = scope.get("buckets") or {}
-                if scope.get("samples"):
-                    curve = " · ".join(
-                        f"{lbl}:{_pct(b['flip_rate'])}"
-                        for lbl, b in buckets.items() if b.get("n")
-                    )
-                    out += ["", f"10M {direction} flip-rate by risk ({scope.get('samples')} obs): {curve or '—'}"]
-        return out
+        if not o.get("alerts"):
+            # Nothing fired yet; still surface the learned curve if it exists.
+            return self._flip_rate_curve(stats)
+
+        # Headline mirrors the interval headline; it carries the detection rate
+        # and advance time, which don't fit the four-column grid.
+        adv = o.get("avg_advance_seconds")
+        adv_s = f" · warn {int(adv)//60}m{int(adv)%60:02d}s" if isinstance(adv, (int, float)) else ""
+        headline = (f"Warned {o.get('alerts', 0)} · precision {_pct(o.get('precision'))} · "
+                    f"caught {o.get('detected', 0)}/{o.get('actual_flips', 0)} "
+                    f"({_pct(o.get('detection_rate'))}){adv_s}")
+
+        by_cp = perf.get("by_checkpoint", {})
+        by_dir = perf.get("by_direction", {})
+        by_asset = perf.get("by_asset", {})
+        groups = [
+            (None, [self._flip_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")]),
+            ("BY DIRECTION", [self._flip_row(d.replace(" ", ""), by_dir.get(d)) for d in ("NO → YES", "YES → NO")]),
+            ("BY ASSET", [self._flip_row(a, d) for a, d in sorted(
+                ((a, d) for a, d in by_asset.items() if (d or {}).get("alerts")),
+                key=lambda kv: kv[1]["alerts"], reverse=True)[:5]]),
+        ]
+        body = [f"{'':<8}{'W-L':>5}{'Acc':>6}{'P/L':>7}"]
+        for header, group in groups:
+            rows = [r for r in group if r]
+            if rows:
+                body.append("")
+                if header:
+                    body.append(header)
+                body.extend(rows)
+        out = ["", "⚠ FLIP WARNING PERFORMANCE", headline, "", *body]
+        if o.get("missed"):
+            out.append(f"Missed {o.get('missed')} flip(s) with no warning fired")
+        # Same thin-sample footnote convention as the interval scoreboard.
+        if any("*" in (r or "") for _h, group in groups for r in group):
+            out.append("* under 10 fired — not yet reliable")
+        return out + self._flip_rate_curve(stats)
 
     def maybe_send(self, now):
         if not self.cfg.hourly_report_enabled or not self.notifier.enabled:
@@ -237,8 +286,8 @@ class HourlyReporter:
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
         body.extend(self._scoreboard_table())
 
-        # Flip-risk warning performance (precision / detection / advance / P&L).
-        body.extend(self._flip_warning_lines())
+        # Flip-warning track record, rendered in the same table as the intervals.
+        body.extend(self._flip_scoreboard())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:
