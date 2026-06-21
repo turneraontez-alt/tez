@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **711 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **734 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -22,6 +22,46 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-719tb9`) — updated-review fixes
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Ran a fresh fan-out `updated-review` (overall **7.5/10**, up from 7.0), then
+adversarially verified every "critical/high" finding — the three headline bugs all
+collapsed (calibration cache already re-checks `_data_version` under lock at
+`ledger_v95.py:1525`; a stale core snapshot IS rejected via `core_valid=not errors`
+at `checkpoint_v95.py:344,374`; the "engine-state race" is a GIL-atomic float read on
+a diagnostics route). The real holdback was **test coverage of degraded paths**, so
+that's where most of the work went. Suite **691 → 714 passed, 4 skipped** (+23).
+
+- **Highest — 4 degraded-path loop tests** (`tests/test_app_loop_degraded_paths.py`,
+  the headline gap): market expiry → cycling and **recovery** when a fresh market
+  appears; `get_orderbook()→None`, `get_trades()→None`, and both-None feeds ingested
+  through the real loop without crashing/freezing the dashboard; a
+  `deep_evaluation_snapshots` crash isolated to `deep_snaps={}` with signals/scalp
+  still running on the empty fallback (not skipped, not stale).
+- **Medium — alert-path visibility** (`checkpoint_v95._send_compact_panel`): a new
+  throttled `_throttled_warn` (≤1 WARNING / 60s / key) surfaces (a) a
+  `reserve_notification` that returns no permit (dedup OR ledger hiccup) and (b) a
+  handled-but-**not-delivered** send (muted / no message_id → no official record).
+  Both were silent before. Tests: `test_q15_v95_alert_logging.py` (+2).
+  ⚠️ The orderbook-age gate I floated is **already covered** by
+  `v5_hardening.apply_snapshot_freshness` (`Q15_V5_MAX_SOURCE_AGE_S`, default 5s,
+  fail-closed) — I did NOT add a redundant second gate.
+- **Polish:** (1) **exact Student-t** promotion p-value — `_two_sided_p(t, df=…)` via
+  the regularized incomplete beta (`_betai`/`_betacf`); the paired test now passes
+  `df=n-1` (the normal approx was slightly anti-conservative at n~50). Back-compat:
+  `df=None` keeps the normal path. (2) **dropped-feature counter under the lock** —
+  the unlocked centroid build now accumulates drops locally and folds them in under
+  `self._lock` (`ledger_v95._pattern_centroids`). (3) **challenger tail-calibration
+  embargo** (`challenger/harness.train_predictor`): purge fit rows whose label window
+  `[t,t+horizon]` reaches into the calibration slice, with a safe fallback to the
+  un-embargoed split if it would starve training (shadow-only). (4) **health `data_age`
+  self-consistent** — `/api/health` reads a new `engine_update_ts` map written under
+  `state_lock` beside the snapshot, instead of an unsynchronized `engines[a]` read.
+  Tests: `test_q15_v95_student_t.py` (+8), `test_q15_ledger_dropped_rows.py` (+1),
+  `test_challenger_harness_embargo.py` (+3), `test_app_health_data_age.py` (+2).
+- All model-behavior-adjacent changes are shadow-only or observability-only; frozen
+  champion output is unchanged. No new always-on production behavior.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — challenger shadow system
 **Read-only, default-OFF, zero production impact. NOT wired into the live loop yet

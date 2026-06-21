@@ -87,17 +87,74 @@ def _normal_cdf(value: float) -> float:
     return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
 
 
-def _two_sided_p(t: float) -> float:
-    """Two-sided p-value from a t/z statistic via a normal approximation.
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued-fraction expansion for the incomplete beta (Numerical Recipes)."""
+    MAXIT, EPS, FPMIN = 200, 3.0e-12, 1.0e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS:
+            break
+    return h
 
-    Promotion only runs at n >= 50, where the normal approximation to Student's
-    t is accurate enough for a screening gate (final calls remain manual)."""
+
+def _betai(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    bt = math.exp(
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+        + a * math.log(x) + b * math.log(1.0 - x)
+    )
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _two_sided_p(t: float, df: float | None = None) -> float:
+    """Two-sided p-value from a t statistic.
+
+    With ``df`` (degrees of freedom) the exact Student-t distribution is used
+    via the regularized incomplete beta; this is correct for the small samples
+    (n~50) at which promotion is screened, where the normal approximation is
+    slightly anti-conservative. With ``df`` omitted it falls back to the normal
+    approximation (preserved for callers that pass a pure z statistic)."""
     if not math.isfinite(t):
         # A non-finite statistic (NaN, or ±inf from a degenerate zero-variance
         # sample) carries no usable evidence of a real difference, so the
         # conservative p-value is 1.0 — never treat it as maximal significance.
         return 1.0
-    return _clamp(2.0 * (1.0 - _normal_cdf(abs(t))), 0.0, 1.0)
+    if df is None or df <= 0:
+        return _clamp(2.0 * (1.0 - _normal_cdf(abs(t))), 0.0, 1.0)
+    df = float(df)
+    return _clamp(_betai(0.5 * df, 0.5, df / (df + t * t)), 0.0, 1.0)
 
 
 def _json(value: Any) -> str:
@@ -1346,18 +1403,20 @@ class V95Ledger:
         # Lock released; centroid build below is identical to the original.
         winners = [row for row in rows if int(row["correct"] or 0) == 1]
         losers = [row for row in rows if int(row["correct"] or 0) == 0]
+        dropped_rows = 0  # accumulated unlocked, folded into the counter under lock
         if len(rows) < 10 or len(winners) < 3 or len(losers) < 3:
             result: dict[str, Any] = {"active": False, "resolved": len(rows)}
         else:
             names = [name for name in CHAMPION_WEIGHTS if name != "intercept"]
             def centroid(selected: Sequence[sqlite3.Row]) -> dict[str, float]:
+                nonlocal dropped_rows
                 sums = {name: 0.0 for name in names}
                 weights = {name: 0.0 for name in names}
                 for row in selected:
                     try:
                         values = json.loads(str(row["feature_json"]))
                     except (TypeError, ValueError, json.JSONDecodeError):
-                        self._dropped_feature_rows += 1
+                        dropped_rows += 1
                         continue
                     orientation = 1.0 if str(row["predicted_side"]).upper() == "YES" else -1.0
                     quality = _clamp(float(row["data_quality"] or 0.0), 0.10, 1.0)
@@ -1371,9 +1430,12 @@ class V95Ledger:
                 return {name: sums[name] / weights[name] if weights[name] else 0.0 for name in names}
             result = {"active": True, "resolved": len(rows), "winners": len(winners), "losers": len(losers),
                       "winner": centroid(winners), "loser": centroid(losers), "names": names}
-        if self._cache_enabled:
+        if dropped_rows or self._cache_enabled:
             with self._lock:
-                if self._data_version == version:
+                # Counter mutation belongs under the lock (it is read unlocked in
+                # status()); fold in the rows the unlocked centroid build dropped.
+                self._dropped_feature_rows += dropped_rows
+                if self._cache_enabled and self._data_version == version:
                     self._pattern_centroid_cache[checkpoint] = (version, result)
         return result
 
@@ -2041,7 +2103,8 @@ class V95Ledger:
         return {
             "n": n, "mean_brier_reduction": round(mean, 6),
             "t": round(t, 4) if math.isfinite(t) else None,
-            "p_value": round(_two_sided_p(t), 6), "favored": mean > 0, "reason": "ok",
+            # Paired one-sample test on the diffs → df = n - 1 (exact Student-t).
+            "p_value": round(_two_sided_p(t, df=n - 1), 6), "favored": mean > 0, "reason": "ok",
         }
 
     def metrics(self) -> dict[str, Any]:
