@@ -14,6 +14,13 @@ def _num(value, default=None):
         return default
 
 
+def _env_flag(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def latest_trade_ts(trades):
     timestamps = []
     for trade in trades or []:
@@ -32,6 +39,16 @@ def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=N
     spot = raw.get("spot") or {}
 
     spot_ts = _num(spot.get("ts"))
+    # When the spot feed serves a bounded last-good fallback, spot["ts"] is
+    # re-stamped to `now` for candle continuity, which would make a stale
+    # underlying read as fresh and slip past the freshness gate below. Honor the
+    # original event time so the gate sees the TRUE age (a 30s-old price reads as
+    # 30s old, not 0s). Gated so the behavior is reversible; default ON because
+    # honest freshness on the price the owner trades on is the safe posture.
+    if _env_flag("Q15_V5_GATE_STALE_SPOT", True) and spot.get("stale"):
+        original_ts = _num(spot.get("original_ts"))
+        if original_ts is not None:
+            spot_ts = original_ts
     trade_ts = _num(raw.get("latest_trade_event_ts"))
     if trade_ts is None:
         trade_ts = latest_trade_ts(raw.get("trades"))

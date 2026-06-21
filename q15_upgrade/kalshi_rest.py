@@ -13,6 +13,34 @@ from .precision import dollars_to_cents, normalized_taker_side
 logger = logging.getLogger(__name__)
 BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 
+# Hard cap on how long a single 429 backoff may sleep, so a hostile or
+# misconfigured ``Retry-After`` cannot stall the ~1s refresh loop.
+_MAX_RETRY_AFTER_SECONDS = 8.0
+
+
+def _retry_after_seconds(response, fallback: float) -> float:
+    """Honor a ``Retry-After`` header (delta-seconds or HTTP-date), capped.
+
+    Falls back to ``fallback`` when the header is absent or unparseable.
+    Always clamped to ``[0, _MAX_RETRY_AFTER_SECONDS]`` so a bad value can't
+    block the cycle indefinitely.
+    """
+    raw = response.headers.get("Retry-After") if response is not None else None
+    wait = fallback
+    if raw:
+        try:
+            wait = float(raw)
+        except (TypeError, ValueError):
+            try:
+                from email.utils import parsedate_to_datetime
+
+                when = parsedate_to_datetime(raw)
+                if when is not None:
+                    wait = (when.timestamp() - time.time())
+            except Exception:
+                wait = fallback
+    return max(0.0, min(_MAX_RETRY_AFTER_SECONDS, wait))
+
 
 class TokenBucket:
     def __init__(self, rate: float, capacity: float | None = None):
@@ -62,8 +90,13 @@ class KalshiClient:
                 response = requests.get(url, params=params, timeout=timeout, headers={"Accept": "application/json"})
                 if response.status_code == 429:
                     if attempt + 1 < retries:
-                        time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                        # Honor the server's Retry-After when present, else fall
+                        # back to bounded exponential backoff. Capped so a large
+                        # Retry-After can't stall the refresh loop.
+                        wait = _retry_after_seconds(response, min(8.0, 0.5 * (2 ** attempt)))
+                        time.sleep(wait)
                         continue
+                    logger.warning("Kalshi REST %s rate-limited (429); giving up after %d attempt(s)", path, retries)
                     return None
                 if response.status_code == 404:
                     return None

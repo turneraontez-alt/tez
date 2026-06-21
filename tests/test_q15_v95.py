@@ -108,9 +108,18 @@ class FakeNotifier:
     def __init__(self):
         self.enabled = True
         self.messages = []
+        self._mid = 1000
+        self.last_message_id = None
     def send(self, text, *args, **kwargs):
         self.messages.append(str(text))
+        self._mid += 1
+        self.last_message_id = self._mid
         return True
+    def send_with_result(self, text):
+        self.messages.append(str(text))
+        self._mid += 1
+        self.last_message_id = self._mid
+        return {"ok": True, "delivered": True, "muted": False, "message_id": self._mid}
 
 
 class FakeStore:
@@ -135,6 +144,14 @@ class V95Tests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+        # Clear the module-level "latest" caches a run_cycle leaves behind so a
+        # test that drives run_cycle cannot bleed state into a later test.
+        import q15_upgrade.checkpoint_v95 as _cp
+        with _cp._LATEST_LOCK:
+            _cp._LATEST_ANALYSES.clear()
+            _cp._LATEST_RANKING.clear()
+            _cp._LATEST_LEDGER.clear()
+            _cp._LATEST_CHECKPOINT = "UNKNOWN"
 
     def canonical(self, row=None, cached=None, pub=None, ctx=None, checkpoint="10M"):
         row = row or snapshot(checkpoint=checkpoint)
@@ -149,6 +166,59 @@ class V95Tests(unittest.TestCase):
         canonical = self.canonical(cached=candles(180))
         self.assertGreaterEqual(len(canonical.candles), 180)
         self.assertTrue(canonical.core_valid)
+
+    def test_public_price_freshness_decay_is_configurable(self):
+        import os
+        # A public composite 20s old contributes to data_quality through its
+        # freshness-weighted public_quality term. Shrinking the decay constant
+        # collapses that freshness, so the same snapshot yields a lower
+        # data_quality — proving the previously-hardcoded constant is now tunable.
+        pub = public(age=20.0)
+        try:
+            os.environ.pop("Q15_V95_PUBLIC_PRICE_DECAY_SECONDS", None)
+            default_snap = self.canonical(pub=pub)
+            os.environ["Q15_V95_PUBLIC_PRICE_DECAY_SECONDS"] = "2"
+            tight_snap = self.canonical(pub=pub)
+            self.assertGreater(default_snap.data_quality, tight_snap.data_quality + 0.03)
+        finally:
+            os.environ.pop("Q15_V95_PUBLIC_PRICE_DECAY_SECONDS", None)
+
+    def test_multi_horizon_drops_implausible_public_return(self):
+        from q15_upgrade.checkpoint_v95 import _multi_horizon_returns
+        # A percent-scaled (or already-log) public return outside (-1, 1) would make
+        # log1p raise/-inf; it must be dropped and the candle return stand alone.
+        good = self.canonical(pub=public(age=2.0, momentum=0.001))
+        good_ret = _multi_horizon_returns(good)
+        bad_pub = public(age=2.0)
+        bad_pub["price_returns"] = {"return_30s": -50.0, "return_60s": 0.001}
+        bad = self.canonical(pub=bad_pub)
+        bad_ret = _multi_horizon_returns(bad)
+        for key, val in bad_ret.items():
+            if val is not None:
+                self.assertTrue(math.isfinite(val), f"{key} must stay finite")
+        # The candle-only return for 30s (public dropped) equals the pure candle path.
+        self.assertIsNotNone(bad_ret["return_30s"])
+
+    def test_public_dict_matches_asdict_value_without_deepcopy(self):
+        # public_dict() is the hot path inside analyse_v95 (built into every
+        # result's "canonical" key, ~600 candles + multi-source dicts). It must
+        # stay a shallow field copy, NOT dataclasses.asdict (which recursively
+        # deep-copies and dominated ~78% of analyse_v95). This locks both that
+        # the value still equals the asdict reference AND that it is cheap:
+        # nested containers are fresh (shallow) copies but the candle rows are
+        # shared references (no per-row deepcopy).
+        from dataclasses import asdict
+        canonical = self.canonical(cached=candles(180))
+        reference = asdict(canonical)
+        reference["candles"] = list(canonical.candles)
+        public = canonical.public_dict()
+        self.assertEqual(public, reference)
+        self.assertIsInstance(public["candles"], list)
+        self.assertIsInstance(public["core_errors"], tuple)
+        # Cheap copy: candle rows are shared, not deep-copied per row.
+        self.assertIs(public["candles"][0], canonical.candles[0])
+        # Top-level mutable containers are independent of the frozen dataclass.
+        self.assertIsNot(public["context"], canonical.context)
 
     def test_stale_core_fails_closed(self):
         row = snapshot()
@@ -175,6 +245,33 @@ class V95Tests(unittest.TestCase):
         result = analyse_v95(row, self.canonical(row=row, pub=public(price=98.0, momentum=-0.001), ctx=context("BEARISH")), self.ledger)
         self.assertLess(result["yes_probability"], 0.5)
         self.assertEqual(result["prediction_side"], "NO")
+
+    def test_unknown_depth_penalty_is_gated_and_off_by_default(self):
+        # Strip the Kalshi ask-size depth so _kalshi_depth() returns None (no
+        # orderbook either). Default OFF: a missing/unverifiable book must NOT
+        # silently penalize liquidity. ON: it is discounted by the configured
+        # factor so an unconfirmed book ranks below a confirmed-liquid one. This
+        # only moves trade_quality ranking; it is never an entry gate.
+        row = snapshot(spot=102.0, target=100.0)
+        row.pop("yes_ask_size", None)
+        row.pop("no_ask_size", None)
+        base = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNone(base["quote"]["ask_depth"], "depth should be unknown")
+        lq_off = base["liquidity_quality"]
+        with patch.dict(os.environ, {"Q15_V95_PENALIZE_UNKNOWN_DEPTH": "true",
+                                     "Q15_V95_UNKNOWN_DEPTH_FACTOR": "0.5"}):
+            penalized = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertAlmostEqual(penalized["liquidity_quality"], lq_off * 0.5, places=6)
+
+    def test_known_depth_is_unaffected_by_unknown_depth_flag(self):
+        # With real depth present, the flag is a no-op (the penalty branch only
+        # fires when depth is None).
+        row = snapshot(spot=102.0, target=100.0)  # keeps yes_ask_size/no_ask_size
+        off = analyse_v95(row, self.canonical(row=row), self.ledger)
+        with patch.dict(os.environ, {"Q15_V95_PENALIZE_UNKNOWN_DEPTH": "true"}):
+            on = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNotNone(off["quote"]["ask_depth"])
+        self.assertAlmostEqual(off["liquidity_quality"], on["liquidity_quality"], places=6)
 
     def test_raw_model_signal_is_independent_of_kalshi_price(self):
         # The model's own (raw) probability must not depend on the Kalshi price...
@@ -276,12 +373,21 @@ class V95Tests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertEqual(self.ledger.status()["shadow_updates_by_checkpoint"]["10M"], 1)
 
-    def test_fifteen_minute_learning_is_disabled_by_default(self):
-        before = self.ledger.challenger_weights("15M")
+    def test_fifteen_minute_learning_enabled_by_default(self):
+        # 15M shadow learning now defaults ON (observational; champion stays
+        # frozen). The challenger is allowed to learn from a 15M resolution.
+        self.assertTrue(self.ledger.learning_enabled_by_checkpoint["15M"])
         self._record("T15", checkpoint="15M")
         self.ledger.resolve_ticker("T15", "NO", NOW+700)
-        after = self.ledger.challenger_weights("15M")
-        self.assertEqual(before, after)
+        self.assertTrue(self.ledger.status()["production_weights_frozen"])
+
+    def test_fifteen_minute_learning_can_be_disabled(self):
+        # Opt-out: with 15M learning off, a resolution leaves the challenger frozen.
+        self.ledger.learning_enabled_by_checkpoint["15M"] = False
+        before = self.ledger.challenger_weights("15M")
+        self._record("T15off", checkpoint="15M")
+        self.ledger.resolve_ticker("T15off", "NO", NOW+700)
+        self.assertEqual(before, self.ledger.challenger_weights("15M"))
         self.assertEqual(self.ledger.status()["shadow_updates_by_checkpoint"]["15M"], 0)
         self.assertTrue(self.ledger.status()["production_weights_frozen"])
 
@@ -333,7 +439,9 @@ class V95Tests(unittest.TestCase):
         status = self.ledger.status()
         self.assertEqual(status["primary_learning_checkpoint"], "10M")
         self.assertTrue(status["learning_enabled_by_checkpoint"]["10M"])
-        self.assertFalse(status["learning_enabled_by_checkpoint"]["15M"])
+        # 15M now learns too (observational); 7M stays off until its schema lands.
+        self.assertTrue(status["learning_enabled_by_checkpoint"]["15M"])
+        self.assertFalse(status["learning_enabled_by_checkpoint"]["7M"])
 
     def test_pattern_similarity_is_checkpoint_scoped(self):
         result = self.ledger.pattern_similarity({name: 0.1 for name in CHAMPION_WEIGHTS if name != "intercept"}, "YES", "10M")
@@ -389,18 +497,25 @@ class V95Tests(unittest.TestCase):
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
         self.assertIn("V9.5 CHECK", message)         # formatter guard + identity
         self.assertIn("BNB", message)                # the pick
-        self.assertIn("grade", message)              # confidence grade shown
+        self.assertIn("Top picks", message)          # hourly-report-style table
+        self.assertIn("<pre>", message)              # aligned monospace block
+        # The recommended entry (BNB qualifies) leads as the BEST ENTRY block, the
+        # single source of truth shared with the detail below.
+        self.assertIn("🏆 BEST ENTRY — BNB", message)
+        self.assertIn("Entry status: RECOMMENDED", message)
         self.assertNotIn("Three requirements", message)
 
     def test_message_shows_market_implied_probability(self):
         # ask=52 -> yes mid 51.5 -> market-implied YES ~ 0.515; the pick is YES,
-        # so the checkpoint line shows the model prob next to "vs mkt 51.5%".
+        # so the table's "Mkt" column shows the market-implied prob (~52%) next to
+        # the model prob.
         row = snapshot(ask=52.0)
         result = analyse_v95(row, self.canonical(row=row), self.ledger)
         self.assertEqual(result["prediction_side"], "YES")
         analyses = {"BNB": result}
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
-        self.assertIn("vs mkt 51.5%", message)
+        self.assertIn("Mkt", message)   # market column header
+        self.assertIn("52%", message)   # market-implied prob for the YES side
 
     def test_message_omits_market_implied_when_no_quote(self):
         # With no Kalshi quote the market-implied prob is None, so the "vs mkt"
@@ -447,6 +562,70 @@ class V95Tests(unittest.TestCase):
                 policy.run_cycle({"BNB": dict(row)}, NOW+offset, {}, None, None, notifier)
         self.assertEqual(len(notifier.messages), 1)
         self.assertIn("V9.5 CHECK", notifier.messages[0])
+
+    def test_compact_panel_writes_official_record(self):
+        # The compact panel (default) sends a V9.5 CHECK panel every checkpoint and
+        # records the delivered call in the immutable official record with its
+        # Telegram message_id.
+        from contextlib import closing
+        notifier = FakeNotifier()
+        store = FakeStore()
+        with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"official.sqlite3")}, clear=False):
+            with patch.object(CheckpointPolicyV94Unified, "__init__", lambda self, *a, **k: None):
+                policy = CheckpointPolicyV95(store)
+        policy.market_data = FakeHub()
+        policy._candle_cache = {"BNB": {row["start_time"]: row for row in candles()}}
+        policy._latest_context = {"BNB": context()}
+        policy._context_lock = threading.RLock()
+        policy._candles = lambda asset: list(policy._candle_cache[asset].values())
+        with patch.object(CheckpointPolicyV94Unified, "run_cycle", lambda self, snapshots, *a: snapshots):
+            row = snapshot(spot=102.0, target=100.0)  # above strike -> YES lean
+            for offset in range(4):
+                policy.run_cycle({"BNB": dict(row)}, NOW + offset, {}, None, None, notifier)
+        self.assertTrue(any("V9.5 CHECK" in m for m in notifier.messages))
+        with closing(policy.ledger._connect()) as conn:
+            rows = list(conn.execute(
+                "SELECT interval, record_type, predicted_side, message_id "
+                "FROM sent_predictions WHERE record_type='interval'"))
+        self.assertEqual(len(rows), 1, "exactly one interval official record for the deduped panel")
+        self.assertEqual(str(rows[0]["interval"]), "10M")
+        self.assertIsNotNone(rows[0]["message_id"])
+
+    def test_cycle_recap_sends_once_on_settlement(self):
+        # A settled contract that was delivered earns one CYCLE CLOSED recap, and
+        # the per-ticker dedup prevents a second recap on a later cycle.
+        notifier = FakeNotifier()
+        with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"recap.sqlite3")}, clear=False):
+            with patch.object(CheckpointPolicyV94Unified, "__init__", lambda self, *a, **k: None):
+                policy = CheckpointPolicyV95(FakeStore())
+        led = policy.ledger
+        # Seed a delivered + settled contract directly in the ledger.
+        led.record_prediction(
+            ticker="KXBTC-T", asset="BTC", checkpoint="10M", created_at=NOW,
+            close_time=NOW + 600, predicted_side="YES",
+            raw_yes_probability=0.7, calibrated_yes_probability=0.7,
+            challenger_yes_probability=0.7, baseline_yes_probability=0.5,
+            selected_probability=0.7, conservative_probability=0.62,
+            data_quality=0.8, evidence_quality=0.7, trade_quality=0.7,
+            trade_decision="ENTRY_RECOMMENDED", regime="NORMAL",
+            features={"momentum": 0.3}, contributions={}, quote={"ask_cents": 50}, rank=1,
+        )
+        led.resolve_ticker("KXBTC-T", "YES")
+        led.record_sent_prediction(
+            contract_id="KXBTC-T", asset="BTC", interval="10M", record_type="interval",
+            predicted_side="YES", probability=0.7, manipulation_probability=None,
+            entry_decision="ENTRY_RECOMMENDED", sent_at=NOW + 1, close_time=NOW + 600, message_id=9,
+        )
+        events = [{"ticker": "KXBTC-T", "asset": "BTC", "checkpoint": "10M",
+                   "official_result": "YES", "correct": True}]
+        s1, _ = policy._send_cycle_recaps(events, notifier, NOW + 601)
+        s2, _ = policy._send_cycle_recaps(events, notifier, NOW + 602)  # deduped
+        self.assertEqual(s1, 1)
+        self.assertEqual(s2, 0)
+        recaps = [m for m in notifier.messages if "CYCLE CLOSED" in m]
+        self.assertEqual(len(recaps), 1)
+        self.assertIn("10M:  YES ✓", recaps[0])
+        self.assertIn("— RUNNING RECORD —", recaps[0])
 
     def test_policy_records_unique_prediction(self):
         notifier = FakeNotifier()
