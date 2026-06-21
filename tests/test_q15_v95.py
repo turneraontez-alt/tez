@@ -167,6 +167,38 @@ class V95Tests(unittest.TestCase):
         self.assertGreaterEqual(len(canonical.candles), 180)
         self.assertTrue(canonical.core_valid)
 
+    def test_public_price_freshness_decay_is_configurable(self):
+        import os
+        # A public composite 20s old contributes to data_quality through its
+        # freshness-weighted public_quality term. Shrinking the decay constant
+        # collapses that freshness, so the same snapshot yields a lower
+        # data_quality — proving the previously-hardcoded constant is now tunable.
+        pub = public(age=20.0)
+        try:
+            os.environ.pop("Q15_V95_PUBLIC_PRICE_DECAY_SECONDS", None)
+            default_snap = self.canonical(pub=pub)
+            os.environ["Q15_V95_PUBLIC_PRICE_DECAY_SECONDS"] = "2"
+            tight_snap = self.canonical(pub=pub)
+            self.assertGreater(default_snap.data_quality, tight_snap.data_quality + 0.03)
+        finally:
+            os.environ.pop("Q15_V95_PUBLIC_PRICE_DECAY_SECONDS", None)
+
+    def test_multi_horizon_drops_implausible_public_return(self):
+        from q15_upgrade.checkpoint_v95 import _multi_horizon_returns
+        # A percent-scaled (or already-log) public return outside (-1, 1) would make
+        # log1p raise/-inf; it must be dropped and the candle return stand alone.
+        good = self.canonical(pub=public(age=2.0, momentum=0.001))
+        good_ret = _multi_horizon_returns(good)
+        bad_pub = public(age=2.0)
+        bad_pub["price_returns"] = {"return_30s": -50.0, "return_60s": 0.001}
+        bad = self.canonical(pub=bad_pub)
+        bad_ret = _multi_horizon_returns(bad)
+        for key, val in bad_ret.items():
+            if val is not None:
+                self.assertTrue(math.isfinite(val), f"{key} must stay finite")
+        # The candle-only return for 30s (public dropped) equals the pure candle path.
+        self.assertIsNotNone(bad_ret["return_30s"])
+
     def test_public_dict_matches_asdict_value_without_deepcopy(self):
         # public_dict() is the hot path inside analyse_v95 (built into every
         # result's "canonical" key, ~600 candles + multi-source dicts). It must

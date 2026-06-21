@@ -1,4 +1,5 @@
 import os
+import atexit
 import time
 import threading
 import logging
@@ -59,6 +60,10 @@ REFRESH_INTERVAL = 1.0
 DISCOVERY_INTERVAL = 30
 DETAIL_INTERVAL = 5  # refresh market detail (volume) every N seconds
 FETCH_DEADLINE = 3.0  # max seconds a cycle waits on concurrent fetches
+# A fetch still running after this long is treated as a permanently hung upstream
+# and dropped from in-flight tracking so the dict can't grow without bound over
+# the life of the loop. Generous vs FETCH_DEADLINE: only abandons true hangs.
+FETCH_INFLIGHT_TTL = float(os.environ.get("Q15_FETCH_INFLIGHT_TTL_S") or 60.0)
 
 client = KalshiClient()
 # Shared cache of immutable settled-market results. All settlement reconcilers
@@ -270,25 +275,36 @@ def _resolve_cached_detail(detail_cache, asset, active_ticker):
     return cached[1] if (cached and cached[0] == active_ticker) else None
 
 
-def _harvest_and_submit(executor, inflight, active, now, deadline, submit_fn):
+def _harvest_and_submit(executor, inflight, active, now, deadline, submit_fn, stale_ttl=None):
     """Drive the per-asset concurrent fetch with at-most-one request in flight.
 
     Harvests any previous-cycle requests that have finished, submits a fresh
     request for each active asset not already in flight, then waits up to
     ``deadline`` for *this* cycle's requests. A request that is still running at
     the deadline stays in ``inflight`` and is harvested in a later cycle, so one
-    slow upstream cannot freeze the whole dashboard. Returns ``{asset: result}``
-    for everything that completed. ``inflight`` is mutated in place.
+    slow upstream cannot freeze the whole dashboard. A request still running after
+    ``stale_ttl`` seconds is treated as a permanently hung upstream: it is
+    cancelled best-effort and dropped from tracking so ``inflight`` can't grow
+    without bound (and a fresh request can take its place). Returns
+    ``{asset: result}`` for everything that completed; ``inflight`` is mutated in
+    place, mapping ``asset -> (Future, submitted_at)``.
     """
+    if stale_ttl is None:
+        stale_ttl = FETCH_INFLIGHT_TTL
     results = {}
-    # 1) harvest any previous-cycle requests that have since finished
+    # 1) harvest any previous-cycle requests that have since finished; abandon any
+    #    that have been hung past the TTL.
     for a in list(inflight.keys()):
-        f = inflight[a]
+        f, submitted_at = inflight[a]
         if f.done():
             try:
                 results[a] = f.result()
             except Exception as e:
                 logger.warning(f"fetch {a}: {e}")
+            del inflight[a]
+        elif now - submitted_at > stale_ttl:
+            f.cancel()  # best-effort; a running fetch can't be interrupted
+            logger.warning(f"fetch {a}: abandoned after {now - submitted_at:.0f}s in flight")
             del inflight[a]
     # 2) submit a fresh request only for active assets not already in flight
     futs = {}
@@ -296,7 +312,7 @@ def _harvest_and_submit(executor, inflight, active, now, deadline, submit_fn):
         if asset in inflight:
             continue
         f = executor.submit(submit_fn, asset, market, now)
-        inflight[asset] = f
+        inflight[asset] = (f, now)
         futs[f] = asset
     # 3) wait up to the per-cycle deadline for THIS cycle's requests; slow ones
     #    stay in flight and are harvested in a later cycle.
@@ -330,6 +346,9 @@ def refresh_loop(max_cycles=None):
     detail_inflight = {}  # asset -> (ticker, Future) for the off-critical detail fetch
     detail_cache = {}     # asset -> (ticker, detail) last-good market volume
     executor = ThreadPoolExecutor(max_workers=8)
+    # Forever-loop: shut the pool down on interpreter exit so we don't leak the 8
+    # worker threads (the bounded-test path shuts down explicitly before return).
+    atexit.register(executor.shutdown, wait=False)
     cycles = 0
     while True:
         cycle_clock = time.monotonic()
@@ -573,6 +592,7 @@ def refresh_loop(max_cycles=None):
             logger.exception("watchdog pager failed")
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
+            executor.shutdown(wait=False)
             return
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
 

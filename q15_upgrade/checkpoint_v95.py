@@ -303,7 +303,12 @@ def build_canonical_snapshot(
         if public_age is None:
             public_freshness = 0.45
         else:
-            public_freshness = _clamp(math.exp(-max(0.0, public_age - 5.0) / 30.0), 0.0, 1.0)
+            # exp(-(age-grace)/tau): freshness 1.0 within `grace`, then an
+            # e-folding decay with time constant `tau` seconds (NOT a half-life;
+            # at age=grace+tau freshness is e^-1 ≈ 0.37).
+            grace = _env_float("Q15_V95_PUBLIC_PRICE_GRACE_SECONDS", 5.0, 0.0, 60.0)
+            tau = _env_float("Q15_V95_PUBLIC_PRICE_DECAY_SECONDS", 30.0, 2.0, 600.0)
+            public_freshness = _clamp(math.exp(-max(0.0, public_age - grace) / tau), 0.0, 1.0)
     candidates: list[tuple[float, float]] = []
     if snapshot_spot is not None and snapshot_spot > 0:
         candidates.append((snapshot_spot, 1.0))
@@ -402,11 +407,19 @@ def _robust_volatility(canonical: CanonicalSnapshot) -> dict[str, Any]:
 
 
 def _multi_horizon_returns(canonical: CanonicalSnapshot) -> dict[str, float | None]:
+    # Coordinate contract: `_window_return` yields LOG returns (candle space); the
+    # public feed quotes SIMPLE fractional returns (e.g. 0.012 == +1.2%), which we
+    # lift into log space with log1p before blending. A value outside (-1, 1) can't
+    # be a plausible short-horizon fractional return (it's likely percent-scaled or
+    # already-log from a feed change) and would make log1p raise/-inf, so it is
+    # dropped rather than trusted — the candle return then stands alone.
     result = {f"return_{seconds}s": _window_return(canonical.candles, float(seconds)) for seconds in (5, 15, 30, 60, 180, 900, 1800)}
     public_returns = canonical.public.get("price_returns") if isinstance(canonical.public.get("price_returns"), Mapping) else {}
     for seconds in (5, 15, 30, 60, 180):
         key = f"return_{seconds}s"
         public_value = _num(public_returns.get(key))
+        if public_value is not None and not (-1.0 < public_value < 1.0):
+            public_value = None  # implausible coordinate; don't blend it
         candle_value = result.get(key)
         if public_value is not None and candle_value is not None:
             result[key] = 0.65 * candle_value + 0.35 * math.log1p(public_value)
