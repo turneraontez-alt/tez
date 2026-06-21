@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **714 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **725 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -144,6 +144,64 @@ as a SHADOW model, built to be promoted to primary with one switch.
   combined totals, and a side-by-side verdict. New `ledger.ranked_comparison` /
   `latest_window_cases`; shadow rows now store `close_time` for exact case grouping.
   `runner.report_message` rewritten. +2 tests. Suite: **691 passed, 4 skipped**.
+- **Report UI cleanup** (owner: "it all looks so confusing"): `runner.report_message`
+  redesigned into ONE card — only the **bold title** (`CHALLENGER SHADOW vs YOUR
+  SYSTEM`) is bright/white; *everything else* now lives inside a single `<pre>`
+  monospace block (owner: "take out the white text I only want the title"). Dropped
+  the long scoring paragraph for a 3-line plain-English note; "NATIVE" → "Yours";
+  empty `P2/P3 –` rows in the latest window are no longer printed (only ranks that
+  had a pick); totals collapsed from `C/W/acc` dual columns to `hit` (e.g. `1/2`) +
+  whole-% `acc`; one clear `Winner:` line + plain `Learning:` state. Same data, far
+  cleaner layout. Tests updated to new wording. Suite: **691 passed, 4 skipped**.
+- **End-result section** (owner: "add a different section where at 10M and 15M they
+  both predict the end result, keep what you already have, make it clean"). NOTE:
+  the ranked report scores **directional accuracy only** — it does NOT read the
+  shadow's `recommendation` (BUY_YES/BUY_NO/NO_TRADE); a no-trade is **never** a
+  loss (P&L is computed for traded rows only in `scoreboard()`, NO_TRADE = sit-out
+  = 0). New `ledger.latest_window_end_results(checkpoints=("15M","10M"))`: for the
+  latest settled 15-min window (bucketed by the 900s boundary), per asset, each
+  model's predicted side + hit at 15M and 10M vs the actual result. Rendered as a
+  compact `END-RESULT CALL · 15M & 10M` block (`Res` col + `Y+/N-` cells, + right /
+  - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
+  (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — 15M rank performance in hourly report
+Owner: "on the hourly report add 15M rank performance." `reporting.HourlyReporter
+._scoreboard_table` now renders a **`15M RANK PERFORMANCE`** section (the #1/#2/#3
+pick judged within the 15M checkpoint) directly above the existing `10M RANK
+PERFORMANCE` block, same W-L/Acc/P/L grid + 0-0 placeholders before settling. Data
+already existed in `scoreboard()["rank_by_checkpoint"]["15M"]` (built for every
+tracked checkpoint) — only the report rendered it for 10M. Test updated
+(`test_q15_learning_scoreboard.py`). Suite: **702 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — gated manipulation alerts
+**Detection unchanged; only NOTIFICATIONS are restricted.** New module
+`q15_upgrade/manipulation_alert.py` + wiring in `checkpoint_v95.run_cycle`. The
+flip-risk / manipulation overlay keeps running every cycle; a manipulation alert
+is now PUSHED to Telegram only when ALL three owner conditions hold:
+1. **High probability** the manipulation actually occurs — gated on the learned
+   flip hit-rate (Wilson lower bound) `>= Q15_V95_MANIPULATION_ALERT_MIN_PROBABILITY`
+   (default 0.70). No learned data ⇒ no alert (conservative, "ignore unconfirmed").
+2. **Normal check delivered first** — the interval's compact-panel `V9.5 CHECK`
+   must have actually reached the owner (`delivered`, not muted/failed). Recorded
+   in `_send_compact_panel` into `self._normal_check[checkpoint]`. Muted/failed
+   normal check ⇒ no manipulation alert for that interval.
+3. **Recommendation changed** — the manipulation analysis must recommend a
+   different side / entry / exit / action than the normal check did.
+Low-probability / low-confidence / unchanged / repetitive findings are dropped
+(dedup set keyed `(ticker, checkpoint, new_side)`); all qualifying findings for an
+interval are **combined into ONE concise alert** carrying the six required fields
+(probability, confidence, what changed, original rec, new rec, evidence, interval).
+- **Flow:** `_process_flip_risk` collects candidates each cycle (read-only, no send,
+  no state mutation); after `_send_compact_panel`, `_dispatch_manipulation_alerts`
+  applies the gate and sends at most one combined alert. Runs AFTER the normal
+  check by construction. Did NOT re-enable the legacy HIGH FLIP RISK / CONFIRMED
+  FLIP Telegram UIs (still off).
+- **Flags** (`.env.example`): `Q15_V95_MANIPULATION_ALERTS_ENABLED` (default true,
+  but heavily gated), `..._MIN_PROBABILITY` (0.70), `..._MIN_CONFIDENCE` (40).
+- **Tests:** `tests/test_q15_manipulation_alert.py` (10) — gate conditions, message
+  content (all six fields), and manager glue (no-send-without-normal-check, single
+  combined send, dedup, interval filtering). Suite: **702 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap

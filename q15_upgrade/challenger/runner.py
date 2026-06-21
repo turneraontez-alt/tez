@@ -136,64 +136,98 @@ class ShadowRunner:
 
     @staticmethod
     def _pick_str(entry) -> str:
+        """One pick as fixed-width 'ASSET SIDE mark' (13 cols), so the two model
+        columns stay aligned in the monospace card."""
         asset, side, correct = entry
-        return f"{str(asset)[:4]:<4} {side:<3} {'OK' if correct else 'X'}"
+        return f"{str(asset)[:4]:<4} {side:<3} {'ok' if correct else 'X'}".ljust(13)
+
+    @staticmethod
+    def _acc_pct(accuracy) -> str:
+        return "—" if accuracy is None else f"{round(accuracy * 100)}%"
 
     def report_message(self, top_k: int = 3) -> str:
+        """A single clean card: only the title is bright (bold); everything else
+        sits in one monospace block so it reads as one aligned, dim panel."""
         mv = self.config.model_version
         rk = self.ledger.ranked_comparison(model_version=mv, top_k=top_k)
         if not rk["n_cases"]:
             return f"{CHALLENGER_REPORT_MARKER} — no settled shadow cases yet"
         ch, nv = rk["challenger"], rk["native"]
 
-        lines = [f"<b>{CHALLENGER_REPORT_MARKER}</b> — ranked Top-{top_k} accuracy (read-only, not trading)",
-                 ("Scoring: a CASE = one 15-min market x checkpoint. Within each case both "
-                  "models' per-asset picks are ranked by confidence (|P-0.5|); Top-1 = most "
-                  "confident. A rank is correct if that pick's side = official result. Each case "
-                  f"adds at most one result per rank (no double-count). Overall = ranks 1-{top_k}.")]
+        body: list[str] = [
+            "Shadow test · read-only · never trades",
+            "Picks ranked by confidence; #1 = most confident.",
+            "Correct = the pick's side matched the result.",
+        ]
 
-        # Latest-window example cases.
+        # Latest window — only ranks that actually had a pick (no empty dashes).
         win = self.ledger.latest_window_cases(model_version=mv, top_k=top_k)
         if win["close"]:
             when = time.strftime("%H:%M", time.gmtime(win["close"]))
-            ex = [f"Latest window (close {when} UTC)"]
+            body += ["", f"LAST WINDOW · {when} UTC"]
             for cp, picks in sorted(win["checkpoints"].items()):
-                ex.append(f"  {cp:<4}{'CHALLENGER':<15}{'NATIVE':<15}")
                 cps, nps = picks["challenger"], picks["native"]
-                for i in range(top_k):
-                    c = self._pick_str(cps[i]) if i < len(cps) else "-"
-                    n = self._pick_str(nps[i]) if i < len(nps) else "-"
-                    ex.append(f"  {('P'+str(i+1)):<4}{c:<15}{n:<15}")
-            lines += ["<pre>", "\n".join(ex), "</pre>"]
+                body.append(f"{cp:<4} {'Shadow':<13}{'Yours'}")
+                for i in range(max(len(cps), len(nps))):
+                    c = self._pick_str(cps[i]) if i < len(cps) else "".ljust(13)
+                    n = self._pick_str(nps[i]) if i < len(nps) else ""
+                    body.append(f" #{i+1}  {c}{n}".rstrip())
 
-        # Running per-rank totals.
-        tbl = [f"Running totals — {rk['n_cases']} cases",
-               f"{'':<6}{'CHALLENGER':>16}{'NATIVE':>18}",
-               f"{'Rank':<6}{'C':>5}{'W':>5}{'acc':>7}{'C':>7}{'W':>5}{'acc':>7}"]
+        # End-result calls at 15M & 10M, per asset — did both models call the
+        # final outcome right as the window counted down? (Y/N + right/wrong.)
+        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=("15M", "10M"))
+        if er["assets"]:
+            cps = list(er["checkpoints"])
+            w = len(cps) * 4
+            body += ["", "END-RESULT CALL · 15M & 10M",
+                     "(side Y/N · + right · - wrong)",
+                     f"{'':<5}{'Res':<4}{'Shadow':<{w}} {'Yours':<{w}}",
+                     f"{'':<5}{'':<4}" + "".join(f"{cp:<4}" for cp in cps)
+                     + " " + "".join(f"{cp:<4}" for cp in cps)]
+
+            def cell(entry) -> str:
+                if not entry:
+                    return "-".ljust(4)
+                side, hit = entry
+                return f"{side[0]}{'+' if hit else '-'}".ljust(4)
+
+            for a in er["assets"]:
+                res = a["official"][0]
+                sh = "".join(cell(a["checkpoints"].get(cp, {}).get("challenger")) for cp in cps)
+                nv_ = "".join(cell(a["checkpoints"].get(cp, {}).get("native")) for cp in cps)
+                body.append(f"{a['asset'][:4]:<5}{res:<4}{sh} {nv_}".rstrip())
+
+        # Running totals — hit (correct/total) + accuracy, both models side by side.
+        body += ["", f"TOTALS · {rk['n_cases']} cases",
+                 f"{'':<6}{'Shadow':>12}{'Yours':>14}",
+                 f"{'':<6}{'hit':>6}{'acc':>6}{'hit':>8}{'acc':>6}"]
+
         def row(label, cd, nd):
-            ca = "n/a" if cd["accuracy"] is None else f"{cd['accuracy']*100:.1f}%"
-            na = "n/a" if nd["accuracy"] is None else f"{nd['accuracy']*100:.1f}%"
-            return (f"{label:<6}{cd['correct']:>5}{cd['wrong']:>5}{ca:>7}"
-                    f"{nd['correct']:>7}{nd['wrong']:>5}{na:>7}")
-        for k in range(1, top_k + 1):
-            tbl.append(row(f"P{k}", ch[f"rank{k}"], nv[f"rank{k}"]))
-        tbl.append(row("TOTAL", ch["overall"], nv["overall"]))
-        lines += ["<pre>", "\n".join(tbl), "</pre>"]
+            ch_hit = f"{cd['correct']}/{cd['correct'] + cd['wrong']}"
+            nv_hit = f"{nd['correct']}/{nd['correct'] + nd['wrong']}"
+            return (f"{label:<6}{ch_hit:>6}{self._acc_pct(cd['accuracy']):>6}"
+                    f"{nv_hit:>8}{self._acc_pct(nd['accuracy']):>6}")
 
-        # Side-by-side verdict.
+        for k in range(1, top_k + 1):
+            body.append(row(f"Top-{k}", ch[f"rank{k}"], nv[f"rank{k}"]))
+        body.append(row("All", ch["overall"], nv["overall"]))
+
+        # Winner + learning state, in plain words.
         cacc, nacc = ch["overall"]["accuracy"], nv["overall"]["accuracy"]
         if cacc is None or nacc is None:
-            verdict = "insufficient data"
+            winner = "not enough data yet"
         elif cacc > nacc:
-            verdict = f"CHALLENGER better ({cacc*100:.1f}% vs {nacc*100:.1f}%)"
+            winner = f"Shadow ahead ({round(cacc*100)}% vs {round(nacc*100)}%)"
         elif nacc > cacc:
-            verdict = f"NATIVE better ({nacc*100:.1f}% vs {cacc*100:.1f}%)"
+            winner = f"Your system ahead ({round(nacc*100)}% vs {round(cacc*100)}%)"
         else:
-            verdict = f"TIE ({cacc*100:.1f}%)"
-        lines.append(f"Better overall: {verdict}")
-        trained = "yes" if self.info.get("fitted") else f"no ({self.info.get('reason','cold start')})"
-        lines.append(f"learning: {trained} · model={mv}")
-        return "\n".join(lines)
+            winner = f"tie ({round(cacc*100)}%)"
+        learning = ("on (training on its own results)" if self.info.get("fitted")
+                    else "warming up — need more settled cases")
+        body += ["", f"Winner: {winner}", f"Learning: {learning}"]
+
+        return (f"<b>{CHALLENGER_REPORT_MARKER} vs YOUR SYSTEM</b>\n"
+                f"<pre>{chr(10).join(body)}</pre>")
 
 
 # ---- module singleton (built only when enabled) ----

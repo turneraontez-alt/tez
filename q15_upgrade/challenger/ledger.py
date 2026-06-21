@@ -303,6 +303,57 @@ class ShadowLedger:
             }
         return out
 
+    def latest_window_end_results(self, model_version: str = "challenger-v1",
+                                  checkpoints: tuple[str, ...] = ("15M", "10M")) -> dict[str, Any]:
+        """For the most recent settled 15-min window, each model's END-RESULT call
+        per asset at the given checkpoints (default 15M & 10M).
+
+        A 15-min market settles once; each checkpoint is an independent decision
+        time predicting that SAME end result. For each asset we return the actual
+        result and, per checkpoint, each model's predicted side + whether it was
+        right — so you can see if both models called the final outcome correctly
+        as the window counted down. Windows are bucketed by the 15-min boundary so
+        all assets settling together are grouped, even if their close timestamps
+        differ by a few seconds.
+        """
+        rows = list(self._conn.execute(
+            "SELECT checkpoint, close_time, created_at, asset, challenger_prob_yes, "
+            "control_prob_yes, official_result FROM shadow_predictions "
+            "WHERE model_version=? AND official_result IS NOT NULL",
+            (model_version,),
+        ))
+        if not rows:
+            return {"close": None, "checkpoints": list(checkpoints), "assets": []}
+
+        def _window(r):
+            close = r["close_time"] if r["close_time"] is not None else r["created_at"]
+            return int(float(close) // 900)
+
+        latest = max(_window(r) for r in rows)
+        want = set(checkpoints)
+        by_asset: dict[str, dict] = {}
+        close_ts = None
+        for r in rows:
+            if _window(r) != latest or str(r["checkpoint"]) not in want:
+                continue
+            close_ts = r["close_time"] if r["close_time"] is not None else r["created_at"]
+            official = str(r["official_result"]).upper()
+            a = by_asset.setdefault(str(r["asset"]), {
+                "asset": str(r["asset"]), "official": official, "checkpoints": {}})
+
+            def _side_hit(prob, _official=official):
+                if prob is None:
+                    return None
+                side = "YES" if float(prob) >= 0.5 else "NO"
+                return (side, side == _official)
+
+            a["checkpoints"][str(r["checkpoint"])] = {
+                "challenger": _side_hit(r["challenger_prob_yes"]),
+                "native": _side_hit(r["control_prob_yes"]),
+            }
+        return {"close": close_ts, "checkpoints": list(checkpoints),
+                "assets": sorted(by_asset.values(), key=lambda x: x["asset"])}
+
     def comparison(self, model_version: str = "challenger-v1") -> dict[str, Any]:
         """Paired challenger-vs-control accuracy, overall and by checkpoint.
 

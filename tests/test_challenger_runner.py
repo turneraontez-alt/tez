@@ -53,7 +53,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("10M", cmp["by_checkpoint"])
         msg = r.report_message()
         self.assertIn("CHALLENGER SHADOW", msg)
-        self.assertIn("challenger", msg)
+        self.assertIn("Shadow", msg)
 
     def test_pending_report_set_on_new_window(self):
         tmp = tempfile.mkdtemp()
@@ -115,8 +115,25 @@ class RankedComparisonTest(unittest.TestCase):
         self.assertAlmostEqual(rk["native"]["overall"]["accuracy"], 1 / 3, places=3)
         # report renders with both models + verdict
         msg = r.report_message()
-        self.assertIn("ranked Top-3", msg)
-        self.assertIn("CHALLENGER better", msg)
+        self.assertIn("Top-1", msg)
+        self.assertIn("Shadow ahead", msg)
+
+    def test_end_result_section(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        # latest window: BTC settles YES, called right at both checkpoints by the
+        # shadow but missed at 15M by native.
+        self._insert(r, asset="BTC", checkpoint="15M", close=2000, chal=0.7, ctrl=0.45, official="YES")
+        self._insert(r, asset="BTC", checkpoint="10M", close=2000, chal=0.8, ctrl=0.62, official="YES")
+        er = r.ledger.latest_window_end_results(model_version="challenger-test")
+        self.assertEqual(len(er["assets"]), 1)
+        a = er["assets"][0]
+        self.assertEqual(a["official"], "YES")
+        self.assertEqual(a["checkpoints"]["15M"]["challenger"], ("YES", True))
+        self.assertEqual(a["checkpoints"]["15M"]["native"], ("NO", False))
+        self.assertEqual(a["checkpoints"]["10M"]["native"], ("YES", True))
+        msg = r.report_message()
+        self.assertIn("END-RESULT CALL", msg)
 
     def test_distinct_cases_by_checkpoint_and_window(self):
         tmp = tempfile.mkdtemp()

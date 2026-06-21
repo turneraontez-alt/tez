@@ -163,6 +163,11 @@ class TestHourlyReportScoreboard(unittest.TestCase):
                 "other": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
             },
             "rank_by_checkpoint": {
+                "15M": {
+                    "1": {"right": 3, "wrong": 0, "n": 3, "accuracy": 1.0},
+                    "2": {"right": 1, "wrong": 2, "n": 3, "accuracy": 0.333},
+                    "3": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
+                },
                 "10M": {
                     "1": {"right": 2, "wrong": 0, "n": 2, "accuracy": 1.0},
                     "2": {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5},
@@ -184,7 +189,11 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertIn("7M", text)
         self.assertIn("#1 pick", text)
         self.assertIn("67%", text)
-        # New: a 10M-specific rank section with its own header and the 10M #1 record.
+        # A 15M-specific rank section with its own header and the 15M #1 record.
+        self.assertIn("15M RANK PERFORMANCE", text)
+        rank15_block = text.split("15M RANK PERFORMANCE", 1)[1].split("10M RANK PERFORMANCE", 1)[0]
+        self.assertIn("3-0", rank15_block)  # 15M #1 went 3-0
+        # A 10M-specific rank section with its own header and the 10M #1 record.
         self.assertIn("10M RANK PERFORMANCE", text)
         rank_block = text.split("10M RANK PERFORMANCE", 1)[1]
         self.assertIn("100%", rank_block)  # 10M #1 went 2-0
