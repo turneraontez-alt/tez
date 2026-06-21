@@ -16,7 +16,7 @@ import os
 import statistics
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Sequence
 
@@ -260,8 +260,19 @@ class CanonicalSnapshot:
     data_quality: float
 
     def public_dict(self) -> dict[str, Any]:
-        value = asdict(self)
+        # Shallow field copy, NOT dataclasses.asdict(): asdict recursively
+        # deep-copies every field — including the ~600-row candle tuple and the
+        # full multi-exchange context/public dicts — on every analyse_v95 call
+        # (it dominated ~78% of analyse_v95 in profiling). The deep copy was also
+        # wasted on candles, which were immediately overwritten by list() below.
+        # A one-level copy is value-identical here (the result is JSON-serialised
+        # for the API and deep-copied downstream) and matches asdict's types.
+        value: dict[str, Any] = {f.name: getattr(self, f.name) for f in fields(self)}
         value["candles"] = list(self.candles)
+        value["context"] = dict(self.context)
+        value["public"] = dict(self.public)
+        value["feed_timestamps"] = dict(self.feed_timestamps)
+        value["feed_ages"] = dict(self.feed_ages)
         return value
 
 

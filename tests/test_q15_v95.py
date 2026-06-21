@@ -150,6 +150,27 @@ class V95Tests(unittest.TestCase):
         self.assertGreaterEqual(len(canonical.candles), 180)
         self.assertTrue(canonical.core_valid)
 
+    def test_public_dict_matches_asdict_value_without_deepcopy(self):
+        # public_dict() is the hot path inside analyse_v95 (built into every
+        # result's "canonical" key, ~600 candles + multi-source dicts). It must
+        # stay a shallow field copy, NOT dataclasses.asdict (which recursively
+        # deep-copies and dominated ~78% of analyse_v95). This locks both that
+        # the value still equals the asdict reference AND that it is cheap:
+        # nested containers are fresh (shallow) copies but the candle rows are
+        # shared references (no per-row deepcopy).
+        from dataclasses import asdict
+        canonical = self.canonical(cached=candles(180))
+        reference = asdict(canonical)
+        reference["candles"] = list(canonical.candles)
+        public = canonical.public_dict()
+        self.assertEqual(public, reference)
+        self.assertIsInstance(public["candles"], list)
+        self.assertIsInstance(public["core_errors"], tuple)
+        # Cheap copy: candle rows are shared, not deep-copied per row.
+        self.assertIs(public["candles"][0], canonical.candles[0])
+        # Top-level mutable containers are independent of the frozen dataclass.
+        self.assertIsNot(public["context"], canonical.context)
+
     def test_stale_core_fails_closed(self):
         row = snapshot()
         row["snapshot_time"] = NOW - 120
