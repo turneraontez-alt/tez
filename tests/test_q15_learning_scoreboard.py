@@ -256,6 +256,77 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertEqual(self._reporter(None)._scoreboard_table(), [])
 
 
+class _FakeFlipLedger:
+    """Ledger stub exposing only the two flip-report methods."""
+    def __init__(self, perf, stats):
+        self._perf, self._stats = perf, stats
+    def flip_warning_performance(self):
+        return self._perf
+    def flip_stats(self):
+        return self._stats
+
+
+class TestHourlyFlipScoreboard(unittest.TestCase):
+    def _reporter(self, ledger):
+        return reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=ledger)
+
+    def _perf(self):
+        agg = lambda alerts, correct, false, prec, det, act, miss, pnl: {
+            "alerts": alerts, "correct": correct, "false": false, "precision": prec,
+            "detected": det, "actual_flips": act, "missed": miss,
+            "detection_rate": (det / act if act else None), "avg_advance_seconds": 150,
+            "realized_total_cents": pnl,
+        }
+        return {
+            "overall": agg(3, 2, 1, 0.667, 2, 4, 2, 18),
+            "by_checkpoint": {"15M": agg(2, 1, 1, 0.5, 1, 2, 1, 8),
+                              "10M": agg(1, 1, 0, 1.0, 1, 2, 1, 10)},
+            "by_direction": {"NO → YES": agg(2, 2, 0, 1.0, 2, 3, 1, 16),
+                             "YES → NO": agg(1, 0, 1, 0.0, 0, 1, 1, 2)},
+            "by_asset": {"BTC": agg(3, 2, 1, 0.667, 2, 4, 2, 18)},
+            "by_score_bucket": {},
+        }
+
+    def _stats(self):
+        return {"available": True, "by_checkpoint": {"10M": {
+            "NO → YES": {"overall": {"samples": 12, "buckets": {
+                "40-60%": {"n": 6, "flip_rate": 0.33},
+                "60-80%": {"n": 5, "flip_rate": 0.6},
+            }}},
+            "YES → NO": {"overall": {"samples": 0, "buckets": {}}},
+        }}}
+
+    def test_flip_table_uses_interval_format(self):
+        text = "\n".join(self._reporter(_FakeFlipLedger(self._perf(), self._stats()))._flip_scoreboard())
+        # Same aligned grid as the intervals: a W-L/Acc/P-L header.
+        self.assertIn("FLIP WARNING PERFORMANCE", text)
+        self.assertIn("W-L", text)
+        self.assertIn("Acc", text)
+        # Rows by checkpoint (placeholder for the missing 7M), direction, asset.
+        self.assertIn("15M", text)
+        self.assertIn("7M", text)            # 0-0 placeholder
+        self.assertIn("BY DIRECTION", text)
+        self.assertIn("NO→YES", text)
+        self.assertIn("BY ASSET", text)
+        self.assertIn("BTC", text)
+        # Precision renders as the Acc column (10M went 1-0 = 100%).
+        self.assertIn("100%", text)
+        # Learned flip-rate curve carried through as its own mini-table.
+        self.assertIn("LEARNED FLIP RATE", text)
+
+    def test_flip_table_empty_until_warned(self):
+        empty = {"overall": {"alerts": 0}, "by_checkpoint": {}, "by_direction": {}, "by_asset": {}}
+        out = self._reporter(_FakeFlipLedger(empty, {"available": False}))._flip_scoreboard()
+        self.assertEqual(out, [])
+
+    def test_flip_table_safe_without_methods(self):
+        # build_report's fake ledger may lack the flip methods entirely.
+        class _Bare:
+            def scoreboard(self):
+                return {"available": True, "overall": {"n": 0}, "by_checkpoint": {}, "by_rank": {}}
+        self.assertEqual(self._reporter(_Bare())._flip_scoreboard(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
