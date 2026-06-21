@@ -65,9 +65,12 @@ G. **NO-ENTRY checkpoints muted entirely** (`Q15_V95_SEND_ONLY_ON_ENTRY`, defaul
    alert level (hard-mutes the "multiple NO ENTRY per interval" the owner saw).
    Flip / follow-up alerts are separate and unaffected; the dashboard still shows
    everything. ⚠️ If symptoms persist after a Repl restart, suspect the **GitHub
-   Relay is PAUSED on a conflict** (e.g. the tracked `health_snapshot.json`, which
-   the Repl regenerates, vs `main`) so the Repl never received the merged code —
+   Relay is PAUSED on a conflict** so the Repl never received the merged code —
    check the *GitHub Relay* console and `python3 tools/github_reconcile.py`.
+H. **`health_snapshot.json` untracked + git-ignored** — it's a generated file the
+   Repl rewrites, so tracking it made the relay conflict on every sync and stall
+   deploys. Removed from the repo (local/Repl copy kept). If a future session sees
+   it reappear tracked, re-ignore it.
 
 ## ✅ Shipped THIS session — part 1 (branch `claude/read-handoff-ipxm5a`, MERGED to `main`)
 **Not yet deployed — needs a Repl reboot to take effect.** Order of work:
