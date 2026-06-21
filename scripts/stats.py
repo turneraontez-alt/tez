@@ -65,6 +65,62 @@ def _print_official(board: Mapping[str, Any]) -> None:
     print(f"  MANIP  {_wl(board.get('manipulation'))}")
 
 
+def _acc(value: Any) -> str:
+    try:
+        return "—" if value is None else f"{float(value) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _print_challenger(ledger: Any) -> None:
+    """CHALLENGER learning, two layers, read-only:
+      1) the shadow MODEL vs your current system (the 'Shadow vs Yours' package);
+      2) the ledger's online champion-vs-challenger WEIGHT learning.
+    Degrades gracefully when the challenger DB / shadow rows aren't there yet."""
+    print("CHALLENGER — shadow model vs your system (read-only)")
+    try:
+        from q15_upgrade.challenger.config import ChallengerConfig
+        cfg = ChallengerConfig()
+        if not os.path.exists(cfg.db_path):
+            print(f"  shadow model: no challenger DB yet ({cfg.db_path}) — "
+                  "enable with Q15_CHALLENGER_ENABLED=true")
+        else:
+            from q15_upgrade.challenger.ledger import ShadowLedger
+            sl = ShadowLedger(cfg.db_path)
+            cmp = sl.comparison(model_version=cfg.model_version,
+                                native_sent_only=cfg.native_sent_only)
+            ov = cmp.get("overall", {})
+            print(f"  model_version={cfg.model_version} · paired settled cases: {ov.get('n', 0)}")
+            print(f"  accuracy  challenger {_acc(ov.get('challenger_accuracy'))}  "
+                  f"vs your system {_acc(ov.get('current_accuracy'))}")
+            for cp in ("15M", "10M", "7M"):
+                b = (cmp.get("by_checkpoint") or {}).get(cp)
+                if b:
+                    print(f"    {cp:<4} challenger {_acc(b.get('challenger_accuracy'))}  "
+                          f"vs yours {_acc(b.get('current_accuracy'))}  (n={b.get('n', 0)})")
+            rk = sl.ranked_comparison(model_version=cfg.model_version,
+                                      native_sent_only=cfg.native_sent_only)
+            ch, na = rk.get("challenger", {}).get("overall", {}), rk.get("native", {}).get("overall", {})
+            print(f"  ranked W/L  challenger {ch.get('correct', 0)}W-{ch.get('wrong', 0)}L "
+                  f"{_acc(ch.get('accuracy'))}  ·  yours {na.get('correct', 0)}W-{na.get('wrong', 0)}L "
+                  f"{_acc(na.get('accuracy'))}  ({rk.get('n_cases', 0)} cases)")
+    except Exception as exc:  # never let the stats command die on the challenger
+        print(f"  shadow model: unavailable ({type(exc).__name__}: {exc})")
+    # Online weight learning (always available from the V9.5 ledger status).
+    st = ledger.status() if hasattr(ledger, "status") else {}
+    if st.get("available"):
+        applied = st.get("shadow_updates_applied")
+        by_cp = st.get("shadow_updates_by_checkpoint") or {}
+        regimes = st.get("regime_challengers") or []
+        active = sum(1 for r in regimes if r.get("active"))
+        print("  online weights (champion frozen; challenger weights learn in shadow):")
+        print(f"    shadow updates applied: {applied} "
+              f"(by checkpoint: {', '.join(f'{k}={v}' for k, v in by_cp.items()) or '—'})")
+        print(f"    regime challengers: {active}/{len(regimes)} active "
+              f"(≥{st.get('minimum_regime_updates','?')} updates to activate)")
+    print("  full out-of-sample verdict: python3 scripts/challenger_eval.py")
+
+
 def _print_status(status: Mapping[str, Any]) -> None:
     print("LEDGER STATUS")
     if not status.get("available"):
@@ -108,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     _print_status(ledger.status())
     print("-" * 64)
     _print_official(ledger.official_scoreboard())
+    print("-" * 64)
+    _print_challenger(ledger)
     print("-" * 64)
     rows = ledger.resolved_factor_rows(args.checkpoint)
     report = factor_lab.analyze(

@@ -26,7 +26,7 @@ delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
 ## ✅ Shipped THIS session — "updated review" robustness/observability fixes (branch claude/updated-review-99rj6l)
-**On the branch, deploy-pending. NOT merged to main (session pinned to this branch).** Implemented
+**Merged to main, deploy-pending.** Implemented
 every item from the fresh code review, all read-only + backward-compatible (no schema changes):
 - **Loop can't be frozen by a feed hint:** `market_data.subscribe()` in `app.py` is now wrapped in
   try/except (logs + continues on REST) — previously the one call that could halt the cycle.
@@ -49,6 +49,17 @@ every item from the fresh code review, all read-only + backward-compatible (no s
 - **Tests:** new `tests/test_review_fixes_v2.py` (13 tests) + the app-loop subscribe-guard exercised
   through the real `refresh_loop`. Full suite **876 passed, 4 skipped** (complete env w/ flask +
   websockets; bare-container skip count is higher). App imports clean and serves `/api/health` 200.
+
+## ✅ Shipped THIS session — challenger learning view in the stats command
+**On the branch, deploy-pending.** Owner asked how to check the CHALLENGER's learning.
+`scripts/stats.py` now prints a CHALLENGER section: (1) the shadow MODEL vs your system —
+challenger vs current accuracy overall + per interval and the ranked W/L (from the
+`q15_upgrade/challenger` package's `ShadowLedger.comparison`/`ranked_comparison`, keyed on the
+configured `model_version`); and (2) the ledger's online champion-vs-challenger WEIGHT learning
+(`shadow_updates_applied`, per-checkpoint, regime challengers active). Read-only, try/except-
+guarded (never crashes the command), degrades to a hint when no challenger DB exists. Points to
+`scripts/challenger_eval.py` for the full out-of-sample verdict. Test in test_q15_stats_cli.py.
+Full suite **863 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session — factor-lab combinations broken down by interval
 **On the branch, deploy-pending.** Owner wanted to see whether the strongest agreeing factor
