@@ -82,18 +82,33 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session — Read-only learning-progress report tool
-**On branch `claude/updated-review-2x7wyr`.** `tools/learning_progress.py` dumps the live state of
-every learning subsystem in one shot — run it **on the Repl** (where the live SQLite ledgers are):
-`python3 tools/learning_progress.py` (human) or `--json`. It opens the production v95 ledger and the
-Shadow-vs-Yours challenger ledger directly and calls the SAME builders the `/api/q15-v9-5/*` endpoints
-use (scoreboard, calibration/metrics, accuracy, shadow-signal A/B, ranked comparison, native delivery
-audit). Strictly read-only — never writes, skips an absent store instead of creating an empty one.
-Tests: `tests/test_learning_progress.py` (3). Suite **940 passed, 4 skipped**.
+## ✅ Shipped THIS session — END-RESULT grid "tries its best on each one" (no needless blanks)
+Owner: don't leave empty slots — fill every interval/rank with the best real data available.
+- **Root cause of blanks:** the grid fed from `latest_window_cases`, which forces ALL three intervals
+  to share one global `max(window_id)`. If 10M/7M's latest settled window was older than 15M's they were
+  dropped entirely; and #2/#3 were blank whenever the single chosen window had <3 settled assets.
+- **Fix — per-interval best-filled window:** new `ShadowLedger.best_filled_window_cases` resolves EACH
+  checkpoint independently, choosing the most recent settled window that has ≥ top_k graded picks (else
+  the fullest, newest-on-tie). The END-RESULT CALL now fills 10M/7M from their own latest windows and
+  fills #1/#2/#3 from a fuller recent window when the just-closed one is sparse. Each interval row is
+  labelled with its own window time (they can differ). A slot reads — ONLY when that interval/rank has
+  no settled pick at all (e.g. 7M right after the v5 reset) — it fills as data accrues. Honest: every
+  shown pick is real and graded against its own window's result; nothing is fabricated.
+- **Tests:** `test_end_result_grid_fills_each_interval_from_its_own_window`,
+  `test_end_result_grid_prefers_fuller_window_to_fill_ranks` (+ existing grid test). `latest_window_cases`
+  still powers the strict LAST WINDOW section (unchanged). Suite: **920 passed, 13 skipped**.
+
+## ✅ Shipped THIS session — Read-only learning-progress report tool (merged from `claude/updated-review-2x7wyr`)
+`tools/learning_progress.py` dumps the live state of every learning subsystem in one shot — run it **on
+the Repl** (where the live SQLite ledgers are): `python3 tools/learning_progress.py` (human) or `--json`.
+It opens the production v95 ledger and the Shadow-vs-Yours challenger ledger directly and calls the SAME
+builders the `/api/q15-v9-5/*` endpoints use (scoreboard, calibration/metrics, accuracy, shadow-signal
+A/B, ranked comparison, native delivery audit). Strictly read-only — never writes, skips an absent store
+instead of creating an empty one. Tests: `tests/test_learning_progress.py`.
 - Note: in a fresh web clone the committed DBs are a post-reset SEED (14 v95 preds, 0 resolved, 0
   weight updates; shadow DB not committed) — real numbers appear when run on the Repl.
 
-## ✅ Shipped — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
+## ✅ Shipped earlier THIS session — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner: the END-RESULT CALL didn't fill #2/#3 (15M) or any rank at 10M/7M, and wanted the comparison reset.
 - **END-RESULT CALL is now a ranked #1/#2/#3 grid across ALL three intervals** (`challenger/runner.py`),
   Shadow vs Your System, graded ✓/✗, built from `latest_window_cases` (same data as LAST WINDOW). Every

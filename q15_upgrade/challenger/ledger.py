@@ -611,6 +611,41 @@ class ShadowLedger:
             }
         return out
 
+    def best_filled_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3,
+                                 native_sent_only: bool = True) -> dict[str, Any]:
+        """Per-checkpoint ranked top-k picks (both models) from the settled window
+        that best FILLS the ranks — so the END-RESULT grid 'tries its best' on every
+        interval/rank instead of leaving slots blank.
+
+        Each checkpoint is resolved INDEPENDENTLY (it is its own decision time), so a
+        sparse just-closed 15M window no longer drops 10M/7M whose latest settled
+        window is a little older. For each checkpoint we pick the MOST RECENT settled
+        window that has at least ``top_k`` graded picks; if none in its history reaches
+        ``top_k``, we fall back to the window with the most picks (ties → most recent),
+        so we still show as many real, graded ranks as exist. A checkpoint with no
+        settled window at all is simply absent (the renderer shows — for it). Returns
+        ``{"checkpoints": {cp: {"close", "challenger", "native"}}}``; ``close`` is that
+        checkpoint's own 15-min boundary so the row can be labelled with its window."""
+        cases = self._resolved_cases(model_version)  # {(cp, wid): rows}
+        by_cp: dict[str, list[tuple[int, list]]] = {}
+        for (cp, wid), rows in cases.items():
+            by_cp.setdefault(str(cp), []).append((int(wid), rows))
+        out: dict[str, Any] = {"checkpoints": {}}
+        for cp, windows in by_cp.items():
+            windows.sort(key=lambda x: x[0], reverse=True)  # newest window first
+            chosen = next((w for w in windows if len(w[1]) >= top_k), None)
+            if chosen is None:
+                # No window reaches top_k picks: take the fullest, newest on a tie.
+                chosen = max(windows, key=lambda x: (len(x[1]), x[0]))
+            wid, rows = chosen
+            out["checkpoints"][cp] = {
+                "close": float(wid) * WINDOW_SECONDS,
+                "challenger": self._rank(rows, "challenger_prob_yes")[:top_k],
+                "native": self._rank(rows, "control_prob_yes",
+                                     sent_only=bool(native_sent_only))[:top_k],
+            }
+        return out
+
     def latest_window_end_results(self, model_version: str = "challenger-v1",
                                   checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS,
                                   native_sent_only: bool = True) -> dict[str, Any]:
