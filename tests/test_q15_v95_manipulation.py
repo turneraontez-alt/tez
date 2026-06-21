@@ -19,6 +19,10 @@ sys.path.insert(0, ROOT)
 from q15_upgrade.checkpoint_v95 import (
     _manipulation_signal,
     _manipulation_phrase,
+    _manipulation_score,
+    _manipulation_divergence_threshold_bps,
+    _collect_manipulation_tells,
+    _panel_manipulation,
     apply_v95_policy,
     build_v95_message,
 )
@@ -166,6 +170,186 @@ class TestScoreboardBreakdown(unittest.TestCase):
         # A row with two reasons counts under each tell.
         self.assertEqual(bm["by_reason"]["ABSORPTION"]["n"], 2)
         self.assertEqual(bm["by_reason"]["PIN"]["n"], 1)
+
+
+class TestManipulationScoreFormula(unittest.TestCase):
+    """The 0..1 score = fraction-of-tells + absorption bonus, capped at 1.0."""
+
+    def test_no_tells_scores_zero(self):
+        self.assertEqual(_manipulation_score([]), 0.0)
+
+    def test_pin_only_is_one_third(self):
+        self.assertEqual(_manipulation_score(["PIN"]), round(1 / 3.0, 4))
+
+    def test_absorption_only_adds_bonus(self):
+        # 1/3 + 0.34 = 0.6733...
+        self.assertEqual(_manipulation_score(["ABSORPTION"]), 0.6733)
+
+    def test_two_non_absorption_tells(self):
+        self.assertEqual(_manipulation_score(["PIN", "DIVERGENCE"]), 0.6667)
+
+    def test_score_is_capped_at_one(self):
+        # 3/3 + 0.34 = 1.34 -> capped to 1.0.
+        self.assertEqual(_manipulation_score(["ABSORPTION", "PIN", "DIVERGENCE"]), 1.0)
+        # ABSORPTION + PIN = 2/3 + 0.34 = 1.0067 -> capped to 1.0.
+        self.assertEqual(_manipulation_score(["ABSORPTION", "PIN"]), 1.0)
+
+    def test_score_deterministic_and_pure(self):
+        # Same input -> same output, no dependence on call order or state.
+        first = _manipulation_score(["DIVERGENCE"])
+        _ = _manipulation_score(["ABSORPTION", "PIN"])
+        self.assertEqual(_manipulation_score(["DIVERGENCE"]), first)
+
+
+class TestDivergenceThreshold(unittest.TestCase):
+    """Threshold boundary, Coinbase/OKX disagreement, and asset-specific config."""
+
+    def tearDown(self):
+        for k in list(os.environ):
+            if k.startswith("Q15_V95_MANIPULATION_DIVERGENCE_BPS"):
+                os.environ.pop(k, None)
+
+    def test_default_band_is_35_bps(self):
+        self.assertEqual(_manipulation_divergence_threshold_bps(None), 35.0)
+        self.assertEqual(_manipulation_divergence_threshold_bps("BTC"), 35.0)
+
+    def test_at_threshold_flags_just_below_does_not(self):
+        # Exact boundary (>=) flags; one bps below does not.
+        at = _manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": 35.0})
+        below = _manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": 34.999})
+        self.assertTrue(at["suspected"])
+        self.assertFalse(below["suspected"])
+
+    def test_coinbase_okx_disagreement_flags_divergence(self):
+        # A wide cross-venue spread is the DIVERGENCE tell.
+        sig = _manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": 80.0})
+        self.assertEqual(sig["reasons"], ["DIVERGENCE"])
+
+    def test_per_asset_override_widens_band(self):
+        os.environ["Q15_V95_MANIPULATION_DIVERGENCE_BPS_DOGE"] = "100"
+        self.assertEqual(_manipulation_divergence_threshold_bps("DOGE"), 100.0)
+        # BTC (no override) keeps the global default.
+        self.assertEqual(_manipulation_divergence_threshold_bps("BTC"), 35.0)
+        # 80 bps flags BTC but NOT DOGE (its band is 100).
+        self.assertTrue(_manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": 80}, asset="BTC")["suspected"])
+        self.assertFalse(_manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": 80}, asset="DOGE")["suspected"])
+
+    def test_per_asset_override_is_case_insensitive(self):
+        os.environ["Q15_V95_MANIPULATION_DIVERGENCE_BPS_DOGE"] = "100"
+        self.assertEqual(_manipulation_divergence_threshold_bps("doge"), 100.0)
+
+    def test_global_override_applies_when_no_asset_override(self):
+        os.environ["Q15_V95_MANIPULATION_DIVERGENCE_BPS"] = "50"
+        self.assertEqual(_manipulation_divergence_threshold_bps("ETH"), 50.0)
+
+
+class TestManipulationEdgeCases(unittest.TestCase):
+    """Missing/stale data, extreme moves, malformed inputs, duplicate calls."""
+
+    def test_missing_price_data_is_clean(self):
+        # No absorption, empty exchange, benign regime -> nothing flagged.
+        sig = _manipulation_signal({"name": "NORMAL"}, {"available": False}, {})
+        self.assertFalse(sig["suspected"])
+        self.assertEqual(sig, {"suspected": False, "reasons": [], "lean": None, "score": 0.0})
+
+    def test_none_inputs_do_not_crash(self):
+        sig = _manipulation_signal(None, None, None)
+        self.assertFalse(sig["suspected"])
+
+    def test_non_numeric_divergence_treated_as_zero(self):
+        # Stale/garbage feed value must not flag and must not raise.
+        sig = _manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": "n/a"})
+        self.assertFalse(sig["suspected"])
+
+    def test_negative_divergence_does_not_flag(self):
+        sig = _manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": -120.0})
+        self.assertFalse(sig["suspected"])
+
+    def test_extreme_divergence_caps_score(self):
+        sig = _manipulation_signal({"name": "NORMAL"}, {}, {"divergence_bps": 1_000_000.0})
+        self.assertTrue(sig["suspected"])
+        self.assertEqual(sig["reasons"], ["DIVERGENCE"])
+        self.assertLessEqual(sig["score"], 1.0)
+
+    def test_absorbed_but_not_available_is_ignored(self):
+        # absorbed without available must not flag (guards malformed details).
+        sig = _manipulation_signal({"name": "NORMAL"}, {"available": False, "absorbed": True}, {})
+        self.assertFalse(sig["suspected"])
+
+    def test_duplicate_calls_are_stable(self):
+        regime = {"name": "THRESHOLD_PIN"}
+        absorb = _absorbed(0.6)
+        exch = {"divergence_bps": 50}
+        outputs = [_manipulation_signal(regime, absorb, exch) for _ in range(5)]
+        self.assertTrue(all(o == outputs[0] for o in outputs))
+
+    def test_input_mappings_not_mutated(self):
+        regime = {"name": "THRESHOLD_PIN"}
+        absorb = _absorbed(0.6)
+        exch = {"divergence_bps": 50}
+        snap = (dict(regime), dict(absorb), dict(exch))
+        _manipulation_signal(regime, absorb, exch)
+        self.assertEqual((regime, absorb, exch), snap)
+
+
+class TestCollectTells(unittest.TestCase):
+    """Tell ordering and the absorption directional lean."""
+
+    def test_tells_returned_in_fixed_order(self):
+        tells, lean = _collect_manipulation_tells(
+            "THRESHOLD_PIN", _absorbed(0.6), {"divergence_bps": 99}, 35.0)
+        self.assertEqual(tells, ["ABSORPTION", "PIN", "DIVERGENCE"])
+        self.assertEqual(lean, "NO")
+
+    def test_lean_only_from_absorption(self):
+        tells, lean = _collect_manipulation_tells("THRESHOLD_PIN", {"available": False}, {}, 35.0)
+        self.assertEqual(tells, ["PIN"])
+        self.assertIsNone(lean)
+
+
+class TestPanelUnitScaling(unittest.TestCase):
+    """The panel risk number must be 0..100 whether it comes from flip-risk or
+    the manipulation-score fallback (regression for the prior unit mismatch)."""
+
+    def test_flip_risk_score_used_directly(self):
+        analysis = {
+            "flip_risk": {"score": 72.0, "primary_reason": "order-book imbalance"},
+            "manipulation": {"suspected": True, "reasons": ["ABSORPTION"], "lean": "NO", "score": 0.67},
+        }
+        panel = _panel_manipulation(analysis)
+        self.assertEqual(panel["risk"], 72.0)
+        self.assertEqual(panel["level"], "HIGH")
+
+    def test_manipulation_fallback_rescaled_to_0_100(self):
+        # No flip-risk score -> fall back to manip score (0..1) rescaled to 0..100.
+        analysis = {
+            "manipulation": {"suspected": True, "reasons": ["ABSORPTION"], "lean": "NO", "score": 0.67},
+        }
+        panel = _panel_manipulation(analysis)
+        self.assertEqual(panel["risk"], 67.0)        # not 0.67
+        self.assertEqual(panel["level"], "HIGH")     # 67 >= 60
+
+    def test_low_manipulation_fallback_level(self):
+        analysis = {
+            "manipulation": {"suspected": True, "reasons": ["PIN"], "lean": None, "score": 0.3333},
+        }
+        panel = _panel_manipulation(analysis)
+        self.assertEqual(panel["risk"], round(0.3333 * 100.0, 4))
+        self.assertEqual(panel["level"], "LOW")      # 33.33 < 35
+
+    def test_nothing_flagged_returns_none(self):
+        analysis = {"manipulation": {"suspected": False, "reasons": [], "lean": None, "score": 0.0}}
+        self.assertIsNone(_panel_manipulation(analysis))
+
+
+class TestTrackingDisabledScore(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("Q15_V95_MANIPULATION_TRACKING", None)
+
+    def test_disabled_returns_clean_zero_score(self):
+        os.environ["Q15_V95_MANIPULATION_TRACKING"] = "0"
+        sig = _manipulation_signal({"name": "THRESHOLD_PIN"}, _absorbed(0.6), {"divergence_bps": 99})
+        self.assertEqual(sig, {"suspected": False, "reasons": [], "lean": None, "score": 0.0})
 
 
 if __name__ == "__main__":
