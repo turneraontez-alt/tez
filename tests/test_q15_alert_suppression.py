@@ -7,8 +7,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-import notifier as notifier_mod
-from notifier import TelegramNotifier, should_suppress_alert
+import telegram.notifier as notifier_mod
+from telegram.notifier import TelegramNotifier, should_suppress_alert
 
 
 # Final, rendered headers exactly as the user sees them in Telegram.

@@ -6,7 +6,7 @@ recap is the single close-out (per-interval hit/miss + flips + running totals).
 """
 import unittest
 
-from q15_upgrade import panels_v95 as P
+from telegram import panels_v95 as P
 
 
 class CheckpointPanelTest(unittest.TestCase):

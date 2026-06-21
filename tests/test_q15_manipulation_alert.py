@@ -7,7 +7,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-from q15_upgrade.manipulation_alert import (
+from telegram.manipulation_alert import (
     ManipCandidate, NormalCheck, qualifies, build_combined_alert, ALERT_MARKER,
 )
 

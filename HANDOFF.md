@@ -25,6 +25,25 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — consolidated all pure Telegram code into a `telegram/` package
+**On the branch, deploy-pending.** Owner: put all Telegram-notification files in one folder.
+Moved the PURE delivery/formatting modules into a new top-level `telegram/` package (history
+preserved via `git mv`): `notifier.py`, `reporting.py`, `alert_config.py` (from root) and
+`panels_v95.py`, `manipulation_alert.py`, `outbox_v9.py` (from `q15_upgrade/`).
+
+- **Import sites updated**: `app.py` (4), `q15_upgrade/checkpoint_v95.py` (2:
+  `from telegram import panels_v95 / manipulation_alert`), and ~10 test files. `telegram/__init__.py`
+  is intentionally import-light (no eager submodule imports) so the notifier ⇄ checkpoint_v95
+  formatter chain has no circular-import hazard. `telegram/` resolves to the local package
+  (repo talks to Telegram via raw `requests`; no third-party `telegram` lib in requirements).
+- **Left in place (documented):** the frozen `format_telegram_message` reformatter chain in
+  `q15_upgrade/checkpoint_v9{1..5}.py` (formatting welded into frozen decision code — can't move
+  without editing frozen files); and the hourly-report builders `q15_upgrade/{setup_miner,
+  shadow_economics,accuracy_report}.py` (learning/analysis modules with a report method, not pure
+  Telegram). `professional_v7`/`calibrated_edge` reformatters also stay (mixed with their engines).
+- **Docs**: `CLAUDE.md` + `README.md` updated to the new layout. Full suite **861 passed,
+  4 skipped**; `import app` + refresh loop start clean.
+
 ## ✅ Shipped THIS session — fix duplicate report every ~minute (don't unlock on send FAILURE) + min-gap backstop
 **On the branch, deploy-pending.** Owner clarified: SINGLE deployment, one report arriving
 roughly every minute — a resend loop, not multiple instances. **Root cause:**

@@ -12,7 +12,7 @@ sys.path.insert(0, ROOT)
 
 from q15_upgrade.ledger_v95 import V95Ledger, TRACKED_CHECKPOINTS
 from q15_upgrade.checkpoint_v94_unified import _detect_checkpoint
-import reporting
+import telegram.reporting as reporting
 
 
 def _mk_ledger():
