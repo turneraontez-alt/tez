@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **691 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **702 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -124,6 +124,35 @@ as a SHADOW model, built to be promoted to primary with one switch.
   compact `END-RESULT CALL · 15M & 10M` block (`Res` col + `Y+/N-` cells, + right /
   - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
   (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — gated manipulation alerts
+**Detection unchanged; only NOTIFICATIONS are restricted.** New module
+`q15_upgrade/manipulation_alert.py` + wiring in `checkpoint_v95.run_cycle`. The
+flip-risk / manipulation overlay keeps running every cycle; a manipulation alert
+is now PUSHED to Telegram only when ALL three owner conditions hold:
+1. **High probability** the manipulation actually occurs — gated on the learned
+   flip hit-rate (Wilson lower bound) `>= Q15_V95_MANIPULATION_ALERT_MIN_PROBABILITY`
+   (default 0.70). No learned data ⇒ no alert (conservative, "ignore unconfirmed").
+2. **Normal check delivered first** — the interval's compact-panel `V9.5 CHECK`
+   must have actually reached the owner (`delivered`, not muted/failed). Recorded
+   in `_send_compact_panel` into `self._normal_check[checkpoint]`. Muted/failed
+   normal check ⇒ no manipulation alert for that interval.
+3. **Recommendation changed** — the manipulation analysis must recommend a
+   different side / entry / exit / action than the normal check did.
+Low-probability / low-confidence / unchanged / repetitive findings are dropped
+(dedup set keyed `(ticker, checkpoint, new_side)`); all qualifying findings for an
+interval are **combined into ONE concise alert** carrying the six required fields
+(probability, confidence, what changed, original rec, new rec, evidence, interval).
+- **Flow:** `_process_flip_risk` collects candidates each cycle (read-only, no send,
+  no state mutation); after `_send_compact_panel`, `_dispatch_manipulation_alerts`
+  applies the gate and sends at most one combined alert. Runs AFTER the normal
+  check by construction. Did NOT re-enable the legacy HIGH FLIP RISK / CONFIRMED
+  FLIP Telegram UIs (still off).
+- **Flags** (`.env.example`): `Q15_V95_MANIPULATION_ALERTS_ENABLED` (default true,
+  but heavily gated), `..._MIN_PROBABILITY` (0.70), `..._MIN_CONFIDENCE` (40).
+- **Tests:** `tests/test_q15_manipulation_alert.py` (10) — gate conditions, message
+  content (all six fields), and manager glue (no-send-without-normal-check, single
+  combined send, dedup, interval filtering). Suite: **702 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap

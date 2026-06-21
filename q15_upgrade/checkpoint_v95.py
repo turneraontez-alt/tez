@@ -51,6 +51,7 @@ from .checkpoint_v94_unified import (
     format_telegram_message as _format_v94_message,
 )
 from . import flip_risk
+from . import manipulation_alert
 from . import panels_v95
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
@@ -1752,6 +1753,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         # by the alert state machine. And a dedup set for confirmed-flip notices.
         self._flip_alert_state: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._flip_confirmed_sent: set[tuple[str, str, str]] = set()
+        # Gated manipulation-alert notification policy: detection always runs; a
+        # manipulation alert is only PUSHED after the interval's normal check was
+        # delivered AND the later analysis recommends a different action (see
+        # manipulation_alert). Per-cycle candidate buffer, the last delivered
+        # normal check per interval, and a dedup set of already-sent findings.
+        self._manip_candidates: list[Any] = []
+        self._normal_check: dict[str, Any] = {}
+        self._manip_alert_sent: set[tuple[str, str, str]] = set()
         self._last_reconcile: dict[str, Any] = {}
         self._last_market_reconcile: dict[str, Any] = {}
         self._run_cycle_timing: dict[str, Any] = {}
@@ -1840,6 +1849,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # threshold/flip-probability resolution.
             flip_learned = self.ledger.flip_stats() if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True) else {"available": False}
             flip_sent = flip_failed = 0
+            self._manip_candidates = []  # rebuilt every cycle by _process_flip_risk
             _s_record = time.monotonic()
             # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
             # persisted with it, enabling per-rank accuracy tracking.
@@ -2030,6 +2040,12 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         self._telegram_suppressed_v95 += 1
                 elif slot_locked or not consistent or no_entry_muted:
                     self._telegram_suppressed_v95 += 1
+            # Manipulation alerts: only AFTER the normal check above was delivered,
+            # only on high-probability findings that change its recommendation, and
+            # combined into one concise alert. Detection ran all cycle regardless.
+            ma_sent, ma_failed = self._dispatch_manipulation_alerts(checkpoint, notifier, now)
+            flip_sent += ma_sent
+            flip_failed += ma_failed
             # End-of-cycle recap: one close-out per contract that just settled.
             rc_sent, rc_failed = self._send_cycle_recaps(result_events, notifier, now)
             sent += rc_sent
@@ -2223,6 +2239,16 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         delivered = bool(result.get("delivered"))
         self.ledger.complete_notification(event_key=permit_key, success=handled, now=now)
 
+        # Record what the normal/base check for this interval recommended and whether
+        # it actually reached the owner. A manipulation alert is only allowed AFTER a
+        # delivered normal check (gate condition 2); a muted/failed send leaves
+        # delivered=False so no manipulation alert rides ahead of it.
+        self._normal_check[str(checkpoint)] = manipulation_alert.NormalCheck(
+            checkpoint=str(checkpoint), delivered=delivered, asset=asset,
+            side=analysis.get("prediction_side"),
+            action=str(analysis.get("trade_decision") or "") or None, at=now,
+        )
+
         if delivered and ticker:
             mid = result.get("message_id")
             decision = str(analysis.get("trade_decision") or "")
@@ -2366,6 +2392,29 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             flip_prob_lower=flip_prob_lower, flip_samples=flip_samples,
         )
 
+        # Gated manipulation-alert candidate (read-only): detection always runs;
+        # the actual SEND is decided after the normal check, by the policy gate in
+        # _dispatch_manipulation_alerts. We collect a candidate only when the risk
+        # is at/above its learned threshold with confirming evidence; the
+        # probability + confidence + "recommendation changed" + dedup gates are all
+        # applied later so this never sends on its own.
+        if (_env_bool("Q15_V95_MANIPULATION_ALERTS_ENABLED", True)
+                and side in ("YES", "NO")
+                and ra.score >= threshold.threshold
+                and len(ra.evidence_categories) >= 1):
+            new_side = "NO" if side == "YES" else "YES"
+            orig_action = str(analysis.get("trade_decision") or "") or None
+            new_action = ("stand down — do not enter (manipulation flip risk)"
+                          if orig_action == "ENTRY_RECOMMENDED"
+                          else f"outcome may settle {new_side}")
+            self._manip_candidates.append(manipulation_alert.ManipCandidate(
+                asset=str(asset), checkpoint=str(checkpoint), ticker=str(ticker),
+                probability=flip_prob_lower, confidence=ra.confidence,
+                evidence=[flip_risk.CATEGORY_LABELS.get(c, c) for c in ra.evidence_categories],
+                original_side=side, original_action=orig_action,
+                new_side=new_side, new_action=new_action,
+            ))
+
         sent = failed = 0
         # Confirmed flip: a later frozen checkpoint side differs from the earlier
         # one for this contract — factual. Owner removed this Telegram alert UI, so
@@ -2409,6 +2458,50 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     risk_score=ra.score, flip_probability=flip_prob, confidence=ra.confidence, now=now,
                 )
         return sent, failed
+
+    def _dispatch_manipulation_alerts(self, checkpoint: str, notifier: Any,
+                                      now: float) -> tuple[int, int]:
+        """Apply the manipulation-alert policy and send at most ONE combined alert
+        for the interval. Detection already ran (candidates were collected this
+        cycle in _process_flip_risk); here we only decide what is pushed:
+
+          1. high probability the manipulation actually occurs;
+          2. the interval's normal check was already delivered;
+          3. the finding recommends a DIFFERENT side / action than the normal check.
+
+        Repetitive / unchanged / low-probability findings are dropped; everything
+        that qualifies is combined into a single concise alert. Returns (sent,
+        failed)."""
+        candidates = list(getattr(self, "_manip_candidates", []))
+        if not candidates or not _env_bool("Q15_V95_MANIPULATION_ALERTS_ENABLED", True):
+            return 0, 0
+        normal = self._normal_check.get(str(checkpoint))
+        min_prob = _env_float("Q15_V95_MANIPULATION_ALERT_MIN_PROBABILITY", 0.70, 0.0, 1.0)
+        min_conf = _env_float("Q15_V95_MANIPULATION_ALERT_MIN_CONFIDENCE", 40.0, 0.0, 100.0)
+        qualifying = []
+        for cand in candidates:
+            if str(cand.checkpoint) != str(checkpoint):
+                continue
+            ok, reason = manipulation_alert.qualifies(
+                cand, normal, min_probability=min_prob, min_confidence=min_conf,
+                already_sent=self._manip_alert_sent,
+            )
+            if ok:
+                qualifying.append(cand)
+            else:
+                logger.debug("manipulation alert gated for %s %s: %s", cand.asset, checkpoint, reason)
+        if not qualifying:
+            return 0, 0
+        message = manipulation_alert.build_combined_alert(str(checkpoint), normal, qualifying)
+        s, f, _ = _BufferedNotifier(notifier).flush(message)
+        if s:
+            for cand in qualifying:
+                self._manip_alert_sent.add(
+                    (cand.ticker, cand.checkpoint, manipulation_alert.ManipCandidate._norm(cand.new_side)))
+            if len(self._manip_alert_sent) > 512:
+                for k in list(self._manip_alert_sent)[:128]:
+                    self._manip_alert_sent.discard(k)
+        return s, f
 
     def _dispatch_entry_followups(self, canonicals: Mapping[str, Any], analyses: Mapping[str, Any],
                                   notifier: Any, now: float) -> tuple[int, int]:
