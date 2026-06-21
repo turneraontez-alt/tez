@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -314,6 +315,74 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("CONFIRMED PREDICTION FLIP — BTC 10M", msg)
         self.assertIn("Previous prediction: NO", msg)
         self.assertIn("New prediction: YES", msg)
+
+
+class _FakeFlipLedger:
+    """Frozen sides differ across checkpoints -> the confirmed-flip path is live."""
+
+    def frozen_prediction(self, ticker, checkpoint):
+        return {"15M": {"side": "NO", "flip_risk_score": 30.0},
+                "10M": {"side": "YES"}}.get(checkpoint, {})
+
+    def record_flip_warning(self, **kwargs):
+        pass
+
+
+class _FakeNotifier:
+    enabled = True
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, msg, *a, **k):
+        self.sent.append(str(msg))
+        return True
+
+
+class FlipAlertDeliveryDefaultTest(unittest.TestCase):
+    """Owner removed the flip Telegram alert UI: CONFIRMED PREDICTION FLIP and
+    HIGH FLIP RISK no longer deliver by default (tracking + dashboard stay on),
+    and are still re-enablable via their flags."""
+
+    def _policy_and_analysis(self):
+        from q15_upgrade.checkpoint_v95 import CheckpointPolicyV95
+        policy = CheckpointPolicyV95(None)
+        policy.ledger = _FakeFlipLedger()
+        analysis = {
+            "prediction_side": "YES",
+            "feature_values": {"wick": 0.7, "book": 0.5, "flow": 0.4, "momentum": 0.6},
+            "feature_quality": {"wick": 0.8, "book": 0.7, "flow": 0.6, "momentum": 0.7},
+            "feature_details": {
+                "absorption": {"available": True, "absorbed": True, "flow": 0.5},
+                "exchange_consensus": {"source_count": 3, "divergence_bps": 50},
+                "threshold_interaction": {"available": True, "crossings": 6, "failed_breakdown": True},
+            },
+            "regime": {"name": "THRESHOLD_PIN"}, "quote": {"spread_cents": 8, "ask_depth": 5},
+            "market_implied_yes_probability": 0.45, "selected_probability": 0.62,
+        }
+        ra = fr.compute_risk(analysis)
+        analysis["flip_risk_obj"] = ra
+        analysis["flip_risk"] = ra.as_dict()
+        return policy, analysis
+
+    def test_confirmed_flip_muted_by_default(self):
+        policy, analysis = self._policy_and_analysis()
+        notifier = _FakeNotifier()
+        sent, failed = policy._process_flip_risk(
+            {}, "DOGE", "10M", "DOGE-T", analysis, {"available": False}, notifier, time.time(),
+        )
+        self.assertEqual((sent, failed), (0, 0))
+        self.assertEqual(notifier.sent, [], "flip alert UI must not deliver by default")
+
+    def test_confirmed_flip_still_sendable_when_re_enabled(self):
+        policy, analysis = self._policy_and_analysis()
+        notifier = _FakeNotifier()
+        with patch.dict(os.environ, {"Q15_V95_FLIP_CONFIRMED_ALERTS": "true"}):
+            sent, failed = policy._process_flip_risk(
+                {}, "DOGE", "10M", "DOGE-T", analysis, {"available": False}, notifier, time.time(),
+            )
+        self.assertEqual(sent, 1)
+        self.assertTrue(any("CONFIRMED PREDICTION FLIP" in m for m in notifier.sent))
 
 
 class TestPushedAccountingAndSlots(unittest.TestCase):

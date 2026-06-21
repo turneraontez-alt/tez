@@ -151,6 +151,10 @@ class TelegramNotifier:
         self.sent_count = 0
         self.last_error = None
         self.last_sent_at = None
+        # Telegram message_id of the most recent successful delivery (None if the
+        # last send was muted/failed). Lets the official record store proof that a
+        # specific prediction was actually delivered, not merely "handled".
+        self.last_message_id = None
 
     def status(self):
         if self.enabled:
@@ -171,8 +175,23 @@ class TelegramNotifier:
         return s
 
     def send(self, text):
+        """Backward-compatible boolean send: True when the message was handled
+        (delivered OR intentionally muted), False on failure/disabled."""
+        return self.send_with_result(text)["ok"]
+
+    def send_with_result(self, text):
+        """Deliver and report exactly what happened, so callers that keep an
+        official record can distinguish a real delivery from a mute or a failure:
+
+            {"ok": bool,          # handled (delivered or muted) -> no retry needed
+             "delivered": bool,   # actually reached Telegram (200 + message_id)
+             "muted": bool,       # suppressed by alert level (NOT delivered)
+             "message_id": int|None}
+
+        ``last_message_id`` is set to the delivered id, or None on mute/failure."""
+        self.last_message_id = None
         if not self.enabled:
-            return False
+            return {"ok": False, "delivered": False, "muted": False, "message_id": None}
         challenger_report = _is_challenger_report(text)
         if _is_performance_report(text) or challenger_report:
             # Deliver the canonical performance report / challenger-shadow report
@@ -183,11 +202,11 @@ class TelegramNotifier:
             text = professionalize_telegram_message(text)
         if not challenger_report and should_suppress_alert(text):
             # Muted by Q15_ALERT_LEVEL (or a per-checkpoint override). Report
-            # success so the outbox marks the message durably handled (no retry);
-            # nothing is sent to Telegram.
+            # handled so the outbox marks the message durably done (no retry);
+            # nothing is sent to Telegram, so it is NOT an official delivery.
             header = next((ln.upper() for ln in str(text or "").splitlines() if ln.strip()), "")
             logger.info("Telegram alert muted (level=%s)", _alert_level(_checkpoint_of(header)))
-            return True
+            return {"ok": True, "delivered": False, "muted": True, "message_id": None}
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         try:
             resp = requests.post(
@@ -204,13 +223,19 @@ class TelegramNotifier:
                 self.sent_count += 1
                 import time as _t
                 self.last_sent_at = _t.time()
-                return True
+                message_id = None
+                try:
+                    message_id = int((((resp.json() or {}).get("result")) or {}).get("message_id"))
+                except (ValueError, TypeError, AttributeError):
+                    message_id = None
+                self.last_message_id = message_id
+                return {"ok": True, "delivered": True, "muted": False, "message_id": message_id}
             # Telegram's error body does not echo the token, but be defensive.
             self.last_error = self._redact(f"HTTP {resp.status_code}: {resp.text[:200]}")
             logger.warning("Telegram send failed: %s", self.last_error)
-            return False
+            return {"ok": False, "delivered": False, "muted": False, "message_id": None}
         except Exception as e:
             # requests exceptions can embed the full URL (with token) -> redact.
             self.last_error = self._redact(str(e))
             logger.warning("Telegram send error: %s", self.last_error)
-            return False
+            return {"ok": False, "delivered": False, "muted": False, "message_id": None}

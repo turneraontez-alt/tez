@@ -108,9 +108,18 @@ class FakeNotifier:
     def __init__(self):
         self.enabled = True
         self.messages = []
+        self._mid = 1000
+        self.last_message_id = None
     def send(self, text, *args, **kwargs):
         self.messages.append(str(text))
+        self._mid += 1
+        self.last_message_id = self._mid
         return True
+    def send_with_result(self, text):
+        self.messages.append(str(text))
+        self._mid += 1
+        self.last_message_id = self._mid
+        return {"ok": True, "delivered": True, "muted": False, "message_id": self._mid}
 
 
 class FakeStore:
@@ -135,6 +144,14 @@ class V95Tests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+        # Clear the module-level "latest" caches a run_cycle leaves behind so a
+        # test that drives run_cycle cannot bleed state into a later test.
+        import q15_upgrade.checkpoint_v95 as _cp
+        with _cp._LATEST_LOCK:
+            _cp._LATEST_ANALYSES.clear()
+            _cp._LATEST_RANKING.clear()
+            _cp._LATEST_LEDGER.clear()
+            _cp._LATEST_CHECKPOINT = "UNKNOWN"
 
     def canonical(self, row=None, cached=None, pub=None, ctx=None, checkpoint="10M"):
         row = row or snapshot(checkpoint=checkpoint)
@@ -196,6 +213,33 @@ class V95Tests(unittest.TestCase):
         result = analyse_v95(row, self.canonical(row=row, pub=public(price=98.0, momentum=-0.001), ctx=context("BEARISH")), self.ledger)
         self.assertLess(result["yes_probability"], 0.5)
         self.assertEqual(result["prediction_side"], "NO")
+
+    def test_unknown_depth_penalty_is_gated_and_off_by_default(self):
+        # Strip the Kalshi ask-size depth so _kalshi_depth() returns None (no
+        # orderbook either). Default OFF: a missing/unverifiable book must NOT
+        # silently penalize liquidity. ON: it is discounted by the configured
+        # factor so an unconfirmed book ranks below a confirmed-liquid one. This
+        # only moves trade_quality ranking; it is never an entry gate.
+        row = snapshot(spot=102.0, target=100.0)
+        row.pop("yes_ask_size", None)
+        row.pop("no_ask_size", None)
+        base = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNone(base["quote"]["ask_depth"], "depth should be unknown")
+        lq_off = base["liquidity_quality"]
+        with patch.dict(os.environ, {"Q15_V95_PENALIZE_UNKNOWN_DEPTH": "true",
+                                     "Q15_V95_UNKNOWN_DEPTH_FACTOR": "0.5"}):
+            penalized = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertAlmostEqual(penalized["liquidity_quality"], lq_off * 0.5, places=6)
+
+    def test_known_depth_is_unaffected_by_unknown_depth_flag(self):
+        # With real depth present, the flag is a no-op (the penalty branch only
+        # fires when depth is None).
+        row = snapshot(spot=102.0, target=100.0)  # keeps yes_ask_size/no_ask_size
+        off = analyse_v95(row, self.canonical(row=row), self.ledger)
+        with patch.dict(os.environ, {"Q15_V95_PENALIZE_UNKNOWN_DEPTH": "true"}):
+            on = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNotNone(off["quote"]["ask_depth"])
+        self.assertAlmostEqual(off["liquidity_quality"], on["liquidity_quality"], places=6)
 
     def test_raw_model_signal_is_independent_of_kalshi_price(self):
         # The model's own (raw) probability must not depend on the Kalshi price...
@@ -486,6 +530,70 @@ class V95Tests(unittest.TestCase):
                 policy.run_cycle({"BNB": dict(row)}, NOW+offset, {}, None, None, notifier)
         self.assertEqual(len(notifier.messages), 1)
         self.assertIn("V9.5 CHECK", notifier.messages[0])
+
+    def test_compact_panel_writes_official_record(self):
+        # The compact panel (default) sends a V9.5 CHECK panel every checkpoint and
+        # records the delivered call in the immutable official record with its
+        # Telegram message_id.
+        from contextlib import closing
+        notifier = FakeNotifier()
+        store = FakeStore()
+        with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"official.sqlite3")}, clear=False):
+            with patch.object(CheckpointPolicyV94Unified, "__init__", lambda self, *a, **k: None):
+                policy = CheckpointPolicyV95(store)
+        policy.market_data = FakeHub()
+        policy._candle_cache = {"BNB": {row["start_time"]: row for row in candles()}}
+        policy._latest_context = {"BNB": context()}
+        policy._context_lock = threading.RLock()
+        policy._candles = lambda asset: list(policy._candle_cache[asset].values())
+        with patch.object(CheckpointPolicyV94Unified, "run_cycle", lambda self, snapshots, *a: snapshots):
+            row = snapshot(spot=102.0, target=100.0)  # above strike -> YES lean
+            for offset in range(4):
+                policy.run_cycle({"BNB": dict(row)}, NOW + offset, {}, None, None, notifier)
+        self.assertTrue(any("V9.5 CHECK" in m for m in notifier.messages))
+        with closing(policy.ledger._connect()) as conn:
+            rows = list(conn.execute(
+                "SELECT interval, record_type, predicted_side, message_id "
+                "FROM sent_predictions WHERE record_type='interval'"))
+        self.assertEqual(len(rows), 1, "exactly one interval official record for the deduped panel")
+        self.assertEqual(str(rows[0]["interval"]), "10M")
+        self.assertIsNotNone(rows[0]["message_id"])
+
+    def test_cycle_recap_sends_once_on_settlement(self):
+        # A settled contract that was delivered earns one CYCLE CLOSED recap, and
+        # the per-ticker dedup prevents a second recap on a later cycle.
+        notifier = FakeNotifier()
+        with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"recap.sqlite3")}, clear=False):
+            with patch.object(CheckpointPolicyV94Unified, "__init__", lambda self, *a, **k: None):
+                policy = CheckpointPolicyV95(FakeStore())
+        led = policy.ledger
+        # Seed a delivered + settled contract directly in the ledger.
+        led.record_prediction(
+            ticker="KXBTC-T", asset="BTC", checkpoint="10M", created_at=NOW,
+            close_time=NOW + 600, predicted_side="YES",
+            raw_yes_probability=0.7, calibrated_yes_probability=0.7,
+            challenger_yes_probability=0.7, baseline_yes_probability=0.5,
+            selected_probability=0.7, conservative_probability=0.62,
+            data_quality=0.8, evidence_quality=0.7, trade_quality=0.7,
+            trade_decision="ENTRY_RECOMMENDED", regime="NORMAL",
+            features={"momentum": 0.3}, contributions={}, quote={"ask_cents": 50}, rank=1,
+        )
+        led.resolve_ticker("KXBTC-T", "YES")
+        led.record_sent_prediction(
+            contract_id="KXBTC-T", asset="BTC", interval="10M", record_type="interval",
+            predicted_side="YES", probability=0.7, manipulation_probability=None,
+            entry_decision="ENTRY_RECOMMENDED", sent_at=NOW + 1, close_time=NOW + 600, message_id=9,
+        )
+        events = [{"ticker": "KXBTC-T", "asset": "BTC", "checkpoint": "10M",
+                   "official_result": "YES", "correct": True}]
+        s1, _ = policy._send_cycle_recaps(events, notifier, NOW + 601)
+        s2, _ = policy._send_cycle_recaps(events, notifier, NOW + 602)  # deduped
+        self.assertEqual(s1, 1)
+        self.assertEqual(s2, 0)
+        recaps = [m for m in notifier.messages if "CYCLE CLOSED" in m]
+        self.assertEqual(len(recaps), 1)
+        self.assertIn("10M:  YES ✓", recaps[0])
+        self.assertIn("— RUNNING RECORD —", recaps[0])
 
     def test_policy_records_unique_prediction(self):
         notifier = FakeNotifier()

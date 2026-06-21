@@ -195,6 +195,14 @@ class V95Ledger:
         # shadow training vs the secondary intervals. 10M is the best performer,
         # so it gets the heaviest sample weight; 7M/15M still learn, just slower.
         self.primary_learning_weight = _env_float("Q15_V95_PRIMARY_LEARNING_WEIGHT", 1.25, 1.0, 3.0)
+        # The primary learner's heavier sample weight must actually exceed 1.0 to
+        # accelerate learning. A legacy ``min(1.0, ...)`` clamp silently erased the
+        # boost for high-quality rows (the only rows whose base weight already hit
+        # 1.0), so 10M learned at the same rate as 15M despite the 1.25x knob. With
+        # the boost ON (default) the weight scales fully (bounded by the per-result
+        # and total-drift caps downstream, so a >1.0 weight is safe). OFF restores
+        # the legacy clamp. Shadow-only: production champion weights stay frozen.
+        self.primary_learning_boost = _env_bool("Q15_V95_PRIMARY_LEARNING_BOOST", True)
         legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
         # 7M is tracked and graded for accuracy alongside 15M/10M, but its weight
         # learning is observational by default (like 15M). Enabling it requires the
@@ -235,6 +243,16 @@ class V95Ledger:
         self.total_drift_cap = self.total_drift_cap_by_checkpoint[self.primary_learning_checkpoint]
         self.minimum_learning_quality = self.minimum_learning_quality_by_checkpoint[self.primary_learning_checkpoint]
         self.minimum_calibration_rows = _env_int("Q15_V95_CALIBRATION_MIN_ROWS", 30, 10, 1000)
+        # When a Platt fit fails to converge (or hits a near-singular Hessian) the
+        # bounded-but-untrusted intercept/slope it leaves behind should not silently
+        # transform live probabilities. With this ON (default) an unconverged fit
+        # falls back to the identity transform (raw probability passes through),
+        # surfaced via the fit's ``reason`` + ``fallback`` and the stats() counter.
+        self.calibration_require_converged = _env_bool("Q15_V95_CALIBRATION_REQUIRE_CONVERGED", True)
+        # Newton-step budget for the Platt fit. Default 12 is unchanged; exposed so
+        # convergence behaviour (and its identity fallback) is deterministically
+        # exercisable and tunable without editing code.
+        self._calibration_max_iters = _env_int("Q15_V95_CALIBRATION_MAX_ITERS", 12, 1, 100)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
@@ -256,6 +274,9 @@ class V95Ledger:
         # was unparseable. Surfaced via stats() so a corrupt data pipeline shows
         # up instead of quietly thinning calibration/learning inputs.
         self._dropped_feature_rows = 0
+        # Observability: Platt fits that did not converge and were replaced by the
+        # identity transform (see calibration_require_converged). Surfaced in stats().
+        self._calibration_unconverged_fallbacks = 0
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
@@ -345,7 +366,7 @@ class V95Ledger:
                     PRIMARY KEY(checkpoint, name)
                 );
                 CREATE TABLE IF NOT EXISTS regime_challenger_weights (
-                    checkpoint TEXT NOT NULL,
+                    checkpoint TEXT NOT NULL CHECK(checkpoint IN ('10M','15M')),
                     regime TEXT NOT NULL,
                     name TEXT NOT NULL,
                     base_value REAL NOT NULL,
@@ -447,6 +468,35 @@ class V95Ledger:
                     resolved INTEGER DEFAULT 0, flip_occurred INTEGER, advance_seconds REAL, realized_cents REAL,
                     UNIQUE(model_version, ticker, checkpoint, direction)
                 )"""
+            )
+            # OFFICIAL RECORD — immutable snapshot of every prediction that was
+            # successfully DELIVERED to the owner before the contract closed. This
+            # is the source of truth for the public win/loss record: a prediction
+            # only counts here if it was actually sent (has a Telegram message_id)
+            # and sent_at < close_time. Rows are insert-only and NEVER edited or
+            # retroactively regraded — grading joins to predictions.official_result
+            # at read time, so the stored call stays exactly as it was sent.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS sent_predictions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_version TEXT NOT NULL,
+                    contract_id TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    record_type TEXT NOT NULL,
+                    predicted_side TEXT,
+                    probability REAL,
+                    manipulation_probability REAL,
+                    entry_decision TEXT,
+                    sent_at REAL NOT NULL,
+                    close_time REAL,
+                    message_id INTEGER,
+                    UNIQUE(model_version, contract_id, interval, record_type, message_id)
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_sent_predictions "
+                "ON sent_predictions(model_version, record_type, interval)"
             )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
@@ -652,6 +702,151 @@ class V95Ledger:
             )
             connection.commit()
             return cur.rowcount > 0
+
+    # -- OFFICIAL RECORD: immutable sent-prediction snapshot + grading -----------
+    def record_sent_prediction(self, *, contract_id: str, asset: str, interval: str,
+                               record_type: str, predicted_side: str | None,
+                               probability: float | None, manipulation_probability: float | None,
+                               entry_decision: str | None, sent_at: float,
+                               close_time: float | None, message_id: int | None) -> bool:
+        """Append an immutable record of a prediction that was DELIVERED to the
+        owner. A row only earns a place in the official record if it was actually
+        sent before close: ``message_id`` is not None AND ``sent_at < close_time``.
+        Anything else (muted, failed, or generated after close) is rejected here so
+        it can never reach the public win/loss totals. Insert-only; never updated.
+
+        ``record_type`` is one of 'interval' (the 15M/10M/7M YES/NO call), 'entry'
+        (an ENTER NOW / ENTRY RECOMMENDED delivery), or 'manipulation'."""
+        if not self._available or not contract_id:
+            return False
+        if message_id is None:
+            return False  # not actually delivered to Telegram -> not official
+        if close_time is not None and sent_at >= float(close_time):
+            return False  # generated at/after close -> never official
+        interval = self._checkpoint(interval)
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO sent_predictions(model_version,contract_id,asset,interval,"
+                "record_type,predicted_side,probability,manipulation_probability,entry_decision,"
+                "sent_at,close_time,message_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (MODEL_VERSION, str(contract_id), str(asset), interval, str(record_type),
+                 (str(predicted_side).upper() if predicted_side else None),
+                 (float(probability) if probability is not None else None),
+                 (float(manipulation_probability) if manipulation_probability is not None else None),
+                 (str(entry_decision) if entry_decision else None),
+                 float(sent_at), (float(close_time) if close_time is not None else None),
+                 int(message_id)),
+            )
+            connection.commit()
+        return True
+
+    def official_scoreboard(self) -> dict[str, Any]:
+        """Official win/loss record built ONLY from delivered predictions, graded
+        against the settled outcome. Interval records (15M/10M/7M) and the entry
+        record split YES vs NO vs Total; the manipulation record is correct/wrong.
+        Each bucket reuses the Wilson-backed ``_win_loss`` so a thin sample is
+        flagged ``low_n`` rather than read as proven skill."""
+        empty = {"15M": {}, "10M": {}, "7M": {}, "entry": {}, "manipulation": {}}
+        if not self._available:
+            return {"available": False, **empty}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                """SELECT s.interval AS interval, s.record_type AS record_type,
+                          s.predicted_side AS predicted_side, p.official_result AS official_result,
+                          p.realized_cents AS realized_cents
+                   FROM sent_predictions s
+                   JOIN predictions p
+                     ON p.model_version = s.model_version AND p.ticker = s.contract_id
+                    AND p.checkpoint = s.interval
+                   WHERE s.model_version = ? AND p.official_result IS NOT NULL""",
+                (MODEL_VERSION,),
+            ))
+
+        def _graded(record_type: str, interval: str | None, side: str | None) -> dict[str, Any]:
+            sel = [
+                r for r in rows
+                if str(r["record_type"]) == record_type
+                and (interval is None or str(r["interval"]) == interval)
+                and (side is None or str(r["predicted_side"] or "").upper() == side)
+            ]
+            # _win_loss keys on row["correct"]; compute it from the sent call vs
+            # the settled result so a regrade can never alter the stored prediction.
+            graded = [
+                {"correct": 1 if str(r["predicted_side"] or "").upper() == str(r["official_result"]).upper() else 0,
+                 "realized_cents": r["realized_cents"]}
+                for r in sel
+            ]
+            return self._win_loss(graded)
+
+        result: dict[str, Any] = {"available": True}
+        for interval in ("15M", "10M", "7M"):
+            result[interval] = {
+                "yes": _graded("interval", interval, "YES"),
+                "no": _graded("interval", interval, "NO"),
+                "total": _graded("interval", interval, None),
+            }
+        result["entry"] = {
+            "yes": _graded("entry", None, "YES"),
+            "no": _graded("entry", None, "NO"),
+            "total": _graded("entry", None, None),
+        }
+        result["manipulation"] = _graded("manipulation", None, None)
+        return result
+
+    def contract_recap(self, ticker: str) -> dict[str, Any] | None:
+        """Per-contract close-out for a SETTLED contract, built only from what was
+        actually delivered (the sent_predictions for this ticker) graded against
+        the settled outcome. Returns the per-interval hit/miss, the side flips, the
+        entry result, and the manipulation call — or None if nothing was sent for
+        this contract or it has not settled."""
+        if not self._available or not ticker:
+            return None
+        order = {"15M": 0, "10M": 1, "7M": 2}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                """SELECT s.interval AS interval, s.record_type AS record_type,
+                          s.predicted_side AS side, s.asset AS asset,
+                          p.official_result AS result, p.realized_cents AS realized,
+                          p.close_time AS close_time
+                   FROM sent_predictions s
+                   JOIN predictions p
+                     ON p.model_version = s.model_version AND p.ticker = s.contract_id
+                    AND p.checkpoint = s.interval
+                   WHERE s.model_version = ? AND s.contract_id = ?
+                     AND p.official_result IS NOT NULL""",
+                (MODEL_VERSION, str(ticker)),
+            ))
+        if not rows:
+            return None
+        result = str(rows[0]["result"]).upper()
+        asset = str(rows[0]["asset"])
+        close_time = _num(_row_get(rows[0], "close_time"))
+        ordered = sorted(
+            ({"interval": str(r["interval"]).upper(), "side": str(r["side"] or "").upper(),
+              "hit": str(r["side"] or "").upper() == result}
+             for r in rows if str(r["record_type"]) == "interval"),
+            key=lambda iv: order.get(iv["interval"], 9),
+        )
+        # Side flips across the ordered intervals.
+        changes = []
+        seq = [(iv["interval"], iv["side"]) for iv in ordered if iv["side"] in ("YES", "NO")]
+        for (_, a), (cp_b, b) in zip(seq, seq[1:]):
+            if a != b:
+                changes.append(f"{a} → {b} at {cp_b}")
+        flips = (f"{'; '.join(changes)} ({len(changes)})") if changes else None
+        entry = None
+        manip = None
+        for r in rows:
+            rt = str(r["record_type"])
+            side = str(r["side"] or "").upper()
+            if rt == "entry" and entry is None:
+                entry = {"checkpoint": str(r["interval"]).upper(), "decision": "ENTRY RECOMMENDED",
+                         "outcome": "WIN" if side == result else "LOSS",
+                         "cents": _num(_row_get(r, "realized"))}
+            elif rt == "manipulation" and manip is None:
+                manip = {"flagged": True, "type": None, "correct": side == result}
+        return {"ticker": str(ticker), "asset": asset, "result": result, "close_time": close_time,
+                "intervals": ordered, "flips": flips, "entry": entry, "manipulation": manip}
 
     def pushed_slot_blocks(self, checkpoint: str, ticker: str, now: float) -> bool:
         """True if a DIFFERENT, still-open contract already holds this timeframe's
@@ -1030,10 +1225,16 @@ class V95Ledger:
             error = actual_yes - probability
             quality_factor = _clamp((quality - minimum_quality) / max(1e-9, 1.0 - minimum_quality), 0.0, 1.0)
             # The primary 10M learner gets more useful weight, while low-quality
-            # rows still have limited influence.
+            # rows still have limited influence. The boosted weight is allowed to
+            # exceed 1.0 (capped at primary_learning_weight, since the base is in
+            # [0.25, 1.0]); the per-result and total-drift caps below bound the
+            # actual step, so a >1.0 weight only speeds learning, never destabilizes.
             sample_weight = 0.25 + 0.75 * quality_factor
             if checkpoint == self.primary_learning_checkpoint:
-                sample_weight = min(1.0, sample_weight * self.primary_learning_weight)
+                if self.primary_learning_boost:
+                    sample_weight = sample_weight * self.primary_learning_weight
+                else:  # legacy clamp: erased the boost for high-quality rows
+                    sample_weight = min(1.0, sample_weight * self.primary_learning_weight)
             learning_rate = self.learning_rate_by_checkpoint[checkpoint]
             per_result_cap = self.per_result_cap_by_checkpoint[checkpoint]
             total_drift_cap = self.total_drift_cap_by_checkpoint[checkpoint]
@@ -1223,11 +1424,15 @@ class V95Ledger:
         if not fit["active"]:
             return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
         calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
-        return {
-            "probability": calibrated, "active": True, "reason": "platt_current_version",
+        result = {
+            "probability": calibrated, "active": True,
+            "reason": fit.get("reason", "platt_current_version"),
             "rows": fit["rows"], "intercept": fit["intercept"], "slope": fit["slope"],
             "scope": fit["scope"],
         }
+        if fit.get("fallback"):
+            result["fallback"] = fit["fallback"]
+        return result
 
     def _calibration_fit(self, checkpoint: str, asset: str | None) -> dict[str, Any]:
         """Cached Platt fit for (checkpoint, asset). Pure function of the resolved
@@ -1261,7 +1466,7 @@ class V95Ledger:
             intercept, slope = 0.0, 1.0
             converged = False
             iterations = 0
-            for _ in range(12):
+            for _ in range(self._calibration_max_iters):
                 iterations += 1
                 g0 = -0.20 * intercept
                 g1 = -0.20 * (slope - 1.0)
@@ -1289,6 +1494,8 @@ class V95Ledger:
                 if abs(d0) + abs(d1) < 1e-6:
                     converged = True
                     break
+            reason = "platt_current_version"
+            fallback = None
             if not converged:
                 # Rare given regularization; surface it instead of silently
                 # shipping an unconverged calibrator.
@@ -1297,9 +1504,21 @@ class V95Ledger:
                     "after %d iterations (intercept=%.4f slope=%.4f)",
                     checkpoint, scope, len(rows), iterations, intercept, slope,
                 )
-            fit = {"active": True, "reason": "platt_current_version", "rows": len(rows),
-                   "intercept": intercept, "slope": slope, "scope": scope,
-                   "converged": converged, "iterations": iterations}
+                if self.calibration_require_converged:
+                    # Don't transform live probabilities with an untrusted fit:
+                    # revert the APPLIED transform to identity (raw passes through),
+                    # but keep the attempted coefficients for diagnostics.
+                    fallback = "identity_unconverged"
+                    reason = "platt_unconverged_identity"
+                    with self._lock:
+                        self._calibration_unconverged_fallbacks += 1
+            fit = {"active": True, "reason": reason, "rows": len(rows),
+                   "intercept": 0.0 if fallback else intercept,
+                   "slope": 1.0 if fallback else slope, "scope": scope,
+                   "converged": converged, "iterations": iterations,
+                   "fitted_intercept": intercept, "fitted_slope": slope}
+            if fallback:
+                fit["fallback"] = fallback
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.
@@ -2028,6 +2247,7 @@ class V95Ledger:
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,
             "dropped_feature_rows": int(self._dropped_feature_rows),
+            "calibration_unconverged_fallbacks": int(self._calibration_unconverged_fallbacks),
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
             "pushed_by_checkpoint": {
                 str(r["checkpoint"]): {

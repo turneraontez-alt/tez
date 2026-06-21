@@ -506,19 +506,32 @@ def refresh_loop(max_cycles=None):
                 snaps = dict(state)
             ws_health = market_data.health()
             global _last_cycle_ok, _last_learn
-            snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
-            snaps = ct.time("upgrade_enrich", upgrade.enrich_all, snaps, now, ws_health)
-            snaps = ct.time("learner_enrich", learner.enrich_and_observe, snaps, now, ws_health)
-            snaps = {
-                asset: risk_preview(enforce_fail_closed(snap))
-                for asset, snap in snaps.items()
-            }
-            snaps = ct.time("calibrated_edge", calibrated_edge.preview_all, snaps, now, ws_health)
-            snaps = ct.time("run_cycle", checkpoint_v95.run_cycle, snaps, now, ws_health, focus_manager, calibrated_edge, notifier)
-            snaps = ct.time("professional_v7", professional_v7.observe_all, snaps, now, ws_health)
-            with state_lock:
-                state.update(snaps)
-            deep_snaps = ct.time("deep_eval_snapshots", focus_manager.deep_evaluation_snapshots, snaps, signal_engine, scalp_engine)
+            try:
+                snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
+                snaps = ct.time("upgrade_enrich", upgrade.enrich_all, snaps, now, ws_health)
+                snaps = ct.time("learner_enrich", learner.enrich_and_observe, snaps, now, ws_health)
+                snaps = {
+                    asset: risk_preview(enforce_fail_closed(snap))
+                    for asset, snap in snaps.items()
+                }
+                snaps = ct.time("calibrated_edge", calibrated_edge.preview_all, snaps, now, ws_health)
+                snaps = ct.time("run_cycle", checkpoint_v95.run_cycle, snaps, now, ws_health, focus_manager, calibrated_edge, notifier)
+                snaps = ct.time("professional_v7", professional_v7.observe_all, snaps, now, ws_health)
+            except Exception:
+                # A single enrichment stage must not freeze the dashboard for every
+                # asset (the previous, now-stale snapshot would otherwise persist
+                # because state.update never ran) nor skip the best-effort
+                # subsystems below. Log it and publish whatever enrichment did
+                # complete; the next cycle retries from a clean copy of state.
+                logger.exception("Enrichment stage failed; publishing partial snapshot")
+            finally:
+                with state_lock:
+                    state.update(snaps)
+            try:
+                deep_snaps = ct.time("deep_eval_snapshots", focus_manager.deep_evaluation_snapshots, snaps, signal_engine, scalp_engine)
+            except Exception:
+                logger.exception("deep_evaluation_snapshots failed; skipping signal/scalp this cycle")
+                deep_snaps = {}
             ct.safe("signals", signal_engine.evaluate_all, deep_snaps, now, ws_health)
             ct.safe("scalp", scalp_engine.evaluate, deep_snaps, now)
             ct.safe("focus_settlement", focus_manager.reconcile_settlements, now)

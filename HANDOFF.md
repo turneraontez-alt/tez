@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **641 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **689 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -98,6 +98,139 @@ as a SHADOW model, built to be promoted to primary with one switch.
   Tests: `test_challenger_runner.py` (6). Suite: **641 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap
+**Merged — not yet deployed (needs a Repl reboot).** Phases 2 (shadow 0–100 score on
+the panel) and 3 (entry recheck + manipulation grading rule) are still TODO; see the
+multi-phase plan below. Phase 1 is complete + green (637 passed, 4 skipped).
+Owner-approved multi-phase rework (decisions locked): **(1)** compact unified panel
+sent EVERY checkpoint (reverses `Q15_V95_SEND_ONLY_ON_ENTRY`) carrying the YES/NO
+call + compact records + manipulation + graduated entry guidance; **(2)** a 0–100
+entry score (30 dir-conf / 25 edge / 20 wick / 15 momentum / 10 manip) as a
+**shadow** overlay first (does NOT drive live entries until it earns OOS lift —
+champion stays frozen); **(3)** entry RECHECK = extend the existing `entry_followups`
+(ENTER NOW / KEEP WAITING / SKIP ENTRY) + manipulation grading. Records display
+compact W-L/% **with a low-n marker** (Wilson-backed). WATCH states must read clearly
+as "not an entry" and show the prior call (e.g. "now YES, was NO at 15M") — each
+interval graded on its OWN sent call (no retroactive regrade).
+
+**Layout (locked with owner):** hourly report UNCHANGED. Live 15M/10M/7M panels are
+forward-looking only (manipulation + prediction w/ WATCH clarity + prior-side flip +
+graduated entry guidance), NO W-L. A single END-OF-CYCLE RECAP fires once after a
+contract settles: per-interval hit/miss + flips + predictability + the entry result +
+manipulation call + the RUNNING official totals. Records show W-L/% with a low-n marker.
+
+**Done so far (Phase-1 FOUNDATION + FORMATTERS, committed to branch, inert until wired):**
+- `notifier.send_with_result()` → `{ok, delivered, muted, message_id}` + `last_message_id`;
+  `send()` stays a bool wrapper. Muted = handled-but-NOT-delivered (no message_id).
+- Ledger `sent_predictions` immutable table + `record_sent_prediction(...)` (rejects
+  no-message_id and sent_at≥close_time) + `official_scoreboard()` (15M/10M/7M YES/NO/Total,
+  entry, manipulation; graded vs settled outcome via join; Wilson low_n flags; insert-only).
+- `q15_upgrade/panels_v95.py` — pure `build_checkpoint_panel()` + `build_cycle_recap()`
+  (single `<pre>`, keeps `V9.5 CHECK` marker, flip/WATCH clarity, running-record block).
+- Tests: `test_q15_official_record.py`, `test_q15_notifier_message_id.py`, `test_q15_panels.py` (+24).
+**WIRED (live, default ON via `Q15_V95_COMPACT_PANEL`; legacy entry-only path preserved
+under the flag):** `checkpoint_v95._send_compact_panel` sends the forward-looking panel
+for the top-ranked pick once per checkpoint+window (reuses the reserve/settle dedup),
+maps analysis → panel (manipulation block, prediction w/ prior-side flip, graduated entry
+state from `trade_decision`), and on a real delivery writes the immutable official record
+from the Telegram message_id: `interval` always, `entry` + slot/pushed/follow-up when the
+pick is ENTRY_RECOMMENDED, `manipulation` (direction-after) when flagged. Muted = no
+message_id = not official. `build_compact_checkpoint_panel` + helpers do the mapping.
+Tests: `test_q15_v95.py::test_compact_panel_writes_official_record`, reworked
+`test_no_entry_checkpoint_panel_behaviour`. Suite 632 → 633.
+
+**RECAP (live, gated `Q15_V95_CYCLE_RECAP` default ON):** on settlement,
+`checkpoint_v95._send_cycle_recaps` fires ONE `CYCLE CLOSED` recap per settled ticker
+(deduped via a `recap:<ticker>` reservation), built from `ledger.contract_recap()` —
+per-interval hit/miss + flips + entry result + manipulation call, graded only on what was
+officially delivered — rendered via `panels_v95.build_cycle_recap` with the running
+`official_scoreboard` totals. `format_telegram_message` bypasses `CYCLE CLOSED` so the
+recap is never re-rendered by the legacy chain. Suite 633 → **637**.
+
+**Next — Phase 2:** the 0–100 entry score (30 dir-conf / 25 edge / 20 wick / 15 momentum /
+10 manip) as a SHADOW value shown on the panel (does NOT drive live entries; champion
+frozen) + the WAIT target range. **Phase 3:** retrofit `entry_followups` into the
+ENTER NOW / KEEP WAITING / SKIP ENTRY recheck (price/trigger-driven) + the manipulation
+grading rule (default: direction-after vs settled outcome — confirm with owner).
+
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
+**Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip
+removal: a full audit found Telegram delivery used **3 different formats**. The
+unified single-`<pre>`-panel cards are the checkpoint alert (`build_v95_message`,
+`V9.5 CHECK`), the hourly report, and the entry follow-up. The OLD plain-text
+format was used by (a) flip alerts [removed prior entry], (b) the window_focus
+**two-window checkpoint alerts** (`🎯 10M FINAL #1 READY …`), and (c) the
+**dip alerts** (`⚡ DIP …`) — and the two-window path fires LIVE via
+`checkpoint_v91.update()→_maybe_notify`, so the owner was getting both a unified
+panel AND a separate old-format alert for the same checkpoint. Owner chose to
+**disable** the old-format senders (not reformat). Now OFF by default:
+`Q15_FOCUS_CHECKPOINT_ALERTS` (new, False) gates the two-window sends and
+`Q15_DIP_ALERT_ENABLED` (True→False) gates the dip alert — the two-window
+ranking/learning/dashboard still run; only Telegram delivery is muted. So only the
+unified panel / hourly report / follow-up are delivered. Tests updated to enable
+the flags where they exercise the send path; new muted-by-default locks in
+`test_q15_alert_send_retry.py::DefaultDeliveryConsolidationTest`. Suite **605 → 608**.
+
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — removed flip-alert UI
+**Merged to `main` — not yet deployed (needs a Repl reboot to take effect).** Owner
+asked to remove the old flip-alert Telegram UI (the `CONFIRMED PREDICTION FLIP —
+DOGE/BTC 7M` cards with "Manipulation risk before flip / Estimated flip probability
+/ Main evidence"). Both flip Telegram sends are now **OFF by default**:
+`Q15_V95_FLIP_CONFIRMED_ALERTS` (True→False, `checkpoint_v95._process_flip_risk`)
+and `Q15_V95_FLIP_ALERTS_ENABLED` (True→False). Read-only flip tracking, the
+`flip_risk` scoring/learning, and the dashboard block are **unchanged** — only the
+Telegram delivery is muted; re-enable either flag to bring it back. Lock test:
+`test_q15_v95_flip_risk.py::FlipAlertDeliveryDefaultTest` (muted by default; still
+sends when re-enabled). Suite **603 → 605**.
+
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — review-fix batch
+**Merged to `main` — not yet deployed (needs a Repl reboot to take effect).**
+Ran a fresh fan-out review (decision engine 7/10, learning 6.5/10, app+loop 6.5/10,
+overall **7.0/10**), then implemented the Highest/Medium/Polish fixes it surfaced.
+Every model-behavior change is flag-gated; shadow-only changes never touch frozen
+champion output. Suite **589 → 603 passed, 4 skipped** (+14 tests).
+
+1. **Primary-learner boost actually applies** (`ledger_v95.py:_apply_shadow_update`).
+   A legacy `min(1.0, sample_weight*primary_learning_weight)` clamp erased the 10M
+   1.25× boost for exactly the high-quality rows whose base weight already hit 1.0,
+   so 10M learned no faster than 15M. The boosted weight now scales fully (bounded
+   by the per-result + total-drift caps, so >1.0 is safe). Gated
+   `Q15_V95_PRIMARY_LEARNING_BOOST` (default ON; OFF = legacy clamp). Shadow-only.
+2. **Platt identity fallback** (`ledger_v95._calibration_fit`). An unconverged /
+   near-singular fit no longer silently transforms live probabilities — it reverts
+   to identity (raw passes through), flagged `fallback=identity_unconverged` +
+   `reason=platt_unconverged_identity`, counted in `status().calibration_unconverged_fallbacks`.
+   Gated `Q15_V95_CALIBRATION_REQUIRE_CONVERGED` (default ON). Newton budget now
+   `Q15_V95_CALIBRATION_MAX_ITERS` (default 12, behaviour-identical; makes the
+   fallback deterministically testable).
+3. **App enrichment exceptions no longer freeze state** (`app.py` refresh loop). The
+   enrichment pipeline ran under `ct.time` (re-raises), so one stage's exception
+   skipped `state.update(snaps)` (stale dashboard for ALL assets) AND every
+   best-effort subsystem below. Wrapped in try/finally → partial snapshot always
+   published; `deep_evaluation_snapshots` isolated so signals/scalp/report/learn
+   still run.
+4. **Regime schema guard** (`ledger_v95.py`): `regime_challenger_weights` now carries
+   the same `CHECK(checkpoint IN ('10M','15M'))` as its siblings (fresh DBs), so an
+   accidental 7M write fails loudly instead of contaminating regime learning.
+5. **Missing-close_time is no longer silent** (`window_focus._maybe_notify`): when a
+   market is near a checkpoint but `close_key` is empty (degraded feed), a throttled
+   (60s) WARNING surfaces the dropped alert instead of returning silently.
+6. **Unknown-depth liquidity penalty** (`checkpoint_v95.analyse_v95`): when the
+   orderbook is unavailable (`depth=None`), optionally discount `liquidity_quality`
+   so an unverifiable book ranks below a confirmed-liquid one. Gated
+   `Q15_V95_PENALIZE_UNKNOWN_DEPTH` (default OFF) / `Q15_V95_UNKNOWN_DEPTH_FACTOR`
+   (0.5). Ranking-only — never an entry gate, so it cannot place a trade.
+
+**Debunked on verification (no change made):** the review's "checkpoint_v95 entry
+alerts don't retry on send failure" was a FALSE POSITIVE — `complete_notification(
+success=False)` clears `reserved_until` without setting `sent_at`, so the next cycle
+re-reserves and retries. Left the working state machine untouched.
+
+New tests: `test_q15_ledger_review_fixes.py` (boost / Platt fallback / regime CHECK),
+`test_q15_v95.py` (gated unknown-depth penalty), `test_app_refresh_loop.py`
+(enrichment-stage isolation), `test_q15_alert_send_retry.py` (empty-close_key warn).
+
+## ✅ Shipped (branch `claude/read-hand-off-5ou5op`, merged to `main`) — alert-delivery hardening
 **Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3
 fixes from a fresh reliability review (the rest of the review's findings were
 either debunked on verification — e.g. the "KeyError in `_harvest_and_submit`"

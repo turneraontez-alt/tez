@@ -267,6 +267,12 @@ class FocusSettings:
     uncertainty_buffer_cents: float = _float("Q15_SELL_UNCERTAINTY_BUFFER_CENTS", 3.0)
     slippage_fraction_of_spread: float = _float("Q15_SLIPPAGE_SPREAD_FRACTION", 0.25)
     telegram_enabled: bool = _bool("Q15_FOCUS_TELEGRAM", True)
+    # Owner consolidated Telegram delivery onto the unified V9.5 CHECK panel /
+    # hourly report / follow-up. The two-window checkpoint alerts used a separate
+    # older plain-text format, so their Telegram delivery is OFF by default (the
+    # two-window ranking/learning/dashboard still run). Re-enable with
+    # Q15_FOCUS_CHECKPOINT_ALERTS=true. telegram_enabled stays the master switch.
+    checkpoint_alerts_enabled: bool = _bool("Q15_FOCUS_CHECKPOINT_ALERTS", False)
     alert_15_at_seconds: int = _int("Q15_15M_TELEGRAM_AT_SECONDS", 884)
     alert_10_at_seconds: int = _int("Q15_10M_TELEGRAM_AT_SECONDS", 599)
     alert_7_at_seconds: int = _int("Q15_7M_TELEGRAM_AT_SECONDS", 419)
@@ -297,7 +303,9 @@ class FocusSettings:
     self_review_adapt_loss_rate: float = _float("Q15_SELF_REVIEW_ADAPT_LOSS_RATE", 0.55)
     self_review_adapt_eval_window: int = _int("Q15_SELF_REVIEW_ADAPT_EVAL_WINDOW", 8)
     self_review_adapt_decay_window: int = _int("Q15_SELF_REVIEW_ADAPT_DECAY_WINDOW", 30)
-    dip_alert_enabled: bool = _bool("Q15_DIP_ALERT_ENABLED", True)
+    # Dip alert also used the older plain-text format -> OFF by default as part of
+    # consolidating onto the unified panel. Re-enable with Q15_DIP_ALERT_ENABLED=true.
+    dip_alert_enabled: bool = _bool("Q15_DIP_ALERT_ENABLED", False)
     dip_alert_min_edge_cents: float = _float("Q15_DIP_ALERT_MIN_EDGE_CENTS", 6.0)
     dip_alert_rearm_edge_cents: float = _float("Q15_DIP_ALERT_REARM_EDGE_CENTS", 2.0)
     dip_alert_min_win_probability: float = _float("Q15_DIP_ALERT_MIN_WIN_PROBABILITY", 0.55)
@@ -357,6 +365,7 @@ class TwoWindowFocusManager:
         self._blocker_counts: Dict[str, int] = defaultdict(int)
         self._last_error: Optional[str] = None
         self._breaker_active = False
+        self._empty_close_key_warned_at = 0.0
         self._migrate()
         # Final 10m prediction self-review (read-only post-mortems + bounded
         # auto-adaptation of decision thresholds). Hydrating the engine re-applies
@@ -1377,32 +1386,50 @@ class TwoWindowFocusManager:
     def _maybe_notify(self, close_key: str, snapshots: Mapping[str, dict], now: float) -> None:
         if not self.settings.telegram_enabled or self.notifier is None or not getattr(self.notifier, "enabled", False):
             return
-        if not close_key:
-            return  # no close_time -> cannot build a unique per-market claim key
         seconds_values = [_num(snap.get("seconds_remaining")) for snap in snapshots.values()]
         seconds_values = [value for value in seconds_values if value is not None]
+        if not close_key:
+            # No close_time -> cannot build a unique per-market claim key, so the
+            # checkpoint alert is dropped. When checkpoint alerts are enabled this
+            # must not be SILENT: if a market is near a checkpoint, a degraded feed
+            # is costing the owner alerts. Warn (throttled to once a minute).
+            if self.settings.checkpoint_alerts_enabled:
+                due = bool(seconds_values) and min(seconds_values) <= self.settings.alert_15_at_seconds
+                if due and (now - self._empty_close_key_warned_at) >= 60.0:
+                    self._empty_close_key_warned_at = now
+                    logger.warning(
+                        "Checkpoint alert skipped: missing close_time (empty close_key) while a "
+                        "market is %.0fs from close — degraded feed is suppressing alerts.",
+                        min(seconds_values),
+                    )
+            return
         if not seconds_values:
             return
-        seconds = min(seconds_values)
-        ranking = self._rankings.get(close_key, {})
-        if seconds <= self.settings.alert_15_at_seconds:
-            key = f"q15-two-window:15m:{close_key}"
-            rows = ranking.get("early_15m", [])
-            self._claim_and_send(key, self._format_checkpoint_alert(
-                "15m", rows[0] if rows else None, ranking.get("early_diagnostics", [])
-            ))
-        if seconds <= self.settings.alert_10_at_seconds:
-            key = f"q15-two-window:10m:{close_key}"
-            rows = ranking.get("final", [])
-            self._claim_and_send(key, self._format_checkpoint_alert(
-                "10m", rows[0] if rows else None, ranking.get("final_diagnostics", [])
-            ))
-        if seconds <= self.settings.alert_7_at_seconds:
-            key = f"q15-two-window:7m:{close_key}"
-            rows = ranking.get("final", [])
-            self._claim_and_send(key, self._format_checkpoint_alert(
-                "7m", rows[0] if rows else None, ranking.get("final_diagnostics", [])
-            ))
+        # Two-window checkpoint alerts use the older plain-text format and are OFF
+        # by default in favour of the unified V9.5 CHECK panel. The ranking they
+        # read is still built every cycle (dashboard + learning); only the Telegram
+        # delivery is gated. Re-enable with Q15_FOCUS_CHECKPOINT_ALERTS=true.
+        if self.settings.checkpoint_alerts_enabled:
+            seconds = min(seconds_values)
+            ranking = self._rankings.get(close_key, {})
+            if seconds <= self.settings.alert_15_at_seconds:
+                key = f"q15-two-window:15m:{close_key}"
+                rows = ranking.get("early_15m", [])
+                self._claim_and_send(key, self._format_checkpoint_alert(
+                    "15m", rows[0] if rows else None, ranking.get("early_diagnostics", [])
+                ))
+            if seconds <= self.settings.alert_10_at_seconds:
+                key = f"q15-two-window:10m:{close_key}"
+                rows = ranking.get("final", [])
+                self._claim_and_send(key, self._format_checkpoint_alert(
+                    "10m", rows[0] if rows else None, ranking.get("final_diagnostics", [])
+                ))
+            if seconds <= self.settings.alert_7_at_seconds:
+                key = f"q15-two-window:7m:{close_key}"
+                rows = ranking.get("final", [])
+                self._claim_and_send(key, self._format_checkpoint_alert(
+                    "7m", rows[0] if rows else None, ranking.get("final_diagnostics", [])
+                ))
         self._maybe_dip_alert(close_key, snapshots, now)
 
     def _maybe_dip_alert(self, close_key: str, snapshots: Mapping[str, dict], now: float) -> None:
