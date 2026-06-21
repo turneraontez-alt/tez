@@ -1777,6 +1777,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._telegram_suppressed_v95 = 0
         self._bridge_status: dict[str, Any] = {}
         self._runtime_binding = "CheckpointPolicyV95"
+        self._warn_throttle: dict[str, float] = {}
+
+    def _throttled_warn(self, key: str, fmt: str, *args: Any, now: float | None = None,
+                        interval: float = 60.0) -> None:
+        """Log a WARNING at most once per ``interval`` seconds per ``key`` so a
+        recurring degraded condition surfaces without flooding the ~1s loop."""
+        ts = now if now is not None else time.time()
+        last = self._warn_throttle.get(key)
+        if last is not None and (ts - last) < interval:
+            return
+        self._warn_throttle[key] = ts
+        logger.warning(fmt, *args)
 
     def run_cycle(self, snapshots: dict[str, dict], now: float, ws_health: Mapping[str, Any] | None,
                   focus_manager: Any, calibrated_edge: Any, notifier: Any) -> dict[str, dict]:
@@ -2220,7 +2232,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             event_key=event_key, checkpoint=checkpoint, state=state, fingerprint=fingerprint, now=now,
         )
         if not permit_key:
+            # Could be an intentional dedup (same event already claimed this
+            # window) or a transient ledger/store hiccup. Either way the send is
+            # dropped this cycle; surface it (throttled) so a silent ledger
+            # outage is visible instead of vanishing.
             self._telegram_suppressed_v95 += 1
+            self._throttled_warn(
+                f"reserve_notification:{event_key}",
+                "v95 checkpoint alert not sent: reserve_notification returned no "
+                "permit for event_key=%s checkpoint=%s state=%s (dedup or ledger "
+                "unavailable; will retry next cycle)", event_key, checkpoint, state,
+                now=now,
+            )
             return 0, 0
 
         prior_cp = _PRIOR_CHECKPOINT.get(str(checkpoint).upper())
@@ -2238,6 +2261,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         handled = bool(result.get("ok"))
         delivered = bool(result.get("delivered"))
         self.ledger.complete_notification(event_key=permit_key, success=handled, now=now)
+
+        # Handled-but-not-delivered = the send was accepted yet produced no
+        # message_id (muted, or a notifier that reports success without one).
+        # No official record is written, so make the gap visible (throttled)
+        # rather than letting an undelivered alert pass silently.
+        if handled and not delivered:
+            self._throttled_warn(
+                f"handled_not_delivered:{checkpoint}",
+                "v95 checkpoint alert handled but not delivered (no message_id) for "
+                "asset=%s checkpoint=%s ticker=%s — no official record written",
+                asset, checkpoint, ticker, now=now,
+            )
 
         # Record what the normal/base check for this interval recommended and whether
         # it actually reached the owner. A manipulation alert is only allowed AFTER a

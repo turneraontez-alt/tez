@@ -70,6 +70,10 @@ for _engine in engines.values():
     _engine.ob_tracker = OrderbookTracker()
 state = {}
 state_lock = threading.Lock()
+# Per-asset engine update epoch captured at snapshot-publish time, under
+# state_lock, so /api/health computes data_age from a value consistent with the
+# state it just read (instead of an unsynchronized read of engines[a]).
+engine_update_ts = {}
 _last_detail = {a: 0 for a in ASSETS}
 
 # Entry-alert subsystem (read-only; never places orders).
@@ -450,6 +454,7 @@ def refresh_loop(max_cycles=None):
                     eng.candles.evict(now)
                     with state_lock:
                         state[a] = snap
+                        engine_update_ts[a] = eng.last_update_ts
                 except Exception as e:
                     logger.error(f"build_snapshot {a}: {e}")
 
@@ -973,8 +978,9 @@ def health():
         ages = []
         for a in ASSETS:
             s = next((x for x in live if x.get("asset") == a), None)
-            if s is not None and engines[a].last_update_ts:
-                ages.append(now - engines[a].last_update_ts)
+            ts = engine_update_ts.get(a)
+            if s is not None and ts:
+                ages.append(now - ts)
     data_age = round(max(ages), 2) if ages else None
 
     closes = sorted([s.get("close_time") for s in live if s.get("close_time")])
