@@ -9,7 +9,8 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **734 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **737 passed, 4 skipped** (12 skipped in a
+bare container where `flask`/`websockets` aren't installed).
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -23,7 +24,50 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/replit-workspace-connect-pfspn4`) — shadow challenger was feature-starved
+## ✅ Shipped THIS session (branch `claude/replit-workspace-connect-pfspn4`) — "is anything 100% correct?" forensic audit
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Owner asked, as a Staff quant: has any variable / rule / combination historically
+predicted with a *credible* 100% win rate — not just a displayed 100%, but one free
+of leakage, duplicate-counting, and overfitting, that survives out-of-sample? Built a
+read-only forensic rule-miner to answer it honestly. **Cannot be run from a CI clone —
+`data/` is schema-only/empty here; the settled history lives ONLY on the Repl.**
+
+- **Tool (`scripts/perfect_condition_audit.py`, READ-ONLY, run ON THE REPL):** opens
+  the v95 ledger `mode=ro`, mines single-variable / threshold / pair / triple rules
+  (≤3 vars by default) for 100% conditions, with the controls that make a 100% claim
+  trustworthy instead of a data-snooping artifact:
+  - **Leakage firewall** — only fields known at `created_at` can be rule variables;
+    `official_result`/`correct`/`realized_cents`/`*_brier`/`*_logloss`/`resolved_at`
+    and post-decision `changed_before_close`/`learning_applied` are denylisted (the
+    miner *raises* if one slips in). The target is recomputed `predicted_side ==
+    official_result` and cross-checked vs the stored `correct` flag (integrity guard).
+  - **No duplicate counting** — the ledger stores one row per `(ticker,checkpoint)`, so
+    a market appears ≤3× and those rows are correlated. ALL stats (sample tier, Wilson
+    CI, multiple-testing) use UNIQUE MARKETS, and a market is a rule "win" only if EVERY
+    matched checkpoint row was correct (conservative collapse).
+  - **Chronological 60/20/20** split on MARKET boundaries (a market never straddles a
+    split); thresholds chosen from discovery quantiles only; test set untouched until
+    the final table. "Historical 100%" = discovery-perfect, then *classified* by its
+    OOS fate (CREDIBLE only if perfect through the untouched test set with ≥20 markets).
+  - **Multiple-testing honesty** — counts every hypothesis and reports the expected
+    number of spurious perfect rules under the null (Σ base_acc**n), plus `p_perfect_by
+    _chance` and a rule-of-three reminder that a finite 100% never proves a 100% future.
+  - Importable `audit()` + CLI `main()` (`--max-vars`, `--min-test-markets`, `--json`).
+- **Tests:** `tests/test_perfect_condition_audit.py` (+22, deterministic, adversarial):
+  duplicate-market collapse, leakage firewall + denylist, target recompute/integrity,
+  chronological split (no straddle), threshold boundary inclusivity, missing/invalid
+  rows, tiny-sample rejection, multiple-testing accounting, an OOS rule that's perfect
+  early then dies (rejected) vs a genuinely separable rule that survives (credible),
+  read-only-open (won't create/mutate the db), and run-to-run reproducibility.
+- Suite green locally: **737 passed, 12 skipped**.
+- **Executive answer until run on real Repl data:** *cannot* be stated from here — the
+  conclusion is whatever the tool emits on the Repl. Run `python3 scripts/perfect_
+  condition_audit.py` and read the EXECUTIVE CONCLUSION line; expect "No perfect
+  condition found" or "found but failed validation / insufficient sample" unless a rule
+  truly stays 100% on the untouched recent test set. No historical pattern should ever
+  be called guaranteed for future markets.
+
+## ✅ Shipped earlier THIS session (branch `claude/replit-workspace-connect-pfspn4`) — shadow challenger was feature-starved
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Diagnosed "shadow learning system doing horrible": the read-only challenger was
 **blind to the dominant drivers of a 15-minute binary**. The production prediction
