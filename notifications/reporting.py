@@ -301,8 +301,15 @@ class HourlyReporter:
             return []
         o = perf.get("overall") or {}
         if not o.get("alerts"):
-            # Nothing fired yet; still surface the learned curve if it exists.
-            return self._flip_rate_curve(stats)
+            # Nothing fired. Distinguish "alert channel intentionally OFF" from
+            # "armed but nothing tripped" so the empty record is never misread as
+            # a detection failure (the raw perf shows 0 detected / N missed).
+            curve = self._flip_rate_curve(stats)
+            if not perf.get("alerts_enabled", False):
+                note = ["", "⚠ FLIP WARNING PERFORMANCE",
+                        "Flip-risk alerts disabled (tracked on dashboard only)"]
+                return note + curve if curve else note
+            return curve
 
         # Headline mirrors the interval headline; it carries the detection rate
         # and advance time, which don't fit the four-column grid.

@@ -159,6 +159,62 @@ def _two_sided_p(t: float, df: float | None = None) -> float:
     return _clamp(_betai(0.5 * df, 0.5, df / (df + t * t)), 0.0, 1.0)
 
 
+def _round_p(p: float | None) -> float | None:
+    """Round a p-value without flattening very strong results to 0.0.
+
+    Fixed 6-dp rounding collapses any p < 5e-7 to 0.0, so two distinct
+    extremely-significant tests become indistinguishable. Keep ~3 significant
+    figures for small p-values (observability only — promotion still compares
+    against alpha, not the rounded display)."""
+    if p is None:
+        return None
+    if p <= 0.0:
+        return 0.0
+    if p >= 1e-4:
+        return round(p, 6)
+    digits = 2 - int(math.floor(math.log10(p)))
+    return round(p, min(digits, 15))
+
+
+def _isotonic_fit(pairs: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Pool-Adjacent-Violators isotonic regression.
+
+    ``pairs`` is (raw_probability, outcome∈{0,1}). Returns monotonically
+    non-decreasing (x, y) anchors (block mean x → block mean y), x ascending —
+    the calibrated map. Pure and deterministic; empty in → empty out."""
+    pts = sorted((float(x), float(y)) for x, y in pairs)
+    if not pts:
+        return []
+    blocks: list[list[float]] = []  # [sum_y, count, sum_x]
+    for x, y in pts:
+        blocks.append([y, 1.0, x])
+        # Merge while the previous block's mean would violate monotonicity.
+        while len(blocks) >= 2 and blocks[-2][0] / blocks[-2][1] >= blocks[-1][0] / blocks[-1][1]:
+            sy2, c2, sx2 = blocks.pop()
+            sy1, c1, sx1 = blocks.pop()
+            blocks.append([sy1 + sy2, c1 + c2, sx1 + sx2])
+    return [(sx / c, sy / c) for sy, c, sx in blocks]
+
+
+def _isotonic_predict(anchors: Sequence[tuple[float, float]], x: float) -> float | None:
+    """Linear interpolation over isotonic ``anchors`` (clamped at the ends)."""
+    if not anchors:
+        return None
+    if x <= anchors[0][0]:
+        return anchors[0][1]
+    if x >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(1, len(anchors)):
+        x0, y0 = anchors[i - 1]
+        x1, y1 = anchors[i]
+        if x <= x1:
+            if x1 == x0:
+                return y1
+            t = (x - x0) / (x1 - x0)
+            return y0 + t * (y1 - y0)
+    return anchors[-1][1]
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -312,6 +368,14 @@ class V95Ledger:
         # convergence behaviour (and its identity fallback) is deterministically
         # exercisable and tunable without editing code.
         self._calibration_max_iters = _env_int("Q15_V95_CALIBRATION_MAX_ITERS", 12, 1, 100)
+        # Isotonic (monotonic, non-parametric) calibration. DEFAULT OFF: live
+        # probabilities keep the 2-parameter Platt transform exactly as today.
+        # The recorded calibration bands show the champion is systematically
+        # UNDER-confident at the high end (predicts ~0.78 where it wins ~0.95) —
+        # a curve a 2-parameter Platt (slope-capped at 1.50) cannot bend out.
+        # Isotonic regression can. It is wired in but gated so it can be measured
+        # against Platt in shadow first and only activated once it proves out.
+        self._calibration_isotonic = _env_bool("Q15_V95_CALIBRATION_ISOTONIC", False)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
@@ -1744,6 +1808,14 @@ class V95Ledger:
         fit = self._calibration_fit(checkpoint, asset)
         if not fit["active"]:
             return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
+        if self._calibration_isotonic and fit.get("isotonic"):
+            iso = _isotonic_predict(fit["isotonic"], raw)
+            if iso is not None:
+                return {
+                    "probability": _clamp(iso, 0.01, 0.99), "active": True,
+                    "reason": "isotonic_current_version", "rows": fit["rows"],
+                    "scope": fit["scope"], "method": "isotonic",
+                }
         calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
         result = {
             "probability": calibrated, "active": True,
@@ -1840,6 +1912,16 @@ class V95Ledger:
                    "fitted_intercept": intercept, "fitted_slope": slope}
             if fallback:
                 fit["fallback"] = fallback
+            # Isotonic curve over the SAME resolved rows. Computed only when the
+            # option is on; robust even where Platt fell back to identity. Stored
+            # on the (in-memory cached) fit and applied by calibrate() — gated so
+            # the default live path is byte-for-byte the Platt transform.
+            if self._calibration_isotonic:
+                fit["isotonic"] = _isotonic_fit([
+                    (_clamp(float(r["raw_yes_probability"]), 0.01, 0.99),
+                     1.0 if r["official_result"] == "YES" else 0.0)
+                    for r in rows
+                ])
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.
@@ -2468,8 +2550,15 @@ class V95Ledger:
             ws = [w for w in warnings if w["risk_score"] is not None and flip_risk.bucket_label(float(w["risk_score"])) == label]
             if ws:
                 by_bucket[label] = _agg(ws, [])
+        # The dedicated high-flip-risk Telegram alert is OFF by default (owner
+        # removed that UI; re-enable with Q15_V95_FLIP_ALERTS_ENABLED). When it
+        # is off, NO warnings are ever recorded, so "0 detected / N missed" is a
+        # disabled channel, NOT a detection failure — surface the flag so the
+        # report can say so honestly instead of implying 100% missed.
+        alerts_enabled = _env_bool("Q15_V95_FLIP_ALERTS_ENABLED", False)
         return {
             "available": True, "model_version": MODEL_VERSION,
+            "alerts_enabled": alerts_enabled,
             "overall": _agg(warnings, all_flips),
             "by_checkpoint": by_checkpoint, "by_direction": by_direction,
             "by_asset": by_asset, "by_score_bucket": by_bucket,
@@ -2516,7 +2605,7 @@ class V95Ledger:
             "n": n, "mean_brier_reduction": round(mean, 6),
             "t": round(t, 4) if math.isfinite(t) else None,
             # Paired one-sample test on the diffs → df = n - 1 (exact Student-t).
-            "p_value": round(_two_sided_p(t, df=n - 1), 6), "favored": mean > 0, "reason": "ok",
+            "p_value": _round_p(_two_sided_p(t, df=n - 1)), "favored": mean > 0, "reason": "ok",
         }
 
     def metrics(self) -> dict[str, Any]:

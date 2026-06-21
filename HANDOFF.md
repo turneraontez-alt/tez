@@ -9,10 +9,52 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **937 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **949 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
-## ✅ Shipped THIS session — Expanded `updated-review` into a full system auditor
+## ✅ Shipped THIS session — Implemented the updated-review fixes (critical → polish)
+**On branch `claude/updated-review-ecyp4x`.** Worked the latest auditor review's
+confirmed findings end-to-end; suite **949 passed, 4 skipped** (+~13). All
+read-only wrt real exchanges; frozen champion untouched; live probability path
+byte-for-byte unchanged unless an explicit default-OFF flag is set.
+- **CRITICAL — per-asset ingest isolation** (`app.py`): wrapped the ingest loop
+  (ensure_market/ingest_trades/ingest_spot/parse_orderbook) in a per-asset
+  try/except so one poisoned tick no longer aborts the loop and starves every
+  other asset of a snapshot that cycle. Test: `test_app_loop_degraded_paths.py::
+  TestIngestExceptionIsolation`.
+- **HIGHEST — isotonic calibration** (`ledger_v95.py`): added pure PAVA
+  `_isotonic_fit`/`_isotonic_predict`, computed over the same resolved rows and
+  applied by `calibrate()` ONLY when `Q15_V95_CALIBRATION_ISOTONIC=1`
+  (DEFAULT OFF → live = Platt, unchanged). Targets the recorded high-band
+  UNDER-confidence (pred ~0.78 → win ~0.95) a slope-capped Platt can't bend.
+  Tests: `test_review_fixes_v4.py`.
+- **MEDIUM — shadow-signal data collection ON by default**
+  (`shadow_signals.py`): `Q15_V95_SHADOW_SIGNALS_ENABLED` now defaults True.
+  Verified the signals are write-only to `predictions.shadow_signal_json` and
+  read back only by the OOS A/B — they never touch the live probability — so the
+  5 features can finally accrue evidence while staying in shadow.
+- **MEDIUM — repaired 3 shadow features** (`shadow_signals.py`):
+  order_flow_persistence now carries a damped flow lean on candle gaps instead
+  of going dead at 0.0; prediction_stability treats a MISSING flip-risk as
+  neutral (0.5) not "perfectly stable"; regime_transition de-confidences (0.5)
+  when all regime inputs are absent instead of assuming "no transition".
+- **POLISH — p-value precision** (`ledger_v95._round_p`): strong promotion
+  p-values no longer flatten to 0.0 at 6dp. **POLISH — flip-alert honesty**
+  (`ledger_v95.flip_warning_performance` + `reporting._flip_scoreboard`): the
+  disabled high-flip-risk channel is now labelled "alerts disabled" rather than
+  reading as 0-detected/100%-missed.
+- **Examined, NOT a bug:** ticker↔asset "mismatch" (Kalshi tickers are
+  market-unique; recorded together per market) and rank double-counting
+  (`prediction_id` is the PK) — documented, no code change.
+- **DB:** no schema change (isotonic fit is in-memory; shadow_signal_json column
+  already existed). **Restart/ET/grading/dedup** re-verified end-to-end.
+- **Files:** `app.py`, `q15_upgrade/ledger_v95.py`, `q15_upgrade/shadow_signals.py`,
+  `notifications/reporting.py`, `.gitignore`, + tests
+  (`test_review_fixes_v4.py` new; updated `test_app_loop_degraded_paths.py`,
+  `test_shadow_signals.py`, `test_q15_v95_significance.py`,
+  `test_q15_learning_scoreboard.py`).
+
+## ✅ Shipped earlier THIS session — Expanded `updated-review` into a full system auditor
 **On branch `claude/updated-review-ecyp4x`, merged to `main`.** Rewrote
 `.claude/skills/updated-review/SKILL.md` (skill-only; no app/test change, suite
 unchanged at **906 passed, 13 skipped** in this container env). The skill now
