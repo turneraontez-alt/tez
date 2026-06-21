@@ -129,6 +129,28 @@ class HourlyReporter:
             table.append("* under 10 settled — not yet reliable")
         return [headline, ""] + table + self._pushed_vs_background_lines(sb) + self._manipulation_lines(sb)
 
+    def _setup_scan_lines(self):
+        """Compact, honest 10M setup-scan block for the hourly report. Reads only
+        settled rows; runs the leakage-safe miner; reports whether anything holds
+        up out-of-sample. Returns [] (silent) when disabled, no ledger, or no
+        settled 10M rows yet — so it never adds noise before there is data."""
+        if (os.environ.get("Q15_SETUP_MINER_ENABLED", "true") or "true").strip().lower() in {"0", "false", "no", "off"}:
+            return []
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "resolved_setup_rows"):
+            return []
+        try:
+            from q15_upgrade import setup_miner
+            rows = ledger.resolved_setup_rows("10M")
+            if not rows:
+                return []
+            cfg = setup_miner.MineConfig.from_env("10M")
+            report = setup_miner.mine(rows, cfg)
+            return ["", *setup_miner.build_report_lines(report, cfg)]
+        except Exception as e:
+            logger.warning(f"setup scan skipped: {e}")
+            return []
+
     @staticmethod
     def _pushed_vs_background_lines(sb):
         """Two separate records: predictions actually PUSHED to the user vs every
@@ -312,6 +334,11 @@ class HourlyReporter:
 
         # Flip-warning track record, rendered in the same table as the intervals.
         body.extend(self._flip_scoreboard())
+
+        # 10M setup scan: leakage-safe, out-of-sample-validated search for a
+        # combination of decision-time conditions that predicts the outcome.
+        # Self-silencing until enough settled rows exist to discover + validate.
+        body.extend(self._setup_scan_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:

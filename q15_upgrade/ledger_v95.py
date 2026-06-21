@@ -1691,6 +1691,39 @@ class V95Ledger:
             "by_pushed": by_pushed, "pushed_by_checkpoint": pushed_by_checkpoint,
         }
 
+    def resolved_setup_rows(self, checkpoint: str = "10M") -> list[dict[str, Any]]:
+        """Read-only export of settled predictions for the setup miner: each row's
+        DECISION-TIME feature values + regime + final outcome, ordered by time.
+
+        Only ``official_result``-bearing rows for the given checkpoint and the
+        current MODEL_VERSION are returned. The outcome is the target; nothing
+        derived from settlement is exposed as a feature. Unparseable feature JSON
+        is skipped, never guessed."""
+        if not self._available:
+            return []
+        out: list[dict[str, Any]] = []
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT created_at, feature_json, regime, official_result "
+                "FROM predictions WHERE model_version=? AND checkpoint=? "
+                "AND official_result IS NOT NULL ORDER BY created_at ASC",
+                (MODEL_VERSION, checkpoint),
+            ))
+        for row in rows:
+            try:
+                features = json.loads(str(row["feature_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(features, dict):
+                continue
+            out.append({
+                "created_at": float(row["created_at"]),
+                "features": features,
+                "regime": row["regime"],
+                "result": str(row["official_result"]).upper(),
+            })
+        return out
+
     def scoreboard(self) -> dict[str, Any]:
         """User-facing record: how often each interval, rank, and asset was right/wrong."""
         if not self._available:

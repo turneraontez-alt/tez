@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **702 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **711 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -124,6 +124,31 @@ as a SHADOW model, built to be promoted to primary with one switch.
   compact `END-RESULT CALL · 15M & 10M` block (`Res` col + `Y+/N-` cells, + right /
   - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
   (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — 10M setup miner (leakage-safe)
+Owner asked: find a 10M setup/combination that always predicted the outcome,
+testing every occurrence, with no hindsight/leakage/cherry-picking. **First the
+honest finding:** the row-level data needed (per-prediction features+outcome) does
+NOT survive in this container — live `predictions` table = 2 synthetic test rows;
+`v95_ledger_snapshot.json` is AGGREGATES only (301 resolved summarised; no per-row
+features); v94 DB = 1 row; v7 JSONL = 126 decision-state events, no outcomes. The
+only 100%-looking artifact is the pooled calibration curve (model prob ≥75% → 27/27
+across ALL checkpoints), but that's in-sample, small-n, not 10M-specific, and its
+Wilson LB is only 87.5% — not a validated rule; the system's own test already says
+`challenger_not_significantly_better`. **Then built the miner so it answers this as
+real data accrues:** new `q15_upgrade/setup_miner.py` (pure, tested) — enumerates
+conjunctions (≤2) of decision-time conditions (feature sign splits + regime eq),
+with ALL guards enforced: chronological train/test split (discover on train,
+CONFIRM on later untouched test), minimum support (train ≥30 / test ≥10),
+Bonferroni multiple-testing correction, Wilson lower bounds (never the raw rate),
+missing-data rows excluded not guessed, outcome never used as an input. Read-only
+`V95Ledger.resolved_setup_rows(checkpoint)` feeds it; `reporting.HourlyReporter
+._setup_scan_lines` renders a compact `10M SETUP SCAN` block that self-silences
+until there's enough data (verified: live ledger → "insufficient data … have 1/1
+of 2"). Flags in `.env.example` (`Q15_SETUP_MINER_*`, default ON). +9 tests
+(`test_q15_setup_miner.py`: stats, undecidable conditions, insufficient-data,
+genuine-signal validates, noise doesn't, in-sample-perfect-but-test-fails flagged,
+multiple-testing correction). Suite: **711 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — 15M rank performance in hourly report
 Owner: "on the hourly report add 15M rank performance." `reporting.HourlyReporter
