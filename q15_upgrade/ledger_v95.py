@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from q15_upgrade import flip_risk
+from q15_upgrade.money import round_cents
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +157,62 @@ def _two_sided_p(t: float, df: float | None = None) -> float:
         return _clamp(2.0 * (1.0 - _normal_cdf(abs(t))), 0.0, 1.0)
     df = float(df)
     return _clamp(_betai(0.5 * df, 0.5, df / (df + t * t)), 0.0, 1.0)
+
+
+def _round_p(p: float | None) -> float | None:
+    """Round a p-value without flattening very strong results to 0.0.
+
+    Fixed 6-dp rounding collapses any p < 5e-7 to 0.0, so two distinct
+    extremely-significant tests become indistinguishable. Keep ~3 significant
+    figures for small p-values (observability only — promotion still compares
+    against alpha, not the rounded display)."""
+    if p is None:
+        return None
+    if p <= 0.0:
+        return 0.0
+    if p >= 1e-4:
+        return round(p, 6)
+    digits = 2 - int(math.floor(math.log10(p)))
+    return round(p, min(digits, 15))
+
+
+def _isotonic_fit(pairs: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Pool-Adjacent-Violators isotonic regression.
+
+    ``pairs`` is (raw_probability, outcome∈{0,1}). Returns monotonically
+    non-decreasing (x, y) anchors (block mean x → block mean y), x ascending —
+    the calibrated map. Pure and deterministic; empty in → empty out."""
+    pts = sorted((float(x), float(y)) for x, y in pairs)
+    if not pts:
+        return []
+    blocks: list[list[float]] = []  # [sum_y, count, sum_x]
+    for x, y in pts:
+        blocks.append([y, 1.0, x])
+        # Merge while the previous block's mean would violate monotonicity.
+        while len(blocks) >= 2 and blocks[-2][0] / blocks[-2][1] >= blocks[-1][0] / blocks[-1][1]:
+            sy2, c2, sx2 = blocks.pop()
+            sy1, c1, sx1 = blocks.pop()
+            blocks.append([sy1 + sy2, c1 + c2, sx1 + sx2])
+    return [(sx / c, sy / c) for sy, c, sx in blocks]
+
+
+def _isotonic_predict(anchors: Sequence[tuple[float, float]], x: float) -> float | None:
+    """Linear interpolation over isotonic ``anchors`` (clamped at the ends)."""
+    if not anchors:
+        return None
+    if x <= anchors[0][0]:
+        return anchors[0][1]
+    if x >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(1, len(anchors)):
+        x0, y0 = anchors[i - 1]
+        x1, y1 = anchors[i]
+        if x <= x1:
+            if x1 == x0:
+                return y1
+            t = (x - x0) / (x1 - x0)
+            return y0 + t * (y1 - y0)
+    return anchors[-1][1]
 
 
 def _json(value: Any) -> str:
@@ -310,6 +368,14 @@ class V95Ledger:
         # convergence behaviour (and its identity fallback) is deterministically
         # exercisable and tunable without editing code.
         self._calibration_max_iters = _env_int("Q15_V95_CALIBRATION_MAX_ITERS", 12, 1, 100)
+        # Isotonic (monotonic, non-parametric) calibration. DEFAULT OFF: live
+        # probabilities keep the 2-parameter Platt transform exactly as today.
+        # The recorded calibration bands show the champion is systematically
+        # UNDER-confident at the high end (predicts ~0.78 where it wins ~0.95) —
+        # a curve a 2-parameter Platt (slope-capped at 1.50) cannot bend out.
+        # Isotonic regression can. It is wired in but gated so it can be measured
+        # against Platt in shadow first and only activated once it proves out.
+        self._calibration_isotonic = _env_bool("Q15_V95_CALIBRATION_ISOTONIC", False)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
@@ -329,8 +395,21 @@ class V95Ledger:
         self._data_version = 0
         # Observability: rows silently dropped because their stored feature JSON
         # was unparseable. Surfaced via stats() so a corrupt data pipeline shows
-        # up instead of quietly thinning calibration/learning inputs.
+        # up instead of quietly thinning calibration/learning inputs. Tracked both
+        # in aggregate (backward-compatible) and per checkpoint, so a corruption
+        # confined to one interval (e.g. only 10M) is not masked as system-wide.
         self._dropped_feature_rows = 0
+        self._dropped_feature_rows_by_checkpoint: dict[str, int] = {cp: 0 for cp in TRACKED_CHECKPOINTS}
+        # Observability: shadow-learning steps. The five learning knobs (rate,
+        # per-result cap, drift cap, min-quality, primary weight) interact, and a
+        # bad combination can silently collapse every step to ~0 — "learning is on"
+        # but nothing moves. We surface the last effective step magnitude and a
+        # counter of applied-but-frozen results so that state is visible, not a
+        # guess. Below this magnitude an update counts as effectively frozen.
+        self._last_learning_step_magnitude = 0.0
+        self._learning_frozen_results = 0
+        self._learning_frozen_epsilon = _env_float("Q15_V95_LEARNING_FROZEN_EPSILON", 1e-9, 0.0, 1.0)
+        self._last_learning_frozen_log = 0.0
         # Observability: Platt fits that did not converge and were replaced by the
         # identity transform (see calibration_require_converged). Surfaced in stats().
         self._calibration_unconverged_fallbacks = 0
@@ -506,6 +585,12 @@ class V95Ledger:
             # their known feature names, so this can never perturb a live decision.
             # Additive; old rows read NULL.
             self._ensure_column(connection, "predictions", "shadow_factor_json", "shadow_factor_json TEXT")
+            # SHADOW SIGNALS: the five experimental, YES-oriented signals graded by
+            # the background A/B (see q15_upgrade/shadow_signals.py). Stored in their
+            # own column, never in feature_json, so they can never reach the frozen
+            # champion/challenger/calibration; they only exist to be graded against
+            # the settled outcome. Additive; old rows read NULL.
+            self._ensure_column(connection, "predictions", "shadow_signal_json", "shadow_signal_json TEXT")
             # One active pushed prediction per timeframe: the contract currently
             # occupying each checkpoint's slot, held until it closes so a second
             # prediction for the same time frame is never pushed while one is live.
@@ -591,11 +676,31 @@ class V95Ledger:
                     )
             connection.commit()
 
-    @staticmethod
-    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
-        existing = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+    # SQLite identifiers (table/column names) cannot be passed as bound
+    # parameters, so any name spliced into DDL must be proven to be a plain
+    # identifier first. This whitelist closes the one parameterisation gap in the
+    # file: even though every current caller passes a literal, a name that ever
+    # came from config/env can no longer reach the SQL string unvalidated.
+    _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @classmethod
+    def _safe_identifier(cls, name: str) -> str:
+        if not cls._IDENTIFIER_RE.match(str(name or "")):
+            raise ValueError(f"unsafe SQL identifier: {name!r}")
+        return str(name)
+
+    @classmethod
+    def _ensure_column(cls, connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        safe_table = cls._safe_identifier(table)
+        safe_column = cls._safe_identifier(column)
+        # The DDL fragment must begin with the (validated) column name; validating
+        # it here keeps the ALTER statement's identifier provably safe while the
+        # trailing type/constraint text stays a controlled, code-supplied literal.
+        if not str(ddl).startswith(safe_column):
+            raise ValueError(f"column DDL {ddl!r} does not begin with column name {column!r}")
+        existing = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({safe_table})")}
+        if safe_column not in existing:
+            connection.execute(f"ALTER TABLE {safe_table} ADD COLUMN {ddl}")
 
     @staticmethod
     def _checkpoint(value: Any) -> str:
@@ -676,6 +781,7 @@ class V95Ledger:
                           flip_risk_confidence: float | None = None,
                           flip_evidence_count: int | None = None,
                           shadow_factors: Mapping[str, Any] | None = None,
+                          shadow_signals: Mapping[str, Any] | None = None,
                           snapshot_id: str | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
@@ -730,6 +836,13 @@ class V95Ledger:
                     "UPDATE predictions SET shadow_factor_json=? WHERE prediction_id=?",
                     (_json(dict(shadow_factors)), prediction_id),
                 )
+            # Experimental shadow signals land in their own isolated column in the
+            # same transaction, only on a fresh insert (never overwrites a lock).
+            if inserted and shadow_signals:
+                connection.execute(
+                    "UPDATE predictions SET shadow_signal_json=? WHERE prediction_id=?",
+                    (_json(dict(shadow_signals)), prediction_id),
+                )
             connection.commit()
         if inserted:
             self._shadow_observe(
@@ -773,6 +886,34 @@ class V95Ledger:
                 runner.mark_native_delivery_failed(str(ticker), str(checkpoint), str(error))
         except Exception as exc:
             self._note_shadow_error("mark_failed", exc)
+
+    def _shadow_mark_pending(self, ticker: str, checkpoint: str, delivery_key: str) -> None:
+        """Tell the shadow that Your System's official report for (ticker, checkpoint)
+        was durably QUEUED in the outbox under ``delivery_key`` — outcome to be
+        reconciled from the outbox's true status later (so a background-worker
+        delivery is credited, not mis-scored as a failure). Read-only wrt
+        production; never raises into the alert path."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                runner.mark_native_pending(str(ticker), str(checkpoint), str(delivery_key))
+        except Exception as exc:
+            self._note_shadow_error("mark_pending", exc)
+
+    def _shadow_reconcile_delivery(self, status_lookup: Any) -> dict[str, int]:
+        """Reconcile pending native picks against the outbox's true delivery status
+        (``status_lookup(key) -> 'SENT'|'DEAD_LETTER'|...|None``). Promotes picks
+        whose official report actually delivered (sync OR worker) and fails only
+        those whose report dead-lettered. Read-only wrt production; never raises."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                return runner.reconcile_native_delivery(status_lookup)
+        except Exception as exc:
+            self._note_shadow_error("reconcile_delivery", exc)
+        return {"promoted": 0, "failed": 0}
 
     def _shadow_resolve(self, events) -> None:
         try:
@@ -1361,7 +1502,10 @@ class V95Ledger:
                 cost = _num(_row_get(row, "entry_cost_cents"), 0.0) or 0.0
                 realized = None
                 if ask is not None:
-                    realized = round((100.0 - ask - cost) if correct else -(ask + cost), 4)
+                    # Canonical 2-dp cent precision shared with the performance
+                    # store and the scoreboard so P&L never drifts between the
+                    # value stored here and the value re-tallied elsewhere.
+                    realized = round_cents((100.0 - ask - cost) if correct else -(ask + cost))
                 connection.execute(
                     """UPDATE predictions SET official_result=?,resolved_at=?,correct=?,
                        realized_cents=?,champion_brier=?,challenger_brier=?,baseline_brier=?,
@@ -1419,7 +1563,10 @@ class V95Ledger:
                 features = json.loads(str(row["feature_json"] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 self._dropped_feature_rows += 1
-                logger.warning("Unparseable feature_json for prediction_id=%s; skipping learning", prediction_id)
+                self._dropped_feature_rows_by_checkpoint[checkpoint] = (
+                    self._dropped_feature_rows_by_checkpoint.get(checkpoint, 0) + 1
+                )
+                logger.warning("Unparseable feature_json for prediction_id=%s (checkpoint=%s); skipping learning", prediction_id, checkpoint)
                 connection.execute("UPDATE predictions SET learning_applied=-3 WHERE prediction_id=?", (prediction_id,))
                 connection.commit()
                 return False
@@ -1468,6 +1615,28 @@ class V95Ledger:
                 connection.execute(
                     "UPDATE checkpoint_challenger_weights SET value=?,grad_sq=?,updates=updates+1,updated_at=? WHERE checkpoint=? AND name=?",
                     (next_value, grad_sq, now, checkpoint, name),
+                )
+            # Observability: the effective step this result produced. If learning
+            # is enabled but the net movement collapsed to ~0 (the per-result /
+            # drift caps or a tiny learning rate cancelling the gradient), record
+            # it as an effectively-frozen result and log it (throttled). This makes
+            # "learning is on but nothing is moving" visible instead of silent.
+            step_magnitude = sum(abs(d) for d in deltas.values())
+            self._last_learning_step_magnitude = step_magnitude
+            if step_magnitude <= self._learning_frozen_epsilon:
+                self._learning_frozen_results += 1
+                if now - self._last_learning_frozen_log >= 300.0:
+                    self._last_learning_frozen_log = now
+                    logger.warning(
+                        "Shadow learning effectively frozen for checkpoint=%s: step magnitude %.3e <= epsilon %.3e "
+                        "(rate=%.4f per_result_cap=%.4f drift_cap=%.4f) — check the learning knobs",
+                        checkpoint, step_magnitude, self._learning_frozen_epsilon,
+                        learning_rate, per_result_cap, total_drift_cap,
+                    )
+            else:
+                logger.debug(
+                    "Shadow learning step checkpoint=%s magnitude=%.3e features_moved=%d",
+                    checkpoint, step_magnitude, len(deltas),
                 )
             # Mirror the same gradient step into the per-regime challenger so it
             # specializes to the market condition this result occurred in.
@@ -1585,6 +1754,10 @@ class V95Ledger:
                 # Counter mutation belongs under the lock (it is read unlocked in
                 # status()); fold in the rows the unlocked centroid build dropped.
                 self._dropped_feature_rows += dropped_rows
+                if dropped_rows:
+                    self._dropped_feature_rows_by_checkpoint[checkpoint] = (
+                        self._dropped_feature_rows_by_checkpoint.get(checkpoint, 0) + dropped_rows
+                    )
                 if self._cache_enabled and self._data_version == version:
                     self._pattern_centroid_cache[checkpoint] = (version, result)
         return result
@@ -1635,6 +1808,14 @@ class V95Ledger:
         fit = self._calibration_fit(checkpoint, asset)
         if not fit["active"]:
             return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
+        if self._calibration_isotonic and fit.get("isotonic"):
+            iso = _isotonic_predict(fit["isotonic"], raw)
+            if iso is not None:
+                return {
+                    "probability": _clamp(iso, 0.01, 0.99), "active": True,
+                    "reason": "isotonic_current_version", "rows": fit["rows"],
+                    "scope": fit["scope"], "method": "isotonic",
+                }
         calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
         result = {
             "probability": calibrated, "active": True,
@@ -1731,6 +1912,16 @@ class V95Ledger:
                    "fitted_intercept": intercept, "fitted_slope": slope}
             if fallback:
                 fit["fallback"] = fallback
+            # Isotonic curve over the SAME resolved rows. Computed only when the
+            # option is on; robust even where Platt fell back to identity. Stored
+            # on the (in-memory cached) fit and applied by calibrate() — gated so
+            # the default live path is byte-for-byte the Platt transform.
+            if self._calibration_isotonic:
+                fit["isotonic"] = _isotonic_fit([
+                    (_clamp(float(r["raw_yes_probability"]), 0.01, 0.99),
+                     1.0 if r["official_result"] == "YES" else 0.0)
+                    for r in rows
+                ])
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.
@@ -1748,14 +1939,23 @@ class V95Ledger:
         threshold = _env_int("Q15_V95_SCOREBOARD_MIN_N", 10, 1, 1000)
         realized = [v for v in (_num(_row_get(row, "realized_cents")) for row in selected) if v is not None]
         pnl_n = len(realized)
+        # Does the accuracy CI exclude 0.5? When the whole 95% Wilson interval
+        # sits above (or below) a coin flip, the bucket is statistically separated
+        # from chance. Read with low_n, this distinguishes "clean but tiny — don't
+        # trust it" (e.g. 3-0, low_n True, interval still straddles 0.5) from
+        # "genuinely separated from chance" (interval entirely above 0.5).
+        ci_excludes_half = bool(
+            n and ((low is not None and low > 0.5) or (high is not None and high < 0.5))
+        )
         return {
             "right": right, "wrong": n - right, "n": n,
             "accuracy": round(right / n, 4) if n else None,
             "ci_low": low, "ci_high": high,
             "low_n": bool(n and n < threshold),
+            "ci_excludes_half": ci_excludes_half,
             "pnl_n": pnl_n,
-            "realized_total_cents": round(sum(realized), 2) if realized else 0.0,
-            "realized_avg_cents": round(sum(realized) / pnl_n, 2) if pnl_n else None,
+            "realized_total_cents": round_cents(sum(realized)) if realized else 0.0,
+            "realized_avg_cents": round_cents(sum(realized) / pnl_n) if pnl_n else None,
         }
 
     @staticmethod
@@ -2021,6 +2221,64 @@ class V95Ledger:
                 "realized_cents": _num(_row_get(row, "realized_cents")),
             })
         return out
+
+    def resolved_shadow_signal_rows(self, checkpoint: str | None = None) -> list[dict[str, Any]]:
+        """Read-only export for the experimental shadow-signal A/B: per settled row,
+        the calibrated YES probability the live system used, the settled outcome, and
+        the recorded experimental signals. Ordered oldest-first so the A/B can do a
+        genuine time-ordered train/test split. Nothing here feeds a live decision."""
+        if not self._available:
+            return []
+        query = (
+            "SELECT checkpoint, calibrated_yes_probability, official_result, shadow_signal_json "
+            "FROM predictions WHERE model_version=? AND official_result IN ('YES','NO') "
+            "AND shadow_signal_json IS NOT NULL"
+        )
+        args: list[Any] = [MODEL_VERSION]
+        if checkpoint:
+            query += " AND checkpoint=?"
+            args.append(self._checkpoint(checkpoint))
+        query += " ORDER BY created_at ASC"
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(query, tuple(args)))
+        out: list[dict[str, Any]] = []
+        dropped = 0  # accumulated unlocked; folded into the counter under the lock
+        for row in rows:
+            try:
+                signals = json.loads(str(row["shadow_signal_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                dropped += 1
+                continue
+            champion_yes = _num(_row_get(row, "calibrated_yes_probability"))
+            if champion_yes is None or not isinstance(signals, dict):
+                continue
+            out.append({
+                "checkpoint": row["checkpoint"],
+                "champion_yes": champion_yes,
+                "outcome": 1 if str(row["official_result"]) == "YES" else 0,
+                "signals": signals,
+            })
+        if dropped:
+            with self._lock:
+                self._dropped_feature_rows += dropped
+        return out
+
+    def shadow_signal_experiment(self, checkpoint: str | None = None) -> dict[str, Any]:
+        """Run the background A/B: for each experimental signal, does it improve the
+        probability out of sample? Returns a JSON-friendly summary for the report and
+        /api. Read-only; never promotes anything (promotion stays manual)."""
+        from q15_upgrade import shadow_signals
+        config = shadow_signals.SignalConfig.from_env()
+        rows = self.resolved_shadow_signal_rows(checkpoint)
+        scores = shadow_signals.evaluate(rows, config)
+        return {
+            "available": True,
+            "enabled": config.enabled,
+            "model_version": MODEL_VERSION,
+            "rows_considered": len(rows),
+            "min_rows": config.min_rows,
+            "signals": shadow_signals.scores_to_dict(scores),
+        }
 
     def scoreboard(self) -> dict[str, Any]:
         """User-facing record: how often each interval, rank, and asset was right/wrong."""
@@ -2292,8 +2550,15 @@ class V95Ledger:
             ws = [w for w in warnings if w["risk_score"] is not None and flip_risk.bucket_label(float(w["risk_score"])) == label]
             if ws:
                 by_bucket[label] = _agg(ws, [])
+        # The dedicated high-flip-risk Telegram alert is OFF by default (owner
+        # removed that UI; re-enable with Q15_V95_FLIP_ALERTS_ENABLED). When it
+        # is off, NO warnings are ever recorded, so "0 detected / N missed" is a
+        # disabled channel, NOT a detection failure — surface the flag so the
+        # report can say so honestly instead of implying 100% missed.
+        alerts_enabled = _env_bool("Q15_V95_FLIP_ALERTS_ENABLED", False)
         return {
             "available": True, "model_version": MODEL_VERSION,
+            "alerts_enabled": alerts_enabled,
             "overall": _agg(warnings, all_flips),
             "by_checkpoint": by_checkpoint, "by_direction": by_direction,
             "by_asset": by_asset, "by_score_bucket": by_bucket,
@@ -2340,7 +2605,7 @@ class V95Ledger:
             "n": n, "mean_brier_reduction": round(mean, 6),
             "t": round(t, 4) if math.isfinite(t) else None,
             # Paired one-sample test on the diffs → df = n - 1 (exact Student-t).
-            "p_value": round(_two_sided_p(t, df=n - 1), 6), "favored": mean > 0, "reason": "ok",
+            "p_value": _round_p(_two_sided_p(t, df=n - 1)), "favored": mean > 0, "reason": "ok",
         }
 
     def metrics(self) -> dict[str, Any]:
@@ -2599,6 +2864,9 @@ class V95Ledger:
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,
             "dropped_feature_rows": int(self._dropped_feature_rows),
+            "dropped_feature_rows_by_checkpoint": {k: int(v) for k, v in self._dropped_feature_rows_by_checkpoint.items()},
+            "last_learning_step_magnitude": float(self._last_learning_step_magnitude),
+            "learning_frozen_results": int(self._learning_frozen_results),
             "calibration_unconverged_fallbacks": int(self._calibration_unconverged_fallbacks),
             "shadow_errors": int(self._shadow_errors),
             "last_shadow_error": self._last_shadow_error,

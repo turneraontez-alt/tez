@@ -15,6 +15,8 @@ import logging
 import os
 import time
 
+from q15_upgrade.money import round_cents
+
 logger = logging.getLogger(__name__)
 
 
@@ -125,7 +127,9 @@ class PerformanceTracker:
                     win = (side == "YES" and result == "yes") or \
                           (side == "NO" and result == "no")
                     outcome = "win" if win else "loss"
-                    realized = (100 - ask - fee) if win else -(ask + fee)
+                    # Canonical 2-dp cent precision (shared via q15_upgrade.money)
+                    # so realized P&L matches the v9.5 ledger's accounting exactly.
+                    realized = round_cents((100 - ask - fee) if win else -(ask + fee))
                 else:
                     outcome = "void"
                     realized = 0

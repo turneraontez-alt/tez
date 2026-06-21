@@ -461,15 +461,23 @@ def refresh_loop(max_cycles=None):
                 # ticker and keeps the snapshot loop's active[a] lookups safe).
                 if not _fetch_result_is_current(active, a, r):
                     continue
-                eng = engines[a]
-                eng.ensure_market(r["ticker"])
-                eng.ingest_trades(r["trades"], now)
-                eng.ingest_spot(r["spot"], now)
-                ob_parsed = parse_orderbook(r["ob_raw"])
-                yb, ya = ob_parsed["yes_bid"], ob_parsed["yes_ask"]
-                ob_parsed["spread"] = (ya - yb) if (yb is not None and ya is not None) else None
-                ob_delta = eng.ob_tracker.update(ob_parsed)
-                prelim[a] = (r, ob_parsed, ob_delta)
+                # Isolate ingest per asset: a poisoned tick (bad timestamp,
+                # malformed orderbook) for one asset must not abort the loop and
+                # starve every *other* asset of a snapshot this cycle. Skip the
+                # bad asset; the rest still publish (mirrors the build_snapshot
+                # loop's per-asset try/except below).
+                try:
+                    eng = engines[a]
+                    eng.ensure_market(r["ticker"])
+                    eng.ingest_trades(r["trades"], now)
+                    eng.ingest_spot(r["spot"], now)
+                    ob_parsed = parse_orderbook(r["ob_raw"])
+                    yb, ya = ob_parsed["yes_bid"], ob_parsed["yes_ask"]
+                    ob_parsed["spread"] = (ya - yb) if (yb is not None and ya is not None) else None
+                    ob_delta = eng.ob_tracker.update(ob_parsed)
+                    prelim[a] = (r, ob_parsed, ob_delta)
+                except Exception as e:
+                    logger.error(f"ingest {a}: {e}")
 
             # -- broader market direction (BTC/ETH underlying 60s) --
             broader = {}
@@ -854,6 +862,11 @@ def q15_v95_scoreboard_ep():
 @app.route("/data/q15-v9-5/accuracy")
 def q15_v95_accuracy_ep():
     return jsonify(checkpoint_v95.accuracy_report())
+
+@app.route("/api/q15-v9-5/shadow-signals")
+@app.route("/data/q15-v9-5/shadow-signals")
+def q15_v95_shadow_signals_ep():
+    return jsonify(checkpoint_v95.shadow_signal_experiment())
 
 @app.route("/api/market-cache")
 @app.route("/data/market-cache")

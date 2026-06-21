@@ -53,6 +53,8 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import shadow_factors as cross_asset
 from . import shadow_economics
+from . import shadow_signals
+from .money import clamp_price_cents, round_edge_cents
 from notifications import manipulation_alert
 from notifications import panels_v95
 from .fast_candles import fast_canonical_candles
@@ -956,6 +958,21 @@ def analyse_v95(
     volatility = _timed(prof, "volatility", _robust_volatility, canonical)
     returns = _timed(prof, "returns", _multi_horizon_returns, canonical)
     structural = _timed(prof, "structural", _structural_probability, canonical, volatility, returns)
+    # Defense-in-depth: the structural base probability is the spine of the model
+    # (every feature is an adjustment to its logit). If it failed to load — a state
+    # the core-validity gate above normally prevents, but which a future feed/edge
+    # case could reach — we must NOT feed thin volatility-derived features into the
+    # ensemble and emit a confident-looking number. Fail closed to a prediction-only
+    # degraded result instead, with the reason surfaced.
+    if not structural.get("available") or structural.get("yes_probability") is None:
+        return {
+            **base_result, "trade_decision": "PREDICTION_ONLY",
+            "main_blocker": "structural_model_unavailable",
+            "yes_probability": None, "no_probability": None, "selected_probability": None,
+            "conservative_probability": None, "data_quality": canonical.data_quality,
+            "evidence_quality": 0.0, "evidence_coverage": 0.0, "low_evidence": True,
+            "absent_features": [], "trade_quality": 0.0,
+        }
     momentum, momentum_q, momentum_d = _timed(prof, "momentum", _momentum_feature, returns, volatility, canonical)
     flow, flow_q, flow_d = _timed(prof, "flow", _flow_feature, snapshot, canonical)
     book, book_q, book_d = _timed(prof, "book", _book_feature, snapshot, canonical)
@@ -1022,17 +1039,31 @@ def analyse_v95(
     uncertainty = 0.018 + (1.0 - data_quality) * 0.12 + float(regime.get("uncertainty", 0.08)) * 0.25
     divergence = _num(exchange_d.get("divergence_bps"), 0.0) or 0.0
     uncertainty += min(0.04, divergence / 1000.0)
+    # Evidence coverage: a feature whose feed is absent has quality 0 and so
+    # contributes NOTHING to the model logit (contribution = weight·value·quality)
+    # — it is treated as missing, never as a neutral/zero signal that masquerades
+    # as support. Coverage = the fraction of features actually backed by data
+    # (quality at/above the floor). It is computed unconditionally so the alert
+    # path can honestly flag a thin snapshot even when the haircut is disabled.
+    coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
+    feature_absent = {name: bool(q < coverage_floor) for name, q in feature_quality.items()}
+    covered = sum(1 for absent in feature_absent.values() if not absent)
+    evidence_coverage = covered / max(1, len(feature_quality))
+    absent_features = sorted(name for name, absent in feature_absent.items() if absent)
     # Evidence-coverage penalty: "insufficient evidence" must read as low
-    # confidence, not as a clean neutral signal. Features that have no data
-    # contribute nothing (quality 0), so a thin snapshot yields low coverage;
-    # low coverage widens the conservative haircut toward 0.5. Default 0.08
-    # (moderate); set to 0.0 to disable, up to 0.20 for a stronger thin-data haircut.
+    # confidence, not as a clean neutral signal. Low coverage widens the
+    # conservative haircut toward 0.5. Default 0.08 (moderate); set to 0.0 to
+    # disable, up to 0.20 for a stronger thin-data haircut.
     coverage_penalty = _env_float("Q15_V95_EVIDENCE_COVERAGE_PENALTY", 0.08, 0.0, 0.20)
     if coverage_penalty > 0.0:
-        coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
-        covered = sum(1 for q in feature_quality.values() if q >= coverage_floor)
-        coverage = covered / max(1, len(feature_quality))
-        uncertainty += coverage_penalty * (1.0 - coverage)
+        uncertainty += coverage_penalty * (1.0 - evidence_coverage)
+    # Low-evidence flag: coverage below this fraction means the prediction rests
+    # on too few backed features to be read as well-supported. This is an
+    # observability marker only — it never changes the (frozen) model output or
+    # the entry gate; it surfaces in the snapshot and, when the default-OFF
+    # Q15_V95_LOW_EVIDENCE_FLAG is enabled, as a compact note in the alert.
+    low_evidence_min_coverage = _env_float("Q15_V95_LOW_EVIDENCE_MIN_COVERAGE", 0.50, 0.0, 1.0)
+    low_evidence = evidence_coverage < low_evidence_min_coverage
     conservative = _clamp(selected - uncertainty, 0.01, 0.99)
 
     quote = _selected_quote(snapshot, side)
@@ -1060,8 +1091,13 @@ def analyse_v95(
     unknown_depth_factor = _env_float("Q15_V95_UNKNOWN_DEPTH_FACTOR", 0.5, 0.0, 1.0)
     min_seconds = _env_float("Q15_V95_MIN_SECONDS_REMAINING", 20.0, 0.0, 300.0)
     total_costs = float(costs.get("total_cents") if "total_cents" in costs else costs.get("total_cost_cents") or 0.0)
-    net_edge = None if ask is None else conservative * 100.0 - ask - total_costs
-    ideal_entry = _clamp(conservative * 100.0 - total_costs - required_edge, 0.0, 100.0)
+    # Canonical cent precision on the money path: net_edge is a signed delta
+    # (legitimately negative, not range-bounded); ideal_entry is an absolute
+    # price that must round-trip into Kalshi's [0, 100]¢ range. Both go through
+    # q15_upgrade.money so the displayed/stored values never carry float noise
+    # like "3.3299999¢" or an impossible ">100¢" entry level.
+    net_edge = None if ask is None else round_edge_cents(conservative * 100.0 - ask - total_costs)
+    ideal_entry = clamp_price_cents(conservative * 100.0 - total_costs - required_edge, context="ideal_entry")
     liquidity_quality = 1.0
     if spread is not None:
         liquidity_quality *= _clamp(1.0 - spread / max(max_spread * 1.5, 1.0), 0.0, 1.0)
@@ -1118,6 +1154,9 @@ def analyse_v95(
         "confidence_grade": grade,
         "data_quality": data_quality,
         "evidence_quality": evidence_quality,
+        "evidence_coverage": evidence_coverage,
+        "low_evidence": low_evidence,
+        "absent_features": absent_features,
         "trade_quality": trade_quality,
         "uncertainty_penalty": uncertainty,
         "regime": regime,
@@ -1179,6 +1218,9 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_conservative_probability"] = analysis.get("conservative_probability")
     snapshot["q15_v9_5_data_quality"] = analysis.get("data_quality")
     snapshot["q15_v9_5_evidence_quality"] = analysis.get("evidence_quality")
+    snapshot["q15_v9_5_evidence_coverage"] = analysis.get("evidence_coverage")
+    snapshot["q15_v9_5_low_evidence"] = analysis.get("low_evidence")
+    snapshot["q15_v9_5_absent_features"] = analysis.get("absent_features")
     snapshot["q15_v9_5_trade_quality"] = analysis.get("trade_quality")
     snapshot["q15_v9_5_trade_decision"] = analysis.get("trade_decision")
     # Surface the blocker (e.g. the AVOID_INVALID_DATA core_errors) so the exact
@@ -1461,6 +1503,28 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             body.append("⚠ Manipulation watch")
             for asset, manip in flagged:
                 body.append(f"{asset}: {_manipulation_phrase(manip)}")
+
+    # Thin-evidence watch (default OFF): flag any top pick whose prediction rests
+    # on too few data-backed features, so a confident-looking number is read with
+    # the caveat that it is thinly supported. Observability only — the model and
+    # entry gate are unchanged; the line is compact and never alters the markers.
+    if _env_bool("Q15_V95_LOW_EVIDENCE_FLAG", False):
+        thin = [
+            (str(row["asset"]), analyses.get(str(row["asset"]), {}))
+            for row in top
+        ]
+        thin = [
+            (asset, a) for asset, a in thin
+            if a.get("prediction_available") and a.get("low_evidence")
+        ]
+        if thin:
+            body.append("")
+            body.append("⚠ Thin evidence")
+            for asset, a in thin:
+                cov = _num(a.get("evidence_coverage"))
+                cov_s = f"{cov * 100:.0f}%" if cov is not None else "n/a"
+                missing = ", ".join(a.get("absent_features") or []) or "—"
+                body.append(f"{asset}: {cov_s} backed · missing {missing}")
 
     # Unavailable picks (kept in the box so the whole card is one panel).
     for row in unavailable:
@@ -2100,6 +2164,17 @@ def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]
     return bridged, stats
 
 
+def _send_with_optional_key(notifier: Any, message: str, idempotency_key: str) -> dict[str, Any]:
+    """Call ``notifier.send_with_result`` with a stable idempotency key when the
+    notifier supports one (the reliable outbox), falling back transparently for a
+    bare notifier whose signature is ``send_with_result(text)``. The key lets the
+    delivery be reconciled later from the outbox's true status."""
+    try:
+        return notifier.send_with_result(message, idempotency_key=idempotency_key)
+    except TypeError:
+        return notifier.send_with_result(message)
+
+
 class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     VERSION = VERSION
 
@@ -2244,6 +2319,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 cross_asset.compute_market(analyses)
                 if _env_bool("Q15_V95_SHADOW_FACTORS_ENABLED", True) else None
             )
+            # Experimental shadow-signal config, resolved once per batch (default-OFF).
+            _signals_cfg = shadow_signals.SignalConfig.from_env()
             # ONE shared frozen-snapshot id for this interval's batch. Every asset
             # in this cycle is scored from the same `now` freeze and the same data,
             # and BOTH systems (champion + shadow) are recorded from this single
@@ -2301,6 +2378,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         cross_asset.for_asset(asset, analysis, shadow_market)
                         if shadow_market is not None else None
                     )
+                    # Experimental shadow signals (default-OFF): computed from data
+                    # already on the analysis/canonical, recorded for the background
+                    # A/B only. Never touches the champion or the live probability;
+                    # a computation failure must not break the recording path.
+                    signals_row = None
+                    if _signals_cfg is not None and _signals_cfg.enabled:
+                        try:
+                            signals_row = shadow_signals.compute_signals(analysis, canonical, _signals_cfg)
+                            analysis["shadow_signals"] = signals_row
+                        except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+                            logger.debug("shadow signal compute skipped for %s: %s", asset, exc)
+                            signals_row = None
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -2325,6 +2414,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
                         flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
                         shadow_factors=xfactors_row,
+                        shadow_signals=signals_row,
                         snapshot_id=snapshot_id,
                     )
                     snapshot["q15_v9_5_snapshot_id"] = snapshot_id
@@ -2477,6 +2567,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             self._telegram_sent_v95 += sent + flip_sent
             self._telegram_failed_v95 += failed + flip_failed
             self._cycles += 1
+            # Reconcile Your System's Shadow-vs-Yours delivery record from the
+            # outbox's TRUE status: an official report that failed its synchronous
+            # attempt but was delivered by the background worker is now credited
+            # SENT (no longer mis-scored as failed), and a pick is marked
+            # DELIVERY_FAILED only when its report dead-letters. Cheap; once per
+            # cycle; read-only wrt production; never raises into the loop.
+            status_lookup = getattr(notifier, "status_by_key", None)
+            if callable(status_lookup) and hasattr(self.ledger, "_shadow_reconcile_delivery"):
+                self.ledger._shadow_reconcile_delivery(status_lookup)
             self._last_error = None
             with self._v95_lock:
                 self._latest_v95 = copy.deepcopy(analyses)
@@ -2660,8 +2759,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             prior_side = (self.ledger.frozen_prediction(str(ticker), prior_cp) or {}).get("side")
         message = build_compact_checkpoint_panel(checkpoint, asset, analysis, prior_side)
 
+        # Stable outbox key so the native record can be credited from the outbox's
+        # true delivery (sync OR background-worker retry), keyed to the same
+        # window basis the lock uses.
+        window_basis = close_time if close_time is not None else now
+        report_key = f"v95-compact:{checkpoint}:{int(window_basis)}"
         if hasattr(notifier, "send_with_result"):
-            result = notifier.send_with_result(message)
+            result = _send_with_optional_key(notifier, message, report_key)
         else:  # legacy/bare notifier: treat a truthy send as handled, no message_id
             ok = bool(notifier.send(message)) if notifier is not None else False
             result = {"ok": ok, "delivered": ok and getattr(notifier, "last_message_id", None) is not None,
@@ -2669,6 +2773,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         handled = bool(result.get("ok"))
         delivered = bool(result.get("delivered"))
         self.ledger.complete_notification(event_key=permit_key, success=handled, now=now)
+        # Durably queued but not synchronously delivered, and not a mute: tag the
+        # top pick PENDING under this key so the per-cycle reconcile credits a
+        # later worker delivery instead of leaving it silently uncounted.
+        if handled and not delivered and not bool(result.get("muted")) and ticker:
+            mark_pending = getattr(self.ledger, "_shadow_mark_pending", None)
+            if callable(mark_pending):
+                mark_pending(str(ticker), str(checkpoint), report_key)
 
         # Handled-but-not-delivered = the send was accepted yet produced no
         # message_id (muted, or a notifier that reports success without one).
@@ -2802,8 +2913,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
 
         message = panels_v95.build_ranked_checkpoint_panel(
             checkpoint=checkpoint, picks=picks, top_k=_RANKED_PICK_COUNT)
+        # Deterministic outbox key for THIS official report (one per interval+window,
+        # matching the once-per-window lock). It lets the Shadow-vs-Yours native
+        # record be credited from the outbox's TRUE delivery — a sync OR a
+        # background-worker retry — instead of only the synchronous first attempt,
+        # which an async, retrying outbox routinely fails (rate limit / worker race).
+        report_key = f"v95-official:{checkpoint}:{int(window_close)}"
         if hasattr(notifier, "send_with_result"):
-            result = notifier.send_with_result(message)
+            result = _send_with_optional_key(notifier, message, report_key)
         else:
             ok = bool(notifier.send(message)) if notifier is not None else False
             result = {"ok": ok, "delivered": ok and getattr(notifier, "last_message_id", None) is not None,
@@ -2821,22 +2938,22 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             if bool(result.get("muted")):
                 self.ledger.unlock_official_report(str(checkpoint), window_close, now)
             else:
-                # A genuine (non-mute) failure: the official report was generated but
-                # not delivered. Record each generated pick as DELIVERY_FAILED in the
-                # shadow ledger with the exact error, so Your System's prediction is
-                # preserved as background (out of the visible totals) and auditable —
-                # never silently lost. Retry stays governed by the existing lock /
-                # min-gap policy above (the lock is intentionally kept on failure).
-                err = (str(result.get("error") or getattr(notifier, "last_error", None)
-                           or ("handled_no_message_id" if handled else "send_failed")))
-                mark_failed = getattr(self.ledger, "_shadow_mark_failed", None)
-                if callable(mark_failed):
+                # A non-mute, synchronously-undelivered send is NOT a failure: the
+                # report is durably queued in the outbox and the background worker
+                # will retry it (that worker is what actually delivers most reports).
+                # Tag each generated pick PENDING under this report's key; the true
+                # outcome — SENT on a real worker delivery, or DELIVERY_FAILED only
+                # when the outbox dead-letters — is resolved by reconcile_native_delivery
+                # each cycle. This is the fix for "0 sent · N failed" while reports
+                # are in fact being received. Retry stays governed by the lock/min-gap.
+                mark_pending = getattr(self.ledger, "_shadow_mark_pending", None)
+                if callable(mark_pending):
                     for pick in picks:
                         p_asset = str(pick.get("asset"))
                         p_canon = canonicals.get(p_asset)
                         p_ticker = p_canon.ticker if p_canon is not None else (analyses.get(p_asset) or {}).get("ticker")
                         if p_ticker:
-                            mark_failed(str(p_ticker), str(checkpoint), err)
+                            mark_pending(str(p_ticker), str(checkpoint), report_key)
             if handled:
                 self._throttled_warn(
                     f"ranked_handled_not_delivered:{checkpoint}",
@@ -3182,6 +3299,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def scoreboard(self) -> dict[str, Any]:
         """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
         return {"version": VERSION, "read_only": True, **self.ledger.scoreboard()}
+
+    def shadow_signal_experiment(self) -> dict[str, Any]:
+        """Background A/B for the five experimental signals: out-of-sample Brier
+        change vs the champion, with significance. Read-only; promotion is manual."""
+        return {"version": VERSION, "read_only": True, **self.ledger.shadow_signal_experiment()}
 
     def accuracy_report(self) -> dict[str, Any]:
         """Honest accuracy / promotion-readiness readout over the ledger metrics."""

@@ -162,6 +162,18 @@ class _SQLiteBackend:
                 ).fetchall()
         return [dict(row) for row in rows]
 
+    def status_by_key(self, idempotency_key: str) -> str | None:
+        """Terminal/transient delivery status of one queued message, by key, or
+        None if the key is unknown. Lets a caller credit a message as delivered
+        from the outbox's TRUE outcome (SENT) — including a background-worker
+        retry — instead of the synchronous first attempt."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM q15_telegram_outbox WHERE idempotency_key=?",
+                (str(idempotency_key),),
+            ).fetchone()
+        return None if row is None else str(row["status"])
+
     def health(self) -> dict[str, Any]:
         with self._connect() as connection:
             counts = {
@@ -284,6 +296,17 @@ class _PostgresBackend:
                 (status, limit),
             )
         return self.store.query("SELECT * FROM q15_telegram_outbox ORDER BY created_at DESC LIMIT %s", (limit,))
+
+    def status_by_key(self, idempotency_key: str) -> str | None:
+        """Delivery status of one queued message by key, or None if unknown."""
+        rows = self.store.query(
+            "SELECT status FROM q15_telegram_outbox WHERE idempotency_key=%s",
+            (str(idempotency_key),),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return None if row.get("status") is None else str(row["status"])
 
     def health(self) -> dict[str, Any]:
         rows = self.store.query("SELECT status, COUNT(*) AS n FROM q15_telegram_outbox GROUP BY status")
@@ -496,6 +519,19 @@ class ReliableTelegramOutbox:
 
     def dead_letters(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.backend.rows(status="DEAD_LETTER", limit=limit)
+
+    def status_by_key(self, idempotency_key: str) -> str | None:
+        """True delivery status of a previously-enqueued message, by key. Used to
+        credit the Shadow-vs-Yours native record from the outbox's actual outcome
+        (a sync OR background-worker delivery), not just the synchronous attempt.
+        Returns None when disabled or the key is unknown; never raises."""
+        if not self.enabled:
+            return None
+        try:
+            return self.backend.status_by_key(str(idempotency_key))
+        except Exception as exc:
+            self.last_error = _safe_error(exc, getattr(self.raw, "token", None))
+            return None
 
     def health(self) -> dict[str, Any]:
         health = self.backend.health()

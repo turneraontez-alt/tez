@@ -122,6 +122,12 @@ class ShadowLedger:
             # scored from the SAME snapshot per interval, and that snapshot id is
             # stamped on the paired row so the simultaneity is auditable.
             ("snapshot_id", "ADD COLUMN snapshot_id TEXT"),
+            # Idempotency key of the OFFICIAL report this pick was sent in. Lets the
+            # delivery status be reconciled from the outbox's TRUE outcome (a sync or
+            # background-worker delivery) instead of the synchronous first attempt,
+            # so a pick is credited SENT only when its report actually reached
+            # Telegram, and DELIVERY_FAILED only when the outbox exhausts retries.
+            ("native_delivery_key", "ADD COLUMN native_delivery_key TEXT"),
         ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE shadow_predictions {ddl}")
@@ -165,6 +171,74 @@ class ShadowLedger:
         )
         self._conn.commit()
         return cur.rowcount > 0
+
+    def mark_native_pending(self, contract: str, checkpoint: str, delivery_key: str,
+                            model_version: str = "challenger-v1") -> bool:
+        """Tag Your System's pick for (contract, checkpoint) with the official
+        report's idempotency key, WITHOUT deciding sent/failed yet. The send was
+        durably queued in the outbox; the true outcome (a sync or worker delivery,
+        or a dead-letter) is resolved later by ``reconcile_native_delivery``. This
+        replaces the old "mark failed the instant the synchronous attempt didn't
+        deliver", which mis-scored every worker-delivered report as a failure.
+        Never overwrites a row already SENT. Idempotent."""
+        cur = self._conn.execute(
+            "UPDATE shadow_predictions SET native_delivery_key=?, "
+            "native_delivery_status=COALESCE(native_delivery_status,'PENDING') "
+            "WHERE model_version=? AND contract=? AND checkpoint=? AND native_sent=0",
+            (str(delivery_key), model_version, str(contract), str(checkpoint)),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def reconcile_native_delivery(self, status_lookup: Any,
+                                  model_version: str = "challenger-v1") -> dict[str, int]:
+        """Resolve every still-pending native pick from the outbox's TRUE status.
+
+        ``status_lookup(key)`` returns the outbox row status for an official
+        report's idempotency key ('SENT', 'DEAD_LETTER', a transient state, or
+        None). For each distinct key still awaiting a verdict:
+          * 'SENT'        -> promote the report's picks to SENT (they count in the
+                             visible record), crediting a delivery that happened on
+                             the synchronous attempt OR a background-worker retry;
+          * 'DEAD_LETTER' -> mark the picks DELIVERY_FAILED (retries exhausted);
+          * anything else -> leave pending (the worker may still deliver).
+        Returns counts of rows newly promoted / failed. Read-only wrt production."""
+        keys = [
+            str(row["native_delivery_key"])
+            for row in self._conn.execute(
+                "SELECT DISTINCT native_delivery_key FROM shadow_predictions "
+                "WHERE model_version=? AND native_sent=0 AND native_delivery_key IS NOT NULL "
+                "AND COALESCE(native_delivery_status,'PENDING') IN ('PENDING','DELIVERY_FAILED')",
+                (model_version,),
+            ).fetchall()
+        ]
+        promoted = failed = 0
+        now = time.time()
+        for key in keys:
+            try:
+                status = status_lookup(key)
+            except Exception:
+                status = None
+            if status == "SENT":
+                cur = self._conn.execute(
+                    "UPDATE shadow_predictions SET native_sent=1, native_delivery_status='SENT', "
+                    "native_delivery_error=NULL, native_delivery_at=? "
+                    "WHERE model_version=? AND native_delivery_key=? AND native_sent=0",
+                    (now, model_version, key),
+                )
+                promoted += cur.rowcount
+            elif status == "DEAD_LETTER":
+                cur = self._conn.execute(
+                    "UPDATE shadow_predictions SET native_delivery_status='DELIVERY_FAILED', "
+                    "native_delivery_error='outbox_dead_letter', native_delivery_at=? "
+                    "WHERE model_version=? AND native_delivery_key=? AND native_sent=0 "
+                    "AND COALESCE(native_delivery_status,'PENDING')<>'DELIVERY_FAILED'",
+                    (now, model_version, key),
+                )
+                failed += cur.rowcount
+        if promoted or failed:
+            self._conn.commit()
+        return {"promoted": promoted, "failed": failed}
 
     def delivery_audit(self, model_version: str = "challenger-v1") -> dict[str, int]:
         """Counts of native delivery outcomes for observability: how many generated

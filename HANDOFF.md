@@ -9,9 +9,66 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **805 passed, 12 skipped** in a bare
-container (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully
-installed; ~832/4 in a complete env).
+Tests: `python3 -m pytest tests/ -q` → **949 passed, 4 skipped** in a complete env
+(skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## ✅ Shipped THIS session — Implemented the updated-review fixes (critical → polish)
+**On branch `claude/updated-review-ecyp4x`.** Worked the latest auditor review's
+confirmed findings end-to-end; suite **949 passed, 4 skipped** (+~13). All
+read-only wrt real exchanges; frozen champion untouched; live probability path
+byte-for-byte unchanged unless an explicit default-OFF flag is set.
+- **CRITICAL — per-asset ingest isolation** (`app.py`): wrapped the ingest loop
+  (ensure_market/ingest_trades/ingest_spot/parse_orderbook) in a per-asset
+  try/except so one poisoned tick no longer aborts the loop and starves every
+  other asset of a snapshot that cycle. Test: `test_app_loop_degraded_paths.py::
+  TestIngestExceptionIsolation`.
+- **HIGHEST — isotonic calibration** (`ledger_v95.py`): added pure PAVA
+  `_isotonic_fit`/`_isotonic_predict`, computed over the same resolved rows and
+  applied by `calibrate()` ONLY when `Q15_V95_CALIBRATION_ISOTONIC=1`
+  (DEFAULT OFF → live = Platt, unchanged). Targets the recorded high-band
+  UNDER-confidence (pred ~0.78 → win ~0.95) a slope-capped Platt can't bend.
+  Tests: `test_review_fixes_v4.py`.
+- **MEDIUM — shadow-signal data collection ON by default**
+  (`shadow_signals.py`): `Q15_V95_SHADOW_SIGNALS_ENABLED` now defaults True.
+  Verified the signals are write-only to `predictions.shadow_signal_json` and
+  read back only by the OOS A/B — they never touch the live probability — so the
+  5 features can finally accrue evidence while staying in shadow.
+- **MEDIUM — repaired 3 shadow features** (`shadow_signals.py`):
+  order_flow_persistence now carries a damped flow lean on candle gaps instead
+  of going dead at 0.0; prediction_stability treats a MISSING flip-risk as
+  neutral (0.5) not "perfectly stable"; regime_transition de-confidences (0.5)
+  when all regime inputs are absent instead of assuming "no transition".
+- **POLISH — p-value precision** (`ledger_v95._round_p`): strong promotion
+  p-values no longer flatten to 0.0 at 6dp. **POLISH — flip-alert honesty**
+  (`ledger_v95.flip_warning_performance` + `reporting._flip_scoreboard`): the
+  disabled high-flip-risk channel is now labelled "alerts disabled" rather than
+  reading as 0-detected/100%-missed.
+- **Examined, NOT a bug:** ticker↔asset "mismatch" (Kalshi tickers are
+  market-unique; recorded together per market) and rank double-counting
+  (`prediction_id` is the PK) — documented, no code change.
+- **DB:** no schema change (isotonic fit is in-memory; shadow_signal_json column
+  already existed). **Restart/ET/grading/dedup** re-verified end-to-end.
+- **Files:** `app.py`, `q15_upgrade/ledger_v95.py`, `q15_upgrade/shadow_signals.py`,
+  `notifications/reporting.py`, `.gitignore`, + tests
+  (`test_review_fixes_v4.py` new; updated `test_app_loop_degraded_paths.py`,
+  `test_shadow_signals.py`, `test_q15_v95_significance.py`,
+  `test_q15_learning_scoreboard.py`).
+
+## ✅ Shipped earlier THIS session — Expanded `updated-review` into a full system auditor
+**On branch `claude/updated-review-ecyp4x`, merged to `main`.** Rewrote
+`.claude/skills/updated-review/SKILL.md` (skill-only; no app/test change, suite
+unchanged at **906 passed, 13 skipped** in this container env). The skill now
+grades **Shadow** and **Your System** separately (/100) from real ledger records
+(`V95Ledger().scoreboard()`/`official_scoreboard()`/`shadow_signal_experiment()`,
+challenger `ShadowLedger` + `challenger/stats.py` paired tests), compares
+15M/10M/7M and #1/#2/#3 ranking **only on matched snapshot+timestamp rows**
+(no look-ahead credit), tests the 5 background features against
+`shadow_signals.SIGNAL_NAMES` (HELPING/HURTING/INSUFFICIENT/BROKEN, OOS-gated),
+runs the full live-workflow bug checklist (confirmed vs suspected), checks
+whether the last review's recommendations landed, and emits the owner's fixed
+output template. Read-only; rules forbid inventing numbers (label
+`INSUFFICIENT DATA (n=…)`). NOTE: container `data/*.sqlite3` are seed/empty
+copies — real numbers populate when run against live Replit data.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -41,7 +98,104 @@ Owner: the END-RESULT CALL didn't fill #2/#3 (15M) or any rank at 10M/7M, and wa
   Suite: **869 passed, 13 skipped**. **⚠️ Deploy note:** if the Repl pins `Q15_CHALLENGER_MODEL_VERSION`
   in its env, that overrides the new default — unset it (or set `=challenger-v5`) for the reset to apply.
 
+## ✅ Shipped THIS session — Fix Shadow-vs-Yours "0 sent · N failed" delivery mis-accounting
+**On branch `claude/updated-review-2x7wyr`.** Root cause: Your System's native picks were marked
+`DELIVERY_FAILED` the instant the **synchronous** outbox attempt didn't return delivered — but the
+notifier is the async `ReliableTelegramOutbox`, whose **background worker** delivers most reports on
+retry (that's why the owner keeps RECEIVING reports while the record showed `0 sent · 39 failed`).
+The sync attempt routinely loses to the worker's `claim()` (`outbox_v9.py:118-120`) or hits a Telegram
+429, so it was never a real failure. Suite **937 passed, 4 skipped** (+7 `tests/test_delivery_reconcile.py`).
+- **Fix — credit from the outbox's TRUE status, not the sync attempt:** the official report is now
+  enqueued with a deterministic idempotency key (`v95-official:{checkpoint}:{window_close}`); a
+  synchronously-undelivered (non-mute) send tags each pick **PENDING** under that key instead of
+  failing it; and `run_cycle` reconciles each cycle — `SENT` (sync OR worker) → credited, `DEAD_LETTER`
+  → failed, transient → still pending. Same applied to the compact-panel fallback.
+- **New plumbing:** `ReliableTelegramOutbox.status_by_key` (+ both backends); challenger
+  `ledger.mark_native_pending` / `reconcile_native_delivery` (+ new `native_delivery_key` column,
+  additive migration); runner + `ledger_v95._shadow_mark_pending` / `_shadow_reconcile_delivery`
+  wrappers; `checkpoint_v95._send_with_optional_key`. Read-only wrt production; what reaches Telegram
+  is unchanged — only HOW Your System's record is computed.
+- **Rate-limit investigation (the "why so many failures"):** there is NO proactive pacing or
+  `429`/`Retry-After` handling. The worker is naturally paced (~0.5 msg/s, `outbox_v9.py:502`) and
+  reliable; the UNPACED synchronous burst (official report + flip + follow-up + hourly in one cycle)
+  exceeds Telegram's ~1 msg/s/chat limit → 429 → fixed 30s+ backoff → late worker delivery. The
+  accounting fix makes the record correct regardless. **Optional follow-up (not done):** a min-interval
+  send pacer + `Retry-After` parsing to cut the 429 rate.
+- **Files:** `notifications/outbox_v9.py`, `q15_upgrade/challenger/{ledger,runner}.py`,
+  `q15_upgrade/ledger_v95.py`, `q15_upgrade/checkpoint_v95.py`, `tests/test_delivery_reconcile.py` (new, 7).
+  **DB:** additive `shadow_predictions.native_delivery_key`; backward-compatible.
+
+## ✅ Shipped THIS session — Background shadow-signal experiment (5 new signals + continuous A/B)
+**On branch `claude/updated-review-2x7wyr`.** Adds five experimental signals computed from data the
+system ALREADY collects, recorded next to each prediction, and graded by a continuous, significance-
+tested **out-of-sample** A/B that answers "would this signal improve the probability?" — WITHOUT
+touching the frozen champion or the live probability. Read-only, default-OFF (`Q15_V95_SHADOW_SIGNALS_ENABLED`).
+Suite **924 passed, 4 skipped** (+11 in `tests/test_shadow_signals.py`).
+- **New module `q15_upgrade/shadow_signals.py`:** `compute_signals(analysis, canonical)` →
+  five YES-oriented signals in [-1,1]: `order_flow_persistence` (#5), `book_resiliency` (#6, wick-
+  rejection replenishment proxy), `prediction_stability` (#14, flip-risk → confidence), `entropy_noise`
+  (#17, return-sign Shannon entropy → confidence), `regime_transition` (#18b, regime-boundary proximity
+  → confidence). `evaluate(rows)` fits a 1-parameter logistic *adjustment* on top of the champion prob
+  and measures the **out-of-sample** Brier reduction (time-ordered train/test split) with a paired
+  t-test; `build_report_lines`/`scores_to_dict` render it. All pure/deterministic (no clock/IO).
+- **Storage:** new additive `predictions.shadow_signal_json` column (validated `_ensure_column`
+  migration), written only on fresh insert in the SAME isolated-column pattern as `shadow_factor_json`
+  — never in `feature_json`, so it can never reach champion/challenger/calibration. Backward-compatible.
+- **Recording:** `record_prediction(..., shadow_signals=...)`; `run_cycle` computes them when the flag
+  is on (guarded; a compute failure can't break recording). `ledger.resolved_shadow_signal_rows()` +
+  `ledger.shadow_signal_experiment()` grade settled rows oldest-first.
+- **Reporting/dashboard:** compact "🧪 Experimental signals" block in the hourly Telegram report
+  (`notifications/reporting.py`, default-OFF) + new endpoint `/api/q15-v9-5/shadow-signals`.
+- **Promotion stays manual.** A signal is flagged a promotion candidate only when its out-of-sample
+  Brier reduction clears the floor AND the paired t-test is significant; nothing is auto-applied.
+- **Files:** `q15_upgrade/shadow_signals.py` (new), `q15_upgrade/ledger_v95.py`,
+  `q15_upgrade/checkpoint_v95.py`, `notifications/reporting.py`, `app.py`,
+  `tests/test_shadow_signals.py` (new, 11). **Env:** `Q15_V95_SHADOW_SIGNALS_ENABLED` (default OFF)
+  + `_MIN_ROWS`/`_TRAIN_FRACTION`/`_BRIER_FLOOR`/`_ALPHA`/`_RECENT_CANDLES` tunables.
+
+## ✅ Shipped THIS session — Updated-review fixes (Highest / Medium / Polish)
+**On branch `claude/updated-review-2x7wyr` (not merged to main — session is branch-scoped).**
+Implemented the full improvement list from the latest review. Read-only + frozen-champion
+invariants intact; every model-touching change is default-OFF `Q15_*`-gated. Suite **913 passed,
+4 skipped** (was 893; +20 in `tests/test_review_fixes_v3.py`).
+- **H1 — honest thin-evidence (`checkpoint_v95.analyse_v95` / `build_v95_message`):** evidence
+  coverage is now computed unconditionally and exposed as `evidence_coverage` / `low_evidence` /
+  `absent_features` on the analysis + snapshot (`q15_v9_5_*`). A feature below the coverage floor is
+  *absent* (quality gates it out of the logit — contribution = weight·value·quality), never a neutral
+  0.0 that reads as support. New default-OFF `Q15_V95_LOW_EVIDENCE_FLAG` adds a compact "⚠ Thin
+  evidence" note to the checkpoint card (markers preserved). `Q15_V95_LOW_EVIDENCE_MIN_COVERAGE`
+  (default 0.50) tunes the flag.
+- **H2 — canonical cent precision (new `q15_upgrade/money.py`):** one `Decimal`/banker's-rounding
+  helper shared by the ledger settlement P&L, the scoreboard, the performance store, and the live
+  money path (`net_edge_cents` as a signed edge; `ideal_entry_cents` clamped to a valid `[0,100]¢`
+  price). Kills float noise like `3.3299¢` and impossible `>100¢` levels; ledger/performance now
+  round identically (was 4-dp vs 2-dp).
+- **M1 — structural fail-closed (`analyse_v95`):** if the structural base probability fails to load,
+  the analysis no longer pushes thin volatility-derived features into the ensemble — it returns a
+  `PREDICTION_ONLY` degraded result (`structural_model_unavailable`).
+- **M2 — SQL identifier hardening (`ledger._ensure_column`):** table/column names are validated
+  against a strict identifier whitelist and the DDL must begin with the column name; the last
+  f-string-DDL gap is closed (raises `ValueError` on anything unsafe).
+- **M3 — learning observability:** `_apply_shadow_update` records the effective step magnitude and a
+  throttled "learning effectively frozen" warning when the knobs collapse every step to ~0; surfaced
+  via `status()` (`last_learning_step_magnitude`, `learning_frozen_results`).
+- **P1 — per-checkpoint dropped-row counters:** `dropped_feature_rows_by_checkpoint` so a corruption
+  confined to one interval isn't masked as system-wide (aggregate kept for compatibility).
+- **P2 — Wilson flag:** scoreboard buckets carry `ci_excludes_half`, distinguishing "clean but tiny"
+  (3-0, low_n, straddles 0.5) from "genuinely separated from chance".
+- **P3 — WS data-staleness watchdog (`spot_ws.py`):** forces a reconnect when an *open* socket stops
+  delivering ticks for `Q15_SPOT_WS_DATA_TIMEOUT` (default 45s, 0=off); `health()` now reports
+  `last_message_age_seconds` / `data_stale`.
+- **Files:** `q15_upgrade/money.py` (new), `q15_upgrade/checkpoint_v95.py`, `q15_upgrade/ledger_v95.py`,
+  `performance.py`, `spot_ws.py`, `tests/test_review_fixes_v3.py` (new, 20). **DB:** no schema change
+  beyond the existing additive `_ensure_column` migrations (now validated); fully backward-compatible.
+
 ## ✅ Shipped THIS session — outbox send_with_result: fix delivery mis-detection (branch `claude/manipulation-learning-progress-liqs9z`)
+> NOTE: a parallel `updated-review` session on `main` fixed the SAME delivery mis-accounting via
+> per-cycle outbox-status reconciliation (`status_by_key` + `mark_native_pending` /
+> `reconcile_native_delivery`). Both fixes now coexist after the merge: this branch's
+> `send_with_result` gives the synchronous attempt a truthful delivered/message_id result, and the
+> reconciliation path credits later worker-retry deliveries. Belt-and-suspenders, not conflicting.
 Owner asked why the "Your System delivery: 0 sent · 12 failed · 23 pending" delivery was failing.
 **It mostly WASN'T failing — delivery DETECTION was broken.** Production wires
 `notifier = ReliableTelegramOutbox` (`app.py:91`) and passes it into `run_cycle` (`app.py:565`).
