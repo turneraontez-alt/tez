@@ -682,7 +682,10 @@ def _asset_from_message(message: str) -> str | None:
 
 def augment_telegram_message(message: str) -> str:
     """Backward-compatible Telegram formatter with side-consistent V9 data."""
-    if not isinstance(message, str) or "V9 TRADE QUALITY" in message:
+    # V9.5 checkpoint alerts own their full layout (the hourly-report-style
+    # table). Leave them untouched so the clean table is not followed by an
+    # appended "V9 TRADE QUALITY" block.
+    if not isinstance(message, str) or "V9 TRADE QUALITY" in message or "V9.5 CHECK" in message:
         return message
     asset = _asset_from_message(message)
     with _LATEST_LOCK:
