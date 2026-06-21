@@ -119,10 +119,11 @@ class HourlyReporter:
                 if header:
                     body.append(header)
                 body.extend(rows)
-        table = ["<b>Track record</b> (paper, after fees)", "<pre>", *body, "</pre>"]
+        # Plain text only — build_report wraps the whole report in one <pre> panel.
+        table = ["Track record (paper, after fees)", *body]
         # Only mention the footnote if some bucket is actually flagged thin.
         if any("*" in (r or "") for _header, group in groups for r in group):
-            table.append("<i>* under 10 settled — not yet reliable</i>")
+            table.append("* under 10 settled — not yet reliable")
         return [headline, ""] + table + self._manipulation_lines(sb)
 
     @staticmethod
@@ -145,7 +146,7 @@ class HourlyReporter:
             rt = d.get("realized_total_cents")
             return f" {rt:+.0f}¢" if (isinstance(rt, (int, float)) and d.get("pnl_n")) else ""
 
-        head = (f"⚠ <b>Manipulation watch</b> — suspected {susp.get('n', 0)} · "
+        head = (f"⚠ Manipulation watch — suspected {susp.get('n', 0)} · "
                 f"{_acc(susp)} right{_pnl(susp)} vs clean {clean.get('n', 0)} · {_acc(clean)} right")
         out = ["", head]
         by_reason = bm.get("by_reason") or {}
@@ -176,7 +177,7 @@ class HourlyReporter:
             adv_s = f"{int(adv)//60}m {int(adv)%60:02d}s" if isinstance(adv, (int, float)) else "—"
             pnl = o.get("realized_total_cents")
             out += [
-                "", "⚠ <b>MANIPULATION WARNING PERFORMANCE</b>",
+                "", "⚠ MANIPULATION WARNING PERFORMANCE",
                 f"Alerts: {o.get('alerts', 0)} · {o.get('correct', 0)} correct / {o.get('false', 0)} false "
                 f"· precision {_pct(o.get('precision'))}",
                 f"Flips: {o.get('detected', 0)}/{o.get('actual_flips', 0)} detected "
@@ -226,13 +227,18 @@ class HourlyReporter:
     # -- report body ----------------------------------------------------
     def build_report(self):
         hh = _eastern_header()
-        lines = [f"\U0001f4ca <b>Hourly Report \u2014 {hh}</b>"]
+        # The bold "Hourly Report \u2014" header MUST stay outside the panel: the
+        # reformatters detect (and bypass) the canonical report by this header.
+        # Everything else goes INSIDE one <pre> block so the whole report renders
+        # as a single panel (matching the checkpoint alert).
+        header = f"\U0001f4ca <b>Hourly Report \u2014 {hh}</b>"
+        body = []
 
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
-        lines.extend(self._scoreboard_table())
+        body.extend(self._scoreboard_table())
 
         # Flip-risk warning performance (precision / detection / advance / P&L).
-        lines.extend(self._flip_warning_lines())
+        body.extend(self._flip_warning_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:
@@ -244,18 +250,19 @@ class HourlyReporter:
             if rr.get("n"):
                 tot = stats.get("total_realized_return")
                 tail = f" \u00b7 realized {tot:+.0f}\u00a2" if isinstance(tot, (int, float)) else ""
-                lines.append(f"\nSent alerts: {rr['wins']}W/{rr['losses']}L ({_pct(rr.get('win_rate'))}){tail}")
+                body.append(f"\nSent alerts: {rr['wins']}W/{rr['losses']}L ({_pct(rr.get('win_rate'))}){tail}")
 
         # Scalp record, one line.
         try:
             sr = self.scalp.record()
             if sr["total"] or sr["open"]:
-                lines.append(
+                body.append(
                     f"\u26a1 Scalps: {sr['wins']}W/{sr['losses']}L "
                     f"({_pct(sr['win_rate'])}, {sr['total_realized_cents']:+.0f}\u00a2, {sr['open']} open)"
                 )
         except Exception:
             pass
 
-        lines.append(f"\n<i>{DISCLAIMER}</i>")
-        return "\n".join(lines)
+        body.append("")
+        body.append(DISCLAIMER)
+        return header + "\n<pre>\n" + "\n".join(body) + "\n</pre>"
