@@ -47,6 +47,29 @@ def _max_age() -> float:
         return 3.0
 
 
+def _data_timeout() -> float:
+    """Seconds of silence on an *open* socket before we force a reconnect.
+
+    The websockets library's ping/pong (``ping_interval``/``ping_timeout``)
+    already tears down a TCP-dead socket. This guards the subtler failure where
+    the socket stays open and ponging but the exchange stops publishing ticker
+    data — a silent staleness the protocol heartbeat cannot see. ``0`` disables
+    the watchdog (relying on ping/pong alone).
+    """
+    try:
+        return max(0.0, float(os.environ.get("Q15_SPOT_WS_DATA_TIMEOUT", "45") or 45))
+    except (TypeError, ValueError):
+        return 45.0
+
+
+def _data_stale(last_message_at: float | None, now: float, timeout: float) -> bool:
+    """True iff the watchdog is enabled, we have seen a message, and the gap
+    since the last one exceeds ``timeout``. Pure/deterministic for testing."""
+    if timeout <= 0.0 or last_message_at is None:
+        return False
+    return (now - last_message_at) > timeout
+
+
 class SpotWebSocketFeed:
     """Background websocket subscriber that caches the latest tick per asset."""
 
@@ -55,6 +78,9 @@ class SpotWebSocketFeed:
         self._ticks: dict[str, dict] = {}  # asset -> {price, bid, ask, ts, source}
         self._connected = {"coinbase": False, "okx": False}
         self._last_error: dict[str, str] = {}
+        # Per-provider wall-clock time of the last successfully handled message,
+        # for the data-staleness watchdog and health reporting.
+        self._last_message_at: dict[str, float] = {}
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         # symbol -> asset, grouped by provider
@@ -87,11 +113,22 @@ class SpotWebSocketFeed:
 
     def health(self) -> dict:
         now = time.time()
+        data_timeout = _data_timeout()
         with self._lock:
             ages = {a: round(now - t["ts"], 3) for a, t in self._ticks.items()}
+            message_ages = {
+                name: round(now - at, 3) for name, at in self._last_message_at.items()
+            }
+            data_stale = {
+                name: _data_stale(at, now, data_timeout)
+                for name, at in self._last_message_at.items()
+            }
             return {
                 "connected": dict(self._connected),
                 "tick_age_seconds": ages,
+                "last_message_age_seconds": message_ages,
+                "data_stale": data_stale,
+                "data_timeout_seconds": data_timeout,
                 "last_error": dict(self._last_error),
             }
 
@@ -121,14 +158,31 @@ class SpotWebSocketFeed:
                     with self._lock:
                         self._connected[name] = True
                         self._last_error.pop(name, None)
+                        # Seed the watchdog at connect so a brand-new socket that
+                        # never delivers data is detected after `timeout`, not
+                        # left waiting forever.
+                        self._last_message_at[name] = time.time()
                     await subscribe(socket)
                     backoff = 1.0
+                    data_timeout = _data_timeout()
                     while not self._stop.is_set():
                         try:
                             message = await asyncio.wait_for(socket.recv(), timeout=15.0)
                         except asyncio.TimeoutError:
+                            with self._lock:
+                                last_at = self._last_message_at.get(name)
+                            if _data_stale(last_at, time.time(), data_timeout):
+                                with self._lock:
+                                    self._last_error[name] = f"data stale >{data_timeout:.0f}s; reconnecting"
+                                logger.warning(
+                                    "Spot websocket %s delivered no data for >%.0fs; forcing reconnect",
+                                    name, data_timeout,
+                                )
+                                break  # leave the `async with` -> reconnect
                             continue
                         handle(message)
+                        with self._lock:
+                            self._last_message_at[name] = time.time()
             except Exception as exc:
                 with self._lock:
                     self._last_error[name] = str(exc)[:200]
