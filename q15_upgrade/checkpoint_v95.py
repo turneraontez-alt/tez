@@ -2114,9 +2114,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
 
         sent = failed = 0
         # Confirmed flip: a later frozen checkpoint side differs from the earlier
-        # one for this contract — factual, sent regardless of the learned gate.
+        # one for this contract — factual. Owner removed this Telegram alert UI, so
+        # delivery is OFF by default; flip-risk is still tracked + on the dashboard.
+        # Re-enable with Q15_V95_FLIP_CONFIRMED_ALERTS=true.
         prior_cp = {"10M": "15M", "7M": "10M"}.get(checkpoint)
-        if prior_cp and _env_bool("Q15_V95_FLIP_CONFIRMED_ALERTS", True):
+        if prior_cp and _env_bool("Q15_V95_FLIP_CONFIRMED_ALERTS", False):
             prev = self.ledger.frozen_prediction(str(ticker), prior_cp) or {}
             cur = self.ledger.frozen_prediction(str(ticker), checkpoint) or {}
             prev_side, cur_side = prev.get("side"), cur.get("side")
@@ -2133,9 +2135,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 sent += s
                 failed += f
 
-        # HIGH FLIP RISK: dormant until a learned threshold exists.
+        # HIGH FLIP RISK: owner removed this Telegram alert UI, so delivery is OFF
+        # by default (re-enable with Q15_V95_FLIP_ALERTS_ENABLED=true). When on, it
+        # stays dormant until a learned threshold exists.
         require_learned = _env_bool("Q15_V95_FLIP_ALERTS_REQUIRE_LEARNED", True)
-        if (decision.should_send and _env_bool("Q15_V95_FLIP_ALERTS_ENABLED", True)
+        if (decision.should_send and _env_bool("Q15_V95_FLIP_ALERTS_ENABLED", False)
                 and (threshold.status == "Learned" or not require_learned)):
             msg = flip_risk.format_high_flip_risk(
                 asset=asset, checkpoint=checkpoint, current_side=side, risk=ra,
