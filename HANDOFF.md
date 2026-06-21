@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **689 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **691 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -96,6 +96,14 @@ as a SHADOW model, built to be promoted to primary with one switch.
   when disabled** (`get_runner()` returns None fast; all hooks try/except). NOT
   primary — never drives live output. Needs a Repl reboot to pick up `.replit`.
   Tests: `test_challenger_runner.py` (6). Suite: **641 passed, 4 skipped**.
+- **Ranked Top-1/2/3 report** (per owner request): the `CHALLENGER SHADOW` report now
+  ranks each model's per-asset picks within a CASE (= one 15-min market × checkpoint)
+  by confidence (|P-0.5|) and scores each rank independently — no double-counting.
+  Shows the latest window's Top-3 per checkpoint for BOTH models with OK/X vs the
+  official result, a running per-rank C/W/accuracy table (challenger vs native), the
+  combined totals, and a side-by-side verdict. New `ledger.ranked_comparison` /
+  `latest_window_cases`; shadow rows now store `close_time` for exact case grouping.
+  `runner.report_message` rewritten. +2 tests. Suite: **691 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap

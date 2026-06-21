@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     spot REAL,
     target REAL,
     seconds_remaining REAL,
+    close_time REAL,
     settlement_source TEXT,
     yes_bid REAL, yes_ask REAL, no_bid REAL, no_ask REAL,
     control_prob_yes REAL,
@@ -77,6 +78,7 @@ class ShadowLedger:
         control_prob_yes: float | None,
         settlement_source: str | None = None,
         created_at: float | None = None,
+        close_time: float | None = None,
         model_version: str = "challenger-v1",
         lineage: dict | None = None,
     ) -> int | None:
@@ -88,6 +90,7 @@ class ShadowLedger:
             model_version, asset, contract, checkpoint,
             getattr(fv, "spot", None), getattr(fv, "target", None),
             getattr(fv, "seconds_remaining", None),
+            close_time,
             settlement_source,
             getattr(fv, "yes_bid_cents", None), getattr(fv, "yes_ask_cents", None),
             getattr(fv, "no_bid_cents", None), getattr(fv, "no_ask_cents", None),
@@ -114,13 +117,13 @@ class ShadowLedger:
             cur = self._conn.execute(
                 """INSERT INTO shadow_predictions
                 (created_at, model_version, asset, contract, checkpoint, spot, target,
-                 seconds_remaining, settlement_source, yes_bid, yes_ask, no_bid, no_ask,
+                 seconds_remaining, close_time, settlement_source, yes_bid, yes_ask, no_bid, no_ask,
                  control_prob_yes, challenger_raw_prob_yes, challenger_prob_yes, confidence,
                  edge_vs_market, net_edge_cents, recommendation, side, executable_ask_cents,
                  total_cost_cents, hypothetical_size_fraction, top_factors_json, warnings_json,
                  feature_json, ood_score, ood_reasons_json, lineage_json,
                  official_result, resolved_at, hypothetical_pnl_cents)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             self._conn.commit()
@@ -214,6 +217,91 @@ class ShadowLedger:
         }
         return out
 
+
+    # ---- ranked Top-1/2/3 comparison ----
+    def _resolved_cases(self, model_version: str):
+        """Group resolved rows into cases. A CASE = one 15-min market (close_time)
+        at one checkpoint; its members are the per-asset predictions in it."""
+        rows = list(self._conn.execute(
+            "SELECT checkpoint, close_time, created_at, asset, challenger_prob_yes, "
+            "control_prob_yes, official_result FROM shadow_predictions "
+            "WHERE model_version=? AND official_result IS NOT NULL",
+            (model_version,),
+        ))
+        cases: dict[tuple, list] = {}
+        for r in rows:
+            close = r["close_time"] if r["close_time"] is not None else r["created_at"]
+            key = (str(r["checkpoint"]), round(float(close)))
+            cases.setdefault(key, []).append(r)
+        return cases
+
+    @staticmethod
+    def _rank(rows, prob_key):
+        """Rank a case's predictions by confidence (decisiveness = |p-0.5|), desc.
+
+        Decisiveness is used for BOTH models so the ranking is comparable. Each
+        returned entry: (asset, side, correct)."""
+        cand = [r for r in rows if r[prob_key] is not None]
+        cand.sort(key=lambda r: abs(float(r[prob_key]) - 0.5), reverse=True)
+        out = []
+        for r in cand:
+            side = "YES" if float(r[prob_key]) >= 0.5 else "NO"
+            correct = side == str(r["official_result"]).upper()
+            out.append((r["asset"], side, correct))
+        return out
+
+    def ranked_comparison(self, model_version: str = "challenger-v1", top_k: int = 3) -> dict[str, Any]:
+        """Top-1/2/3 correctness for both models, scored per rank (no double count).
+
+        Within each case, predictions are ranked by confidence. Rank k is correct
+        if that pick's side matched the official result. Each case contributes at
+        most one result per rank. Overall = sum over ranks 1..top_k.
+        """
+        cases = self._resolved_cases(model_version)
+        models = {"challenger": "challenger_prob_yes", "native": "control_prob_yes"}
+        stats = {m: {k: {"correct": 0, "wrong": 0} for k in range(1, top_k + 1)} for m in models}
+        for case_rows in cases.values():
+            for m, pk in models.items():
+                ranked = self._rank(case_rows, pk)
+                for k in range(min(top_k, len(ranked))):
+                    _, _, correct = ranked[k]
+                    stats[m][k + 1]["correct" if correct else "wrong"] += 1
+
+        def _finish(d):
+            out = {}
+            tot_c = tot_w = 0
+            for k in range(1, top_k + 1):
+                c, w = d[k]["correct"], d[k]["wrong"]
+                tot_c += c
+                tot_w += w
+                n = c + w
+                out[f"rank{k}"] = {"correct": c, "wrong": w,
+                                   "accuracy": round(c / n, 4) if n else None}
+            n = tot_c + tot_w
+            out["overall"] = {"correct": tot_c, "wrong": tot_w,
+                              "accuracy": round(tot_c / n, 4) if n else None}
+            return out
+
+        return {"n_cases": len(cases), "top_k": top_k,
+                "challenger": _finish(stats["challenger"]),
+                "native": _finish(stats["native"])}
+
+    def latest_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3) -> dict[str, Any]:
+        """Per-checkpoint top-k picks (both models) for the most recent settled
+        close window — for the human-readable example block in the report."""
+        cases = self._resolved_cases(model_version)
+        if not cases:
+            return {"close": None, "checkpoints": {}}
+        latest_close = max(close for (_cp, close) in cases)
+        out = {"close": latest_close, "checkpoints": {}}
+        for (cp, close), rows in cases.items():
+            if close != latest_close:
+                continue
+            out["checkpoints"][cp] = {
+                "challenger": self._rank(rows, "challenger_prob_yes")[:top_k],
+                "native": self._rank(rows, "control_prob_yes")[:top_k],
+            }
+        return out
 
     def comparison(self, model_version: str = "challenger-v1") -> dict[str, Any]:
         """Paired challenger-vs-control accuracy, overall and by checkpoint.

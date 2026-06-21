@@ -94,7 +94,7 @@ class ShadowRunner:
             self.ledger.record(
                 pred, asset=asset, contract=ticker, checkpoint=checkpoint,
                 control_prob_yes=control_prob_yes, created_at=created_at,
-                model_version=self.config.model_version,
+                close_time=close_time, model_version=self.config.model_version,
                 lineage=lineage_record(self.config, calibrator_version=calib),
             )
         except Exception:
@@ -131,23 +131,68 @@ class ShadowRunner:
     def comparison(self) -> dict:
         return self.ledger.comparison(model_version=self.config.model_version)
 
-    def report_message(self) -> str:
-        cmp = self.comparison()
-        o = cmp["overall"]
-        if not o["n"]:
-            return f"{CHALLENGER_REPORT_MARKER} — no settled shadow predictions yet"
-        def line(label, d):
-            ch = "n/a" if d["challenger_accuracy"] is None else f"{d['challenger_accuracy']*100:.1f}%"
-            cu = "n/a" if d["current_accuracy"] is None else f"{d['current_accuracy']*100:.1f}%"
-            return f"{label:<7} challenger {ch:>6}   current {cu:>6}   (n={d['n']})"
-        lines = [f"<b>{CHALLENGER_REPORT_MARKER}</b> — accuracy (read-only, not trading)",
-                 "<pre>",
-                 line("overall", o)]
-        for cp, d in cmp["by_checkpoint"].items():
-            lines.append(line(cp, d))
-        lines.append("</pre>")
+    def ranked(self, top_k: int = 3) -> dict:
+        return self.ledger.ranked_comparison(model_version=self.config.model_version, top_k=top_k)
+
+    @staticmethod
+    def _pick_str(entry) -> str:
+        asset, side, correct = entry
+        return f"{str(asset)[:4]:<4} {side:<3} {'OK' if correct else 'X'}"
+
+    def report_message(self, top_k: int = 3) -> str:
+        mv = self.config.model_version
+        rk = self.ledger.ranked_comparison(model_version=mv, top_k=top_k)
+        if not rk["n_cases"]:
+            return f"{CHALLENGER_REPORT_MARKER} — no settled shadow cases yet"
+        ch, nv = rk["challenger"], rk["native"]
+
+        lines = [f"<b>{CHALLENGER_REPORT_MARKER}</b> — ranked Top-{top_k} accuracy (read-only, not trading)",
+                 ("Scoring: a CASE = one 15-min market x checkpoint. Within each case both "
+                  "models' per-asset picks are ranked by confidence (|P-0.5|); Top-1 = most "
+                  "confident. A rank is correct if that pick's side = official result. Each case "
+                  f"adds at most one result per rank (no double-count). Overall = ranks 1-{top_k}.")]
+
+        # Latest-window example cases.
+        win = self.ledger.latest_window_cases(model_version=mv, top_k=top_k)
+        if win["close"]:
+            when = time.strftime("%H:%M", time.gmtime(win["close"]))
+            ex = [f"Latest window (close {when} UTC)"]
+            for cp, picks in sorted(win["checkpoints"].items()):
+                ex.append(f"  {cp:<4}{'CHALLENGER':<15}{'NATIVE':<15}")
+                cps, nps = picks["challenger"], picks["native"]
+                for i in range(top_k):
+                    c = self._pick_str(cps[i]) if i < len(cps) else "-"
+                    n = self._pick_str(nps[i]) if i < len(nps) else "-"
+                    ex.append(f"  {('P'+str(i+1)):<4}{c:<15}{n:<15}")
+            lines += ["<pre>", "\n".join(ex), "</pre>"]
+
+        # Running per-rank totals.
+        tbl = [f"Running totals — {rk['n_cases']} cases",
+               f"{'':<6}{'CHALLENGER':>16}{'NATIVE':>18}",
+               f"{'Rank':<6}{'C':>5}{'W':>5}{'acc':>7}{'C':>7}{'W':>5}{'acc':>7}"]
+        def row(label, cd, nd):
+            ca = "n/a" if cd["accuracy"] is None else f"{cd['accuracy']*100:.1f}%"
+            na = "n/a" if nd["accuracy"] is None else f"{nd['accuracy']*100:.1f}%"
+            return (f"{label:<6}{cd['correct']:>5}{cd['wrong']:>5}{ca:>7}"
+                    f"{nd['correct']:>7}{nd['wrong']:>5}{na:>7}")
+        for k in range(1, top_k + 1):
+            tbl.append(row(f"P{k}", ch[f"rank{k}"], nv[f"rank{k}"]))
+        tbl.append(row("TOTAL", ch["overall"], nv["overall"]))
+        lines += ["<pre>", "\n".join(tbl), "</pre>"]
+
+        # Side-by-side verdict.
+        cacc, nacc = ch["overall"]["accuracy"], nv["overall"]["accuracy"]
+        if cacc is None or nacc is None:
+            verdict = "insufficient data"
+        elif cacc > nacc:
+            verdict = f"CHALLENGER better ({cacc*100:.1f}% vs {nacc*100:.1f}%)"
+        elif nacc > cacc:
+            verdict = f"NATIVE better ({nacc*100:.1f}% vs {cacc*100:.1f}%)"
+        else:
+            verdict = f"TIE ({cacc*100:.1f}%)"
+        lines.append(f"Better overall: {verdict}")
         trained = "yes" if self.info.get("fitted") else f"no ({self.info.get('reason','cold start')})"
-        lines.append(f"learning: {trained} · model={self.config.model_version}")
+        lines.append(f"learning: {trained} · model={mv}")
         return "\n".join(lines)
 
 
