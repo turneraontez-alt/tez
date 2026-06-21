@@ -27,7 +27,12 @@ class Notifier:
 
 def make_manager(settings=None):
     notifier = Notifier()
-    mgr = TwoWindowFocusManager(Store(), notifier, None, None, settings or FocusSettings())
+    # Dip alerts are OFF by default now (consolidated onto the unified panel);
+    # this suite exercises the dip mechanism, so enable it unless a test overrides.
+    mgr = TwoWindowFocusManager(
+        Store(), notifier, None, None,
+        settings if settings is not None else FocusSettings(dip_alert_enabled=True),
+    )
     # Local-only claim so the test does not depend on a DB store.
     claimed = set()
     mgr._claim = lambda key: (key not in claimed) and (claimed.add(key) or True)  # type: ignore[assignment]
@@ -64,7 +69,7 @@ class DipAlertTest(unittest.TestCase):
         self.assertEqual(len(notifier.messages), 1)
 
     def test_rearms_after_edge_recedes(self):
-        s = FocusSettings()
+        s = FocusSettings(dip_alert_enabled=True)
         mgr, notifier = make_manager(s)
         mgr._maybe_dip_alert("k", {"BTC": snap(edge=7.5)}, 0.0)
         # Edge recedes below the re-arm threshold -> trigger re-arms.
@@ -97,7 +102,7 @@ class DipAlertTest(unittest.TestCase):
         # Shared/permanent claim store: event 1 was already delivered by a peer
         # process or before a restart. Local state must still advance so a later
         # re-armed dip emits ...:2 instead of starving on the claimed ...:1 key.
-        s = FocusSettings()
+        s = FocusSettings(dip_alert_enabled=True)
         notifier = Notifier()
         mgr = TwoWindowFocusManager(Store(), notifier, None, None, s)
         preclaimed = {"q15-dip:k:BTC:1"}
@@ -118,7 +123,7 @@ class DipAlertTest(unittest.TestCase):
         self.assertIn("q15-dip:k:BTC:2", sent)
 
     def test_per_cycle_cap(self):
-        s = FocusSettings(dip_alert_max_per_cycle=2)
+        s = FocusSettings(dip_alert_enabled=True, dip_alert_max_per_cycle=2)
         mgr, notifier = make_manager(s)
         now = 0.0
         # Three separate dip events, each spaced past cooldown with a recede in between.

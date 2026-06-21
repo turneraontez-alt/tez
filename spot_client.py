@@ -66,10 +66,13 @@ def get_spot(asset):
     # REST behaviour below is unchanged; a per-asset stale/missing tick also
     # falls through to REST + last-good.
     ws = _ws_spot(asset)
-    if ws is not None:
+    if ws is not None and ws.get("ok") and ws.get("price"):
         with _LAST_GOOD_LOCK:
             _LAST_GOOD[asset] = (time.time(), dict(ws))
         return ws
+    # A present-but-not-ok websocket tick (e.g. a future error shape) must not be
+    # cached as "last good" nor returned as fresh — fall through to REST + the
+    # last-good fallback below so we never serve a silently bad price.
     result = _fetch_spot(asset)
     now = time.time()
     if result.get("ok") and result.get("price"):

@@ -35,8 +35,12 @@ def _esc(value: Any) -> str:
     parse_mode=HTML message. Reason/diagnostic strings contain characters such
     as '<', '>', and '&' (e.g. "consensus 64% < 72%"); without escaping these
     Telegram rejects the whole message with HTTP 400 'can't parse entities' and
-    the alert is never delivered. Literal markup tags are added separately."""
-    return html.escape("" if value is None else str(value), quote=False)
+    the alert is never delivered. Literal markup tags are added separately.
+
+    quote=True also escapes single/double quotes, so a value that lands inside a
+    quoted HTML attribute (e.g. an href) cannot break out of it — robust even
+    though current messages interpolate dynamic text only as tag content."""
+    return html.escape("" if value is None else str(value), quote=True)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -263,6 +267,12 @@ class FocusSettings:
     uncertainty_buffer_cents: float = _float("Q15_SELL_UNCERTAINTY_BUFFER_CENTS", 3.0)
     slippage_fraction_of_spread: float = _float("Q15_SLIPPAGE_SPREAD_FRACTION", 0.25)
     telegram_enabled: bool = _bool("Q15_FOCUS_TELEGRAM", True)
+    # Owner consolidated Telegram delivery onto the unified V9.5 CHECK panel /
+    # hourly report / follow-up. The two-window checkpoint alerts used a separate
+    # older plain-text format, so their Telegram delivery is OFF by default (the
+    # two-window ranking/learning/dashboard still run). Re-enable with
+    # Q15_FOCUS_CHECKPOINT_ALERTS=true. telegram_enabled stays the master switch.
+    checkpoint_alerts_enabled: bool = _bool("Q15_FOCUS_CHECKPOINT_ALERTS", False)
     alert_15_at_seconds: int = _int("Q15_15M_TELEGRAM_AT_SECONDS", 884)
     alert_10_at_seconds: int = _int("Q15_10M_TELEGRAM_AT_SECONDS", 599)
     alert_7_at_seconds: int = _int("Q15_7M_TELEGRAM_AT_SECONDS", 419)
@@ -293,13 +303,22 @@ class FocusSettings:
     self_review_adapt_loss_rate: float = _float("Q15_SELF_REVIEW_ADAPT_LOSS_RATE", 0.55)
     self_review_adapt_eval_window: int = _int("Q15_SELF_REVIEW_ADAPT_EVAL_WINDOW", 8)
     self_review_adapt_decay_window: int = _int("Q15_SELF_REVIEW_ADAPT_DECAY_WINDOW", 30)
-    dip_alert_enabled: bool = _bool("Q15_DIP_ALERT_ENABLED", True)
+    # Dip alert also used the older plain-text format -> OFF by default as part of
+    # consolidating onto the unified panel. Re-enable with Q15_DIP_ALERT_ENABLED=true.
+    dip_alert_enabled: bool = _bool("Q15_DIP_ALERT_ENABLED", False)
     dip_alert_min_edge_cents: float = _float("Q15_DIP_ALERT_MIN_EDGE_CENTS", 6.0)
     dip_alert_rearm_edge_cents: float = _float("Q15_DIP_ALERT_REARM_EDGE_CENTS", 2.0)
     dip_alert_min_win_probability: float = _float("Q15_DIP_ALERT_MIN_WIN_PROBABILITY", 0.55)
     dip_alert_cooldown_seconds: float = _float("Q15_DIP_ALERT_COOLDOWN_SECONDS", 90.0)
     dip_alert_max_per_cycle: int = _int("Q15_DIP_ALERT_MAX_PER_CYCLE", 3)
     dip_alert_min_seconds_remaining: int = _int("Q15_DIP_ALERT_MIN_SECONDS_REMAINING", 60)
+    # When a claimed alert fails to deliver (Telegram 429/400/network blip,
+    # notifier.send() returns falsy or raises), release the local claim and do
+    # NOT advance state so the alert is retried on a later cycle instead of being
+    # silently dropped. The shared claim store's ledger is permanent by design,
+    # so a retry only truly re-fires in the common single-process deployment;
+    # against a shared store the second attempt is treated as already-delivered.
+    alert_retry_on_send_failure: bool = _bool("Q15_V95_ALERT_RETRY_ON_SEND_FAILURE", True)
     # Read-only NO-conviction score for the 10m checkpoint. Derived from settled
     # history: a 10m NO has been ~97% accurate when it clears a high-consensus /
     # high-side-probability / high-decisiveness bar with macro alignment, and is
@@ -346,6 +365,7 @@ class TwoWindowFocusManager:
         self._blocker_counts: Dict[str, int] = defaultdict(int)
         self._last_error: Optional[str] = None
         self._breaker_active = False
+        self._empty_close_key_warned_at = 0.0
         self._migrate()
         # Final 10m prediction self-review (read-only post-mortems + bounded
         # auto-adaptation of decision thresholds). Hydrating the engine re-applies
@@ -628,6 +648,16 @@ class TwoWindowFocusManager:
                     _v9_probability /= 100.0
                 _v9_probability = max(0.001, min(0.999, _v9_probability))
             except (TypeError, ValueError):
+                _v9_probability = None
+        # Freshness gate: the canonical v9 probability overrides the live
+        # component blend below (see the return statements), so a value carried on
+        # a stale snapshot — e.g. after a failed refresh or a restart that reuses
+        # the prior dict — must not resurrect an old cycle's lean. When the
+        # snapshot is older than the focus data-age budget, drop it and let the
+        # freshly-computed components stand. No-op for fresh snapshots.
+        if _v9_probability is not None and isinstance(snapshot, dict):
+            data_age = _num(snapshot.get("data_age_seconds"), 0.0) or 0.0
+            if data_age > self.settings.max_data_age_seconds:
                 _v9_probability = None
         components: List[Tuple[str, float, float]] = []
         fair = _num(snapshot.get("calibrated_yes_probability"), _num(snapshot.get("estimated_fair_probability")))
@@ -1356,33 +1386,48 @@ class TwoWindowFocusManager:
     def _maybe_notify(self, close_key: str, snapshots: Mapping[str, dict], now: float) -> None:
         if not self.settings.telegram_enabled or self.notifier is None or not getattr(self.notifier, "enabled", False):
             return
-        if not close_key:
-            return  # no close_time -> cannot build a unique per-market claim key
         seconds_values = [_num(snap.get("seconds_remaining")) for snap in snapshots.values()]
         seconds_values = [value for value in seconds_values if value is not None]
+        if not close_key:
+            # No close_time -> cannot build a unique per-market claim key, so the
+            # checkpoint alert is dropped. When checkpoint alerts are enabled this
+            # must not be SILENT: if a market is near a checkpoint, a degraded feed
+            # is costing the owner alerts. Warn (throttled to once a minute).
+            if self.settings.checkpoint_alerts_enabled:
+                due = bool(seconds_values) and min(seconds_values) <= self.settings.alert_15_at_seconds
+                if due and (now - self._empty_close_key_warned_at) >= 60.0:
+                    self._empty_close_key_warned_at = now
+                    logger.warning(
+                        "Checkpoint alert skipped: missing close_time (empty close_key) while a "
+                        "market is %.0fs from close — degraded feed is suppressing alerts.",
+                        min(seconds_values),
+                    )
+            return
         if not seconds_values:
             return
-        seconds = min(seconds_values)
-        ranking = self._rankings.get(close_key, {})
-        if seconds <= self.settings.alert_15_at_seconds:
-            key = f"q15-two-window:15m:{close_key}"
-            if self._claim(key):
+        # Two-window checkpoint alerts use the older plain-text format and are OFF
+        # by default in favour of the unified V9.5 CHECK panel. The ranking they
+        # read is still built every cycle (dashboard + learning); only the Telegram
+        # delivery is gated. Re-enable with Q15_FOCUS_CHECKPOINT_ALERTS=true.
+        if self.settings.checkpoint_alerts_enabled:
+            seconds = min(seconds_values)
+            ranking = self._rankings.get(close_key, {})
+            if seconds <= self.settings.alert_15_at_seconds:
+                key = f"q15-two-window:15m:{close_key}"
                 rows = ranking.get("early_15m", [])
-                self.notifier.send(self._format_checkpoint_alert(
+                self._claim_and_send(key, self._format_checkpoint_alert(
                     "15m", rows[0] if rows else None, ranking.get("early_diagnostics", [])
                 ))
-        if seconds <= self.settings.alert_10_at_seconds:
-            key = f"q15-two-window:10m:{close_key}"
-            if self._claim(key):
+            if seconds <= self.settings.alert_10_at_seconds:
+                key = f"q15-two-window:10m:{close_key}"
                 rows = ranking.get("final", [])
-                self.notifier.send(self._format_checkpoint_alert(
+                self._claim_and_send(key, self._format_checkpoint_alert(
                     "10m", rows[0] if rows else None, ranking.get("final_diagnostics", [])
                 ))
-        if seconds <= self.settings.alert_7_at_seconds:
-            key = f"q15-two-window:7m:{close_key}"
-            if self._claim(key):
+            if seconds <= self.settings.alert_7_at_seconds:
+                key = f"q15-two-window:7m:{close_key}"
                 rows = ranking.get("final", [])
-                self.notifier.send(self._format_checkpoint_alert(
+                self._claim_and_send(key, self._format_checkpoint_alert(
                     "7m", rows[0] if rows else None, ranking.get("final_diagnostics", [])
                 ))
         self._maybe_dip_alert(close_key, snapshots, now)
@@ -1435,14 +1480,18 @@ class TwoWindowFocusManager:
             if last_sent is not None and (now - last_sent) < self.settings.dip_alert_cooldown_seconds:
                 continue
             key = f"q15-dip:{close_key}:{asset}:{state['count'] + 1}"
-            # Send only if we win the claim; but advance local state regardless.
-            # The claim store is permanent and SHARED across dev+prod processes,
-            # so a failed claim means this dip event was already delivered (by a
-            # peer process or before a restart). Advancing prevents starvation:
-            # otherwise we would retry the same already-claimed key forever and
-            # never progress to the next event's key.
-            if self._claim(key):
-                self.notifier.send(self._format_dip_alert(asset, side, snap, edge, win, seconds))
+            # Send only if we win the claim. On a LOST claim ("duplicate") the
+            # store is permanent and SHARED across dev+prod processes, so the
+            # event was already delivered (by a peer or before a restart) —
+            # advance local state anyway to avoid starving on the claimed key.
+            # On a delivery FAILURE ("failed") leave the trigger armed and the
+            # counters untouched so the next cycle retries instead of silently
+            # dropping the dip alert.
+            result = self._claim_and_send(
+                key, self._format_dip_alert(asset, side, snap, edge, win, seconds)
+            )
+            if result == "failed":
+                continue
             state["armed"] = False
             state["count"] += 1
             state["last_sent"] = now
@@ -2011,10 +2060,55 @@ class TwoWindowFocusManager:
             try:
                 if not self.store.claim_event(key):
                     return False
-            except Exception:
-                pass
+            except Exception as exc:
+                # Fail CLOSED: if we cannot coordinate via the shared store we
+                # must not claim locally and send, or two processes (dev+prod)
+                # both racing a transient store outage would each deliver the
+                # same alert. Skip this cycle; we retry once the store recovers.
+                logger.error("claim store error for key=%s: %s", key, exc)
+                return False
         self._local_claims.add(key)
         return True
+
+    def _release(self, key: str) -> None:
+        """Undo a *local* claim so a failed delivery is retried next cycle.
+
+        The shared store's claim ledger is permanent by design, so this only
+        re-opens retries within this process (the common single-process case);
+        against a shared store the next attempt sees the key already claimed and
+        is treated as already-delivered.
+        """
+        self._local_claims.discard(key)
+
+    def _claim_and_send(self, key: str, message: str) -> str:
+        """Claim ``key`` then deliver ``message``.
+
+        Returns one of:
+          ``"sent"``      – we won the claim and delivery was accepted;
+          ``"duplicate"`` – claim lost (already delivered by a peer / restart);
+          ``"failed"``    – we won the claim but delivery failed. With
+                            ``alert_retry_on_send_failure`` the local claim is
+                            released so a later cycle retries; otherwise the
+                            claim is consumed (legacy behavior) and ``"sent"``
+                            is returned so callers advance as before.
+        """
+        if not self._claim(key):
+            return "duplicate"
+        delivered = True
+        if self.notifier is not None:
+            try:
+                delivered = bool(self.notifier.send(message))
+            except Exception as exc:
+                logger.error("alert send raised for key=%s: %s", key, exc)
+                delivered = False
+        if delivered:
+            return "sent"
+        if self.settings.alert_retry_on_send_failure:
+            self._release(key)
+            logger.warning("alert delivery failed for key=%s; will retry", key)
+            return "failed"
+        logger.warning("alert delivery failed for key=%s; not retried", key)
+        return "sent"
 
     @staticmethod
     def _public_cycle(cycle: Mapping[str, Any]) -> dict:

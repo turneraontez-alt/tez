@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '%s\\n' 'ENGINEERING STANDARD: Read ENGINEERING_GUIDELINES.md (the staff-engineer meta-prompt) before any code task and apply its rules — failure modes, idempotency, stale-feed/WebSocket handling, Decimal for prices, parameterized SQL, narrow exception handling, deterministic tests, and adversarial self-review.'"
+          }
+        ]
+      }
+    ]
+  }
+}
