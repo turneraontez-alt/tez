@@ -128,6 +128,16 @@ class ChallengerConfig:
     # reset are never mixed into the visible record.
     reset_at: float = field(default_factory=lambda: _float("Q15_CHALLENGER_RESET_AT", 0.0))
 
+    # -- grading rule --
+    # Your System (native/control) counts in the VISIBLE record only when that
+    # prediction was actually delivered before contract close (mark_native_sent on
+    # a real Telegram delivery). Unsent predictions stay in the ledger as internal
+    # background rows (graded for learning) but never inflate the visible Yours
+    # record. The Shadow side is exempt (read-only test). Default ON = the required
+    # behavior; OFF = legacy count-all (reversible).
+    native_sent_only: bool = field(
+        default_factory=lambda: _bool("Q15_CHALLENGER_NATIVE_SENT_ONLY", True))
+
     @classmethod
     def from_env(cls) -> "ChallengerConfig":
         return cls()

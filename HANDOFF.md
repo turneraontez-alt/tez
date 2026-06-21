@@ -61,13 +61,23 @@ Read-only/observational throughout; the frozen champion is untouched.
   empty 10M, reset-marker stamped-once + pre-reset archive excluded, empty report
   shows reset + `0W–0L | N/A`. `.env.example` documents the challenger flags.
   Full suite **813 passed, 4 skipped**.
-- ⚠️ KNOWN GAP (documented, not yet done): the "Your System counts only predictions
-  actually SENT before close" rule isn't wired — the shadow records native=control
-  for every champion prediction, sent or not. Honoring it needs a sent-flag bridged
-  from `_send_compact_panel`/`record_sent_prediction`; deferred to keep this pass
-  read-only and within the frozen-champion invariant. Both systems are still graded
-  on the locked, pre-close, immutable prediction (UNIQUE key, created_at before
-  close), so grading is honest — just not yet sent-gated for Your System.
+- **Official grading rule — Your System counts only DELIVERED predictions** (follow-up
+  on this branch, post-merge): the visible "Yours" record now counts a native prediction
+  only if it was actually sent before close. New `native_sent` column (+ guarded SQLite
+  migration) on `shadow_predictions`; `ShadowLedger.mark_native_sent` (idempotent),
+  `runner.mark_native_sent`, and `ledger_v95._shadow_mark_sent`. Wired in
+  `checkpoint_v95._send_compact_panel` on a REAL Telegram delivery (read-only wrt
+  production; the observe row is recorded first at line 2081, the send marks it at 2171).
+  All visible native scoring (`ranked_comparison`, `ranked_by_checkpoint`,
+  `latest_window_cases`, `latest_window_end_results`, `comparison`) is sent-gated; the
+  Shadow side is exempt (read-only test, still created before close). Unsent predictions
+  stay as internal background rows (graded for learning, never in the visible record).
+  Gated `Q15_CHALLENGER_NATIVE_SENT_ONLY` (default ON; OFF = legacy count-all). +4 tests
+  (unsent-excluded-but-shadow-counts, mark promotes + idempotent, legacy-DB migration,
+  delivered-vs-undelivered end-to-end). Full suite **816 passed, 4 skipped**.
+  ⚠️ In production only the TOP pick's panel is delivered per checkpoint+window today, so
+  the visible Yours record populates rank #1 (ranks #2/#3 will fill once the official
+  interval report sends 3 ranked picks — the separate "RANKED PICKS" item).
 
 ## ✅ Shipped THIS session (branch `claude/crypto-prediction-monitor-ygugze`) — engineering-standard meta-prompt persisted
 **Merged to `main` (docs/config only, no behavior change). Tests: 809 passed, 12 skipped.**

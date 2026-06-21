@@ -44,12 +44,20 @@ class RunnerTest(unittest.TestCase):
                       features={"momentum": 0.1, "flow": -0.05, "book": 0.0},
                       quote={"yes_bid_cents": 40, "yes_ask_cents": 42,
                              "no_bid_cents": 56, "no_ask_cents": 58})
+            r.mark_native_sent(tkr, "10M")  # simulate the panel actually delivering
             r.resolve(tkr, "10M", "YES" if i % 2 == 0 else "NO",
                       resolved_at=1_700_000_900 + i * 60)
         cmp = r.comparison()
         self.assertEqual(cmp["overall"]["n"], 12)
         self.assertIsNotNone(cmp["overall"]["challenger_accuracy"])
+        # current (native) accuracy is populated because each was marked delivered
         self.assertIsNotNone(cmp["overall"]["current_accuracy"])
+        # and an UNDELIVERED prediction stays out of the visible native record
+        r.observe(ticker="UNSENT", asset="BTC", checkpoint="10M", created_at=1_700_000_000,
+                  close_time=1_700_000_900, control_prob_yes=0.9,
+                  features={"momentum": 0.1}, quote={"yes_ask_cents": 42, "yes_bid_cents": 40})
+        r.resolve("UNSENT", "10M", "YES", resolved_at=1_700_000_900)
+        self.assertEqual(r.comparison()["overall"]["n"], 13)  # row exists (background)
         self.assertIn("10M", cmp["by_checkpoint"])
         msg = r.report_message()
         self.assertIn("CHALLENGER SHADOW", msg)
@@ -85,12 +93,16 @@ class NotifierBypassTest(unittest.TestCase):
 
 
 class RankedComparisonTest(unittest.TestCase):
-    def _insert(self, led, *, asset, checkpoint, close, chal, ctrl, official, mv="challenger-test"):
+    def _insert(self, led, *, asset, checkpoint, close, chal, ctrl, official,
+                mv="challenger-test", native_sent=1):
+        # native_sent defaults to 1 here so these rows represent delivered ("sent")
+        # Your-System predictions; sent-gating tests pass native_sent=0 explicitly.
         led.ledger._conn.execute(
             "INSERT INTO shadow_predictions (created_at, model_version, asset, contract, "
-            "checkpoint, close_time, control_prob_yes, challenger_prob_yes, official_result) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (1.0, mv, asset, f"{asset}-{checkpoint}-{int(close)}", checkpoint, close, ctrl, chal, official),
+            "checkpoint, close_time, control_prob_yes, challenger_prob_yes, official_result, "
+            "native_sent) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (1.0, mv, asset, f"{asset}-{checkpoint}-{int(close)}", checkpoint, close, ctrl, chal,
+             official, native_sent),
         )
         led.ledger._conn.commit()
 
@@ -202,6 +214,61 @@ class RankedComparisonTest(unittest.TestCase):
         self._insert(r, asset="BTC", checkpoint="10M", close=1900, chal=0.9, ctrl=0.9, official="NO")
         rk = r.ranked()
         self.assertEqual(rk["n_cases"], 3)
+
+    def test_unsent_native_excluded_but_shadow_counts(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        # Two assets in one 10M case; native NEVER delivered (background only).
+        self._insert(r, asset="BTC", checkpoint="10M", close=1000, chal=0.9, ctrl=0.9,
+                     official="YES", native_sent=0)
+        self._insert(r, asset="SOL", checkpoint="10M", close=1000, chal=0.8, ctrl=0.8,
+                     official="YES", native_sent=0)
+        rk = r.ranked()  # sent-gated (default)
+        # Shadow (read-only test) counts both; Your System counts none (unsent).
+        self.assertEqual(rk["challenger"]["overall"]["correct"], 2)
+        self.assertEqual(rk["native"]["overall"], {"correct": 0, "wrong": 0, "accuracy": None})
+        rbc = r.ledger.ranked_by_checkpoint(model_version="challenger-test", native_sent_only=True)
+        self.assertEqual(rbc["by_checkpoint"]["10M"]["native"]["total"]["accuracy"], None)
+        self.assertEqual(rbc["by_checkpoint"]["10M"]["challenger"]["total"]["correct"], 2)
+        # End-result call: native reads — (no official prediction), shadow shows the call.
+        er = r.ledger.latest_window_end_results(model_version="challenger-test")
+        a = next(x for x in er["assets"] if x["asset"] == "BTC")
+        self.assertIsNone(a["checkpoints"]["10M"]["native"])
+        self.assertEqual(a["checkpoints"]["10M"]["challenger"], ("YES", True))
+        # Legacy count-all (sent_only OFF) brings the native rows back.
+        rk_all = r.ledger.ranked_comparison(model_version="challenger-test", native_sent_only=False)
+        self.assertEqual(rk_all["native"]["overall"]["correct"], 2)
+
+    def test_mark_native_sent_promotes_to_visible_record(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        self._insert(r, asset="BTC", checkpoint="10M", close=1000, chal=0.2, ctrl=0.9,
+                     official="YES", native_sent=0)
+        self.assertEqual(r.ranked()["native"]["overall"]["correct"], 0)  # unsent
+        # delivery before close marks it sent -> now visible (and correct: 0.9->YES==YES)
+        self.assertTrue(r.mark_native_sent("BTC-10M-1000", "10M"))
+        self.assertEqual(r.ranked()["native"]["overall"]["correct"], 1)
+        # idempotent: a second mark is a no-op, count unchanged
+        self.assertFalse(r.mark_native_sent("BTC-10M-1000", "10M"))
+        self.assertEqual(r.ranked()["native"]["overall"]["correct"], 1)
+
+    def test_migration_adds_native_sent_to_legacy_db(self):
+        import sqlite3
+        from q15_upgrade.challenger.ledger import ShadowLedger
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "legacy.sqlite3")
+        # Pre-create a shadow_predictions table WITHOUT native_sent (old schema).
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE shadow_predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                     "model_version TEXT, contract TEXT, checkpoint TEXT, official_result TEXT)")
+        conn.execute("INSERT INTO shadow_predictions (model_version, contract, checkpoint) "
+                     "VALUES ('challenger-test','C1','10M')")
+        conn.commit(); conn.close()
+        led = ShadowLedger(path)  # __init__ migrates
+        cols = {row["name"] for row in led._conn.execute("PRAGMA table_info(shadow_predictions)")}
+        self.assertIn("native_sent", cols)
+        # existing row defaulted to 0 (unsent) and mark flips it
+        self.assertTrue(led.mark_native_sent("C1", "10M", model_version="challenger-test"))
 
 
 class GatingTest(unittest.TestCase):

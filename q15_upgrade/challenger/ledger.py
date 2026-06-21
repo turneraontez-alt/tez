@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     official_result TEXT,
     resolved_at REAL,
     hypothetical_pnl_cents REAL,
+    native_sent INTEGER NOT NULL DEFAULT 0,
     UNIQUE(model_version, contract, checkpoint)
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_resolved ON shadow_predictions(checkpoint, official_result);
@@ -69,10 +70,35 @@ class ShadowLedger:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a DB file was first created. New columns
+        must be nullable / have a default so existing rows stay valid."""
+        cols = {row["name"] for row in
+                self._conn.execute("PRAGMA table_info(shadow_predictions)")}
+        if "native_sent" not in cols:
+            self._conn.execute(
+                "ALTER TABLE shadow_predictions ADD COLUMN native_sent INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
+
+    # ---- "Your System" sent-before-close marker (official grading rule) ----
+    def mark_native_sent(self, contract: str, checkpoint: str,
+                         model_version: str = "challenger-v1") -> bool:
+        """Flag the native (Your System) prediction for (contract, checkpoint) as
+        delivered before close, so it counts in the VISIBLE record. Idempotent: a
+        re-mark or a no-matching-row call is a harmless no-op (the row stays
+        background)."""
+        cur = self._conn.execute(
+            "UPDATE shadow_predictions SET native_sent=1 "
+            "WHERE model_version=? AND contract=? AND checkpoint=? AND native_sent=0",
+            (model_version, str(contract), str(checkpoint)),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     # ---- reset marker (so the report can show "Comparison reset: <UTC>") ----
     def reset_marker(self, model_version: str, configured_reset_at: float = 0.0) -> float:
@@ -257,7 +283,7 @@ class ShadowLedger:
         at one checkpoint; its members are the per-asset predictions in it."""
         rows = list(self._conn.execute(
             "SELECT checkpoint, close_time, created_at, asset, challenger_prob_yes, "
-            "control_prob_yes, official_result FROM shadow_predictions "
+            "control_prob_yes, official_result, native_sent FROM shadow_predictions "
             "WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
         ))
@@ -269,12 +295,16 @@ class ShadowLedger:
         return cases
 
     @staticmethod
-    def _rank(rows, prob_key):
+    def _rank(rows, prob_key, sent_only: bool = False):
         """Rank a case's predictions by confidence (decisiveness = |p-0.5|), desc.
 
-        Decisiveness is used for BOTH models so the ranking is comparable. Each
+        Decisiveness is used for BOTH models so the ranking is comparable. With
+        ``sent_only`` (used for the native "Your System" side), only predictions
+        that were actually delivered before close (``native_sent``) are eligible —
+        unsent rows stay background and never enter the visible record. Each
         returned entry: (asset, side, correct)."""
-        cand = [r for r in rows if r[prob_key] is not None]
+        cand = [r for r in rows if r[prob_key] is not None
+                and (not sent_only or r["native_sent"])]
         cand.sort(key=lambda r: abs(float(r[prob_key]) - 0.5), reverse=True)
         out = []
         for r in cand:
@@ -283,19 +313,29 @@ class ShadowLedger:
             out.append((r["asset"], side, correct))
         return out
 
-    def ranked_comparison(self, model_version: str = "challenger-v1", top_k: int = 3) -> dict[str, Any]:
+    # Per-model ranking config: (probability column, sent-gated?). The native
+    # "Your System" side is sent-gated (visible only if delivered before close);
+    # the challenger shadow is a read-only test and counts every created row.
+    @staticmethod
+    def _ranking_models(native_sent_only: bool) -> dict[str, tuple[str, bool]]:
+        return {"challenger": ("challenger_prob_yes", False),
+                "native": ("control_prob_yes", bool(native_sent_only))}
+
+    def ranked_comparison(self, model_version: str = "challenger-v1", top_k: int = 3,
+                          native_sent_only: bool = True) -> dict[str, Any]:
         """Top-1/2/3 correctness for both models, scored per rank (no double count).
 
         Within each case, predictions are ranked by confidence. Rank k is correct
         if that pick's side matched the official result. Each case contributes at
-        most one result per rank. Overall = sum over ranks 1..top_k.
+        most one result per rank. Overall = sum over ranks 1..top_k. The native
+        side counts only delivered-before-close predictions when sent-gated.
         """
         cases = self._resolved_cases(model_version)
-        models = {"challenger": "challenger_prob_yes", "native": "control_prob_yes"}
+        models = self._ranking_models(native_sent_only)
         stats = {m: {k: {"correct": 0, "wrong": 0} for k in range(1, top_k + 1)} for m in models}
         for case_rows in cases.values():
-            for m, pk in models.items():
-                ranked = self._rank(case_rows, pk)
+            for m, (pk, sent_only) in models.items():
+                ranked = self._rank(case_rows, pk, sent_only=sent_only)
                 for k in range(min(top_k, len(ranked))):
                     _, _, correct = ranked[k]
                     stats[m][k + 1]["correct" if correct else "wrong"] += 1
@@ -320,7 +360,8 @@ class ShadowLedger:
                 "native": _finish(stats["native"])}
 
     def ranked_by_checkpoint(self, model_version: str = "challenger-v1", top_k: int = 3,
-                             checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS) -> dict[str, Any]:
+                             checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS,
+                             native_sent_only: bool = True) -> dict[str, Any]:
         """All-time per-interval, per-rank correctness for BOTH systems.
 
         For each interval (15M/10M/7M) and each rank 1..top_k, returns
@@ -328,11 +369,13 @@ class ShadowLedger:
         (native), plus a per-interval total (summed over the ranks). Each resolved
         case contributes at most one result per (interval, rank) — the UNIQUE
         (model_version, contract, checkpoint) row key plus per-rank scoring means a
-        prediction is graded exactly once. Intervals with no settled case yet read
-        0W-0L / accuracy None so the report can show "0W-0L | N/A".
+        prediction is graded exactly once. The native side counts only
+        delivered-before-close predictions when sent-gated. Intervals with no
+        settled case yet read 0W-0L / accuracy None so the report can show
+        "0W-0L | N/A".
         """
         cases = self._resolved_cases(model_version)
-        models = {"challenger": "challenger_prob_yes", "native": "control_prob_yes"}
+        models = self._ranking_models(native_sent_only)
 
         def _blank():
             return {m: {k: {"correct": 0, "wrong": 0} for k in range(1, top_k + 1)}
@@ -343,8 +386,8 @@ class ShadowLedger:
             bucket = by_cp.get(cp)
             if bucket is None:
                 continue
-            for m, pk in models.items():
-                ranked = self._rank(case_rows, pk)
+            for m, (pk, sent_only) in models.items():
+                ranked = self._rank(case_rows, pk, sent_only=sent_only)
                 for k in range(min(top_k, len(ranked))):
                     _, _, correct = ranked[k]
                     bucket[m][k + 1]["correct" if correct else "wrong"] += 1
@@ -371,9 +414,11 @@ class ShadowLedger:
             out["by_checkpoint"][cp] = cp_out
         return out
 
-    def latest_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3) -> dict[str, Any]:
+    def latest_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3,
+                            native_sent_only: bool = True) -> dict[str, Any]:
         """Per-checkpoint top-k picks (both models) for the most recent settled
-        close window — for the human-readable example block in the report."""
+        close window — for the human-readable example block in the report. The
+        native side lists only delivered-before-close picks when sent-gated."""
         cases = self._resolved_cases(model_version)
         if not cases:
             return {"close": None, "checkpoints": {}}
@@ -384,12 +429,14 @@ class ShadowLedger:
                 continue
             out["checkpoints"][cp] = {
                 "challenger": self._rank(rows, "challenger_prob_yes")[:top_k],
-                "native": self._rank(rows, "control_prob_yes")[:top_k],
+                "native": self._rank(rows, "control_prob_yes",
+                                     sent_only=bool(native_sent_only))[:top_k],
             }
         return out
 
     def latest_window_end_results(self, model_version: str = "challenger-v1",
-                                  checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS) -> dict[str, Any]:
+                                  checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS,
+                                  native_sent_only: bool = True) -> dict[str, Any]:
         """For the most recent settled 15-min window, each model's END-RESULT call
         per asset at the given checkpoints (default 15M & 10M).
 
@@ -403,7 +450,7 @@ class ShadowLedger:
         """
         rows = list(self._conn.execute(
             "SELECT checkpoint, close_time, created_at, asset, challenger_prob_yes, "
-            "control_prob_yes, official_result FROM shadow_predictions "
+            "control_prob_yes, official_result, native_sent FROM shadow_predictions "
             "WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
         ))
@@ -426,28 +473,33 @@ class ShadowLedger:
             a = by_asset.setdefault(str(r["asset"]), {
                 "asset": str(r["asset"]), "official": official, "checkpoints": {}})
 
-            def _side_hit(prob, _official=official):
-                if prob is None:
+            def _side_hit(prob, _official=official, gated=False, _sent=r["native_sent"]):
+                # A gated (native) call shows only if delivered before close;
+                # otherwise it reads as "no official prediction" (—).
+                if prob is None or (gated and native_sent_only and not _sent):
                     return None
                 side = "YES" if float(prob) >= 0.5 else "NO"
                 return (side, side == _official)
 
             a["checkpoints"][str(r["checkpoint"])] = {
                 "challenger": _side_hit(r["challenger_prob_yes"]),
-                "native": _side_hit(r["control_prob_yes"]),
+                "native": _side_hit(r["control_prob_yes"], gated=True),
             }
         return {"close": close_ts, "checkpoints": list(checkpoints),
                 "assets": sorted(by_asset.values(), key=lambda x: x["asset"])}
 
-    def comparison(self, model_version: str = "challenger-v1") -> dict[str, Any]:
+    def comparison(self, model_version: str = "challenger-v1",
+                   native_sent_only: bool = True) -> dict[str, Any]:
         """Paired challenger-vs-control accuracy, overall and by checkpoint.
 
         Control = the production champion's probability stored alongside each
-        shadow prediction, so this is strictly paired on identical contracts.
+        shadow prediction, so this is strictly paired on identical contracts. The
+        challenger accuracy is over all rows; the current (native) accuracy counts
+        only delivered-before-close predictions when sent-gated.
         """
         rows = list(self._conn.execute(
-            "SELECT checkpoint, challenger_prob_yes, control_prob_yes, official_result "
-            "FROM shadow_predictions WHERE model_version=? AND official_result IS NOT NULL",
+            "SELECT checkpoint, challenger_prob_yes, control_prob_yes, official_result, "
+            "native_sent FROM shadow_predictions WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
         ))
 
@@ -457,7 +509,8 @@ class ShadowLedger:
                 return {"n": 0, "challenger_accuracy": None, "current_accuracy": None}
             cy = sum(1 for r in subset
                      if (float(r["challenger_prob_yes"]) >= 0.5) == (str(r["official_result"]).upper() == "YES"))
-            ctl = [r for r in subset if r["control_prob_yes"] is not None]
+            ctl = [r for r in subset if r["control_prob_yes"] is not None
+                   and (not native_sent_only or r["native_sent"])]
             cu = sum(1 for r in ctl
                      if (float(r["control_prob_yes"]) >= 0.5) == (str(r["official_result"]).upper() == "YES"))
             return {

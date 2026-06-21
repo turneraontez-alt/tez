@@ -2461,6 +2461,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             mid = result.get("message_id")
             decision = str(analysis.get("trade_decision") or "")
             manip_prob = (analysis.get("flip_risk") or {}).get("score")
+            # Your System (native) counts in the visible Shadow-vs-Yours record
+            # only once actually delivered before close — mark it here, on a real
+            # Telegram delivery. Read-only wrt production.
+            self.ledger._shadow_mark_sent(str(ticker), str(checkpoint))
             self.ledger.record_sent_prediction(
                 contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="interval",
                 predicted_side=analysis.get("prediction_side"), probability=analysis.get("yes_probability"),
