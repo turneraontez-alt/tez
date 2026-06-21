@@ -174,6 +174,42 @@ class TestNoneFeedIngest(_LoopHarness):
         self.assertEqual(published, set(appmod.ASSETS))
 
 
+class TestIngestExceptionIsolation(_LoopHarness):
+    def test_one_asset_ingest_crash_does_not_starve_the_others(self):
+        # The updated review flagged that the per-asset ingest loop (unlike the
+        # build_snapshot loop below it) was not wrapped in try/except: a single
+        # poisoned tick aborted the whole loop and dropped EVERY other asset's
+        # snapshot that cycle. Poison exactly one asset's orderbook parse and
+        # confirm the remaining assets still publish and the cycle completes.
+        poisoned = "ETH"
+        appmod.discover_single = lambda asset: _live_market(f"{asset}-LIVE")
+
+        def fetch(asset, market, when, last_ts):
+            ob = {"__POISON__": True} if asset == poisoned else {"yes": [[40, 10]], "no": [[55, 10]]}
+            return _raw_result(market["ticker"], ob_raw=ob, trades=[], now=time.time())
+
+        orig_parse = appmod.parse_orderbook
+
+        def parse(ob_raw):
+            if isinstance(ob_raw, dict) and ob_raw.get("__POISON__"):
+                raise ValueError("poisoned orderbook")
+            return orig_parse(ob_raw)
+
+        appmod.fetch_asset_raw = fetch
+        appmod.parse_orderbook = parse
+        try:
+            appmod.refresh_loop(max_cycles=2)
+        finally:
+            appmod.parse_orderbook = orig_parse
+        self.assertIsNotNone(appmod._last_cycle_ok,
+                             "one asset's ingest crash must not abort the cycle")
+        with appmod.state_lock:
+            published = set(appmod.state.keys())
+        expected = set(appmod.ASSETS) - {poisoned}
+        self.assertEqual(published, expected,
+                         "every asset except the poisoned one must still publish")
+
+
 class TestDeepEvalCascade(_LoopHarness):
     def test_deep_eval_crash_is_isolated_and_signals_still_run(self):
         # A crash in deep_evaluation_snapshots must (a) not abort the cycle and
