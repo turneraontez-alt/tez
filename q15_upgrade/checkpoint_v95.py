@@ -1145,6 +1145,15 @@ def _c(value: Any, signed: bool = False) -> str:
     return f"{parsed:+.0f}¢" if signed else f"{parsed:.0f}¢"
 
 
+def _seconds_phrase(value: Any) -> str:
+    """`~Xm Ys left` entry-deadline phrase from seconds-remaining, or `—`."""
+    secs = _num(value)
+    if secs is None or secs < 0:
+        return "—"
+    total = int(secs)
+    return f"~{total // 60}m {total % 60:02d}s left"
+
+
 def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None) -> str:
     """Render the checkpoint alert in the hourly-report house style.
 
@@ -1194,6 +1203,18 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
         else:
             body.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · no executable edge — holding")
         body.append(f"P(Yes) {_pct0(a.get('yes_probability'))} · P(No) {_pct0(a.get('no_probability'))} · {checkpoint} interval")
+        # Pushed-prediction meta: type, entry deadline, and the pushed-only track
+        # record for this interval (sample size + accuracy). Background results are
+        # excluded from this number by construction.
+        deadline = _seconds_phrase(a.get("seconds_remaining"))
+        pbc = (ledger_status.get("pushed_by_checkpoint") or {}).get(checkpoint) or {}
+        p_settled = int(pbc.get("settled") or 0)
+        p_acc = pbc.get("accuracy")
+        p_acc_s = f"{p_acc * 100:.0f}%" if isinstance(p_acc, (int, float)) else "n/a"
+        body.append(
+            f"Type: checkpoint prediction · entry by {deadline} · "
+            f"pushed {checkpoint} acc {p_acc_s} (n={p_settled})"
+        )
     else:
         body.append("No prediction available this cycle")
 
@@ -1626,6 +1647,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 expired = _checkpoint_expired(checkpoint, seconds_left)
                 analysis["interval"] = checkpoint
                 analysis["expired"] = expired
+                analysis["seconds_remaining"] = seconds_left
                 snapshot["q15_v9_5_interval"] = checkpoint
                 snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
                 snapshot["q15_v9_5_selected_probability"] = analysis.get("selected_probability")
@@ -1706,7 +1728,26 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # Discard all parent V9.4 messages. V9.5 owns the final state machine.
             deferred.suppress_all(generated_message=message is not None)
             sent = failed = 0
-            if message and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+            # The actionable pushed prediction is the highest-ranked pick with a
+            # recommended entry; it owns this timeframe's active slot.
+            top_entry_ticker = top_entry_close = None
+            for _row in ranking:
+                _a = analyses.get(str(_row["asset"]))
+                if _a and _a.get("entry_allowed"):
+                    _can = canonicals.get(str(_row["asset"]))
+                    if _can is not None and _can.ticker:
+                        top_entry_ticker = _can.ticker
+                        top_entry_close = _can.settlement_time
+                    break
+            # One active prediction per timeframe: if a different, still-open
+            # contract already holds this checkpoint's slot, do not push a second
+            # prediction for the same time frame — leave the active one untouched.
+            one_active = _env_bool("Q15_V95_ONE_ACTIVE_PER_TIMEFRAME", True)
+            slot_locked = bool(
+                one_active and top_entry_ticker is not None
+                and self.ledger.pushed_slot_blocks(checkpoint, top_entry_ticker, now)
+            )
+            if message and not slot_locked and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
                 event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
                 previous = self.ledger.notification_state(event_key)
                 state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
@@ -1718,8 +1759,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     fresh = _BufferedNotifier(notifier)
                     sent, failed, _ = fresh.flush(message)
                     self.ledger.complete_notification(event_key=permit_key, success=sent > 0 and failed == 0, now=now)
+                    # On a delivered entry recommendation, claim the timeframe slot
+                    # and mark that prediction pushed (separate pushed accuracy).
+                    if sent > 0 and top_entry_ticker is not None:
+                        self.ledger.claim_pushed_slot(checkpoint, top_entry_ticker, top_entry_close, now)
+                        self.ledger.mark_pushed(top_entry_ticker, checkpoint)
                 else:
                     self._telegram_suppressed_v95 += 1
+            elif slot_locked:
+                self._telegram_suppressed_v95 += 1
             self._telegram_sent_v95 += sent + flip_sent
             self._telegram_failed_v95 += failed + flip_failed
             self._cycles += 1
@@ -1876,12 +1924,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             asset_stats, overall_stats, asset=asset, checkpoint=checkpoint, direction=direction,
         )
         scope = asset_stats if (asset_stats and threshold.status == "Learned") else overall_stats
-        flip_prob = flip_risk.estimate_flip_probability(ra.score, (scope or {}).get("buckets"))
+        buckets = (scope or {}).get("buckets")
+        flip_prob = flip_risk.estimate_flip_probability(ra.score, buckets)
+        # Reliability-aware "≥X% chance of being right" estimate for this risk level
+        # (Wilson lower bound of the bucket flip-rate) + its sample size. The gate
+        # keeps flips dormant until this clears Q15_V95_FLIP_MIN_HITRATE.
+        flip_prob_lower, flip_samples = flip_risk.bucket_flip_reliability(ra.score, buckets)
 
         key = (str(asset), str(checkpoint), str(ticker))
         decision, new_state = flip_risk.evaluate_alert(
             risk=ra, threshold=threshold, flip_probability=flip_prob,
-            prior=self._flip_alert_state.get(key), now=now,
+            prior=self._flip_alert_state.get(key), now=now, flip_prob_lower=flip_prob_lower,
         )
         self._flip_alert_state[key] = new_state
         if len(self._flip_alert_state) > 256:
@@ -1893,10 +1946,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         snapshot["q15_v9_5_flip_threshold_status"] = threshold.status
         snapshot["q15_v9_5_flip_samples"] = threshold.samples
         snapshot["q15_v9_5_flip_probability"] = flip_prob
+        snapshot["q15_v9_5_flip_hitrate_lower"] = flip_prob_lower
+        snapshot["q15_v9_5_flip_hitrate_samples"] = flip_samples
         snapshot["q15_v9_5_flip_state"] = decision.state
         snapshot["q15_v9_5_flip_dashboard"] = flip_risk.dashboard_block(
             risk=ra, threshold=threshold, flip_probability=flip_prob,
             state=decision.state, persistence=decision.persistence,
+            flip_prob_lower=flip_prob_lower, flip_samples=flip_samples,
         )
 
         sent = failed = 0
@@ -1927,6 +1983,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             msg = flip_risk.format_high_flip_risk(
                 asset=asset, checkpoint=checkpoint, current_side=side, risk=ra,
                 threshold=threshold, flip_probability=flip_prob, persistence=decision.persistence,
+                flip_prob_lower=flip_prob_lower, flip_samples=flip_samples,
             )
             s, f, _ = _BufferedNotifier(notifier).flush(msg)
             sent += s

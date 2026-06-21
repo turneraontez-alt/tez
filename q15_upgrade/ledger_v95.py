@@ -409,6 +409,21 @@ class V95Ledger:
             self._ensure_column(connection, "predictions", "flip_risk_score", "flip_risk_score REAL")
             self._ensure_column(connection, "predictions", "flip_risk_confidence", "flip_risk_confidence REAL")
             self._ensure_column(connection, "predictions", "flip_evidence_count", "flip_evidence_count INTEGER")
+            # Whether this prediction was actually PUSHED to the user (an entry was
+            # recommended and the alert was delivered) vs only observed in the
+            # background. Lets the scoreboard keep pushed-only accuracy separate
+            # from the full background record. Default 0 = background.
+            self._ensure_column(connection, "predictions", "pushed", "pushed INTEGER NOT NULL DEFAULT 0")
+            # One active pushed prediction per timeframe: the contract currently
+            # occupying each checkpoint's slot, held until it closes so a second
+            # prediction for the same time frame is never pushed while one is live.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS pushed_slots(
+                    model_version TEXT NOT NULL, checkpoint TEXT NOT NULL,
+                    ticker TEXT NOT NULL, close_time REAL, pushed_at REAL NOT NULL,
+                    PRIMARY KEY(model_version, checkpoint)
+                )"""
+            )
             # Warning-performance log: one row per HIGH FLIP RISK alert that fired,
             # reconciled against whether the frozen prediction actually flipped.
             connection.execute(
@@ -579,6 +594,77 @@ class V95Ledger:
             "flip_risk_score": _num(row["flip_risk_score"]),
             "flip_risk_confidence": _num(row["flip_risk_confidence"]),
         }
+
+    # -- pushed-prediction accounting + one-active-per-timeframe slot lock ------
+    def mark_pushed(self, ticker: str, checkpoint: str) -> bool:
+        """Flag the (ticker, checkpoint) prediction as actually pushed to the user.
+
+        Idempotent. Lets the scoreboard report pushed-only accuracy without
+        background observations inflating it."""
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            cur = connection.execute(
+                "UPDATE predictions SET pushed=1 WHERE model_version=? AND checkpoint=? AND ticker=?",
+                (MODEL_VERSION, checkpoint, str(ticker)),
+            )
+            connection.commit()
+            return cur.rowcount > 0
+
+    def pushed_slot_blocks(self, checkpoint: str, ticker: str, now: float) -> bool:
+        """True if a DIFFERENT, still-open contract already holds this timeframe's
+        active slot — i.e. pushing now would be a second prediction for the same
+        time frame. The slot frees on its own once the held contract closes."""
+        if not self._available:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT ticker, close_time FROM pushed_slots WHERE model_version=? AND checkpoint=?",
+                (MODEL_VERSION, checkpoint),
+            ).fetchone()
+        if row is None or str(row["ticker"]) == str(ticker):
+            return False
+        close = _num(row["close_time"])
+        return close is None or now < close  # held contract still open -> locked
+
+    def claim_pushed_slot(self, checkpoint: str, ticker: str, close_time: float | None, now: float) -> bool:
+        """Occupy this timeframe's active slot with ``ticker`` until it closes.
+
+        Refuses if a different, still-open contract holds it; otherwise claims
+        (or refreshes its own claim) and returns True."""
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        if self.pushed_slot_blocks(checkpoint, ticker, now):
+            return False
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO pushed_slots(model_version,checkpoint,ticker,close_time,pushed_at) "
+                "VALUES(?,?,?,?,?)",
+                (MODEL_VERSION, checkpoint, str(ticker), _num(close_time), float(now)),
+            )
+            connection.commit()
+            return True
+
+    def active_pushed_slot(self, checkpoint: str, now: float) -> dict[str, Any] | None:
+        """The contract currently holding this timeframe's slot, or None if free
+        (never claimed, or the held contract has already closed)."""
+        if not self._available:
+            return None
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT ticker, close_time, pushed_at FROM pushed_slots WHERE model_version=? AND checkpoint=?",
+                (MODEL_VERSION, checkpoint),
+            ).fetchone()
+        if row is None:
+            return None
+        close = _num(row["close_time"])
+        if close is not None and now >= close:
+            return None
+        return {"ticker": str(row["ticker"]), "close_time": close, "pushed_at": _num(row["pushed_at"])}
 
     def note_prediction_revision(self, *, ticker: str, checkpoint: str, current_side: str) -> bool:
         """Flag that the live predicted side drifted from the locked prediction
@@ -1261,11 +1347,25 @@ class V95Ledger:
             a: self._win_loss([r for r in rank1 if str(r["asset"]) == a])
             for a in sorted({str(r["asset"]) for r in rank1})
         }
+        # Pushed vs background: the two separate records. Pushed = predictions an
+        # entry was recommended on and the alert was actually delivered; background
+        # = every other observation. Background results NEVER inflate pushed accuracy.
+        pushed_rows = [r for r in rows if int(_row_get(r, "pushed") or 0) == 1]
+        background_rows = [r for r in rows if int(_row_get(r, "pushed") or 0) != 1]
+        by_pushed = {
+            "pushed": self._win_loss(pushed_rows),
+            "background": self._win_loss(background_rows),
+        }
+        pushed_by_checkpoint = {
+            cp: self._win_loss([r for r in pushed_rows if r["checkpoint"] == cp])
+            for cp in TRACKED_CHECKPOINTS
+        }
         return {
             "overall": self._win_loss(rows), "by_checkpoint": by_checkpoint,
             "by_rank": by_rank, "rank_by_checkpoint": rank_by_checkpoint,
             "by_asset": by_asset, "top_pick_by_asset": top_pick_by_asset,
             "by_manipulation": self._by_manipulation(rows),
+            "by_pushed": by_pushed, "pushed_by_checkpoint": pushed_by_checkpoint,
         }
 
     def scoreboard(self) -> dict[str, Any]:
@@ -1276,7 +1376,7 @@ class V95Ledger:
             rows = list(connection.execute(
                 "SELECT checkpoint, correct, rank, asset, realized_cents, "
                 "predicted_side, official_result, confidence_grade, changed_before_close, "
-                "manipulation_suspected, manipulation_reason "
+                "manipulation_suspected, manipulation_reason, pushed "
                 "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
                 (MODEL_VERSION,),
             ))
@@ -1745,6 +1845,15 @@ class V95Ledger:
             notifications = connection.execute(
                 "SELECT COUNT(*) total,SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) sent,SUM(failures) failures FROM notification_state"
             ).fetchone()
+            # Compact pushed-prediction record per checkpoint, for the live alert's
+            # "current pushed accuracy" line (settled pushed predictions only).
+            pushed_rows = list(connection.execute(
+                """SELECT checkpoint,
+                   SUM(CASE WHEN official_result IS NOT NULL THEN 1 ELSE 0 END) settled,
+                   SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) correct_n
+                   FROM predictions WHERE model_version=? AND pushed=1 GROUP BY checkpoint""",
+                (MODEL_VERSION,),
+            ))
             last_update = connection.execute("SELECT * FROM checkpoint_challenger_updates ORDER BY id DESC LIMIT 1").fetchone()
             updates_by_checkpoint = {
                 checkpoint: int(connection.execute(
@@ -1787,6 +1896,13 @@ class V95Ledger:
             "last_shadow_update": dict(last_update) if last_update else None,
             "dropped_feature_rows": int(self._dropped_feature_rows),
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
+            "pushed_by_checkpoint": {
+                str(r["checkpoint"]): {
+                    "settled": int(r["settled"] or 0), "right": int(r["correct_n"] or 0),
+                    "accuracy": (round(int(r["correct_n"] or 0) / int(r["settled"]), 4) if int(r["settled"] or 0) else None),
+                }
+                for r in pushed_rows
+            },
         }
 
 

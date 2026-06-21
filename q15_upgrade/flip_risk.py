@@ -19,6 +19,7 @@ unit-tested without a database.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
@@ -310,6 +311,44 @@ def estimate_flip_probability(
     return rate
 
 
+def wilson_lower_bound(successes: int, n: int, z: float = 1.96) -> float | None:
+    """Lower bound of the 95% Wilson score interval for ``successes/n``.
+
+    Used as a reliability-aware estimate of "how often a flip really happens at
+    this risk level": with few samples the bound sits well below the point rate,
+    so a category cannot clear a high gate until it has enough completed results.
+    Returns None when there is no data.
+    """
+    if n <= 0:
+        return None
+    p = successes / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2.0 * n)) / denom
+    margin = (z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))) / denom
+    return max(0.0, center - margin)
+
+
+def bucket_flip_reliability(
+    score: float, bucket_rates: Mapping[str, Any] | None,
+) -> tuple[float | None, int]:
+    """(Wilson lower-bound of the bucket flip-rate, sample size) for ``score``.
+
+    The lower bound is the conservative "≥X% chance of being right" estimate the
+    flip-send gate uses; the sample size is shown to the user. Returns
+    ``(None, 0)`` when that bucket has no learned history yet.
+    """
+    if not bucket_rates:
+        return None, 0
+    row = bucket_rates.get(bucket_label(score))
+    if not row:
+        return None, 0
+    n = int(_num(row.get("n"), 0) or 0)
+    flips = int(_num(row.get("flips"), 0) or 0)
+    if n <= 0:
+        return None, 0
+    return wilson_lower_bound(flips, n), n
+
+
 # --- alert states -------------------------------------------------------------
 NORMAL = "NORMAL"
 WATCH = "WATCH"
@@ -332,6 +371,7 @@ def evaluate_alert(
     flip_probability: float | None,
     prior: Mapping[str, Any] | None,
     now: float,
+    flip_prob_lower: float | None = None,
 ) -> tuple[AlertDecision, dict[str, Any]]:
     """The gated alert state machine with persistence, hysteresis and cooldown.
 
@@ -339,13 +379,19 @@ def evaluate_alert(
     cycles; the returned dict is the new state to carry forward. A HIGH FLIP RISK
     Telegram send requires ALL of: score >= threshold, the condition held for
     >= N consecutive observations, >= 2 independent evidence categories, flip
-    probability above the configured minimum, sufficient confidence, and no prior
-    send for the same warning (cooldown + hysteresis + re-arm rules).
+    probability above the configured minimum, sufficient confidence, the learned
+    flip hit-rate for this risk level reliably clearing the minimum (its Wilson
+    lower bound, ``flip_prob_lower``, >= ``Q15_V95_FLIP_MIN_HITRATE`` — so a
+    category stays dormant until it has enough completed results to be ~70%+
+    likely right), and no prior send for the same warning (cooldown + hysteresis
+    + re-arm rules).
     """
     prior = dict(prior or {})
     persist_needed = _env_int("Q15_V95_FLIP_PERSISTENCE", 3, 1, 50)
     min_categories = _env_int("Q15_V95_FLIP_MIN_CATEGORIES", 2, 1, 7)
     min_flip_prob = _env_float("Q15_V95_FLIP_MIN_PROBABILITY", 0.0, 0.0, 1.0)
+    require_hitrate = _env_bool("Q15_V95_FLIP_REQUIRE_HITRATE", True)
+    min_hitrate = _env_float("Q15_V95_FLIP_MIN_HITRATE", 0.70, 0.0, 1.0)
     min_confidence = _env_float("Q15_V95_FLIP_MIN_CONFIDENCE", 40.0, 0.0, 100.0)
     cooldown = _env_float("Q15_V95_FLIP_ALERT_COOLDOWN_SECONDS", 90.0, 0.0, 3600.0)
     hysteresis = _env_float("Q15_V95_FLIP_HYSTERESIS_POINTS", 10.0, 0.0, 100.0)
@@ -374,19 +420,22 @@ def evaluate_alert(
     else:
         display = NORMAL
 
+    hitrate_ok = (not require_hitrate) or (flip_prob_lower is not None and flip_prob_lower >= min_hitrate)
     gates_pass = (
         above
         and persistence >= persist_needed
         and len(risk.evidence_categories) >= min_categories
         and (flip_probability is not None and flip_probability >= min_flip_prob)
         and risk.confidence >= min_confidence
+        and hitrate_ok
     )
     if not gates_pass:
         reason = "below_threshold" if not above else (
             "persistence" if persistence < persist_needed else
             "evidence_categories" if len(risk.evidence_categories) < min_categories else
             "flip_probability" if (flip_probability is None or flip_probability < min_flip_prob) else
-            "confidence"
+            "confidence" if risk.confidence < min_confidence else
+            "hitrate"
         )
         return AlertDecision(display, False, reason, persistence), new_state
 
@@ -420,15 +469,20 @@ def _pct(value: float | None) -> str:
 
 def format_high_flip_risk(*, asset: str, checkpoint: str, current_side: str,
                           risk: RiskAssessment, threshold: ThresholdResolution,
-                          flip_probability: float | None, persistence: int) -> str:
+                          flip_probability: float | None, persistence: int,
+                          flip_prob_lower: float | None = None, flip_samples: int = 0) -> str:
     evidence = " + ".join(CATEGORY_LABELS.get(c, c) for c in risk.evidence_categories) or risk.primary_reason
     persist_needed = _env_int("Q15_V95_FLIP_PERSISTENCE", 3, 1, 50)
+    min_hitrate = _env_float("Q15_V95_FLIP_MIN_HITRATE", 0.70, 0.0, 1.0)
+    hit = (f"Historical hit-rate: {_pct(flip_prob_lower * 100)} (95% lower bound, {flip_samples} samples; "
+           f"gate ≥{round(min_hitrate * 100)}%)\n") if flip_prob_lower is not None else ""
     return (
         f"⚠️ <b>HIGH FLIP RISK — {asset} {checkpoint}</b>\n\n"
         f"Current prediction: {current_side}\n"
         f"Possible flip: {risk.direction_monitored or '—'}\n"
         f"Manipulation risk: {_pct(risk.score)}\n"
         f"Estimated flip probability: {_pct(None if flip_probability is None else flip_probability * 100)}\n"
+        f"{hit}"
         f"Learned threshold: {_pct(threshold.threshold)}\n"
         f"Confirmation: {min(persistence, persist_needed)}/{persist_needed} observations\n"
         f"Evidence: {evidence}\n"
@@ -453,15 +507,20 @@ def format_confirmed_flip(*, asset: str, checkpoint: str, previous_side: str,
 
 def dashboard_block(*, risk: RiskAssessment, threshold: ThresholdResolution,
                     flip_probability: float | None, state: str,
-                    persistence: int) -> list[str]:
+                    persistence: int, flip_prob_lower: float | None = None,
+                    flip_samples: int = 0) -> list[str]:
     persist_needed = _env_int("Q15_V95_FLIP_PERSISTENCE", 3, 1, 50)
+    min_hitrate = _env_float("Q15_V95_FLIP_MIN_HITRATE", 0.70, 0.0, 1.0)
     tail = "no alert" if state in (NORMAL, WATCH) else "alert sent"
+    hit = (f"{_pct(flip_prob_lower * 100)} lower bound · {flip_samples} samples · gate ≥{round(min_hitrate * 100)}%"
+           if flip_prob_lower is not None else f"learning (need ≥{round(min_hitrate * 100)}% over enough samples)")
     return [
         "MANIPULATION / FLIP RISK",
         f"Risk score: {_pct(risk.score)}",
         f"Risk confidence: {_pct(risk.confidence)}",
         f"Learned flip threshold: {_pct(threshold.threshold)}",
         f"Estimated flip probability: {_pct(None if flip_probability is None else flip_probability * 100)}",
+        f"Flip hit-rate gate: {hit}",
         f"Direction monitored: {risk.direction_monitored or '—'}",
         f"Evidence categories: {len(risk.evidence_categories)}",
         f"Confirmation: {min(persistence, persist_needed)}/{persist_needed} observations",
