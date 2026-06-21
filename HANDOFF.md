@@ -64,6 +64,33 @@ changed. Read-only + frozen-champion invariants intact.
   hold until the named 15:00/10:00/7:00 mark + a force-send safety net as the band closes).
   Regression test in `tests/test_q15_v95_single_alert.py`.
 
+## ✅ Shipped THIS session — cross-asset shadow factors (new reliable data)
+**On the branch, deploy-pending.** Adds the genuinely-new reliable data the codebase can
+collect TODAY with no external feed: cross-asset / correlated-movement signals. Each cycle
+already holds all 7 assets' snapshots, so broad-market + relative-strength factors are free
+and leakage-free. Recorded for the factor lab ONLY, isolated from the frozen champion.
+
+- **`q15_upgrade/shadow_factors.py`** (pure): `compute_market(analyses)` → mean momentum/
+  flow across assets + BTC (leader) momentum; `for_asset()` → YES-signed factors
+  `x_market_momentum`, `x_market_flow`, `x_leader_momentum`, `x_rel_strength`
+  (asset − market), `x_div_from_leader` (asset − BTC). Same sign convention as the champion
+  features so the lab grades them identically.
+- **Isolation**: stored in a NEW `predictions.shadow_factor_json` column — never in
+  `feature_json`. The champion/challenger/calibration/pattern overlay read only their known
+  feature names, so this cannot perturb a live decision. `record_prediction(shadow_factors=)`
+  writes it in the same transaction (insert-only); `resolved_factor_rows` merges it back so
+  the lab + `scripts/stats.py` grade the `x_*` factors automatically. Default-ON flag
+  `Q15_V95_SHADOW_FACTORS_ENABLED` (pure rollback switch).
+- **Already-tracked richer data** the lab now also surfaces: `derivatives` (Deribit
+  funding/OI-derived), `exchange_consensus` (cross-exchange spot), `absorption`, `context`,
+  `threshold_interaction` were always recorded — the lab grades all of them.
+- **Still needs a real feed (NOT faked):** sentiment, social, on-chain, calendar/seasonality
+  as a *signed* factor. Each is a separate ingestion task with a verified source.
+- **Tests** (`tests/test_q15_shadow_factors.py` + extended `test_q15_stats_cli.py`): market
+  aggregation/skip-missing, signed relative factors, leader self-divergence = 0, and the
+  isolated round-trip into the export. Full suite **854 passed, 4 skipped**; app imports +
+  refresh loop start clean.
+
 ## ✅ Shipped THIS session — shadow FACTOR LAB + all-stats CLI
 **On the branch, deploy-pending.** Adds a read-only, shadow-mode factor-attribution
 layer over the official predictions the system ALREADY records, plus a single command to

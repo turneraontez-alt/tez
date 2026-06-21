@@ -20,7 +20,8 @@ from q15_upgrade.ledger_v95 import V95Ledger
 from scripts import stats
 
 
-def _resolve(led, ticker, checkpoint, side, official, *, features, asset="ETH"):
+def _resolve(led, ticker, checkpoint, side, official, *, features, asset="ETH",
+             shadow_factors=None):
     raw = 0.62 if side == "YES" else 0.38
     led.record_prediction(
         ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=time.time(),
@@ -31,6 +32,7 @@ def _resolve(led, ticker, checkpoint, side, official, *, features, asset="ETH"):
         data_quality=0.8, evidence_quality=0.7, trade_quality=0.7,
         trade_decision="ENTRY_RECOMMENDED", regime="NORMAL",
         features=features, contributions=features, quote={"ask_cents": 50}, rank=1,
+        shadow_factors=shadow_factors,
     )
     led.resolve_ticker(ticker, official)
 
@@ -50,6 +52,16 @@ class ResolvedFactorRowsTest(unittest.TestCase):
         self.assertIn("changed_before_close", r)
         # checkpoint filter
         self.assertEqual([x["checkpoint"] for x in led.resolved_factor_rows("7M")], ["7M"])
+
+    def test_shadow_factors_merge_into_export_isolated_from_feature_json(self):
+        led = V95Ledger(tempfile.mktemp(suffix=".sqlite3"))
+        _resolve(led, "C1", "10M", "YES", "YES", features={"wick": 0.4},
+                 shadow_factors={"x_market_momentum": 0.3, "x_rel_strength": -0.1})
+        row = led.resolved_factor_rows()[0]
+        # the lab sees both the champion feature and the isolated shadow factors
+        self.assertEqual(row["features"]["wick"], 0.4)
+        self.assertEqual(row["features"]["x_market_momentum"], 0.3)
+        self.assertEqual(row["features"]["x_rel_strength"], -0.1)
 
     def test_export_empty_when_unavailable(self):
         led = V95Ledger.__new__(V95Ledger)
