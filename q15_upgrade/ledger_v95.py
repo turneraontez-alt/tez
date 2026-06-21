@@ -632,7 +632,36 @@ class V95Ledger:
                 ),
             )
             connection.commit()
-            return prediction_id, cursor.rowcount == 1
+            inserted = cursor.rowcount == 1
+        if inserted:
+            self._shadow_observe(
+                ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=created_at,
+                close_time=close_time, control_prob_yes=raw_yes_probability,
+                features=features, quote=quote,
+            )
+        return prediction_id, inserted
+
+    # -- read-only challenger shadow (default-OFF; never affects production) --
+    def _shadow_observe(self, **kw) -> None:
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                runner.observe(**kw)
+        except Exception:
+            logger.debug("challenger shadow observe skipped", exc_info=True)
+
+    def _shadow_resolve(self, events) -> None:
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is None:
+                return
+            for ev in events:
+                runner.resolve(str(ev.get("ticker")), str(ev.get("checkpoint")),
+                               str(ev.get("official_result")))
+        except Exception:
+            logger.debug("challenger shadow resolve skipped", exc_info=True)
 
     def frozen_prediction(self, ticker: str, checkpoint: str) -> dict[str, Any] | None:
         """The frozen (first-recorded) side + flip-risk score for (ticker, checkpoint).
@@ -1148,6 +1177,7 @@ class V95Ledger:
         for row in rows:
             if self._apply_shadow_update(str(row["prediction_id"])):
                 learned += 1
+        self._shadow_resolve(events)
         return {"resolved": len(rows), "updates_applied": learned, "events": events}
 
     def _apply_shadow_update(self, prediction_id: str) -> bool:

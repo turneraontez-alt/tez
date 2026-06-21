@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **608 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **689 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -23,6 +23,81 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — challenger shadow system
+**Read-only, default-OFF, zero production impact. NOT wired into the live loop yet
+(by design — single documented seam to promote it).** A new self-contained package
+`q15_upgrade/challenger/` that estimates calibrated P(Yes) for the 15-min binaries
+as a SHADOW model, built to be promoted to primary with one switch.
+
+- **Decoupled:** own `ChallengerConfig` (all flags default OFF: `Q15_CHALLENGER_ENABLED`,
+  `Q15_CHALLENGER_AS_PRIMARY`), own SQLite ledger (`data/q15_challenger_shadow_v1.sqlite3`,
+  gitignored), no order execution, no writes to production tables.
+- **Pure-python by default** (`backend=logistic`) — the deploy target has no
+  numpy/sklearn/xgboost. Optional `xgboost`/`lightgbm` backends used only if importable
+  (your depth-3 / eta-0.03 / min_child-20 / subsample-0.75 / λ-10 config is pre-wired).
+  Baselines: `market_only`, `volatility_only`.
+- **Leakage-safe:** `features.py` reads only decision-time fields (+ a `FORBIDDEN_KEYS`
+  guard); validation is **purged walk-forward + embargo** (`validation.py`); calibration
+  (Platt / isotonic / identity, `auto`-selectable) fits on a held-out fold only.
+- **8 required outputs** via `ShadowPredictor.predict` (P(Yes)/P(No)/confidence/edge-vs-
+  market/net-edge-after-costs/recommendation/top-factors/warnings). Decision logic uses
+  the EXECUTABLE ask (never midpoint), a no-trade zone, risk gates, conservative
+  fractional sizing (never Kelly).
+- **Scoring:** `ShadowLedger` records immutably pre-settlement, grades after official
+  result, `scoreboard()` reports Brier / log-loss / ECE / accuracy / Wilson-CI trade
+  stats for challenger vs control. `harness.walk_forward_evaluate` gives OOS metrics vs
+  baselines; `harness.train_predictor` freezes a live shadow predictor.
+- **Promotion seam (the "easy switch"):** `primary_probability(snapshot, champion_p, predictor=...)`
+  returns the champion unchanged when `as_primary` is OFF (byte-identical production),
+  the challenger's calibrated P(Yes) when ON+trained, champion fallback otherwise. That
+  one call is the entire integration — nothing is wired into `app.py`/`checkpoint_v95.py` yet.
+- Tests: `tests/test_challenger.py` (22) — features/leakage, logistic learning, Platt/
+  isotonic, purged-WF embargo+purge, decision gates, predictor 8-outputs+cold-start,
+  harness OOS eval, ledger record/resolve/score, promotion seam on/off/untrained.
+- ⚠️ **Data reality:** the v95 ledger has ~0 resolved rows under the current MODEL_VERSION,
+  so the challenger is cold-start (defers to market price) until data accrues. Judge it
+  ONLY on OOS log-loss/Brier/ECE/net-cents vs control once ≥ a few hundred resolved/checkpoint.
+- **Governance addendum controls** (same package, all EXECUTED+TESTED): `schema.py`
+  (min contract-observation schema + validate), `features.assert_point_in_time` (reject
+  receive-after-decision), richer cost model (latency + adverse-selection cents),
+  `ood.py` (out-of-distribution score → severe forces NO TRADE; lowers confidence),
+  confidence redefined (coverage/freshness/decisiveness/OOD, not just distance-from-0.5),
+  `stats.py` (paired log-loss/Brier diff, block-bootstrap CI, McNemar, effective-N),
+  `lineage.py` (code commit + config hash + version stamps on every recorded prediction),
+  `experiment.py` (frozen PreRegistration + append-only experiment & holdout-access ledger).
+  ⚠️ DATA-DEPENDENT pieces (control reproduction, real backtest, live shadow vs production
+  feed) remain **NOT EXECUTED — REQUIRES EXTERNAL DATA**; no fabricated metrics anywhere.
+- **Extraction bridge** (`extract_bridge.py`, EXECUTED+TESTED): `export_production_ledger`
+  (read-only `SELECT *` JSONL dump to run on the Repl), `load_jsonl`, `inspect_feature_json`,
+  `rows_to_samples` → (ts, feature_dicts, y, control_probs, groups) for the harness. Reuses
+  `features.extract` so shadow == live features. Feature mapping is defensive pending
+  confirmation of the real `feature_json` keys (run `inspect_feature_json` on the dump first).
+- **Owner sent an AGGREGATE ledger snapshot** (metrics/scoreboard, NOT row-level) on 2026-06.
+  MEASURED facts from it (real production data, 301 resolved): overall acc 67.4%, champion
+  log-loss 0.600 vs market-baseline 0.723 (champion has real skill); shadow challenger NOT
+  promotable (10M vs-champion p=0.37; 15M effect below floor) — matches the gate. **ECE=0.069
+  with systematic UNDER-confidence above 0.60** (predicts 60-65% → wins 80%; predicts 75%+ →
+  wins ~100%): a real, actionable recalibration opportunity. Realized P&L NEGATIVE overall
+  (-496c/295) despite 67% acc — SOL/DOGE/XRP bleed, BNB/ETH/BTC positive. 15M is the weak
+  checkpoint (51.6%), 7M strong (76.8%). Row-level export still needed to train/eval the
+  challenger for real (aggregate can't reconstruct per-row features).
+- **Challenger is now WIRED LIVE as a read-only SHADOW and ENABLED** (`.replit`:
+  `Q15_CHALLENGER_ENABLED=true`, `Q15_CHALLENGER_AS_PRIMARY=false`). Hooks live in
+  `ledger_v95.record_prediction` (→ `runner.observe`, on each NEW unique prediction)
+  and `resolve_ticker` (→ `runner.resolve`, on settlement). `runner.py` records a
+  PAIRED challenger prediction beside the champion (champion `raw_yes_probability` =
+  control), grades on settlement, **re-trains from its own settled rows every
+  `Q15_CHALLENGER_REFIT_EVERY`=10 resolutions ("learns as it goes")**, and at each
+  15-min window boundary emits a Telegram **`CHALLENGER SHADOW`** report =
+  challenger-vs-current accuracy overall + by checkpoint. Cold start mirrors the
+  champion (parity) then diverges as it learns. `notifier.send` delivers the
+  `CHALLENGER SHADOW` header as-is (skips reformatters + suppression). app loop
+  drains+sends the report each cycle. **Zero overhead + byte-identical production
+  when disabled** (`get_runner()` returns None fast; all hooks try/except). NOT
+  primary — never drives live output. Needs a Repl reboot to pick up `.replit`.
+  Tests: `test_challenger_runner.py` (6). Suite: **641 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap
 **Merged — not yet deployed (needs a Repl reboot).** Phases 2 (shadow 0–100 score on
 the panel) and 3 (entry recheck + manipulation grading rule) are still TODO; see the
