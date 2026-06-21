@@ -400,6 +400,23 @@ def _robust_volatility(canonical: CanonicalSnapshot) -> dict[str, Any]:
     }
 
 
+def _shadow_vol_per_min(volatility: Mapping[str, Any] | None) -> float | None:
+    """Per-minute fractional volatility for the shadow challenger's features.
+
+    ``_robust_volatility`` reports sigma per sqrt-second; volatility scales with
+    sqrt-time, so per-minute sigma = sigma_per_sqrt_second * sqrt(60). Returns
+    None when unavailable so the challenger falls back to its own estimate.
+    """
+    if not isinstance(volatility, Mapping):
+        return None
+    sigma = volatility.get("sigma_per_sqrt_second")
+    try:
+        sigma = float(sigma)
+    except (TypeError, ValueError):
+        return None
+    return sigma * math.sqrt(60.0) if sigma > 0 else None
+
+
 def _multi_horizon_returns(canonical: CanonicalSnapshot) -> dict[str, float | None]:
     result = {f"return_{seconds}s": _window_return(canonical.candles, float(seconds)) for seconds in (5, 15, 30, 60, 180, 900, 1800)}
     public_returns = canonical.public.get("price_returns") if isinstance(canonical.public.get("price_returns"), Mapping) else {}
@@ -1007,7 +1024,18 @@ def analyse_v95(
         "calibration": {**calibration, "production_enabled": production_calibration_enabled},
         "shadow_calibrated_yes_probability": shadow_calibrated_yes,
         "pattern_similarity": pattern,
-        "quote": {**quote, "ask_depth": depth, "quote_age_seconds": quote_age},
+        # Decision-time context is forwarded to the read-only shadow challenger
+        # via the quote bundle. Without spot / strike / time-remaining / vol the
+        # challenger's distance-to-target and time-decay features (the dominant
+        # drivers of a 15-minute binary) extract as zeros, leaving it effectively
+        # blind. These keys are additive — existing readers only use bid/ask/spread.
+        "quote": {
+            **quote, "ask_depth": depth, "quote_age_seconds": quote_age,
+            "spot": canonical.spot, "target": canonical.threshold,
+            "seconds_remaining": canonical.seconds_remaining,
+            "volatility_per_min": _shadow_vol_per_min(volatility),
+            "depth_contracts": depth, "data_quality": data_quality,
+        },
         "costs": costs,
         "net_edge_cents": net_edge,
         "required_edge_cents": required_edge,

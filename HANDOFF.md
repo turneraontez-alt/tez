@@ -23,6 +23,37 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session (branch `claude/replit-workspace-connect-pfspn4`) — shadow challenger was feature-starved
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Diagnosed "shadow learning system doing horrible": the read-only challenger was
+**blind to the dominant drivers of a 15-minute binary**. The production prediction
+only forwarded the Kalshi bid/ask quote to the shadow (`_selected_quote` returns
+just `bid/ask/spread`), so the challenger's distance-to-target, time-decay, and
+volatility features all extracted as **zeros** at both train and predict time — it
+was effectively learning from the market price plus the 9 compressed champion
+signals only.
+
+- **Fix (`checkpoint_v95.py`):** `analysis["quote"]` now also carries `spot`,
+  `target` (strike), `seconds_remaining`, `volatility_per_min`, `depth_contracts`,
+  and `data_quality`. Keys are additive — existing readers only touch
+  `bid/ask/spread`. New helper `_shadow_vol_per_min()` converts the robust
+  `sigma_per_sqrt_second` → per-minute fractional vol (`× √60`).
+- **Fix (`challenger/extract_bridge.py`):** `_row_to_snapshot` now also reads
+  passthrough context from `quote_json`, so future offline retrains /
+  `walk_forward_evaluate` aren't blind either (pre-fix production rows still lack
+  it retroactively).
+- **Tests:** `tests/test_q15_v95_shadow_features.py` (+5) — vol conversion, quote
+  carries context end-to-end through `analyse_v95`, the challenger feature vector is
+  now live (pct/log/normalized distance + minutes-remaining non-zero, coverage True),
+  plus a guard test proving the old bid/ask-only quote collapsed those to zero.
+- Suite green locally: **710 passed, 12 skipped** (5 new; higher skip count than the
+  734-env figure above only because `flask`/`websockets` weren't installed here → the
+  two app-level files skip).
+- ⚠️ Caveat to owner: this is the *plumbing* fix. The challenger is still one pooled,
+  L2=10 logistic across all assets/checkpoints vs a specialized champion, so it may
+  still trail until that's addressed; and it needs `min_train_rows=200` before it
+  stops mirroring the market mid.
+
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-719tb9`) — updated-review fixes
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Ran a fresh fan-out `updated-review` (overall **7.5/10**, up from 7.0), then

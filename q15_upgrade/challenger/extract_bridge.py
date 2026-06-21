@@ -94,13 +94,23 @@ def _row_to_snapshot(row: Mapping) -> dict:
     snap: dict[str, Any] = {}
     fj = row.get("feature_json")
     fj = fj if isinstance(fj, Mapping) else {}
+    qj = row.get("quote_json")
+    if isinstance(qj, str):
+        try:
+            qj = json.loads(qj)
+        except (TypeError, ValueError):
+            qj = None
+    qj = qj if isinstance(qj, Mapping) else {}
 
-    # passthrough scalar context from either location
+    # passthrough scalar context from any location: top-level row column,
+    # feature_json, or quote_json (decision-time spot/strike/time/vol live here).
     for k in _PASSTHROUGH:
         if row.get(k) is not None:
             snap[k] = row[k]
         elif fj.get(k) is not None:
             snap[k] = fj[k]
+        elif qj.get(k) is not None:
+            snap[k] = qj[k]
 
     # champion signal values: nested under feature_values, or flat in feature_json
     signals = {}
