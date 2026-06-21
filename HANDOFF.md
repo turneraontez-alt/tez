@@ -9,9 +9,57 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **545 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **574 passed, 4 skipped**.
 
-## ✅ Shipped THIS session (branch `claude/read-handoff-ipxm5a`, MERGED to `main` @ `6e7a524`)
+## ⚙️ Merge policy (NEW — applies every session)
+Finished + green work **auto-merges to `main`** without asking (owner-authorized;
+see CLAUDE.md "Merge policy"). `main` is the deploy branch (GitHub Relay syncs it
+to/from the Repl). **The one gate is a data-safety guard:** before merging, `git
+fetch origin main` and inspect commits that exist ONLY on `main` (`git log --stat
+origin/main ^<branch>`); if any add/modify real file content (NOT the empty
+"Published your App" syncs), merge `origin/main` INTO the branch first and verify
+the merge drops no `main`-only lines/files — then merge back. If a merge would
+delete data that only exists on `main`, STOP and report. (This already caught a
+6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session — part 2 (branch `claude/read-handoff-ipxm5a`, MERGED to `main` @ `4954e7b`)
+**Not yet deployed — needs a Repl reboot to take effect.** Newer work, on top of part 1:
+
+A. **Flip-warning report in the interval-scoreboard table format** (`reporting.py`):
+   the old free-text `MANIPULATION WARNING PERFORMANCE` block now renders as the same
+   aligned W-L/Acc/P-L grid as the intervals (`_flip_scoreboard`/`_flip_row`), by
+   checkpoint/direction/asset, plus a learned flip-rate-by-risk mini-table.
+B. **Flip 70% hit-rate gate** (owner: "the 70% is for flips"): a HIGH FLIP RISK
+   warning is DORMANT until the learned flip-rate for the current risk bucket is
+   reliably ≥70% — its **95% Wilson LOWER bound** must clear `Q15_V95_FLIP_MIN_HITRATE`
+   (0.70). Bootstraps from background settled flips; thin samples ⇒ wide CI ⇒ stays
+   quiet. `flip_risk.wilson_lower_bound`/`bucket_flip_reliability`;
+   `Q15_V95_FLIP_REQUIRE_HITRATE` (ON). Stacks with the existing require-learned gate.
+C. **One ACTIVE prediction per timeframe + pushed-vs-background accuracy**
+   (`Q15_V95_ONE_ACTIVE_PER_TIMEFRAME`, ON): once an entry is recommended + delivered,
+   that contract holds the checkpoint's slot (`pushed_slots` table) until it closes —
+   no 2nd push for the same time frame while live. New `pushed` column marks delivered
+   entries; `scoreboard()` reports `by_pushed` (pushed vs background) and the hourly
+   report + checkpoint alert show pushed-only accuracy (background never inflates it).
+D. **One follow-up check per interval** (`Q15_V95_ENTRY_FOLLOWUP_ENABLED`, ON): on a
+   delivered entry, arm exactly ONE follow-up per (contract, interval) — fires once
+   after `Q15_V95_FOLLOWUP_DELAY_SECONDS` (120) confirming still-valid / side-changed /
+   hold / take-profit / avoid / exit, then never repeats. `entry_followups` table;
+   `build_followup_message`/`_followup_verdict`/`_dispatch_entry_followups`. Per
+   (ticker, checkpoint) so 15M never blocks 10M. Eligible: 15M+10M. "FOLLOW-UP" added
+   to the notifier actionable allowlist so it's never muted.
+E. **Best Entry top/detail consistency** (fixed the BNB-on-top-while-BTC-is-#1 bug):
+   the `🏆 BEST ENTRY` block is now `_best_entry()` = rank #1 of the QUALIFYING entries
+   from the SAME `rank_analyses` ordering the detail renders (executable trade score,
+   not confidence-only `_best_pick`). Only ENTRY_RECOMMENDED assets qualify; none ⇒
+   `NO ENTRY RECOMMENDED`. `_best_entry_consistent` guard suppresses the alert if top
+   ≠ detail #1. New top format (asset/side, interval, status, prob, recommended entry,
+   conservative net edge, follow-up remaining).
+F. **Scalp engine DISABLED by default** (`alert_config.py`: `SCALP_ENABLED` default
+   False) — owner-directed; `ScalpEngine.evaluate` short-circuits. Re-enable with
+   `SCALP_ENABLED=true`.
+
+## ✅ Shipped THIS session — part 1 (branch `claude/read-handoff-ipxm5a`, MERGED to `main`)
 **Not yet deployed — needs a Repl reboot to take effect.** Order of work:
 
 1. **Review-hardening** (closed the prior review's gaps): extracted + unit-tested
