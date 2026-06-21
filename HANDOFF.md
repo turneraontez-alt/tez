@@ -125,6 +125,15 @@ as a SHADOW model, built to be promoted to primary with one switch.
   - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
   (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
 
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — 15M rank performance in hourly report
+Owner: "on the hourly report add 15M rank performance." `reporting.HourlyReporter
+._scoreboard_table` now renders a **`15M RANK PERFORMANCE`** section (the #1/#2/#3
+pick judged within the 15M checkpoint) directly above the existing `10M RANK
+PERFORMANCE` block, same W-L/Acc/P/L grid + 0-0 placeholders before settling. Data
+already existed in `scoreboard()["rank_by_checkpoint"]["15M"]` (built for every
+tracked checkpoint) — only the report rendered it for 10M. Test updated
+(`test_q15_learning_scoreboard.py`). Suite: **702 passed, 4 skipped**.
+
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — gated manipulation alerts
 **Detection unchanged; only NOTIFICATIONS are restricted.** New module
 `q15_upgrade/manipulation_alert.py` + wiring in `checkpoint_v95.run_cycle`. The

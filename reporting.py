@@ -99,13 +99,16 @@ class HourlyReporter:
         headline = f"Settled {overall['n']} · {acc_s} right{pnl_s}"
 
         by_cp, by_asset = sb.get("by_checkpoint", {}), sb.get("by_asset", {})
-        # Rank record for the primary (10M) interval on its own — the #1/#2/#3 pick
-        # judged within 10M rather than blended across every interval.
-        rank_10m = (sb.get("rank_by_checkpoint", {}) or {}).get("10M", {})
+        # Rank record per interval on its own — the #1/#2/#3 pick judged within that
+        # checkpoint rather than blended across every interval.
+        rank_by_cp = sb.get("rank_by_checkpoint", {}) or {}
+        rank_15m = rank_by_cp.get("15M", {})
+        rank_10m = rank_by_cp.get("10M", {})
         # Each group is (optional section header, rows). placeholder=True keeps the
-        # 10M rank rows visible (0-0 — —) before they settle.
+        # rank rows visible (0-0 — —) before they settle.
         groups = [
             (None, [self._sb_row(cp, by_cp.get(cp), placeholder=True) for cp in ("15M", "10M", "7M")]),
+            ("15M RANK PERFORMANCE", [self._sb_row(f"#{k} pick", rank_15m.get(k), placeholder=True) for k in ("1", "2", "3")]),
             ("10M RANK PERFORMANCE", [self._sb_row(f"#{k} pick", rank_10m.get(k), placeholder=True) for k in ("1", "2", "3")]),
             (None, [self._sb_row(a, d) for a, d in sorted(
                 ((a, d) for a, d in by_asset.items() if (d or {}).get("n")),
