@@ -25,6 +25,49 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session (branch `claude/monitor-challenger-shadow-system-y4yu2p`) — Challenger Shadow vs Your System rework + RESET
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Owner: fix/reactivate the "CHALLENGER SHADOW vs YOUR SYSTEM" comparison — it must
+not stay dormant/empty/one-pick — to 3 ranked picks per interval across ALL THREE
+intervals (15M/10M/7M), a clearly-graded end-result call, all-time per-rank/per-
+interval records with combined totals, ✓/✗/— symbols only, and a RESET on deploy.
+Read-only/observational throughout; the frozen champion is untouched.
+
+- **7M is now a first-class interval** everywhere in the comparison (was 15M/10M
+  only). New `ledger.REPORT_CHECKPOINTS=("15M","10M","7M")`; `ranked_by_checkpoint`,
+  `latest_window_end_results`, and the report all iterate it. 7M reads
+  `0W–0L | N/A` until its cases settle (safe even if 7M rows don't flow yet).
+- **Reset that archives, not deletes** (`config.py`): default
+  `Q15_CHALLENGER_MODEL_VERSION` bumped `challenger-v1`→`challenger-v2`. All scoring
+  keys on `model_version`, so the old v1 rows survive in the SAME SQLite file as an
+  internal PRE-RESET archive (debug only) while the new comparison starts at
+  `0W–0L | N/A`. New `Q15_CHALLENGER_RESET_AT` (epoch, optional) + `shadow_meta`
+  table + `ledger.reset_marker()` stamp the reset instant ONCE (stable), shown as
+  `Comparison reset: <UTC>`.
+- **New all-time records** (`ledger.ranked_by_checkpoint`): per interval, per rank
+  1..3, per system {correct,wrong,accuracy} + a per-interval total. Each resolved
+  case contributes ≤1 result per (interval, rank) — the UNIQUE
+  (model_version, contract, checkpoint) row key + per-rank scoring = graded once
+  (duplicate protection).
+- **Report rewrite** (`runner.report_message`): one bold `CHALLENGER SHADOW vs YOUR
+  SYSTEM` title + one `<pre>` block (notifier bypass marker preserved). LAST WINDOW
+  shows `#k Shadow: SOL NO ✓ | Yours: SOL NO ✓` for each of 15M/10M/7M; END-RESULT
+  CALL grades all ranks across all three intervals; ALL-TIME RANK RESULTS renders
+  SHADOW RECORD + YOUR SYSTEM RECORD + per-interval TOTALs. Only ✓/✗/— marks (no
+  bare ok/X/+/-). Missing rank/asset → `—` (never an invented pick).
+- **Tests** (`tests/test_challenger_runner.py`, +5; one updated to the new format):
+  symbol-only + all-section render, `ranked_by_checkpoint` per-rank/interval incl.
+  empty 10M, reset-marker stamped-once + pre-reset archive excluded, empty report
+  shows reset + `0W–0L | N/A`. `.env.example` documents the challenger flags.
+  Full suite **813 passed, 4 skipped**.
+- ⚠️ KNOWN GAP (documented, not yet done): the "Your System counts only predictions
+  actually SENT before close" rule isn't wired — the shadow records native=control
+  for every champion prediction, sent or not. Honoring it needs a sent-flag bridged
+  from `_send_compact_panel`/`record_sent_prediction`; deferred to keep this pass
+  read-only and within the frozen-champion invariant. Both systems are still graded
+  on the locked, pre-close, immutable prediction (UNIQUE key, created_at before
+  close), so grading is honest — just not yet sent-gated for Your System.
+
 ## ✅ Shipped THIS session (branch `claude/replit-workspace-connect-pfspn4`) — "is anything 100% correct?" forensic audit
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Owner asked, as a Staff quant: has any variable / rule / combination historically

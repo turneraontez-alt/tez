@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from .config import ChallengerConfig
 from .harness import train_predictor
-from .ledger import ShadowLedger
+from .ledger import REPORT_CHECKPOINTS, ShadowLedger
 from .lineage import lineage_record
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,9 @@ class ShadowRunner:
     def __init__(self, config: ChallengerConfig | None = None):
         self.config = config or ChallengerConfig.from_env()
         self.ledger = ShadowLedger(self.config.db_path)
+        # Stamp (or read) the reset instant for this model_version. Pre-reset rows
+        # under other versions stay archived and are never scored into this record.
+        self.reset_at = self.ledger.reset_marker(self.config.model_version, self.config.reset_at)
         self.predictor, self.info = self._train()
         self._resolved_since_refit = 0
         self._last_report_window: int | None = None
@@ -134,85 +137,118 @@ class ShadowRunner:
     def ranked(self, top_k: int = 3) -> dict:
         return self.ledger.ranked_comparison(model_version=self.config.model_version, top_k=top_k)
 
-    @staticmethod
-    def _pick_str(entry) -> str:
-        """One pick as fixed-width 'ASSET SIDE mark' (13 cols), so the two model
-        columns stay aligned in the monospace card."""
-        asset, side, correct = entry
-        return f"{str(asset)[:4]:<4} {side:<3} {'ok' if correct else 'X'}".ljust(13)
+    # Only these three symbols are used in the graded cells (no bare X/+/-).
+    _OK, _BAD, _NONE = "✓", "✗", "—"
 
-    @staticmethod
-    def _acc_pct(accuracy) -> str:
-        return "—" if accuracy is None else f"{round(accuracy * 100)}%"
+    @classmethod
+    def _mark(cls, correct) -> str:
+        """✓ correct · ✗ wrong · — no official prediction."""
+        if correct is None:
+            return cls._NONE
+        return cls._OK if correct else cls._BAD
+
+    @classmethod
+    def _pick(cls, entry) -> str:
+        """A ranked pick as 'ASSET SIDE mark' (e.g. 'SOL NO ✓'); '—' if absent."""
+        if not entry:
+            return cls._NONE
+        asset, side, correct = entry
+        return f"{asset} {side} {cls._mark(correct)}"
+
+    @classmethod
+    def _wl(cls, d) -> str:
+        """'3W–1L | 75%' (or '| N/A' before any settled case)."""
+        c, w = d["correct"], d["wrong"]
+        acc = d["accuracy"]
+        acc_s = "N/A" if acc is None else f"{round(acc * 100)}%"
+        return f"{c}W–{w}L | {acc_s}"
 
     def report_message(self, top_k: int = 3) -> str:
-        """A single clean card: only the title is bright (bold); everything else
-        sits in one monospace block so it reads as one aligned, dim panel."""
+        """The Shadow-vs-Your-System card: one bold title + a single monospace
+        block. Three ranked picks per interval, an end-result call graded across
+        all three intervals, and all-time per-rank/per-interval records — all in
+        ✓ / ✗ / — only. Scored strictly on predictions recorded under this
+        model_version (post-reset)."""
         mv = self.config.model_version
+        cps = list(REPORT_CHECKPOINTS)
         rk = self.ledger.ranked_comparison(model_version=mv, top_k=top_k)
-        if not rk["n_cases"]:
-            return f"{CHALLENGER_REPORT_MARKER} — no settled shadow cases yet"
-        ch, nv = rk["challenger"], rk["native"]
 
+        reset_s = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(self.reset_at))
         body: list[str] = [
             "Shadow test · read-only · never trades",
-            "Picks ranked by confidence; #1 = most confident.",
-            "Correct = the pick's side matched the result.",
+            "Picks ranked by confidence; #1 = most confident",
+            "Correct = the predicted side matched the final result",
+            f"Comparison reset: {reset_s}",
         ]
 
-        # Latest window — only ranks that actually had a pick (no empty dashes).
+        if not rk["n_cases"]:
+            body += ["", "No settled cases since reset yet.", "0W–0L | N/A"]
+            return (f"<b>{CHALLENGER_REPORT_MARKER} vs YOUR SYSTEM</b>\n"
+                    f"<pre>{chr(10).join(body)}</pre>")
+
+        # ---- LAST WINDOW: three ranked picks per interval, side by side ----
         win = self.ledger.latest_window_cases(model_version=mv, top_k=top_k)
         if win["close"]:
             when = time.strftime("%H:%M", time.gmtime(win["close"]))
             body += ["", f"LAST WINDOW · {when} UTC"]
-            for cp, picks in sorted(win["checkpoints"].items()):
-                cps, nps = picks["challenger"], picks["native"]
-                body.append(f"{cp:<4} {'Shadow':<13}{'Yours'}")
-                for i in range(max(len(cps), len(nps))):
-                    c = self._pick_str(cps[i]) if i < len(cps) else "".ljust(13)
-                    n = self._pick_str(nps[i]) if i < len(nps) else ""
-                    body.append(f" #{i+1}  {c}{n}".rstrip())
+            for cp in cps:
+                picks = win["checkpoints"].get(cp)
+                if not picks:
+                    continue
+                cpk, nvk = picks["challenger"], picks["native"]
+                body += ["", cp]
+                for i in range(top_k):
+                    c = self._pick(cpk[i] if i < len(cpk) else None)
+                    n = self._pick(nvk[i] if i < len(nvk) else None)
+                    body.append(f"#{i+1} Shadow: {c} | Yours: {n}")
 
-        # End-result calls at 15M & 10M, per asset — did both models call the
-        # final outcome right as the window counted down? (Y/N + right/wrong.)
-        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=("15M", "10M"))
+        # ---- END-RESULT CALL: all three ranks across all three intervals ----
+        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=tuple(cps))
         if er["assets"]:
-            cps = list(er["checkpoints"])
-            w = len(cps) * 4
-            body += ["", "END-RESULT CALL · 15M & 10M",
-                     "(side Y/N · + right · - wrong)",
-                     f"{'':<5}{'Res':<4}{'Shadow':<{w}} {'Yours':<{w}}",
-                     f"{'':<5}{'':<4}" + "".join(f"{cp:<4}" for cp in cps)
-                     + " " + "".join(f"{cp:<4}" for cp in cps)]
+            body += ["", "END-RESULT CALL · 15M, 10M & 7M",
+                     "✓ = correct | ✗ = wrong | — = no official prediction"]
 
-            def cell(entry) -> str:
+            def _interval_line(cp, entry) -> str:
+                # An asset has at most one locked prediction per interval -> rank #1;
+                # ranks #2/#3 never apply to a single asset, shown as —.
                 if not entry:
-                    return "-".ljust(4)
+                    return f"{cp}: #1 {self._NONE} | #2 {self._NONE} | #3 {self._NONE}"
                 side, hit = entry
-                return f"{side[0]}{'+' if hit else '-'}".ljust(4)
+                return f"{cp}: #1 {side} {self._mark(hit)} | #2 {self._NONE} | #3 {self._NONE}"
 
             for a in er["assets"]:
-                res = a["official"][0]
-                sh = "".join(cell(a["checkpoints"].get(cp, {}).get("challenger")) for cp in cps)
-                nv_ = "".join(cell(a["checkpoints"].get(cp, {}).get("native")) for cp in cps)
-                body.append(f"{a['asset'][:4]:<5}{res:<4}{sh} {nv_}".rstrip())
+                body += ["", f"{a['asset']} · RESULT {a['official']}", "Shadow:"]
+                for cp in cps:
+                    body.append(_interval_line(cp, a["checkpoints"].get(cp, {}).get("challenger")))
+                body.append("Your System:")
+                for cp in cps:
+                    body.append(_interval_line(cp, a["checkpoints"].get(cp, {}).get("native")))
 
-        # Running totals — hit (correct/total) + accuracy, both models side by side.
-        body += ["", f"TOTALS · {rk['n_cases']} cases",
-                 f"{'':<6}{'Shadow':>12}{'Yours':>14}",
-                 f"{'':<6}{'hit':>6}{'acc':>6}{'hit':>8}{'acc':>6}"]
+        # ---- ALL-TIME RANK RESULTS: per rank/interval + combined totals ----
+        rbc = self.ledger.ranked_by_checkpoint(model_version=mv, top_k=top_k, checkpoints=tuple(cps))
 
-        def row(label, cd, nd):
-            ch_hit = f"{cd['correct']}/{cd['correct'] + cd['wrong']}"
-            nv_hit = f"{nd['correct']}/{nd['correct'] + nd['wrong']}"
-            return (f"{label:<6}{ch_hit:>6}{self._acc_pct(cd['accuracy']):>6}"
-                    f"{nv_hit:>8}{self._acc_pct(nd['accuracy']):>6}")
+        def _record_block(model_key, title):
+            lines = ["", title]
+            for cp in cps:
+                lines.append(cp)
+                m = rbc["by_checkpoint"][cp][model_key]
+                for k in range(1, top_k + 1):
+                    lines.append(f"#{k}: {self._wl(m[f'rank{k}'])}")
+            return lines
 
-        for k in range(1, top_k + 1):
-            body.append(row(f"Top-{k}", ch[f"rank{k}"], nv[f"rank{k}"]))
-        body.append(row("All", ch["overall"], nv["overall"]))
+        body += ["", "ALL-TIME RANK RESULTS"]
+        body += _record_block("challenger", "SHADOW RECORD")
+        body += _record_block("native", "YOUR SYSTEM RECORD")
 
-        # Winner + learning state, in plain words.
+        body += [""]
+        for cp in cps:
+            m = rbc["by_checkpoint"][cp]
+            body += [f"{cp} TOTAL",
+                     f"Shadow: {self._wl(m['challenger']['total'])}",
+                     f"Yours: {self._wl(m['native']['total'])}"]
+
+        # ---- Winner + learning state, in plain words ----
+        ch, nv = rk["challenger"], rk["native"]
         cacc, nacc = ch["overall"]["accuracy"], nv["overall"]["accuracy"]
         if cacc is None or nacc is None:
             winner = "not enough data yet"

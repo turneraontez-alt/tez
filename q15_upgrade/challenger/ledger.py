@@ -53,7 +53,14 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     UNIQUE(model_version, contract, checkpoint)
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_resolved ON shadow_predictions(checkpoint, official_result);
+CREATE TABLE IF NOT EXISTS shadow_meta (
+    model_version TEXT PRIMARY KEY,
+    reset_at REAL NOT NULL
+);
 """
+
+# Intervals graded in the Shadow-vs-Your-System comparison, most-distant first.
+REPORT_CHECKPOINTS: tuple[str, ...] = ("15M", "10M", "7M")
 
 
 class ShadowLedger:
@@ -66,6 +73,32 @@ class ShadowLedger:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ---- reset marker (so the report can show "Comparison reset: <UTC>") ----
+    def reset_marker(self, model_version: str, configured_reset_at: float = 0.0) -> float:
+        """Return the reset timestamp for ``model_version``, stamping it on first use.
+
+        The visible comparison for a model_version begins at this instant. Because
+        all scoring filters on ``model_version``, predictions recorded under any
+        OTHER version (e.g. the pre-reset ``challenger-v1`` rows) stay archived in
+        the same file and are never mixed into the new record. The stamp is written
+        once and never moved, so the displayed reset time is stable.
+        """
+        row = self._conn.execute(
+            "SELECT reset_at FROM shadow_meta WHERE model_version=?", (model_version,)
+        ).fetchone()
+        if row is not None:
+            return float(row["reset_at"])
+        reset_at = float(configured_reset_at) if configured_reset_at else time.time()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO shadow_meta (model_version, reset_at) VALUES (?,?)",
+            (model_version, reset_at),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT reset_at FROM shadow_meta WHERE model_version=?", (model_version,)
+        ).fetchone()
+        return float(row["reset_at"]) if row else reset_at
 
     # ---- write path (immutable pre-settlement) ----
     def record(
@@ -286,6 +319,58 @@ class ShadowLedger:
                 "challenger": _finish(stats["challenger"]),
                 "native": _finish(stats["native"])}
 
+    def ranked_by_checkpoint(self, model_version: str = "challenger-v1", top_k: int = 3,
+                             checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS) -> dict[str, Any]:
+        """All-time per-interval, per-rank correctness for BOTH systems.
+
+        For each interval (15M/10M/7M) and each rank 1..top_k, returns
+        {correct, wrong, accuracy} for the Shadow (challenger) and Your System
+        (native), plus a per-interval total (summed over the ranks). Each resolved
+        case contributes at most one result per (interval, rank) — the UNIQUE
+        (model_version, contract, checkpoint) row key plus per-rank scoring means a
+        prediction is graded exactly once. Intervals with no settled case yet read
+        0W-0L / accuracy None so the report can show "0W-0L | N/A".
+        """
+        cases = self._resolved_cases(model_version)
+        models = {"challenger": "challenger_prob_yes", "native": "control_prob_yes"}
+
+        def _blank():
+            return {m: {k: {"correct": 0, "wrong": 0} for k in range(1, top_k + 1)}
+                    for m in models}
+
+        by_cp = {cp: _blank() for cp in checkpoints}
+        for (cp, _close), case_rows in cases.items():
+            bucket = by_cp.get(cp)
+            if bucket is None:
+                continue
+            for m, pk in models.items():
+                ranked = self._rank(case_rows, pk)
+                for k in range(min(top_k, len(ranked))):
+                    _, _, correct = ranked[k]
+                    bucket[m][k + 1]["correct" if correct else "wrong"] += 1
+
+        def _rank_dict(d):
+            c, w = d["correct"], d["wrong"]
+            n = c + w
+            return {"correct": c, "wrong": w, "accuracy": round(c / n, 4) if n else None}
+
+        out: dict[str, Any] = {"top_k": top_k, "checkpoints": list(checkpoints),
+                               "by_checkpoint": {}}
+        for cp in checkpoints:
+            cp_out = {"challenger": {}, "native": {}}
+            for m in models:
+                tot_c = tot_w = 0
+                for k in range(1, top_k + 1):
+                    rd = _rank_dict(by_cp[cp][m][k])
+                    cp_out[m][f"rank{k}"] = rd
+                    tot_c += rd["correct"]
+                    tot_w += rd["wrong"]
+                n = tot_c + tot_w
+                cp_out[m]["total"] = {"correct": tot_c, "wrong": tot_w,
+                                      "accuracy": round(tot_c / n, 4) if n else None}
+            out["by_checkpoint"][cp] = cp_out
+        return out
+
     def latest_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3) -> dict[str, Any]:
         """Per-checkpoint top-k picks (both models) for the most recent settled
         close window — for the human-readable example block in the report."""
@@ -304,7 +389,7 @@ class ShadowLedger:
         return out
 
     def latest_window_end_results(self, model_version: str = "challenger-v1",
-                                  checkpoints: tuple[str, ...] = ("15M", "10M")) -> dict[str, Any]:
+                                  checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS) -> dict[str, Any]:
         """For the most recent settled 15-min window, each model's END-RESULT call
         per asset at the given checkpoints (default 15M & 10M).
 

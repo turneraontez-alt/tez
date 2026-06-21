@@ -113,10 +113,68 @@ class RankedComparisonTest(unittest.TestCase):
         self.assertEqual(rk["native"]["rank1"], {"correct": 0, "wrong": 1, "accuracy": 0.0})
         self.assertEqual(rk["native"]["overall"]["correct"], 1)
         self.assertAlmostEqual(rk["native"]["overall"]["accuracy"], 1 / 3, places=3)
-        # report renders with both models + verdict
+        # report renders with both models + verdict, in the new ranked format
         msg = r.report_message()
-        self.assertIn("Top-1", msg)
+        self.assertIn("ALL-TIME RANK RESULTS", msg)
+        self.assertIn("#1 Shadow:", msg)
         self.assertIn("Shadow ahead", msg)
+        # only the labelled tick symbols — no bare ok/X/+/- marks
+        self.assertNotIn(" ok", msg)
+        self.assertTrue(any(s in msg for s in ("✓", "✗")))
+
+    def test_report_uses_only_check_symbols_and_all_sections(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        # one settled case at 10M so the report has data to render.
+        self._insert(r, asset="SOL", checkpoint="10M", close=3000, chal=0.8, ctrl=0.7, official="YES")
+        msg = r.report_message()
+        for header in ("CHALLENGER SHADOW vs YOUR SYSTEM", "Shadow test · read-only · never trades",
+                       "Comparison reset:", "LAST WINDOW", "END-RESULT CALL · 15M, 10M & 7M",
+                       "ALL-TIME RANK RESULTS", "SHADOW RECORD", "YOUR SYSTEM RECORD",
+                       "15M TOTAL", "10M TOTAL", "7M TOTAL"):
+            self.assertIn(header, msg)
+        # ✓/✗/— only — never a bare +, lone X marker, or "ok"
+        self.assertNotIn(" ok", msg)
+        self.assertIn("✓", msg)
+        # all three intervals appear in the all-time record (7M with 0W–0L | N/A)
+        self.assertIn("7M\n#1: 0W–0L | N/A", msg.replace("<pre>", "").replace("</pre>", ""))
+
+    def test_ranked_by_checkpoint_records_per_rank_and_interval(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        # a 15M case (SOL right at #1 for shadow) and a 7M case; 10M stays empty.
+        self._insert(r, asset="SOL", checkpoint="15M", close=4000, chal=0.9, ctrl=0.9, official="YES")
+        self._insert(r, asset="BTC", checkpoint="7M", close=4000, chal=0.2, ctrl=0.8, official="NO")
+        rbc = r.ledger.ranked_by_checkpoint(model_version="challenger-test", top_k=3)
+        self.assertEqual(set(rbc["by_checkpoint"]), {"15M", "10M", "7M"})
+        # 15M #1 shadow correct (SOL YES==YES); native also YES==YES
+        self.assertEqual(rbc["by_checkpoint"]["15M"]["challenger"]["rank1"]["correct"], 1)
+        self.assertEqual(rbc["by_checkpoint"]["15M"]["challenger"]["total"]["accuracy"], 1.0)
+        # 7M #1 shadow NO==NO correct; native YES!=NO wrong
+        self.assertEqual(rbc["by_checkpoint"]["7M"]["challenger"]["rank1"]["correct"], 1)
+        self.assertEqual(rbc["by_checkpoint"]["7M"]["native"]["rank1"]["wrong"], 1)
+        # 10M had no case -> 0W-0L / accuracy None
+        self.assertEqual(rbc["by_checkpoint"]["10M"]["challenger"]["total"],
+                         {"correct": 0, "wrong": 0, "accuracy": None})
+
+    def test_reset_marker_stamped_once_and_archives_pre_reset(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        first = r.ledger.reset_marker("challenger-test")
+        # stamped once and stable across calls
+        self.assertEqual(first, r.ledger.reset_marker("challenger-test"))
+        # a row under a DIFFERENT (pre-reset) model_version is archived, not scored
+        self._insert(r, asset="BTC", checkpoint="10M", close=900, chal=0.9, ctrl=0.9,
+                     official="YES", mv="challenger-v1")
+        rk = r.ranked()
+        self.assertEqual(rk["n_cases"], 0)  # pre-reset row excluded from the record
+
+    def test_empty_report_shows_reset_and_zero(self):
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        msg = r.report_message()
+        self.assertIn("Comparison reset:", msg)
+        self.assertIn("0W–0L | N/A", msg)
 
     def test_end_result_section(self):
         tmp = tempfile.mkdtemp()

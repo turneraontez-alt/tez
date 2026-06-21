@@ -115,7 +115,18 @@ class ChallengerConfig:
 
     # -- persistence --
     db_path: str = field(default_factory=lambda: _str("Q15_CHALLENGER_DB", "data/q15_challenger_shadow_v1.sqlite3"))
-    model_version: str = field(default_factory=lambda: _str("Q15_CHALLENGER_MODEL_VERSION", "challenger-v1"))
+    # Bumped v1 -> v2 to RESET the visible Shadow-vs-Your-System comparison: all
+    # scoring keys on model_version, so the old "challenger-v1" rows survive in the
+    # same SQLite file as an internal PRE-RESET archive (debug only) while the new
+    # comparison starts empty. Override with Q15_CHALLENGER_MODEL_VERSION.
+    model_version: str = field(default_factory=lambda: _str("Q15_CHALLENGER_MODEL_VERSION", "challenger-v2"))
+
+    # -- reset / comparison window --
+    # Optional explicit reset timestamp (epoch seconds, UTC). When unset (0) the
+    # reset timestamp is stamped the first time this model_version records, so the
+    # report can show "Comparison reset: <UTC>". Predictions created before the
+    # reset are never mixed into the visible record.
+    reset_at: float = field(default_factory=lambda: _float("Q15_CHALLENGER_RESET_AT", 0.0))
 
     @classmethod
     def from_env(cls) -> "ChallengerConfig":
