@@ -25,6 +25,28 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — flip-learning in the decision-stats snapshot (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner asked for a single snapshot that captures BOTH manipulation tracks.
+- **`decision_stats()` now carries a `flip_learning` block** (`checkpoint_v95.py`) wrapping the
+  existing read-only ledger methods `flip_stats()` (learned flip-rate-by-risk curves + thresholds
+  per checkpoint/direction/asset) and `flip_warning_performance()` (precision / detection-rate of
+  fired warnings). Purely additive — the prior keys (`version`, `read_only`,
+  `current_trade_decisions`, `ledger`, `metrics`) are unchanged. So one capture of
+  `/api/q15-v9-5/decision-stats` (the `v95_ledger_snapshot.json` source) now shows the
+  by_manipulation reliability scoreboard AND the flip-risk learning that was previously omitted.
+- **Test:** `tests/test_q15_v95_flip_risk.py::TestDecisionStatsExposesFlipLearning` (records a real
+  NO→YES flip, asserts the curve + warning-perf surface and the old contract is preserved). Suite:
+  **863 passed, 13 skipped**.
+- **DIVERGENCE investigation (no code change):** the DIVERGENCE manipulation tell never accumulates
+  graded rows because it requires ≥35 bps (0.35%) cross-venue spot deviation
+  (`Q15_V95_MANIPULATION_DIVERGENCE_BPS`, and the `EXCHANGE_DIVERGENCE` regime is hardcoded to the
+  same 35 bps gate at `checkpoint_v95.py:647`). Major venues stay within a few bps via arbitrage, so
+  35 bps is a tail event. Corroborated by the latest snapshot: across 910 resolved predictions
+  `metrics.by_regime` has only HIGH_VOLATILITY + THRESHOLD_PIN (no EXCHANGE_DIVERGENCE) and
+  `by_manipulation.by_reason` has only PIN + ABSORPTION. Fix is operational: lower the (already
+  env-tunable) threshold to a realistic band (~8–12 bps) — pending owner's chosen value, since it
+  changes the observational scoreboard's composition (it does NOT touch predictions/edge).
+
 ## ✅ Shipped THIS session — Shadow vs Yours: synchronized snapshot + Eastern Time + reset
 **Merged to main (7e474f0), deploy-pending (Relay syncs main → Repl).** Builds on the window-grading repair below.
 - **Simultaneous predictions / shared frozen snapshot:** both systems are already scored from one

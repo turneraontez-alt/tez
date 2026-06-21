@@ -413,6 +413,45 @@ class TestPushedAccountingAndSlots(unittest.TestCase):
         # status() exposes the compact pushed record the live alert renders.
         self.assertEqual(self.led.status()["pushed_by_checkpoint"]["10M"]["accuracy"], 0.5)
 
+
+class TestDecisionStatsExposesFlipLearning(unittest.TestCase):
+    """decision_stats() (the /api/q15-v9-5/decision-stats snapshot) must carry the
+    flip-risk learning curves so ONE capture covers BOTH manipulation tracks: the
+    by_manipulation reliability scoreboard (already under metrics.scoreboard) and
+    the learned flip-rate-by-risk curves, which it previously omitted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.led = V95Ledger(os.path.join(self.tmp.name, "l.sqlite3"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_flip_learning_block_present_and_wired(self):
+        from q15_upgrade.checkpoint_v95 import CheckpointPolicyV95
+        # One real NO -> YES flip at 15M (score 85) so the learned curve is non-empty.
+        _rec(self.led, "t1", "15M", "NO", 85)
+        _rec(self.led, "t1", "10M", "YES", 40)
+        self.led.resolve_ticker("t1", "YES", time.time() + 700)
+
+        policy = CheckpointPolicyV95(None)
+        policy.ledger = self.led
+        stats = policy.decision_stats()
+
+        # Existing contract is preserved (additive change only).
+        self.assertTrue(stats["read_only"])
+        self.assertIn("ledger", stats)
+        self.assertIn("metrics", stats)
+
+        # New flip-learning track, wired to the ledger's learned curves.
+        fl = stats["flip_learning"]
+        self.assertTrue(fl["stats"]["available"])
+        overall = fl["stats"]["by_checkpoint"]["15M"]["NO → YES"]["overall"]
+        self.assertEqual(overall["samples"], 1)
+        self.assertEqual(overall["flips"], 1)
+        self.assertEqual(overall["buckets"]["80-89"]["flip_rate"], 1.0)
+        self.assertTrue(fl["warning_performance"]["available"])
+
     def test_one_active_slot_per_timeframe(self):
         now = 1000.0
         # First 10M push claims the slot until its contract closes at now+600.
