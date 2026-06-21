@@ -346,9 +346,15 @@ def refresh_loop(max_cycles=None):
     detail_inflight = {}  # asset -> (ticker, Future) for the off-critical detail fetch
     detail_cache = {}     # asset -> (ticker, detail) last-good market volume
     executor = ThreadPoolExecutor(max_workers=8)
-    # Forever-loop: shut the pool down on interpreter exit so we don't leak the 8
+    # Separate pool for off-critical market-detail (volume) fetches. Kalshi REST
+    # get_market can take seconds; sharing the critical pool means a burst of slow
+    # detail calls could occupy every worker and starve the freshness-critical
+    # asset fetches, aging the snapshot. An isolated pool bounds that blast radius.
+    detail_executor = ThreadPoolExecutor(max_workers=4)
+    # Forever-loop: shut the pools down on interpreter exit so we don't leak the
     # worker threads (the bounded-test path shuts down explicitly before return).
     atexit.register(executor.shutdown, wait=False)
+    atexit.register(detail_executor.shutdown, wait=False)
     cycles = 0
     while True:
         cycle_clock = time.monotonic()
@@ -393,7 +399,14 @@ def refresh_loop(max_cycles=None):
             # Split into live (strike assigned, tradeable) vs upcoming.
             active = {a: m for a, m in current_markets.items() if is_live_market(m)}
             upcoming = {a: m for a, m in current_markets.items() if not is_live_market(m)}
-            market_data.subscribe([m.get("ticker") for m in active.values() if m.get("ticker")])
+            # Subscribing is a best-effort feed hint, not part of the decision path:
+            # a websocket-layer error here must never halt the cycle (that would
+            # freeze the dashboard and cut off the alerts the owner trades on). The
+            # REST fetch below still serves fresh data if the subscribe fails.
+            try:
+                market_data.subscribe([m.get("ticker") for m in active.values() if m.get("ticker")])
+            except Exception as e:
+                logger.warning(f"market_data.subscribe failed (continuing on REST): {e}")
 
             # -- concurrent fetch (network only) --
             # Per-asset in-flight tracking: at most one outstanding request per
@@ -428,7 +441,17 @@ def refresh_loop(max_cycles=None):
                     continue
                 if (now - _last_detail[asset]) >= DETAIL_INTERVAL:
                     _last_detail[asset] = now
-                    detail_inflight[asset] = (tkr, executor.submit(fetch_market_detail, tkr))
+                    detail_inflight[asset] = (tkr, detail_executor.submit(fetch_market_detail, tkr))
+            # Prune last-good detail that can no longer be consumed: an entry whose
+            # asset is not live this cycle, or whose cached ticker no longer matches
+            # the active market (rolled over). `_resolve_cached_detail` already
+            # refuses a ticker mismatch, so this is purely housekeeping — it keeps
+            # detail_cache from holding a dead market's volume indefinitely.
+            for a in list(detail_cache.keys()):
+                m = active.get(a)
+                if m is None or detail_cache[a][0] != m.get("ticker"):
+                    if a not in detail_inflight:
+                        del detail_cache[a]
 
             # -- ingest sequentially into engines --
             prelim = {}
@@ -593,6 +616,7 @@ def refresh_loop(max_cycles=None):
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             executor.shutdown(wait=False)
+            detail_executor.shutdown(wait=False)
             return
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
 
@@ -1020,9 +1044,12 @@ def health():
 
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
 
-    # Surface learning-ledger health at the top level so "ledger down" (calibration
-    # silently falls back to identity) is visible without digging into
-    # q15_v9_5.ledger. Never let a ledger hiccup break the health route itself.
+    # Surface learning-ledger health at the top level so silent learning-layer
+    # degradation is visible without digging into q15_v9_5.ledger. The owner trades
+    # off these alerts, so a calibration that has silently fallen back to identity
+    # (calibration_unconverged_fallbacks) or a shadow challenger that has stopped
+    # learning (shadow_errors / last_shadow_error) must surface here, not just in
+    # logs. Never let a ledger hiccup break the health route itself.
     try:
         ls = checkpoint_v95.ledger.status()
         ledger_health = {
@@ -1032,6 +1059,9 @@ def health():
             "unique_predictions": ls.get("unique_predictions"),
             "unique_resolved": ls.get("unique_resolved"),
             "dropped_feature_rows": ls.get("dropped_feature_rows"),
+            "calibration_unconverged_fallbacks": ls.get("calibration_unconverged_fallbacks"),
+            "shadow_errors": ls.get("shadow_errors"),
+            "last_shadow_error": ls.get("last_shadow_error"),
         }
     except Exception as e:
         ledger_health = {"available": False, "error": f"{type(e).__name__}: {e}"}

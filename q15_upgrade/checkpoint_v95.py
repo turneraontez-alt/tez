@@ -2056,7 +2056,22 @@ def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]
                     stats["momentum_injected"] += 1
 
             public = policy.market_data.snapshot(asset, now) if hasattr(policy, "market_data") else {}
-            if isinstance(public, Mapping):
+            # Optional freshness fence on the bridged public composite. The local
+            # quote/edge path uses sub-30s data; a public flow/book that is much
+            # older can mix a stale read into the same row. `_combine_public_signal`
+            # already down-weights by age, but this is a hard cutoff for when the
+            # operator wants the bridge to refuse outright-stale public data. Default
+            # 0.0 = OFF (preserves current behaviour; staleness handled only by the
+            # soft freshness weight). Read-only: only gates an evidence injection.
+            bridge_max_public_age = _env_float("Q15_V95_BRIDGE_MAX_PUBLIC_AGE_SECONDS", 0.0, 0.0, 600.0)
+            public_age = _num(public.get("age_seconds")) if isinstance(public, Mapping) else None
+            public_too_stale = (
+                bridge_max_public_age > 0.0 and public_age is not None
+                and public_age > bridge_max_public_age
+            )
+            if public_too_stale:
+                stats["public_stale_skipped"] = stats.get("public_stale_skipped", 0) + 1
+            if isinstance(public, Mapping) and not public_too_stale:
                 flow, _, _ = _combine_public_signal(public, "flow")
                 if flow is not None and _flow_score(row)[0] is None:
                     row["taker_buy_volume"] = 100.0 * (1.0 + _clamp(flow, -1.0, 1.0)) / 2.0
@@ -2723,6 +2738,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         top_canon = canonicals.get(top_asset)
         window_close = top_canon.settlement_time if top_canon is not None else None
         if window_close is None:
+            # The top pick's canonical isn't built yet, so we have no stable window
+            # key and must wait a cycle. This is normally transient; log it (throttled
+            # to once per 60s) so a top asset that PERSISTENTLY fails to produce a
+            # canonical — and so keeps dropping out of the official report — is
+            # visible instead of being silently skipped every cycle.
+            last_log = getattr(self, "_ranked_skip_log_at", 0.0)
+            if now - last_log >= 60.0:
+                self._ranked_skip_log_at = now
+                logger.info(
+                    "%s official report deferred: no canonical/settlement_time for top asset %s yet",
+                    checkpoint, top_asset,
+                )
             return 0, 0
 
         # Backstop dedup: refuse to send the SAME interval's official report twice

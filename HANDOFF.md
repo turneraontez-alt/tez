@@ -25,6 +25,31 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — "updated review" robustness/observability fixes (branch claude/updated-review-99rj6l)
+**Merged to main, deploy-pending.** Implemented
+every item from the fresh code review, all read-only + backward-compatible (no schema changes):
+- **Loop can't be frozen by a feed hint:** `market_data.subscribe()` in `app.py` is now wrapped in
+  try/except (logs + continues on REST) — previously the one call that could halt the cycle.
+- **Silent learning-layer degradation is now visible:** `ledger.status()` + `/api/health.ledger`
+  surface `calibration_unconverged_fallbacks`, `shadow_errors`, `last_shadow_error`. New
+  `V95Ledger._note_shadow_error()` counts the previously-swallowed shadow observe/mark_sent/resolve
+  exceptions (still read-only; never raises into the alert path).
+- **Notifier message_id robustness:** `TelegramNotifier._coerce_message_id` accepts int/float/numeric
+  string, rejects junk/bool/NaN; deliveries that arrive without a usable id are counted
+  (`delivered_without_id_count`) + logged so the Shadow-vs-Yours record can't silently diverge.
+- **Detail fetches isolated:** separate `detail_executor` (4 workers) so slow Kalshi `get_market`
+  calls can't starve the freshness-critical fetch pool; `detail_cache` is now pruned of
+  non-consumable (inactive / rolled-over ticker) entries.
+- **Ranked official report no longer skips silently:** when the top pick's canonical/settlement_time
+  isn't built yet, `checkpoint_v95` logs (throttled 60s) instead of dropping the interval quietly.
+- **Default-OFF, `Q15_*`-gated model knobs (no behaviour change unless enabled):**
+  `Q15_V95_PROMOTION_BONFERRONI` (per-test α/2 on the promotion screen — surfaces `per_test_alpha`),
+  `Q15_V95_BRIDGE_MAX_PUBLIC_AGE_SECONDS` (hard freshness fence on the public-composite bridge).
+  `_regime_key` is now length-bounded to 64 chars.
+- **Tests:** new `tests/test_review_fixes_v2.py` (13 tests) + the app-loop subscribe-guard exercised
+  through the real `refresh_loop`. Full suite **876 passed, 4 skipped** (complete env w/ flask +
+  websockets; bare-container skip count is higher). App imports clean and serves `/api/health` 200.
+
 ## ✅ Shipped THIS session — challenger learning view in the stats command
 **On the branch, deploy-pending.** Owner asked how to check the CHALLENGER's learning.
 `scripts/stats.py` now prints a CHALLENGER section: (1) the shadow MODEL vs your system —
