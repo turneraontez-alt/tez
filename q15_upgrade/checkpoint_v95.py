@@ -2760,9 +2760,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         delivered = bool(result.get("delivered"))
 
         if not delivered:
-            # Muted / failed -> not official. Release the claim so the next cycle
-            # can retry; surface a handled-but-undelivered send (throttled).
-            self.ledger.unlock_official_report(str(checkpoint), window_close, now)
+            # Not an official delivery. Release the claim ONLY when the send was an
+            # intentional MUTE (nothing reached Telegram, so a retry is safe and may
+            # succeed once config changes). On an ambiguous FAILURE (HTTP timeout /
+            # 429 rate-limit) the message may well have reached Telegram, so we KEEP
+            # the lock — releasing it caused a resend-every-cycle loop that the owner
+            # saw as one duplicate report per minute. One attempt per window.
+            if bool(result.get("muted")):
+                self.ledger.unlock_official_report(str(checkpoint), window_close, now)
             if handled:
                 self._throttled_warn(
                     f"ranked_handled_not_delivered:{checkpoint}",
