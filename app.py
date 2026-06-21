@@ -133,6 +133,10 @@ def _seconds_remaining(close_time_str):
         close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
         return max(0, int((close_dt - datetime.now(timezone.utc)).total_seconds()))
     except Exception:
+        # A malformed close_time still returns None (callers handle it), but log
+        # it so a bad/changed upstream timestamp format is visible instead of
+        # silently disabling every checkpoint clock.
+        logger.warning("Could not parse close_time %r", close_time_str)
         return None
 
 

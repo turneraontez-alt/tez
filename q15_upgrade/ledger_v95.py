@@ -1560,15 +1560,32 @@ class V95Ledger:
                 diffs.append(worse - better)
         n = len(diffs)
         if n < 2:
-            return {"n": n, "mean_brier_reduction": None, "t": None, "p_value": None, "favored": False}
+            return {"n": n, "mean_brier_reduction": None, "t": None, "p_value": None,
+                    "favored": False, "reason": "insufficient_pairs"}
         mean = sum(diffs) / n
         variance = sum((d - mean) ** 2 for d in diffs) / (n - 1)
+        # Effect-size floor. The real spurious-promotion vector is a sample whose
+        # diffs are nearly identical AND tiny: with real float Brier values the
+        # variance is numerically tiny (not exactly zero), so the standard error
+        # collapses and an economically meaningless mean reduction (e.g. +0.0002
+        # Brier) blows the t statistic up and reads as highly significant.
+        # Significance is not materiality, so require a minimum mean Brier
+        # reduction before the challenger can be favored. The opposite case —
+        # small variance with a *large* mean — is genuinely strong, consistent
+        # evidence and is intentionally NOT blocked. This only gates the
+        # observational manual-review screen (never live weights), so a small
+        # default is safe; the default is negligible against realistic
+        # improvements (~0.01-0.02 Brier). Set to 0.0 to disable.
+        min_effect = _env_float("Q15_V95_PROMOTION_MIN_EFFECT", 0.002, 0.0, 1.0)
+        if abs(mean) < min_effect:
+            return {"n": n, "mean_brier_reduction": round(mean, 6), "t": None, "p_value": None,
+                    "favored": False, "reason": "effect_below_floor"}
         se = math.sqrt(variance / n) if variance > 0 else 0.0
         t = (mean / se) if se > 0 else (math.inf if mean > 0 else -math.inf if mean < 0 else 0.0)
         return {
             "n": n, "mean_brier_reduction": round(mean, 6),
             "t": round(t, 4) if math.isfinite(t) else None,
-            "p_value": round(_two_sided_p(t), 6), "favored": mean > 0,
+            "p_value": round(_two_sided_p(t), 6), "favored": mean > 0, "reason": "ok",
         }
 
     def metrics(self) -> dict[str, Any]:
@@ -1582,16 +1599,23 @@ class V95Ledger:
         def aggregate(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
             if not selected:
                 return {"resolved": 0}
+            # Average each scoring column over only the rows that actually carry a
+            # finite value. A single NULL (e.g. a row written under an older schema
+            # before brier/logloss were populated) must not raise from float(None)
+            # or silently collapse the whole checkpoint group to {"resolved": 0}.
+            def _mean(key: str) -> float | None:
+                vals = [v for v in (_num(_row_get(row, key)) for row in selected) if v is not None]
+                return (sum(vals) / len(vals)) if vals else None
             return {
                 "resolved": len(selected),
                 "correct": sum(int(row["correct"] or 0) for row in selected),
                 "accuracy": sum(int(row["correct"] or 0) for row in selected) / len(selected),
-                "champion_brier": sum(float(row["champion_brier"]) for row in selected) / len(selected),
-                "challenger_brier": sum(float(row["challenger_brier"]) for row in selected) / len(selected),
-                "baseline_brier": sum(float(row["baseline_brier"]) for row in selected) / len(selected),
-                "champion_logloss": sum(float(row["champion_logloss"]) for row in selected) / len(selected),
-                "challenger_logloss": sum(float(row["challenger_logloss"]) for row in selected) / len(selected),
-                "baseline_logloss": sum(float(row["baseline_logloss"]) for row in selected) / len(selected),
+                "champion_brier": _mean("champion_brier"),
+                "challenger_brier": _mean("challenger_brier"),
+                "baseline_brier": _mean("baseline_brier"),
+                "champion_logloss": _mean("champion_logloss"),
+                "challenger_logloss": _mean("challenger_logloss"),
+                "baseline_logloss": _mean("baseline_logloss"),
             }
         overall = aggregate(rows)
         by_checkpoint = {cp: aggregate([r for r in rows if r["checkpoint"] == cp]) for cp in TRACKED_CHECKPOINTS}
@@ -1623,6 +1647,11 @@ class V95Ledger:
             reason = "learning_disabled" if not self.learning_enabled(checkpoint) else "insufficient_resolved_rows"
             if self.learning_enabled(checkpoint) and resolved >= self.minimum_promotion_rows:
                 # Significant paired Brier improvement over BOTH champion and baseline.
+                # Note: this runs two paired tests at the same alpha without a
+                # Bonferroni correction, so the combined false-positive rate is
+                # ~2*alpha. That is acceptable here because this is only a
+                # screening gate that flags candidates for manual review — it
+                # never promotes automatically (production_weights_frozen).
                 vs_champion = self._paired_better_test(cp_rows, "champion_brier", "challenger_brier")
                 vs_baseline = self._paired_better_test(cp_rows, "baseline_brier", "challenger_brier")
                 pc, pb = vs_champion["p_value"], vs_baseline["p_value"]

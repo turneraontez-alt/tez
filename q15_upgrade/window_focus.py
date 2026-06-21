@@ -35,8 +35,12 @@ def _esc(value: Any) -> str:
     parse_mode=HTML message. Reason/diagnostic strings contain characters such
     as '<', '>', and '&' (e.g. "consensus 64% < 72%"); without escaping these
     Telegram rejects the whole message with HTTP 400 'can't parse entities' and
-    the alert is never delivered. Literal markup tags are added separately."""
-    return html.escape("" if value is None else str(value), quote=False)
+    the alert is never delivered. Literal markup tags are added separately.
+
+    quote=True also escapes single/double quotes, so a value that lands inside a
+    quoted HTML attribute (e.g. an href) cannot break out of it — robust even
+    though current messages interpolate dynamic text only as tag content."""
+    return html.escape("" if value is None else str(value), quote=True)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -628,6 +632,16 @@ class TwoWindowFocusManager:
                     _v9_probability /= 100.0
                 _v9_probability = max(0.001, min(0.999, _v9_probability))
             except (TypeError, ValueError):
+                _v9_probability = None
+        # Freshness gate: the canonical v9 probability overrides the live
+        # component blend below (see the return statements), so a value carried on
+        # a stale snapshot — e.g. after a failed refresh or a restart that reuses
+        # the prior dict — must not resurrect an old cycle's lean. When the
+        # snapshot is older than the focus data-age budget, drop it and let the
+        # freshly-computed components stand. No-op for fresh snapshots.
+        if _v9_probability is not None and isinstance(snapshot, dict):
+            data_age = _num(snapshot.get("data_age_seconds"), 0.0) or 0.0
+            if data_age > self.settings.max_data_age_seconds:
                 _v9_probability = None
         components: List[Tuple[str, float, float]] = []
         fair = _num(snapshot.get("calibrated_yes_probability"), _num(snapshot.get("estimated_fair_probability")))
