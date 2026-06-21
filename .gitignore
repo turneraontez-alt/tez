@@ -27,6 +27,10 @@ Q15_REVIEW_PASTE.txt
 backups/
 *_recommended_env.txt
 
+# Generated health/diagnostic snapshot the Repl regenerates — tracking it makes
+# the GitHub Relay conflict on every sync and stall deploys. Kept local only.
+health_snapshot.json
+
 # Python cache
 __pycache__/
 *.py[cod]
