@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **605 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **608 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -22,6 +22,24 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
+**Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip
+removal: a full audit found Telegram delivery used **3 different formats**. The
+unified single-`<pre>`-panel cards are the checkpoint alert (`build_v95_message`,
+`V9.5 CHECK`), the hourly report, and the entry follow-up. The OLD plain-text
+format was used by (a) flip alerts [removed prior entry], (b) the window_focus
+**two-window checkpoint alerts** (`🎯 10M FINAL #1 READY …`), and (c) the
+**dip alerts** (`⚡ DIP …`) — and the two-window path fires LIVE via
+`checkpoint_v91.update()→_maybe_notify`, so the owner was getting both a unified
+panel AND a separate old-format alert for the same checkpoint. Owner chose to
+**disable** the old-format senders (not reformat). Now OFF by default:
+`Q15_FOCUS_CHECKPOINT_ALERTS` (new, False) gates the two-window sends and
+`Q15_DIP_ALERT_ENABLED` (True→False) gates the dip alert — the two-window
+ranking/learning/dashboard still run; only Telegram delivery is muted. So only the
+unified panel / hourly report / follow-up are delivered. Tests updated to enable
+the flags where they exercise the send path; new muted-by-default locks in
+`test_q15_alert_send_retry.py::DefaultDeliveryConsolidationTest`. Suite **605 → 608**.
 
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — removed flip-alert UI
 **Merged to `main` — not yet deployed (needs a Repl reboot to take effect).** Owner

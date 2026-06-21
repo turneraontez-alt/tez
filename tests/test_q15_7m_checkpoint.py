@@ -102,7 +102,10 @@ class SevenMinuteNotifyTest(unittest.TestCase):
                 return True
 
         notifier = Notifier()
-        mgr = TwoWindowFocusManager(Store(), notifier, None, None, FocusSettings())
+        # Two-window checkpoint alerts are OFF by default now; this test exercises
+        # the 7M send path, so enable it explicitly.
+        mgr = TwoWindowFocusManager(Store(), notifier, None, None,
+                                    FocusSettings(checkpoint_alerts_enabled=True))
         claimed = set()
         mgr._claim = lambda key: claimed.add(key) or True  # type: ignore[assignment]
         mgr._rankings["k"] = {
