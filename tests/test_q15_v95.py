@@ -402,7 +402,10 @@ class V95Tests(unittest.TestCase):
         self.assertIn("BNB", message)                # the pick
         self.assertIn("Top picks", message)          # hourly-report-style table
         self.assertIn("<pre>", message)              # aligned monospace block
-        self.assertIn("Best:", message)              # the one-line headline
+        # The recommended entry (BNB qualifies) leads as the BEST ENTRY block, the
+        # single source of truth shared with the detail below.
+        self.assertIn("🏆 BEST ENTRY — BNB", message)
+        self.assertIn("Entry status: RECOMMENDED", message)
         self.assertNotIn("Three requirements", message)
 
     def test_message_shows_market_implied_probability(self):

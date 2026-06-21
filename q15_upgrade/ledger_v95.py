@@ -424,6 +424,18 @@ class V95Ledger:
                     PRIMARY KEY(model_version, checkpoint)
                 )"""
             )
+            # Exactly one follow-up check per (contract, interval) after an entry was
+            # recommended: armed when the entry alert is delivered, fired once at
+            # due_at, then never again. Keyed per (ticker, checkpoint) so a 15M
+            # follow-up never blocks the same contract's 10M follow-up.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS entry_followups(
+                    model_version TEXT NOT NULL, ticker TEXT NOT NULL, checkpoint TEXT NOT NULL,
+                    asset TEXT, side TEXT, recommended_at REAL NOT NULL, due_at REAL NOT NULL,
+                    sent_at REAL,
+                    PRIMARY KEY(model_version, ticker, checkpoint)
+                )"""
+            )
             # Warning-performance log: one row per HIGH FLIP RISK alert that fired,
             # reconciled against whether the frozen prediction actually flipped.
             connection.execute(
@@ -665,6 +677,68 @@ class V95Ledger:
         if close is not None and now >= close:
             return None
         return {"ticker": str(row["ticker"]), "close_time": close, "pushed_at": _num(row["pushed_at"])}
+
+    def arm_entry_followup(self, *, ticker: str, checkpoint: str, asset: str, side: str,
+                           now: float, delay: float) -> bool:
+        """Arm the single follow-up check for (ticker, checkpoint) on the FIRST
+        delivered entry recommendation. INSERT OR IGNORE keeps the original arm
+        time, so repeated entry alerts never re-arm or duplicate a follow-up."""
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            cur = connection.execute(
+                "INSERT OR IGNORE INTO entry_followups(model_version,ticker,checkpoint,asset,side,"
+                "recommended_at,due_at,sent_at) VALUES(?,?,?,?,?,?,?,NULL)",
+                (MODEL_VERSION, str(ticker), checkpoint, str(asset), str(side or ""),
+                 float(now), float(now) + float(delay)),
+            )
+            connection.commit()
+            return cur.rowcount == 1
+
+    def followup_already_sent(self, ticker: str, checkpoint: str) -> bool:
+        """True once this (ticker, checkpoint)'s one follow-up has been sent — so
+        the live alert can show 'Follow-up check remaining: NO'."""
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT sent_at FROM entry_followups WHERE model_version=? AND ticker=? AND checkpoint=?",
+                (MODEL_VERSION, str(ticker), checkpoint),
+            ).fetchone()
+        return row is not None and row["sent_at"] is not None
+
+    def due_followups(self, now: float) -> list[dict[str, Any]]:
+        """Armed follow-ups whose due time has arrived and that have not fired."""
+        if not self._available:
+            return []
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT ticker,checkpoint,asset,side,recommended_at,due_at FROM entry_followups "
+                "WHERE model_version=? AND sent_at IS NULL AND due_at<=?",
+                (MODEL_VERSION, float(now)),
+            ))
+        return [
+            {"ticker": str(r["ticker"]), "checkpoint": str(r["checkpoint"]),
+             "asset": str(r["asset"] or ""), "side": str(r["side"] or ""),
+             "recommended_at": _num(r["recommended_at"]), "due_at": _num(r["due_at"])}
+            for r in rows
+        ]
+
+    def mark_followup_sent(self, ticker: str, checkpoint: str, now: float) -> bool:
+        """Consume the one follow-up for (ticker, checkpoint); never fires again."""
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        with self._lock, closing(self._connect()) as connection:
+            cur = connection.execute(
+                "UPDATE entry_followups SET sent_at=? WHERE model_version=? AND ticker=? "
+                "AND checkpoint=? AND sent_at IS NULL",
+                (float(now), MODEL_VERSION, str(ticker), checkpoint),
+            )
+            connection.commit()
+            return cur.rowcount > 0
 
     def note_prediction_revision(self, *, ticker: str, checkpoint: str, current_side: str) -> bool:
         """Flag that the live predicted side drifted from the locked prediction
