@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **603 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **605 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -22,6 +22,18 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — removed flip-alert UI
+**Merged to `main` — not yet deployed (needs a Repl reboot to take effect).** Owner
+asked to remove the old flip-alert Telegram UI (the `CONFIRMED PREDICTION FLIP —
+DOGE/BTC 7M` cards with "Manipulation risk before flip / Estimated flip probability
+/ Main evidence"). Both flip Telegram sends are now **OFF by default**:
+`Q15_V95_FLIP_CONFIRMED_ALERTS` (True→False, `checkpoint_v95._process_flip_risk`)
+and `Q15_V95_FLIP_ALERTS_ENABLED` (True→False). Read-only flip tracking, the
+`flip_risk` scoring/learning, and the dashboard block are **unchanged** — only the
+Telegram delivery is muted; re-enable either flag to bring it back. Lock test:
+`test_q15_v95_flip_risk.py::FlipAlertDeliveryDefaultTest` (muted by default; still
+sends when re-enabled). Suite **603 → 605**.
 
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — review-fix batch
 **Merged to `main` — not yet deployed (needs a Repl reboot to take effect).**
