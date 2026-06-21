@@ -195,6 +195,14 @@ class V95Ledger:
         # shadow training vs the secondary intervals. 10M is the best performer,
         # so it gets the heaviest sample weight; 7M/15M still learn, just slower.
         self.primary_learning_weight = _env_float("Q15_V95_PRIMARY_LEARNING_WEIGHT", 1.25, 1.0, 3.0)
+        # The primary learner's heavier sample weight must actually exceed 1.0 to
+        # accelerate learning. A legacy ``min(1.0, ...)`` clamp silently erased the
+        # boost for high-quality rows (the only rows whose base weight already hit
+        # 1.0), so 10M learned at the same rate as 15M despite the 1.25x knob. With
+        # the boost ON (default) the weight scales fully (bounded by the per-result
+        # and total-drift caps downstream, so a >1.0 weight is safe). OFF restores
+        # the legacy clamp. Shadow-only: production champion weights stay frozen.
+        self.primary_learning_boost = _env_bool("Q15_V95_PRIMARY_LEARNING_BOOST", True)
         legacy_enabled = _env_bool("Q15_V95_SHADOW_LEARNING", True)
         # 7M is tracked and graded for accuracy alongside 15M/10M, but its weight
         # learning is observational by default (like 15M). Enabling it requires the
@@ -235,6 +243,16 @@ class V95Ledger:
         self.total_drift_cap = self.total_drift_cap_by_checkpoint[self.primary_learning_checkpoint]
         self.minimum_learning_quality = self.minimum_learning_quality_by_checkpoint[self.primary_learning_checkpoint]
         self.minimum_calibration_rows = _env_int("Q15_V95_CALIBRATION_MIN_ROWS", 30, 10, 1000)
+        # When a Platt fit fails to converge (or hits a near-singular Hessian) the
+        # bounded-but-untrusted intercept/slope it leaves behind should not silently
+        # transform live probabilities. With this ON (default) an unconverged fit
+        # falls back to the identity transform (raw probability passes through),
+        # surfaced via the fit's ``reason`` + ``fallback`` and the stats() counter.
+        self.calibration_require_converged = _env_bool("Q15_V95_CALIBRATION_REQUIRE_CONVERGED", True)
+        # Newton-step budget for the Platt fit. Default 12 is unchanged; exposed so
+        # convergence behaviour (and its identity fallback) is deterministically
+        # exercisable and tunable without editing code.
+        self._calibration_max_iters = _env_int("Q15_V95_CALIBRATION_MAX_ITERS", 12, 1, 100)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
@@ -256,6 +274,9 @@ class V95Ledger:
         # was unparseable. Surfaced via stats() so a corrupt data pipeline shows
         # up instead of quietly thinning calibration/learning inputs.
         self._dropped_feature_rows = 0
+        # Observability: Platt fits that did not converge and were replaced by the
+        # identity transform (see calibration_require_converged). Surfaced in stats().
+        self._calibration_unconverged_fallbacks = 0
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
@@ -345,7 +366,7 @@ class V95Ledger:
                     PRIMARY KEY(checkpoint, name)
                 );
                 CREATE TABLE IF NOT EXISTS regime_challenger_weights (
-                    checkpoint TEXT NOT NULL,
+                    checkpoint TEXT NOT NULL CHECK(checkpoint IN ('10M','15M')),
                     regime TEXT NOT NULL,
                     name TEXT NOT NULL,
                     base_value REAL NOT NULL,
@@ -1000,10 +1021,16 @@ class V95Ledger:
             error = actual_yes - probability
             quality_factor = _clamp((quality - minimum_quality) / max(1e-9, 1.0 - minimum_quality), 0.0, 1.0)
             # The primary 10M learner gets more useful weight, while low-quality
-            # rows still have limited influence.
+            # rows still have limited influence. The boosted weight is allowed to
+            # exceed 1.0 (capped at primary_learning_weight, since the base is in
+            # [0.25, 1.0]); the per-result and total-drift caps below bound the
+            # actual step, so a >1.0 weight only speeds learning, never destabilizes.
             sample_weight = 0.25 + 0.75 * quality_factor
             if checkpoint == self.primary_learning_checkpoint:
-                sample_weight = min(1.0, sample_weight * self.primary_learning_weight)
+                if self.primary_learning_boost:
+                    sample_weight = sample_weight * self.primary_learning_weight
+                else:  # legacy clamp: erased the boost for high-quality rows
+                    sample_weight = min(1.0, sample_weight * self.primary_learning_weight)
             learning_rate = self.learning_rate_by_checkpoint[checkpoint]
             per_result_cap = self.per_result_cap_by_checkpoint[checkpoint]
             total_drift_cap = self.total_drift_cap_by_checkpoint[checkpoint]
@@ -1193,11 +1220,15 @@ class V95Ledger:
         if not fit["active"]:
             return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
         calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
-        return {
-            "probability": calibrated, "active": True, "reason": "platt_current_version",
+        result = {
+            "probability": calibrated, "active": True,
+            "reason": fit.get("reason", "platt_current_version"),
             "rows": fit["rows"], "intercept": fit["intercept"], "slope": fit["slope"],
             "scope": fit["scope"],
         }
+        if fit.get("fallback"):
+            result["fallback"] = fit["fallback"]
+        return result
 
     def _calibration_fit(self, checkpoint: str, asset: str | None) -> dict[str, Any]:
         """Cached Platt fit for (checkpoint, asset). Pure function of the resolved
@@ -1231,7 +1262,7 @@ class V95Ledger:
             intercept, slope = 0.0, 1.0
             converged = False
             iterations = 0
-            for _ in range(12):
+            for _ in range(self._calibration_max_iters):
                 iterations += 1
                 g0 = -0.20 * intercept
                 g1 = -0.20 * (slope - 1.0)
@@ -1259,6 +1290,8 @@ class V95Ledger:
                 if abs(d0) + abs(d1) < 1e-6:
                     converged = True
                     break
+            reason = "platt_current_version"
+            fallback = None
             if not converged:
                 # Rare given regularization; surface it instead of silently
                 # shipping an unconverged calibrator.
@@ -1267,9 +1300,21 @@ class V95Ledger:
                     "after %d iterations (intercept=%.4f slope=%.4f)",
                     checkpoint, scope, len(rows), iterations, intercept, slope,
                 )
-            fit = {"active": True, "reason": "platt_current_version", "rows": len(rows),
-                   "intercept": intercept, "slope": slope, "scope": scope,
-                   "converged": converged, "iterations": iterations}
+                if self.calibration_require_converged:
+                    # Don't transform live probabilities with an untrusted fit:
+                    # revert the APPLIED transform to identity (raw passes through),
+                    # but keep the attempted coefficients for diagnostics.
+                    fallback = "identity_unconverged"
+                    reason = "platt_unconverged_identity"
+                    with self._lock:
+                        self._calibration_unconverged_fallbacks += 1
+            fit = {"active": True, "reason": reason, "rows": len(rows),
+                   "intercept": 0.0 if fallback else intercept,
+                   "slope": 1.0 if fallback else slope, "scope": scope,
+                   "converged": converged, "iterations": iterations,
+                   "fitted_intercept": intercept, "fitted_slope": slope}
+            if fallback:
+                fit["fallback"] = fallback
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.
@@ -1998,6 +2043,7 @@ class V95Ledger:
             "automatic_promotion": False, "automatic_threshold_changes": False,
             "last_shadow_update": dict(last_update) if last_update else None,
             "dropped_feature_rows": int(self._dropped_feature_rows),
+            "calibration_unconverged_fallbacks": int(self._calibration_unconverged_fallbacks),
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
             "pushed_by_checkpoint": {
                 str(r["checkpoint"]): {

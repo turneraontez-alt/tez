@@ -140,5 +140,34 @@ class DipAlertRetryTest(unittest.TestCase):
         self.assertEqual(len(n.messages), 1)
 
 
+class EmptyCloseKeyWarningTest(unittest.TestCase):
+    """A missing close_time drops the checkpoint alert (no unique claim key can be
+    built). That is correct, but it must not be SILENT when a market is actually
+    near a checkpoint — a degraded feed would otherwise cost the owner alerts."""
+
+    def test_warns_when_a_due_alert_is_skipped_for_missing_close_time(self):
+        mgr = _mgr(_Notifier())
+        snaps = {"BTC": _snap(edge=7.5, seconds=300)}  # well inside the 15m window
+        with self.assertLogs("q15_upgrade.window_focus", level="WARNING") as cm:
+            mgr._maybe_notify("", snaps, now=100.0)
+        self.assertTrue(any("missing close_time" in m for m in cm.output))
+
+    def test_no_warning_when_no_market_is_near_a_checkpoint(self):
+        mgr = _mgr(_Notifier())
+        snaps = {"BTC": _snap(edge=7.5, seconds=1200)}  # before the earliest window
+        with self.assertNoLogs("q15_upgrade.window_focus", level="WARNING"):
+            mgr._maybe_notify("", snaps, now=100.0)
+
+    def test_warning_is_throttled_to_once_a_minute(self):
+        mgr = _mgr(_Notifier())
+        snaps = {"BTC": _snap(edge=7.5, seconds=300)}
+        with self.assertLogs("q15_upgrade.window_focus", level="WARNING") as cm:
+            mgr._maybe_notify("", snaps, now=100.0)
+            mgr._maybe_notify("", snaps, now=130.0)  # within 60s -> throttled
+            mgr._maybe_notify("", snaps, now=200.0)  # past the window -> warns again
+        warns = [m for m in cm.output if "missing close_time" in m]
+        self.assertEqual(len(warns), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
