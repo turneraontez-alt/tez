@@ -12,6 +12,22 @@ may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 Tests: `python3 -m pytest tests/ -q` → **937 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
+## ✅ Shipped THIS session — Expanded `updated-review` into a full system auditor
+**On branch `claude/updated-review-ecyp4x`, merged to `main`.** Rewrote
+`.claude/skills/updated-review/SKILL.md` (skill-only; no app/test change, suite
+unchanged at **906 passed, 13 skipped** in this container env). The skill now
+grades **Shadow** and **Your System** separately (/100) from real ledger records
+(`V95Ledger().scoreboard()`/`official_scoreboard()`/`shadow_signal_experiment()`,
+challenger `ShadowLedger` + `challenger/stats.py` paired tests), compares
+15M/10M/7M and #1/#2/#3 ranking **only on matched snapshot+timestamp rows**
+(no look-ahead credit), tests the 5 background features against
+`shadow_signals.SIGNAL_NAMES` (HELPING/HURTING/INSUFFICIENT/BROKEN, OOS-gated),
+runs the full live-workflow bug checklist (confirmed vs suspected), checks
+whether the last review's recommendations landed, and emits the owner's fixed
+output template. Read-only; rules forbid inventing numbers (label
+`INSUFFICIENT DATA (n=…)`). NOTE: container `data/*.sqlite3` are seed/empty
+copies — real numbers populate when run against live Replit data.
+
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
 see CLAUDE.md "Merge policy"). **HANDOFF.md is refreshed automatically as part of
