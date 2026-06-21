@@ -25,6 +25,33 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — Shadow vs Yours: synchronized snapshot + Eastern Time + reset
+**On the branch, deploy-pending.** Builds on the window-grading repair below.
+- **Simultaneous predictions / shared frozen snapshot:** both systems are already scored from one
+  `record_prediction` call (champion features/quote → shadow `observe`); made it auditable by
+  threading a shared `snapshot_id` (`f"{checkpoint}@{int(now)}"`, computed once per interval batch
+  in `run_cycle`) through `record_prediction → _shadow_observe → runner.observe → ledger.record`,
+  stamped on the paired `shadow_predictions` row (+`snapshot_id` column, migrated). Neither system
+  fetches newer data; the id locks with the first INSERT-OR-IGNORE write. Also exposed on the
+  snapshot as `q15_v9_5_snapshot_id`.
+- **Eastern Time (America/Detroit, DST-aware):** new `q15_upgrade/timez.py` (EDT in summer / EST in
+  winter via IANA zone — never a fixed offset). All VISIBLE comparison times now render Eastern with
+  the EDT/EST label: report reset timestamp, LAST WINDOW label, the recap close label
+  (`_recap_close_label`), and an additive dashboard field `q15_v9_5_prediction_timestamp_eastern`.
+  **UTC stays internal** (storage, contract matching, the existing ISO field, window bucketing by
+  epoch) — display-only conversion; the contract-close instant and interval timing are unchanged
+  (verified: `to_eastern(ts).timestamp()==ts`).
+- **Synchronized reset:** comparison `model_version` bumped `challenger-v3 → challenger-v4`. The v4
+  visible record starts empty (counts only post-reset predictions); v1/v2/v3 rows stay archived in
+  the same file as **PRE-SYNCHRONIZED-RESET** (never scored — every query filters on model_version),
+  surfaced via `ledger.archived_versions()` and labelled in the report. Post-reset banner now shows
+  exactly: `Comparison reset: <Eastern EDT/EST>` · `Synchronization: Same snapshot and prediction
+  time` · `Time zone: America/Detroit` · `Shadow: 0W–0L | N/A` · `Your System: 0W–0L | N/A`.
+- **Files:** `q15_upgrade/timez.py` (new), `q15_upgrade/challenger/{ledger,runner,config}.py`,
+  `q15_upgrade/ledger_v95.py`, `q15_upgrade/checkpoint_v95.py`. **DB:** `shadow_predictions`
+  +`snapshot_id` (migrated). New tests `tests/test_challenger_sync_tz_reset.py` (9). Full suite
+  **893 passed, 4 skipped**. Read-only shadow only; no model/decision change.
+
 ## ✅ Shipped THIS session — Challenger Shadow vs Your System window-grading repair
 **On the branch, deploy-pending.** The deployed report showed Your System as `0W–0L | N/A`
 everywhere and Shadow with only one 15M pick (ranks #2/#3 and the 10M/7M intervals missing).

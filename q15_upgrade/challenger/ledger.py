@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     native_delivery_status TEXT,
     native_delivery_error TEXT,
     native_delivery_at REAL,
+    snapshot_id TEXT,
     UNIQUE(model_version, contract, checkpoint)
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_resolved ON shadow_predictions(checkpoint, official_result);
@@ -117,6 +118,10 @@ class ShadowLedger:
             ("native_delivery_status", "ADD COLUMN native_delivery_status TEXT"),
             ("native_delivery_error", "ADD COLUMN native_delivery_error TEXT"),
             ("native_delivery_at", "ADD COLUMN native_delivery_at REAL"),
+            # Shared frozen-snapshot id: both systems (challenger + control) are
+            # scored from the SAME snapshot per interval, and that snapshot id is
+            # stamped on the paired row so the simultaneity is auditable.
+            ("snapshot_id", "ADD COLUMN snapshot_id TEXT"),
         ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE shadow_predictions {ddl}")
@@ -175,6 +180,18 @@ class ShadowLedger:
             out[str(r["s"])] = int(r["n"])
         return out
 
+    def archived_versions(self, current_model_version: str) -> list[str]:
+        """Model versions present in the file OTHER than the current one — the
+        PRE-SYNCHRONIZED-RESET archive. These rows are retained for debugging /
+        background research and are NEVER scored into the current visible record
+        (every scoring query filters on the current model_version)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT model_version FROM shadow_predictions WHERE model_version<>? "
+            "ORDER BY model_version",
+            (current_model_version,),
+        ).fetchall()
+        return [str(r["model_version"]) for r in rows]
+
     # ---- reset marker (so the report can show "Comparison reset: <UTC>") ----
     def reset_marker(self, model_version: str, configured_reset_at: float = 0.0) -> float:
         """Return the reset timestamp for ``model_version``, stamping it on first use.
@@ -215,6 +232,7 @@ class ShadowLedger:
         close_time: float | None = None,
         model_version: str = "challenger-v1",
         lineage: dict | None = None,
+        snapshot_id: str | None = None,
     ) -> int | None:
         dec = prediction.decision
         total_cost = dec.costs.total_cents if (dec and dec.costs) else None
@@ -246,6 +264,7 @@ class ShadowLedger:
             json.dumps(getattr(prediction, "ood_reasons", [])),
             json.dumps(lineage or {}),
             None, None, None,
+            snapshot_id,
         )
         try:
             cur = self._conn.execute(
@@ -256,8 +275,8 @@ class ShadowLedger:
                  edge_vs_market, net_edge_cents, recommendation, side, executable_ask_cents,
                  total_cost_cents, hypothetical_size_fraction, top_factors_json, warnings_json,
                  feature_json, ood_score, ood_reasons_json, lineage_json,
-                 official_result, resolved_at, hypothetical_pnl_cents)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 official_result, resolved_at, hypothetical_pnl_cents, snapshot_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             self._conn.commit()

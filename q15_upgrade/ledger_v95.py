@@ -675,7 +675,8 @@ class V95Ledger:
                           flip_risk_score: float | None = None,
                           flip_risk_confidence: float | None = None,
                           flip_evidence_count: int | None = None,
-                          shadow_factors: Mapping[str, Any] | None = None) -> tuple[str, bool]:
+                          shadow_factors: Mapping[str, Any] | None = None,
+                          snapshot_id: str | None = None) -> tuple[str, bool]:
         checkpoint = self._checkpoint(checkpoint)
         prediction_id = f"{MODEL_VERSION}|{checkpoint}|{ticker}"
         if not self._available or not ticker:
@@ -734,7 +735,7 @@ class V95Ledger:
             self._shadow_observe(
                 ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=created_at,
                 close_time=close_time, control_prob_yes=raw_yes_probability,
-                features=features, quote=quote,
+                features=features, quote=quote, snapshot_id=snapshot_id,
             )
         return prediction_id, inserted
 
