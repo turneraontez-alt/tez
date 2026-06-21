@@ -63,6 +63,14 @@ class TestLedgerScoreboard(unittest.TestCase):
         self.assertEqual(_core(sb["by_rank"]["1"]), {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5})
         self.assertEqual(sb["by_rank"]["2"]["right"], 1)
         self.assertEqual(sb["by_rank"]["3"]["wrong"], 1)
+        # Rank record separated by interval: the all-interval #1 blends 15M (right)
+        # + 10M (wrong) into 1-1, but per-interval keeps them distinct.
+        rbc = sb["rank_by_checkpoint"]
+        self.assertEqual(_core(rbc["15M"]["1"]), {"right": 1, "wrong": 0, "n": 1, "accuracy": 1.0})
+        self.assertEqual(_core(rbc["10M"]["1"]), {"right": 0, "wrong": 1, "n": 1, "accuracy": 0.0})
+        self.assertEqual(rbc["7M"]["2"]["right"], 1)
+        self.assertEqual(rbc["7M"]["3"]["wrong"], 1)
+        self.assertEqual(rbc["10M"]["2"]["n"], 0)  # no 10M #2 settled
 
     def test_scoreboard_breaks_down_by_asset(self):
         led = _mk_ledger()
@@ -153,18 +161,91 @@ class TestHourlyReportScoreboard(unittest.TestCase):
                 "3": {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5},
                 "other": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
             },
+            "rank_by_checkpoint": {
+                "10M": {
+                    "1": {"right": 2, "wrong": 0, "n": 2, "accuracy": 1.0},
+                    "2": {"right": 1, "wrong": 1, "n": 2, "accuracy": 0.5},
+                    "3": {"right": 0, "wrong": 0, "n": 0, "accuracy": None},
+                },
+            },
         }
         sb["overall"]["accuracy"] = 0.625
         text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
         self.assertIn("Track record", text)
         self.assertIn("Settled 8 ·", text)
         self.assertIn("right", text)
-        self.assertIn("<pre>", text)
+        # The scoreboard helper now returns plain content; build_report owns the
+        # single <pre> panel (see test_full_report_is_one_pre_panel).
+        self.assertNotIn("<pre>", text)
+        self.assertNotIn("<b>", text)
         # aligned rows for interval and rank
         self.assertIn("15M", text)
         self.assertIn("7M", text)
         self.assertIn("#1 pick", text)
         self.assertIn("67%", text)
+        # New: a 10M-specific rank section with its own header and the 10M #1 record.
+        self.assertIn("10M RANK PERFORMANCE", text)
+        rank_block = text.split("10M RANK PERFORMANCE", 1)[1]
+        self.assertIn("100%", rank_block)  # 10M #1 went 2-0
+        self.assertIn("2-0", rank_block)
+
+    def test_ten_minute_rank_section_shows_placeholders_before_settling(self):
+        # The 10M rank section is always visible (0-0 rows) so the user sees it is
+        # tracked even before any 10M pick has settled.
+        sb = {
+            "available": True,
+            "overall": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667},
+            "by_checkpoint": {"15M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+        text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
+        self.assertIn("10M RANK PERFORMANCE", text)
+        rank_block = text.split("10M RANK PERFORMANCE", 1)[1]
+        self.assertIn("#1 pick", rank_block)
+        self.assertIn("0-0", rank_block)
+
+    def test_all_three_checkpoints_shown_even_when_empty(self):
+        # 15M has settled rows; 10M/7M have none yet. All three must still appear
+        # (10M/7M as zeroed placeholders) so the user can see they're tracked.
+        sb = {
+            "available": True,
+            "overall": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667},
+            "by_checkpoint": {"15M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {},
+        }
+        text = "\n".join(self._reporter(_FakeLedger(sb))._scoreboard_table())
+        self.assertIn("15M", text)
+        self.assertIn("10M", text)   # placeholder row, previously hidden
+        self.assertIn("7M", text)    # placeholder row, previously hidden
+        self.assertIn("0-0", text)   # the zeroed "awaiting data" marker
+
+    def test_full_report_is_one_pre_panel(self):
+        # The whole report body renders inside a single <pre> panel; only the bold
+        # "Hourly Report —" header (reformatter-bypass marker) stays outside it.
+        sb = {
+            "available": True,
+            "overall": {"right": 5, "wrong": 3, "n": 8, "accuracy": 0.625, "realized_total_cents": 12, "pnl_n": 8},
+            "by_checkpoint": {"10M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+        text = self._reporter(_FakeLedger(sb)).build_report()
+        self.assertEqual(text.count("<pre>"), 1)
+        self.assertEqual(text.count("</pre>"), 1)
+        # Header is outside the panel and keeps the canonical marker.
+        head, _, panel = text.partition("<pre>")
+        self.assertIn("Hourly Report —", head)
+        self.assertNotIn("<pre>", head)
+        # Body content lives inside the panel.
+        self.assertIn("Track record", panel)
+        self.assertIn("Settled 8", panel)
+
+    def test_header_is_eastern_time(self):
+        reporter = reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=None)
+        header = reporting._eastern_header()
+        # Eastern, not UTC, and carries an AM/PM + tz label.
+        self.assertNotIn("UTC", header)
+        self.assertTrue(("AM" in header) or ("PM" in header))
+        self.assertTrue(header.endswith("EST") or header.endswith("EDT"))
 
     def test_empty_shows_building_history(self):
         sb = {"available": True, "overall": {"n": 0}, "by_checkpoint": {}, "by_rank": {}}
@@ -175,6 +256,77 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertEqual(self._reporter(None)._scoreboard_table(), [])
 
 
+class _FakeFlipLedger:
+    """Ledger stub exposing only the two flip-report methods."""
+    def __init__(self, perf, stats):
+        self._perf, self._stats = perf, stats
+    def flip_warning_performance(self):
+        return self._perf
+    def flip_stats(self):
+        return self._stats
+
+
+class TestHourlyFlipScoreboard(unittest.TestCase):
+    def _reporter(self, ledger):
+        return reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=ledger)
+
+    def _perf(self):
+        agg = lambda alerts, correct, false, prec, det, act, miss, pnl: {
+            "alerts": alerts, "correct": correct, "false": false, "precision": prec,
+            "detected": det, "actual_flips": act, "missed": miss,
+            "detection_rate": (det / act if act else None), "avg_advance_seconds": 150,
+            "realized_total_cents": pnl,
+        }
+        return {
+            "overall": agg(3, 2, 1, 0.667, 2, 4, 2, 18),
+            "by_checkpoint": {"15M": agg(2, 1, 1, 0.5, 1, 2, 1, 8),
+                              "10M": agg(1, 1, 0, 1.0, 1, 2, 1, 10)},
+            "by_direction": {"NO → YES": agg(2, 2, 0, 1.0, 2, 3, 1, 16),
+                             "YES → NO": agg(1, 0, 1, 0.0, 0, 1, 1, 2)},
+            "by_asset": {"BTC": agg(3, 2, 1, 0.667, 2, 4, 2, 18)},
+            "by_score_bucket": {},
+        }
+
+    def _stats(self):
+        return {"available": True, "by_checkpoint": {"10M": {
+            "NO → YES": {"overall": {"samples": 12, "buckets": {
+                "40-60%": {"n": 6, "flip_rate": 0.33},
+                "60-80%": {"n": 5, "flip_rate": 0.6},
+            }}},
+            "YES → NO": {"overall": {"samples": 0, "buckets": {}}},
+        }}}
+
+    def test_flip_table_uses_interval_format(self):
+        text = "\n".join(self._reporter(_FakeFlipLedger(self._perf(), self._stats()))._flip_scoreboard())
+        # Same aligned grid as the intervals: a W-L/Acc/P-L header.
+        self.assertIn("FLIP WARNING PERFORMANCE", text)
+        self.assertIn("W-L", text)
+        self.assertIn("Acc", text)
+        # Rows by checkpoint (placeholder for the missing 7M), direction, asset.
+        self.assertIn("15M", text)
+        self.assertIn("7M", text)            # 0-0 placeholder
+        self.assertIn("BY DIRECTION", text)
+        self.assertIn("NO→YES", text)
+        self.assertIn("BY ASSET", text)
+        self.assertIn("BTC", text)
+        # Precision renders as the Acc column (10M went 1-0 = 100%).
+        self.assertIn("100%", text)
+        # Learned flip-rate curve carried through as its own mini-table.
+        self.assertIn("LEARNED FLIP RATE", text)
+
+    def test_flip_table_empty_until_warned(self):
+        empty = {"overall": {"alerts": 0}, "by_checkpoint": {}, "by_direction": {}, "by_asset": {}}
+        out = self._reporter(_FakeFlipLedger(empty, {"available": False}))._flip_scoreboard()
+        self.assertEqual(out, [])
+
+    def test_flip_table_safe_without_methods(self):
+        # build_report's fake ledger may lack the flip methods entirely.
+        class _Bare:
+            def scoreboard(self):
+                return {"available": True, "overall": {"n": 0}, "by_checkpoint": {}, "by_rank": {}}
+        self.assertEqual(self._reporter(_Bare())._flip_scoreboard(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -183,6 +335,7 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
     """End-to-end: a 7-minute cycle records each prediction as 7M with its rank."""
 
     def setUp(self):
+        self._prior_public = os.environ.get("Q15_V95_PUBLIC_DATA_ENABLED")
         os.environ["Q15_V95_PUBLIC_DATA_ENABLED"] = "false"
         from q15_upgrade.checkpoint_v95 import CheckpointPolicyV95
         from tests.test_q15_v95 import snapshot, candles, FakeHub, FakeNotifier
@@ -195,6 +348,10 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        if self._prior_public is None:
+            os.environ.pop("Q15_V95_PUBLIC_DATA_ENABLED", None)
+        else:
+            os.environ["Q15_V95_PUBLIC_DATA_ENABLED"] = self._prior_public
         # A real cycle populates module-level "latest" caches; clear them so we
         # don't leak state into tests asserting a pre-first-cycle startup state.
         import q15_upgrade.checkpoint_v95 as cp95
@@ -203,6 +360,32 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
             cp95._LATEST_RANKING.clear()
             cp95._LATEST_LEDGER.clear()
             cp95._LATEST_CHECKPOINT = "UNKNOWN"
+
+    def test_no_entry_checkpoint_is_muted(self):
+        # A pricey ask -> no executable edge -> no recommended entry. With the
+        # default entry-only delivery, NO checkpoint alert should be sent even
+        # after the decision settles over several cycles.
+        now = time.time()
+
+        class FM:
+            def update(self, snaps, now, wsh):
+                return snaps
+
+        class CE:
+            def enrich_all(self, snaps, now, wsh):
+                return snaps
+
+        notifier = self.FakeNotifier()
+        for i in range(5):
+            snaps = {"BNB": self._snapshot(asset="BNB", checkpoint="10M", ask=98.0,
+                                           target=100.0, spot=101.0)}
+            for s in snaps.values():
+                s["seconds_remaining"] = 600
+                s["underlying_candles_5s"] = self._candles()[-12:]
+                s["close_time"] = now + 600
+            self.policy.run_cycle(dict(snaps), now + i, {}, FM(), CE(), notifier)
+        checkpoint_msgs = [m for m in notifier.messages if "V9.5 CHECK" in m]
+        self.assertEqual(checkpoint_msgs, [])  # no entry -> muted entirely
 
     def test_cycle_buckets_seven_minute_and_persists_rank(self):
         now = time.time()

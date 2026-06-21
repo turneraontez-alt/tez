@@ -150,6 +150,27 @@ class V95Tests(unittest.TestCase):
         self.assertGreaterEqual(len(canonical.candles), 180)
         self.assertTrue(canonical.core_valid)
 
+    def test_public_dict_matches_asdict_value_without_deepcopy(self):
+        # public_dict() is the hot path inside analyse_v95 (built into every
+        # result's "canonical" key, ~600 candles + multi-source dicts). It must
+        # stay a shallow field copy, NOT dataclasses.asdict (which recursively
+        # deep-copies and dominated ~78% of analyse_v95). This locks both that
+        # the value still equals the asdict reference AND that it is cheap:
+        # nested containers are fresh (shallow) copies but the candle rows are
+        # shared references (no per-row deepcopy).
+        from dataclasses import asdict
+        canonical = self.canonical(cached=candles(180))
+        reference = asdict(canonical)
+        reference["candles"] = list(canonical.candles)
+        public = canonical.public_dict()
+        self.assertEqual(public, reference)
+        self.assertIsInstance(public["candles"], list)
+        self.assertIsInstance(public["core_errors"], tuple)
+        # Cheap copy: candle rows are shared, not deep-copied per row.
+        self.assertIs(public["candles"][0], canonical.candles[0])
+        # Top-level mutable containers are independent of the frozen dataclass.
+        self.assertIsNot(public["context"], canonical.context)
+
     def test_stale_core_fails_closed(self):
         row = snapshot()
         row["snapshot_time"] = NOW - 120
@@ -276,12 +297,21 @@ class V95Tests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertEqual(self.ledger.status()["shadow_updates_by_checkpoint"]["10M"], 1)
 
-    def test_fifteen_minute_learning_is_disabled_by_default(self):
-        before = self.ledger.challenger_weights("15M")
+    def test_fifteen_minute_learning_enabled_by_default(self):
+        # 15M shadow learning now defaults ON (observational; champion stays
+        # frozen). The challenger is allowed to learn from a 15M resolution.
+        self.assertTrue(self.ledger.learning_enabled_by_checkpoint["15M"])
         self._record("T15", checkpoint="15M")
         self.ledger.resolve_ticker("T15", "NO", NOW+700)
-        after = self.ledger.challenger_weights("15M")
-        self.assertEqual(before, after)
+        self.assertTrue(self.ledger.status()["production_weights_frozen"])
+
+    def test_fifteen_minute_learning_can_be_disabled(self):
+        # Opt-out: with 15M learning off, a resolution leaves the challenger frozen.
+        self.ledger.learning_enabled_by_checkpoint["15M"] = False
+        before = self.ledger.challenger_weights("15M")
+        self._record("T15off", checkpoint="15M")
+        self.ledger.resolve_ticker("T15off", "NO", NOW+700)
+        self.assertEqual(before, self.ledger.challenger_weights("15M"))
         self.assertEqual(self.ledger.status()["shadow_updates_by_checkpoint"]["15M"], 0)
         self.assertTrue(self.ledger.status()["production_weights_frozen"])
 
@@ -333,7 +363,9 @@ class V95Tests(unittest.TestCase):
         status = self.ledger.status()
         self.assertEqual(status["primary_learning_checkpoint"], "10M")
         self.assertTrue(status["learning_enabled_by_checkpoint"]["10M"])
-        self.assertFalse(status["learning_enabled_by_checkpoint"]["15M"])
+        # 15M now learns too (observational); 7M stays off until its schema lands.
+        self.assertTrue(status["learning_enabled_by_checkpoint"]["15M"])
+        self.assertFalse(status["learning_enabled_by_checkpoint"]["7M"])
 
     def test_pattern_similarity_is_checkpoint_scoped(self):
         result = self.ledger.pattern_similarity({name: 0.1 for name in CHAMPION_WEIGHTS if name != "intercept"}, "YES", "10M")
@@ -389,18 +421,25 @@ class V95Tests(unittest.TestCase):
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
         self.assertIn("V9.5 CHECK", message)         # formatter guard + identity
         self.assertIn("BNB", message)                # the pick
-        self.assertIn("grade", message)              # confidence grade shown
+        self.assertIn("Top picks", message)          # hourly-report-style table
+        self.assertIn("<pre>", message)              # aligned monospace block
+        # The recommended entry (BNB qualifies) leads as the BEST ENTRY block, the
+        # single source of truth shared with the detail below.
+        self.assertIn("🏆 BEST ENTRY — BNB", message)
+        self.assertIn("Entry status: RECOMMENDED", message)
         self.assertNotIn("Three requirements", message)
 
     def test_message_shows_market_implied_probability(self):
         # ask=52 -> yes mid 51.5 -> market-implied YES ~ 0.515; the pick is YES,
-        # so the checkpoint line shows the model prob next to "vs mkt 51.5%".
+        # so the table's "Mkt" column shows the market-implied prob (~52%) next to
+        # the model prob.
         row = snapshot(ask=52.0)
         result = analyse_v95(row, self.canonical(row=row), self.ledger)
         self.assertEqual(result["prediction_side"], "YES")
         analyses = {"BNB": result}
         message = build_v95_message("10M", analyses, rank_analyses(analyses), self.ledger.status())
-        self.assertIn("vs mkt 51.5%", message)
+        self.assertIn("Mkt", message)   # market column header
+        self.assertIn("52%", message)   # market-implied prob for the YES side
 
     def test_message_omits_market_implied_when_no_quote(self):
         # With no Kalshi quote the market-implied prob is None, so the "vs mkt"

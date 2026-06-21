@@ -5,132 +5,370 @@ and `SYNC.md` (Replit sync). Live app on Replit (`python3 app.py`). **The owner
 trades REAL money manually off the alerts**, so reliability + honest data
 freshness + honest accuracy measurement matter more than new model features.
 
-⚠️ Fresh container: `pytest` and `websockets` are NOT preinstalled →
-`pip install pytest "websockets>=12.0" -q` first. Tests: `python3 -m pytest tests/ -q`
-→ **408 passed, 4 skipped**.
+⚠️ Fresh container: `pytest`/`websockets`/`flask` are NOT preinstalled →
+`pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
+may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
+(else the two app-level test files error on collection instead of skipping).
+Tests: `python3 -m pytest tests/ -q` → **588 passed, 4 skipped**.
 
-## ✅ Current state (after this session)
-- **The model is producing predictions again.** The long-standing
-  `current_trade_decisions: {AVOID_INVALID_DATA: 7}` is fixed — the inner chain now
-  emits real decisions (`WATCH_CONFIDENCE` / `WATCH_PRICE`). This was the headline
-  bug and it's resolved (root cause below).
-- **Spot WS is ON** (`Q15_SPOT_WS_ENABLED=true`), connected to Coinbase+OKX,
-  sub-second ticks for all 7 assets. (It did NOT clear the gate — that wasn't the
-  cause — but it's a real latency win and is live.)
-- **Accuracy is now measurable**: `GET /api/q15-v9-5/accuracy` + a one-line
-  `model_accuracy` headline in `/api/health`.
-- Scoreboard is still tiny (~3 resolved — the bug starved it for weeks). Now that
-  predictions flow it will accumulate. Calibration is still `"identity"` (none
-  fitted yet — needs data).
+## ⚙️ Merge policy (NEW — applies every session)
+Finished + green work **auto-merges to `main`** without asking (owner-authorized;
+see CLAUDE.md "Merge policy"). **HANDOFF.md is refreshed automatically as part of
+every such change** (this section + the "Shipped" entries) — no need to be asked. `main` is the deploy branch (GitHub Relay syncs it
+to/from the Repl). **The one gate is a data-safety guard:** before merging, `git
+fetch origin main` and inspect commits that exist ONLY on `main` (`git log --stat
+origin/main ^<branch>`); if any add/modify real file content (NOT the empty
+"Published your App" syncs), merge `origin/main` INTO the branch first and verify
+the merge drops no `main`-only lines/files — then merge back. If a merge would
+delete data that only exists on `main`, STOP and report. (This already caught a
+6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## 🔴 Immediate next step
-**Let it bake and watch the accuracy readout.** Nothing to build for accuracy
-right now — the binding constraint is resolved data, not the model.
-- `curl -s localhost:8000/api/q15-v9-5/accuracy | python3 -m json.tool`
-- Wait for **≥30** resolved (trust) / **≥50** (promotion gate) before judging.
-- Judge on **`champion_skill_vs_market`** (>0 = beats the Kalshi line),
-  **`calibration_error_ece`** (0 = perfect), and **`realized_avg_cents`** — NOT raw
-  % accuracy. When a checkpoint's verdict flips to `PROMOTION_CANDIDATE`, that's
-  the (evidence-based) signal to manually promote the challenger.
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
+**Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3
+fixes from a fresh reliability review (the rest of the review's findings were
+either debunked on verification — e.g. the "KeyError in `_harvest_and_submit`"
+and "leaked executor" were misreads — or filed as Medium/optional follow-ups).
 
-## Shipped this session (all merged to `main`, latest HEAD `3105cab`)
-1. **THE FIX — false `AVOID_INVALID_DATA`** (`analysis.py`,
-   `test_q15_snapshot_time_core_age.py`). Root cause: the v9.4/v9.5 "core age"
-   staleness checks resolve the snapshot observe-time via `_first_value`, which
-   *walks the whole snapshot* for any `timestamp`/`ts`/`updated_at`-ish key — and
-   nothing ever set an authoritative one, so it latched onto a stale nested
-   timestamp and tripped `stale_core_snapshot` → `AVOID_INVALID_DATA` for all 7
-   assets, persistently, regardless of feed freshness. Fix: `build_snapshot` now
-   stamps `snapshot_time = now`, which both gates check *first*. Freshness is NOT
-   weakened (v5 spot/book age + the 90s candle-age check stay; a genuinely
-   un-rebuilt snapshot still ages out — locked by test).
-2. **Spot WS enabled** — `Q15_SPOT_WS_ENABLED = "true"` in `.replit`
-   `[userenv.shared]` (same mechanism as `KALSHI_WS_ENABLED`). Per-asset REST
-   fallback, read-only public tickers. `have_ws:true` on the Repl confirms the
-   `websockets` dep is installed there.
-3. **`Q15_FAST_CANONICAL_CANDLES`** (default OFF) — behaviour-identical fast
-   `_canonical_candles` for the two v9.5 call sites (`q15_upgrade/fast_candles.py`,
-   `test_q15_fast_canonical_candles.py` incl. a 400-iter fuzz). ~1.8x on the candle
-   *build*, but that's only tens of ms/cycle — leave it OFF unless chasing compute.
-4. **data_age cuts** (`app.py`, `checkpoint_v91.py`, `test_q15_v91_rolling_batch.py`):
-   - **Decoupled the slow detail fetch.** `client.get_market` (volume, REST, up to
-     ~7s) was the only REST leg left in the per-cycle critical fetch and was
-     blowing the 3s deadline → deferral → aged snapshot. It's now refreshed OFF the
-     critical path into a per-ticker last-good cache (`fetch_market_detail` +
-     `detail_cache` in `refresh_loop`); the critical fetch is WS-only. Closes the
-     ~1.8s deferral gap.
-   - **Batched the v91 rolling read** — `pre_enrich_all` did one Postgres
-     round-trip per asset for `recent_observations`; now one via
-     `recent_observations_for_pairs` (PG `UNION ALL` of the *exact* per-pair query,
-     byte-identical; SQLite stays per-pair). This was the prior handoff's named
-     "last lever".
-5. **OOS reviews-table error spam silenced** (`oos_v9.py`,
-   `test_q15_oos_reviews_table_probe.py`) — `q15_ten_minute_reviews` /
-   `q15_10m_reviews` were never created; probe with `to_regclass()` first, only
-   SELECT what exists.
-6. **Accuracy / promotion-readiness readout** (`q15_upgrade/accuracy_report.py`,
-   `test_q15_accuracy_report.py`) — pure interpreter over `V95Ledger.metrics()`:
-   per-checkpoint verdict (`LEARNING_OFF`/`ACCUMULATING`/`CHALLENGER_NOT_BETTER`/
-   `PROMOTION_CANDIDATE`), ECE, skill-vs-market, challenger-vs-champion p-values,
-   realized edge. `GET /api/q15-v9-5/accuracy` + `/api/health.model_accuracy`.
+1. **Alert send failures are no longer silently dropped** (`window_focus.py`).
+   `notifier.send()`'s return value was ignored: a Telegram 429/400/network blip
+   (send returns falsy) still advanced the alert state as if delivered, so the
+   alert was lost with no retry. New `_claim_and_send()` returns
+   `sent`/`duplicate`/`failed`; on `failed` it **releases the local claim** and
+   the caller does NOT advance state, so the next cycle retries. The dip alert and
+   all three checkpoint sends (15M/10M/7M) route through it. Preserves the
+   intentional anti-starvation advance on a *lost* claim (`duplicate`). Gated
+   `Q15_V95_ALERT_RETRY_ON_SEND_FAILURE` (default ON; OFF = legacy consume-on-fail).
+   ⚠️ The shared claim store's ledger is permanent, so a true re-fire only happens
+   in the common single-process deployment; against a shared store the retry is
+   seen as already-delivered. Either way the failure is now logged, not silent.
+2. **`_claim` now fails CLOSED on a claim-store error** (`window_focus.py`).
+   `store.claim_event()` raising was swallowed (`except: pass`) and then returned
+   `True`, so a transient store outage could let dev+prod each deliver the SAME
+   alert (cross-process duplicate). Now logs and returns `False` (skip this cycle,
+   retry once the store recovers).
+3. **Kalshi REST honors `Retry-After` on 429** (`q15_upgrade/kalshi_rest.py`).
+   429 backoff ignored the server's `Retry-After`; now parsed (delta-seconds or
+   HTTP-date) and used on the retry paths (e.g. discovery `retries=3`), capped at
+   `_MAX_RETRY_AFTER_SECONDS`=8 so a bad value can't stall the ~1s loop. The
+   per-cycle single-attempt default (`retries=1`) is unchanged on purpose — the
+   loop itself is the retry and the token bucket caps the request rate.
 
-## Key reframes / correct the record
-- **The earlier handoff was WRONG** that `AVOID_INVALID_DATA` keyed on a 3s
-  feed-age gate (`max(spot_age, book_age)`). The actual blocker producing the 7×
-  AVOID was the `stale_core_snapshot` timestamp-walk bug (fixed above). That's why
-  enabling spot WS alone didn't clear it.
-- **Two different `data_age` numbers.** `/api/health.data_age_seconds` =
-  `now − engine.last_update_ts` ≈ the **cycle period** (~3.5–5s). It does NOT gate
-  predictions. The gates use spot/target/time *presence* + a 30s core-age + 90s
-  candle-age.
-- **parent_chain (~2.0s) is mostly GIL-bound per-asset compute** (v94 candle
-  analysis), not DB. DB round-trips are now minimal. Further cuts need either the
-  flagged candle path or the high-risk decoupled-ingest loop.
+New tests: `test_q15_alert_send_retry.py` (claim fail-closed, `_claim_and_send`
+tri-state, dip retry on/off) + `test_q15_kalshi_retry_after.py` (header parse /
+cap / fallback). Suite: **588 passed, 4 skipped** (was 574).
 
-## Levers still open (none urgent — predictions flow + accuracy doesn't gate)
-- **Decoupled fast-ingest loop** to push `data_age` < 3s: run a tight ~1s
-  fetch/ingest loop independent of the heavy chain. Biggest data_age win but real
-  concurrency risk on a money path → flag it + test hard. LOW ROI now (data_age
-  doesn't gate; ENTRY alerts gated by `min_settled:30` anyway).
-- **Fit a real calibrator** once ≥~50 resolved (replace `identity`). Needs data.
-- **Trim cruft**: collapse the duplicated `q15_v9_1..v9_5` health blocks; retire
-  dead layers. Heavy ~7k-line frozen stack is hard to trust with money.
-- NOT WORTH IT: thread-parallelising the per-asset chain (GIL-bound + already
-  batched/lock-serialised → ~zero reward, high risk).
+## ✅ Shipped THIS session — part 2 (branch `claude/read-handoff-ipxm5a`, MERGED to `main` @ `4954e7b`)
+**Not yet deployed — needs a Repl reboot to take effect.** Newer work, on top of part 1:
 
-## Repo state & workflow
-- Dev branch this session: **`claude/vibrant-franklin-x16oqb`** (pushed, even with
-  origin). `main` carries the full history; merges go straight to `main` (the
-  GitHub Relay auto-syncs `main` ⇄ Repl ~20s, never force-push, and also pushes
-  Repl-side `"Published your App"` commits to `main` — reconcile with
-  `git fetch origin main` before pushing). Commit identity: `user.name Claude`,
-  `user.email noreply@anthropic.com`.
-- **Code** changes need only the relay sync + **Stop ▸ Run** to load. **Env**
-  changes (`.replit [userenv.shared]`) need a real restart/reboot — Stop▸Run may
-  not re-read `.replit`; if `spot_ws.enabled` stays false after a code restart,
-  set the var in Replit **Secrets** instead.
+A. **Flip-warning report in the interval-scoreboard table format** (`reporting.py`):
+   the old free-text `MANIPULATION WARNING PERFORMANCE` block now renders as the same
+   aligned W-L/Acc/P-L grid as the intervals (`_flip_scoreboard`/`_flip_row`), by
+   checkpoint/direction/asset, plus a learned flip-rate-by-risk mini-table.
+B. **Flip 70% hit-rate gate** (owner: "the 70% is for flips"): a HIGH FLIP RISK
+   warning is DORMANT until the learned flip-rate for the current risk bucket is
+   reliably ≥70% — its **95% Wilson LOWER bound** must clear `Q15_V95_FLIP_MIN_HITRATE`
+   (0.70). Bootstraps from background settled flips; thin samples ⇒ wide CI ⇒ stays
+   quiet. `flip_risk.wilson_lower_bound`/`bucket_flip_reliability`;
+   `Q15_V95_FLIP_REQUIRE_HITRATE` (ON). Stacks with the existing require-learned gate.
+C. **One ACTIVE prediction per timeframe + pushed-vs-background accuracy**
+   (`Q15_V95_ONE_ACTIVE_PER_TIMEFRAME`, ON): once an entry is recommended + delivered,
+   that contract holds the checkpoint's slot (`pushed_slots` table) until it closes —
+   no 2nd push for the same time frame while live. New `pushed` column marks delivered
+   entries; `scoreboard()` reports `by_pushed` (pushed vs background) and the hourly
+   report + checkpoint alert show pushed-only accuracy (background never inflates it).
+D. **One follow-up check per interval** (`Q15_V95_ENTRY_FOLLOWUP_ENABLED`, ON): on a
+   delivered entry, arm exactly ONE follow-up per (contract, interval) — fires once
+   after `Q15_V95_FOLLOWUP_DELAY_SECONDS` (120) confirming still-valid / side-changed /
+   hold / take-profit / avoid / exit, then never repeats. `entry_followups` table;
+   `build_followup_message`/`_followup_verdict`/`_dispatch_entry_followups`. Per
+   (ticker, checkpoint) so 15M never blocks 10M. Eligible: 15M+10M. "FOLLOW-UP" added
+   to the notifier actionable allowlist so it's never muted.
+E. **Best Entry top/detail consistency** (fixed the BNB-on-top-while-BTC-is-#1 bug):
+   the `🏆 BEST ENTRY` block is now `_best_entry()` = rank #1 of the QUALIFYING entries
+   from the SAME `rank_analyses` ordering the detail renders (executable trade score,
+   not confidence-only `_best_pick`). Only ENTRY_RECOMMENDED assets qualify; none ⇒
+   `NO ENTRY RECOMMENDED`. `_best_entry_consistent` guard suppresses the alert if top
+   ≠ detail #1. New top format (asset/side, interval, status, prob, recommended entry,
+   conservative net edge, follow-up remaining).
+F. **Scalp engine DISABLED by default** (`alert_config.py`: `SCALP_ENABLED` default
+   False) — owner-directed; `ScalpEngine.evaluate` short-circuits. Re-enable with
+   `SCALP_ENABLED=true`.
+G. **NO-ENTRY checkpoints muted entirely** (`Q15_V95_SEND_ONLY_ON_ENTRY`, default
+   ON): `run_cycle` does not send the checkpoint alert when `best_entry is None`,
+   so you're only messaged on a recommended entry — independent of the notifier
+   alert level (hard-mutes the "multiple NO ENTRY per interval" the owner saw).
+   Flip / follow-up alerts are separate and unaffected; the dashboard still shows
+   everything. ⚠️ If symptoms persist after a Repl restart, suspect the **GitHub
+   Relay is PAUSED on a conflict** so the Repl never received the merged code —
+   check the *GitHub Relay* console and `python3 tools/github_reconcile.py`.
+H. **`health_snapshot.json` untracked + git-ignored** — it's a generated file the
+   Repl rewrites, so tracking it made the relay conflict on every sync and stall
+   deploys. Removed from the repo (local/Repl copy kept). If a future session sees
+   it reappear tracked, re-ignore it.
 
-## New env flags (all optional)
-`Q15_SPOT_WS_ENABLED` (now ON via .replit) / `Q15_SPOT_WS_MAX_AGE_SECONDS` (3) ·
-`Q15_FAST_CANONICAL_CANDLES` (default OFF) · `Q15_CYCLE_WATCHDOG_SECONDS` (10) ·
-`Q15_WATCHDOG_ALERT_*` · `Q15_V95_RECONCILE_BUDGET_SECONDS` (4) /
-`Q15_RECONCILE_BUDGET_SECONDS` (4) · `Q15_V95_SLOW_CYCLE_SECONDS` (10) ·
-`Q15_V95_PROMOTION_MIN_ROWS` (50) / `Q15_V95_PROMOTION_ALPHA` (0.05).
+## ✅ Shipped THIS session — part 1 (branch `claude/read-handoff-ipxm5a`, MERGED to `main`)
+**Not yet deployed — needs a Repl reboot to take effect.** Order of work:
+
+1. **Review-hardening** (closed the prior review's gaps): extracted + unit-tested
+   the loop's rollover/in-flight logic (`_fetch_result_is_current`,
+   `_resolve_cached_detail`, `_harvest_and_submit` in `app.py`); None-contract
+   fixes (`analysis.ingest_trades`, `spot_client` WS `ok`+`price` gate);
+   `_two_sided_p` returns 1.0 (not 0.0) for non-finite t; top-level `ledger`
+   block in `/api/health`; fixed two leaky test teardowns.
+2. **Model-improvement flags flipped DEFAULT-ON + scoreboard RESET** (owner-directed):
+   `Q15_V95_REGIME_AWARE_ANCHOR`, `Q15_V95_EVIDENCE_COVERAGE_PENALTY` (0.0→0.08),
+   `Q15_V95_PRODUCTION_CALIBRATION_ENABLED`, `Q15_V95_15M_SHADOW_LEARNING` are now
+   ON in code. **`MODEL_VERSION` bumped `…-v1`→`q15-v9.5.2-…-v2`** to start the
+   scoreboard fresh (non-destructive; everything keys on `model_version`).
+   ⚠️ **7M shadow learning stays OFF** — the `checkpoint_challenger_*` tables'
+   CHECK constraint only admits `'10M'/'15M'`; enabling 7M raises IntegrityError
+   on every 7M resolution. Needs a `'7M'` schema migration first.
+3. **Manipulation tracking** (`_manipulation_signal` in `checkpoint_v95.py`): a
+   read-only suspected-manipulation flag (pin / order-wall absorption / cross-
+   exchange divergence) recorded per prediction, broken down in the scoreboard
+   (`by_manipulation` suspected-vs-clean + by-tell), tagged on the checkpoint
+   alert. Gated `Q15_V95_MANIPULATION_*` (default ON). Owner chose to KEEP it
+   (retire later via `Q15_V95_MANIPULATION_ALERT_TAG=false` once flip-risk matures).
+4. **Hourly report `10M RANK PERFORMANCE` section** + ledger `rank_by_checkpoint`
+   (rank #1/#2/#3 within each interval, not blended).
+5. **Flip-risk subsystem** (the big one — new module `q15_upgrade/flip_risk.py`):
+   measures whether the FROZEN prediction is at risk of flipping. Three SEPARATE
+   values — 0-100 manipulation/flip RISK score + confidence (missing data lowers
+   confidence, never the score), learned flip PROBABILITY (historical flip rate of
+   the score's bucket), learned THRESHOLD (per checkpoint/direction/asset, ≥30-sample
+   gate → overall fallback). Flip = frozen 15M≠10M, 10M≠7M, or resolution-opposite;
+   YES→NO and NO→YES separate. Point-in-time learning from resolved contracts only
+   (`ledger.flip_stats`/`_flip_observations`/`flip_warnings` table). Gated alert
+   state machine (threshold + 3-obs persistence + ≥2 evidence categories + flip-prob
+   + confidence + 90s cooldown + hysteresis + re-arm); NORMAL/WATCH silent, only
+   HIGH FLIP RISK + CONFIRMED FLIP send. Dashboard block + `MANIPULATION WARNING
+   PERFORMANCE` report section. **Posture: HIGH FLIP RISK alerts are DORMANT until
+   a learned threshold exists** (`Q15_V95_FLIP_ALERTS_REQUIRE_LEARNED` ON) — so
+   nothing fires until ~30 flips accrue (days). All `Q15_V95_FLIP_*`, default ON.
+6. **Single-panel Telegram layout** for BOTH the checkpoint alert and the hourly
+   report: the whole body now renders inside ONE `<pre>` block; only the bold
+   title / `Hourly Report —` header stays outside (markers + reformatter-bypass).
+
+🔴 **Immediate next step: reboot the Repl** to deploy all of the above. Then bake —
+the fresh scoreboard + flip history must accumulate (≥30 settled per checkpoint /
+per flip direction) before the new defaults can be judged or HIGH FLIP RISK alerts
+can fire. Judge on skill-vs-market / calibration ECE / realized cents, not raw %.
+
+📊 **Optional: old-deployment history.** Owner has prior-deployment data; if sent,
+treat as PRIOR-VERSION reference (audit + calibration fit), NOT folded into the
+freshly-reset board (it's under the old `MODEL_VERSION`/config and has no
+historical flip-risk scores, so it can't bootstrap flip-learning).
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — alerts, UI, learning priority
+Four-part request — fewer/expiring alerts, consistent UI, richer prediction
+cards, and a 10-minute learning priority with per-interval metrics.
+1. **One alert per *material* verdict + auto-expiry** (`checkpoint_v95.py`). The
+   notification key now embeds the best pick's material state (coin/side/grade)
+   via `_material_token`, so an unchanged verdict is deduplicated and only a real
+   direction/confidence-band change (or an entry appearing/withdrawing, still via
+   the state machine) sends a replacement. `_decision_signature` keys on the
+   single best pick (not top-3). `_checkpoint_expired` auto-expires each interval
+   (15M at 10:00, 10M at 7:00, 7M at `Q15_V95_7M_EXPIRY_SECONDS`=120 before close)
+   so a 7-minute alert no longer lingers to market close.
+2. **Stability trend** (`_stability_marker`): each prediction is tagged stable /
+   strengthening / weakening / changed per (asset, checkpoint, window).
+3. **UI consistency** (`format_telegram_message`): the legacy v94 reformatter is
+   now disabled by default (`Q15_V95_LEGACY_FALLBACK_FORMAT`, default OFF) so no
+   message renders in the old layout; `V9.5 CHECK` + the canonical hourly report
+   still own their clean output.
+4. **Richer prediction cards** (`templates/index.html` + new `q15_v9_5_*`
+   snapshot keys): interval, side, grade (A high / B moderate / C low-developing),
+   confidence %, P(Yes)/P(No) (sum ~100%), timestamp, time-remaining, and the
+   stability trend; expired predictions dim.
+5. **10-minute learning priority** (`ledger_v95.py`): configurable primary sample
+   weight (`Q15_V95_PRIMARY_LEARNING_WEIGHT`=1.25), and per-interval metrics in
+   `scoreboard()` — precision/recall for Yes & No, FPR/FNR, by-confidence-grade,
+   and prediction-stability (change-rate) via new columns
+   (`confidence_grade`/`original_predicted_side`/`changed_before_close`) +
+   `note_prediction_revision`. 7M/15M keep collecting + grading; 10M just trains
+   heavier. Displayed confidence is unchanged — validate real lift OOS.
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — review follow-ups (rating → ~8.5)
+Implemented the "how to raise the rating" list from the code review. Every
+model-behavior change is **default-OFF** behind a `Q15_*` flag (shadow-validate
+first) so production output is byte-identical until enabled.
+- **Loop + concurrency tests** (`tests/test_app_refresh_loop.py`,
+  `test_app_concurrent_routes.py`) — the biggest gap. Added a test-only seam:
+  `refresh_loop(max_cycles=…)` and `Q15_AUTOSTART_REFRESH=0` (skip autostart on
+  import). Tests drive a real cycle (no network), prove `ct.safe`/discovery
+  exception isolation, and hammer `/api/snapshot|summary` from many threads
+  against a writer to prove the `state_lock` contract (no deadlock / 500).
+- **Regime-aware market anchor** (`Q15_V95_REGIME_AWARE_ANCHOR`,
+  `_regime_anchor_strength` in `checkpoint_v95.py`): shrinks model deviation from
+  the market in noisy regimes (high-vol / divergence / pin), full deviation in
+  clean trends. Knobs `..._SENSITIVITY`, `..._MIN_FACTOR`.
+- **Evidence-coverage confidence penalty** (`Q15_V95_EVIDENCE_COVERAGE_PENALTY`):
+  thin evidence now widens the conservative haircut toward 0.5 instead of reading
+  as a clean neutral — the "no data ≠ neutral" fix.
+- **Pinned the frozen model constants**: `CHAMPION_WEIGHTS` and the new named
+  `_EVIDENCE_QUALITY_WEIGHTS` (was an inline literal) are documented and locked by
+  `tests/test_q15_v95_weights.py` so an accidental edit fails loudly.
+- **Public-feed circuit breaker** (`market_data_v95.py`,
+  `Q15_V95_PUBLIC_BREAKER_THRESHOLD`/`_COOLDOWN_SECONDS`, default 5/30s): per-asset
+  backoff after repeated all-source failures; `health()["breaker_open_assets"]`.
+- **Ledger observability**: Platt fit now logs non-convergence and returns
+  `converged`/`iterations`; unparseable `feature_json` rows increment
+  `dropped_feature_rows` (in ledger `stats()`) instead of vanishing silently.
+- Skipped from the list: full `Q15_*`→dataclass centralization (too large/risky
+  vs value for the frozen-adjacent engine; flagged as polish). The per-loop
+  executor item was a false positive — it's already created once before `while`.
+
+## ✅ Shipped (branch `claude/read-handoff-e79js5`) — Telegram UX + alert dedup
+Verified live first: speedup (~4.5s → ~2.3–2.6s) and the checkpoint-label fix
+(saw `7M` in `/predictions`, impossible under the old all-`15M` bug).
+1. **Checkpoint alert restyled to the hourly-report look** (`build_v95_message`,
+   `checkpoint_v95.py`). Bold header (keeps `V9.5 CHECK` + `ENTRY/NO ENTRY`),
+   one-line headline, a `<pre>` monospace table (asset · side · model P · market
+   P · edge), an `ask→max` economics line per live entry, unavailable picks
+   listed below. `augment_telegram_message` (`calibrated_edge.py`) now skips any
+   `V9.5 CHECK` message so the clean table isn't followed by a `V9 TRADE QUALITY`
+   block.
+2. **Eastern time on the report** (`reporting.py`): header renders
+   `America/New_York` (auto EST/EDT) via `_eastern_header`; `tzdata` added to
+   `requirements.txt`. Dedup/claim key stays UTC (whole-hour offset → same firing
+   moment).
+3. **Hourly scoreboard always shows 15M/10M/7M** (`_sb_row(..., placeholder=True)`
+   for the checkpoint group) — empty buckets render `0-0  —  —` instead of
+   vanishing, so 10M/7M are visible as they start accumulating.
+4. **"4 alerts at the 10m mark" → exactly one, only once decided**
+   (`checkpoint_v95.py`). Root cause: `_notification_identity` keyed the dedup on
+   the top-ranked **ticker**, which churns as edges jitter → a fresh key + send
+   per leader. Now keyed per **(checkpoint, 15-min market window)**
+   (`Q15_V95_SINGLE_ALERT_PER_CHECKPOINT`, default ON). Plus a stability gate
+   `_decision_settled`: holds the alert until the top-3 (asset/side/entry)
+   signature is stable for `Q15_V95_DECISION_STABILITY_CYCLES` (default 3) cycles,
+   with a force-send fallback as the band closes
+   (`Q15_V95_DECISION_FORCE_MARGIN_SECONDS`, default 60). NOTE: a genuine
+   WATCH→ENTRY upgrade after the first send still re-fires (intentional — don't
+   miss a real entry); only jitter is suppressed.
+   **Timing fix:** the detection bands (660s/480s) made the alert fire at band
+   *entry* — 10M at ~11:00 and 7M at ~8:00 remaining (~1 min early). The gate now
+   holds each alert until the clock reaches its **named minute**
+   (`_CHECKPOINT_TARGET_SECONDS` = 900/600/420s; `Q15_V95_FIRE_AT_CHECKPOINT_MARK`
+   default ON, `Q15_V95_CHECKPOINT_MARK_TOLERANCE_SECONDS` default 15) so 15M/10M/7M
+   land on time.
+5. **Hourly report "14 min late"**: scheduling code is correct (fires every ~1s at
+   the UTC boundary). Owner confirmed Always-On, so cause is restarts. Added
+   send-time logging (`:NN past the hour`) + a restart catch-up
+   (`Q15_HOURLY_CATCHUP_MINUTES`, default 5) so a restart shortly after the hour
+   still delivers (claim_event keeps it idempotent). Watch the logs to confirm.
+
+Tests: `450 passed, 4 skipped`. New: `test_q15_v95_single_alert.py`; updated
+checkpoint-message + scoreboard + calibrated-edge tests for the new format.
+**Still TODO on Replit:** set `Q15_ALERT_LEVEL_10M=all` / `_7M=all` in Secrets to
+actually receive the 10m/7m checks (else muted as `NO ENTRY YET` under `balanced`).
+
+## ✅ Shipped prior session (branch `claude/hand-off-report-ezzh3s`, merged to `main`)
+1. **THE FIX — 10m/7m checkpoints never fired** (`checkpoint_v95.py`,
+   `test_q15_v95_checkpoint_time_authoritative.py`). Root cause: `_detect_checkpoint`
+   (inherited, frozen) consults a recursive snapshot key-walk + the buffered
+   parent message text BEFORE its time fallback. The parent emits a
+   `30M CHART CONTEXT — PRIOR 15M + CURRENT 15M` header (contains "15M", never
+   "10M"), so every cycle was labeled **15M** regardless of clock. Confirmed live:
+   `/predictions` said `15M` at the 10-min mark and the ledger held 37 resolved
+   rows ALL under 15M (zero 10M/7M). Since checkpoint drives both the alert event
+   key and the ledger bucket, this suppressed every 10m/7m alert and starved their
+   scoreboards. Fix: `_resolve_checkpoint` resolves time-first from
+   `seconds_remaining` (same 660/480 boundaries), heuristics only when no time.
+   Gated `Q15_V95_TIME_AUTHORITATIVE_CHECKPOINT` (default ON).
+2. **Per-checkpoint alert levels** (`notifier.py`, `test_q15_alert_suppression.py`).
+   `Q15_ALERT_LEVEL_10M` / `_7M` / `_15M` override the global `Q15_ALERT_LEVEL`
+   per checkpoint (keyed off the header label). Unset → inherit global (default
+   behaviour unchanged). Lets the owner get 10m/7m checks delivered even when the
+   verdict is `NO ENTRY YET`, while 15m stays muted under `balanced`.
+3. **Muted the `V9.5 STARTUP` Telegram spam** (`notifier.py`). The
+   "canonical analysis is not ready" placeholder (emitted before the first v9.5
+   cycle populates globals — re-opens on every restart) is now a non-actionable
+   marker → muted under `balanced`, still visible under `all` + in /api/health.
+4. **Speedup ~4.5s → ~2.3–2.6s/cycle** (no model-output change):
+   - **Ledger caches** (`ledger_v95.py`, `test_q15_v95_ledger_cache.py`):
+     `calibrate` (12-iter Platt/Newton over ≤2500 rows), `pattern_similarity`
+     (500-row fetch + JSON parse), and `challenger_weights` were recomputed per
+     asset per ~1s cycle but only change every ~30s. Now memoized against a
+     monotonic data version bumped in `resolve_ticker` + `_apply_shadow_update`;
+     cache hit is byte-identical. `calibrate` split into a cached fit + cheap
+     apply. Kill-switch `Q15_V95_LEDGER_CACHE=false`. (~0.3–0.65s)
+   - **`Q15_FAST_CANONICAL_CANDLES` default flipped ON** (fuzz-locked identical;
+     `=false` reverts).
+   - **Disabled the legacy v9.4 unified loop** (`.replit [userenv.shared]`
+     `Q15_V94_UNIFIED_ENABLED = "false"`). v9.5 reads ZERO `q15_v9_4_unified_*`
+     fields yet that loop ran a full second per-asset model every cycle (~1.6s)
+     only to be discarded. The flag short-circuits `v94_unified.run_cycle` right
+     after `super().run_cycle()`, which still produces the dual-window context
+     v9.5 needs. Trade-off (owner-approved): `/api/q15-v9-4/unified/*` endpoints,
+     `q15_v9_4_unified_*` snapshot keys, and the v9.4 15M learning ledger go dark
+     — all superseded by v9.5.
+5. **Per-stage profiler for `analyse_v95`** (`checkpoint_v95.py`,
+   `test_q15_v95_feature_profile.py`). `Q15_V95_PROFILE_FEATURES=true` (default
+   OFF) times each feature/model/ledger stage → `/api/health.q15_v9_5.feature_profile`
+   ranked by total time. Use it to pick the next optimisation target in `analyse_v95`.
+
+## 🔴 Immediate next steps (deploy + verify, then bake)
+- **Deploy:** code changes load on Repl **Stop ▸ Run** after pulling `main`. The
+  **`.replit` env change (`Q15_V94_UNIFIED_ENABLED`) needs a real RESTART/REBOOT**
+  (Stop▸Run may not re-read `.replit`); if it stays enabled, set the var in
+  Replit **Secrets** instead.
+- **For 10m/7m Telegram pings:** set `Q15_ALERT_LEVEL_10M=all` + `Q15_ALERT_LEVEL_7M=all`
+  in Secrets (else they stay muted as `NO ENTRY YET` under `balanced`).
+- **Verify speedup:** `curl /api/health` → `cycle_watchdog.last_cycle_seconds`
+  should be ~2.3–2.6s; `q15_v9_5.run_cycle_timing.parent_chain` should drop ~1.6s.
+- **Verify the fix:** at the 10-min mark `curl /api/q15-v9-5/predictions` →
+  `checkpoint` should now print `10M` (was `15M`). 10m/7m will start appearing in
+  the hourly report once they settle.
+- **Then bake.** Wait for ≥30 resolved (trust) / ≥50 (promotion) PER checkpoint.
+  Judge on `champion_skill_vs_market`, `calibration_error_ece`, `realized_avg_cents`
+  — not raw %. Calibration is still `identity` (ECE ~0.07); fit a real calibrator
+  once ≥~50 resolved.
+
+## Why "no entry" (asked + answered — it's intended, not a bug)
+The v9.5 ladder (`analyse_v95` ~lines 790–810) needs BOTH ≥0.60 conservative
+win-prob AND ≥6¢ net edge after costs at 10m (0.58/4¢ at 15m). `conservative =
+selected − ~0.08`, and `selected` is **market-anchored** (`Q15_V95_MARKET_ANCHOR_STRENGTH=1.0`)
+toward the ~50/50 Kalshi line, so it rarely clears the bar. Scoreboard (54% acc,
+−480¢ realized over 37) confirms the model hasn't earned the right to deviate —
+suppressing entries is correct. The fix is data + calibration, NOT looser gates.
+Levers (use with caution): `Q15_V95_10M_MIN_PROBABILITY`,
+`Q15_V95_10M_REQUIRED_EDGE_CENTS`, `Q15_V95_MARKET_ANCHOR_STRENGTH`.
+
+## Levers still open
+- **Next compute cut:** turn on `Q15_V95_PROFILE_FEATURES`, read
+  `feature_profile`, optimise the top `analyse_v95` stage behaviour-identically.
+  Remaining parent cost (`v94_super_chain` ~0.4s) is frozen + produces the context
+  v9.5 needs — hard to cut safely.
+- Fit a real calibrator once ≥~50 resolved (replace `identity`).
+- DOGE spot-WS tick age runs >3s (thin feed) → uses REST last-good fallback;
+  fine, only touch if you want fresher DOGE spot.
 
 ## Invariants — do not break
 - Read-only; nothing places a real exchange order (the human trades manually).
 - Champion weights FROZEN; only the shadow challenger learns; promotion is manual +
   significance-tested. Gate model-behavior changes behind default-OFF `Q15_*` flags.
+- Don't edit the frozen `checkpoint_v91..v94*` chain except owner-approved,
+  behaviour-IDENTICAL, test-locked changes. This session deliberately avoided
+  frozen-chain edits (the ~1.6s win was the existing `Q15_V94_UNIFIED_ENABLED` flag).
 - Keep `V9.5 CHECK` + `ENTRY RECOMMENDED`/`NO ENTRY YET` markers in checkpoint
   messages; keep the `Hourly Report —` header. Keep `.env.example` free of real
-  secret-scanner patterns. Don't edit the frozen `checkpoint_v91..v94*` chain
-  except for owner-approved, behaviour-IDENTICAL, test-locked round-trip cuts
-  (e.g. this session's v91 rolling batch).
+  secret-scanner patterns.
+
+## Repo state & workflow
+- Dev branch this session: **`claude/hand-off-report-ezzh3s`** (merged to `main`).
+  The GitHub Relay auto-syncs `main` ⇄ Repl ~20s (never force-push; also pushes
+  Repl-side "Published your App" commits to `main` — `git fetch origin main`
+  before pushing). Commit identity: `user.name Claude`, `user.email noreply@anthropic.com`.
+
+## New env flags this session (all optional)
+`Q15_V95_TIME_AUTHORITATIVE_CHECKPOINT` (ON) · `Q15_ALERT_LEVEL_10M` / `_7M` /
+`_15M` (inherit global) · `Q15_V95_LEDGER_CACHE` (ON) ·
+`Q15_FAST_CANONICAL_CANDLES` (now ON) · `Q15_V94_UNIFIED_ENABLED` (now false via
+.replit) · `Q15_V95_PROFILE_FEATURES` (OFF).
 
 ## Gotchas
-- Data is sparse until markets settle — don't tune on tiny samples (3/3 is noise).
-- For binaries, **calibration + skill-vs-market + edge** beat raw % accuracy.
-- `MarketResultCache` (`market_cache.py`) caches only resolved markets; unresolved
-  ones are re-fetched live each cycle (root of the old reconcile-stall bugs).
-- Market detail/volume is now last-good (refreshed off the critical fetch); it's
-  keyed by ticker so a rollover never reuses the prior market's volume.
+- Data is sparse until markets settle — don't tune on tiny samples.
+- For binaries, calibration + skill-vs-market + edge beat raw % accuracy.
+- After the checkpoint fix, the prior 37 resolved rows remain labeled 15M; 10M/7M
+  scoreboards correctly start from 0 and accumulate going forward.
