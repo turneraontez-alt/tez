@@ -120,7 +120,7 @@ python3 -m pytest -q
 ```
 app.py                  Flask app + refresh loop
 db.py                   PostgreSQL signal store
-telegram/               All pure Telegram code (one package)
+notifications/          All pure Telegram code (one package)
   notifier.py           Telegram delivery + suppression
   outbox_v9.py          Reliable Telegram outbox
   reporting.py          Hourly performance report

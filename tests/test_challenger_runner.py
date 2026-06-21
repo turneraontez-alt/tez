@@ -10,7 +10,7 @@ sys.path.insert(0, ROOT)
 
 from q15_upgrade.challenger.config import ChallengerConfig
 from q15_upgrade.challenger.runner import ShadowRunner, _build_snapshot
-import telegram.notifier as notifier_mod
+import notifications.notifier as notifier_mod
 
 
 def _cfg(tmp):

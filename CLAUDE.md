@@ -30,7 +30,7 @@ checkpoints, sends Telegram alerts, and learns from officially settled results.
   Platt calibration, shadow challenger (global + per-regime), the scoreboard
   (accuracy / P&L / Wilson CIs by interval, rank, asset) and significance-tested
   promotion. SQLite at `data/`.
-- `telegram/` — **all PURE Telegram code in one package**: `notifier.py` (delivery +
+- `notifications/` — **all PURE Telegram code in one package**: `notifier.py` (delivery +
   `should_suppress_alert`), `outbox_v9.py` (reliable retry outbox), `reporting.py`
   (hourly report), `panels_v95.py` (checkpoint/ranked/recap panels),
   `manipulation_alert.py`, `alert_config.py`. NOTE: the legacy `format_telegram_message`

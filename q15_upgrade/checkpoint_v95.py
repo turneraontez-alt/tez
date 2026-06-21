@@ -53,8 +53,8 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import shadow_factors as cross_asset
 from . import shadow_economics
-from telegram import manipulation_alert
-from telegram import panels_v95
+from notifications import manipulation_alert
+from notifications import panels_v95
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,

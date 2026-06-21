@@ -14,7 +14,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-from telegram import panels_v95
+from notifications import panels_v95
 from q15_upgrade.checkpoint_v95 import (
     _build_ranked_picks, _entry_score, _extract_pick,
 )
