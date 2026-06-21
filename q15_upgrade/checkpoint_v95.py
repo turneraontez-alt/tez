@@ -1868,6 +1868,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             consistent = _best_entry_consistent(analyses, ranking)
             if not consistent:
                 logger.error("V9.5 best-entry mismatch — suppressing alert (top != detail rank #1)")
+            # Entry-only delivery (default ON): when nothing qualifies as a
+            # recommended entry, do not send the checkpoint alert at all — so you
+            # only ever get messaged on an actual entry. This hard-mutes every
+            # "NO ENTRY" checkpoint regardless of the notifier alert level; the
+            # full picture is still on the dashboard. Flip / follow-up alerts are
+            # separate and unaffected.
+            entry_only = _env_bool("Q15_V95_SEND_ONLY_ON_ENTRY", True)
+            no_entry_muted = entry_only and best_entry is None
             # One active prediction per timeframe: if a different, still-open
             # contract already holds this checkpoint's slot, do not push a second
             # prediction for the same time frame — leave the active one untouched.
@@ -1876,7 +1884,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 one_active and top_entry_ticker is not None
                 and self.ledger.pushed_slot_blocks(checkpoint, top_entry_ticker, now)
             )
-            if message and consistent and not slot_locked and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+            if message and consistent and not slot_locked and not no_entry_muted and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
                 event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
                 previous = self.ledger.notification_state(event_key)
                 state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
@@ -1903,7 +1911,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                             )
                 else:
                     self._telegram_suppressed_v95 += 1
-            elif slot_locked or not consistent:
+            elif slot_locked or not consistent or no_entry_muted:
                 self._telegram_suppressed_v95 += 1
             # Fire any due follow-up checks (exactly one per contract+interval).
             fu_sent, fu_failed = self._dispatch_entry_followups(canonicals, analyses, notifier, now)

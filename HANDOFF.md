@@ -93,6 +93,18 @@ E. **Best Entry top/detail consistency** (fixed the BNB-on-top-while-BTC-is-#1 b
 F. **Scalp engine DISABLED by default** (`alert_config.py`: `SCALP_ENABLED` default
    False) — owner-directed; `ScalpEngine.evaluate` short-circuits. Re-enable with
    `SCALP_ENABLED=true`.
+G. **NO-ENTRY checkpoints muted entirely** (`Q15_V95_SEND_ONLY_ON_ENTRY`, default
+   ON): `run_cycle` does not send the checkpoint alert when `best_entry is None`,
+   so you're only messaged on a recommended entry — independent of the notifier
+   alert level (hard-mutes the "multiple NO ENTRY per interval" the owner saw).
+   Flip / follow-up alerts are separate and unaffected; the dashboard still shows
+   everything. ⚠️ If symptoms persist after a Repl restart, suspect the **GitHub
+   Relay is PAUSED on a conflict** so the Repl never received the merged code —
+   check the *GitHub Relay* console and `python3 tools/github_reconcile.py`.
+H. **`health_snapshot.json` untracked + git-ignored** — it's a generated file the
+   Repl rewrites, so tracking it made the relay conflict on every sync and stall
+   deploys. Removed from the repo (local/Repl copy kept). If a future session sees
+   it reappear tracked, re-ignore it.
 
 ## ✅ Shipped THIS session — part 1 (branch `claude/read-handoff-ipxm5a`, MERGED to `main`)
 **Not yet deployed — needs a Repl reboot to take effect.** Order of work:
