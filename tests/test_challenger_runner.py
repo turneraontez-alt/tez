@@ -267,6 +267,36 @@ class RankedComparisonTest(unittest.TestCase):
         # The 15M #1 pick is graded (BTC YES vs YES -> correct).
         self.assertIn("BTC YES ✓", end)
 
+    def test_end_result_grid_fills_each_interval_from_its_own_window(self):
+        # "Try its best on each one": 10M must NOT go blank just because its latest
+        # settled window is older than 15M's. Each interval fills from its own window.
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        self._insert(r, asset="BTC", checkpoint="15M", close=18000, chal=0.8, ctrl=0.8, official="YES")  # newer window
+        self._insert(r, asset="ETH", checkpoint="10M", close=9000, chal=0.7, ctrl=0.7, official="YES")   # older window
+        grid = r.ledger.best_filled_window_cases(model_version="challenger-test")
+        self.assertIn("15M", grid["checkpoints"])
+        self.assertIn("10M", grid["checkpoints"])  # not dropped despite the older window
+        end = r.report_message().replace("<pre>", "").replace("</pre>", "")
+        end = end.split("END-RESULT CALL", 1)[1].split("ALL-TIME RANK RESULTS", 1)[0]
+        self.assertIn("BTC YES", end)  # 15M filled
+        self.assertIn("ETH YES", end)  # 10M filled from ITS own (older) window
+
+    def test_end_result_grid_prefers_fuller_window_to_fill_ranks(self):
+        # When the newest window is sparse (1 asset) but an older one is full (3),
+        # the grid picks the fuller window so #1/#2/#3 are filled with real picks.
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        self._insert(r, asset="XRP", checkpoint="15M", close=18000, chal=0.9, ctrl=0.9, official="YES")  # newest, sparse
+        for a, (ch, ct, of) in {"BTC": (0.8, 0.8, "YES"), "ETH": (0.2, 0.3, "NO"),
+                                "SOL": (0.7, 0.6, "YES")}.items():
+            self._insert(r, asset=a, checkpoint="15M", close=9000, chal=ch, ctrl=ct, official=of)  # older, full
+        ranked = r.ledger.best_filled_window_cases(model_version="challenger-test", top_k=3)
+        fifteen = ranked["checkpoints"]["15M"]["challenger"]
+        self.assertEqual(len(fifteen), 3)  # all three ranks filled
+        self.assertEqual({a for a, _, _ in fifteen}, {"BTC", "ETH", "SOL"})  # chose the fuller window
+        self.assertNotIn("XRP", {a for a, _, _ in fifteen})
+
     def test_distinct_cases_by_checkpoint_and_window(self):
         tmp = tempfile.mkdtemp()
         r = ShadowRunner(_cfg(tmp))

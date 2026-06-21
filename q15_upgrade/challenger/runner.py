@@ -276,19 +276,25 @@ class ShadowRunner:
                     n = self._pick(nvk[i] if i < len(nvk) else None)
                     body.append(f"#{i+1} Shadow: {c} | Yours: {n}")
 
-        # ---- END-RESULT CALL: the latest settled window's ranked #1/#2/#3 picks at
-        # EVERY interval (15M/10M/7M), Shadow vs Your System, each graded against the
-        # actual settled result (✓/✗). Every interval and every rank is always shown
-        # — a slot with no pick reads — rather than being omitted — so the grid is
-        # never silently truncated to whichever interval happened to have a pick. ----
-        if win["close"]:
+        # ---- END-RESULT CALL: ranked #1/#2/#3 picks at EVERY interval (15M/10M/7M),
+        # Shadow vs Your System, graded against the settled result (✓/✗). It "tries its
+        # best on each one": each interval is filled from its OWN most-recent settled
+        # window that best fills the ranks (prefer a window with >= top_k graded picks,
+        # else the fullest), so 10M/7M no longer go blank just because their latest
+        # settled window is older than 15M's, and #2/#3 fill whenever a recent window
+        # had that many assets. A slot only reads — when no settled pick exists for it
+        # at all. Each interval is labelled with its own window time (they can differ). ----
+        grid = self.ledger.best_filled_window_cases(model_version=mv, top_k=top_k,
+                                                    native_sent_only=sent_only)
+        if grid["checkpoints"]:
             body += ["", "END-RESULT CALL · 15M, 10M & 7M",
                      "✓ = correct | ✗ = wrong | — = no pick"]
             for cp in cps:
-                picks = win["checkpoints"].get(cp) or {}
-                cpk = picks.get("challenger") or []
-                nvk = picks.get("native") or []
-                body += ["", cp]
+                slot = grid["checkpoints"].get(cp) or {}
+                cpk = slot.get("challenger") or []
+                nvk = slot.get("native") or []
+                when = fmt_eastern_hm(slot["close"]) if slot.get("close") else None
+                body += ["", f"{cp} · {when}" if when else cp]
                 for i in range(top_k):
                     c = self._pick(cpk[i] if i < len(cpk) else None)
                     n = self._pick(nvk[i] if i < len(nvk) else None)
