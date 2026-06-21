@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **588 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **603 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -23,7 +23,54 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — review-fix batch
+**Merged to `main` — not yet deployed (needs a Repl reboot to take effect).**
+Ran a fresh fan-out review (decision engine 7/10, learning 6.5/10, app+loop 6.5/10,
+overall **7.0/10**), then implemented the Highest/Medium/Polish fixes it surfaced.
+Every model-behavior change is flag-gated; shadow-only changes never touch frozen
+champion output. Suite **589 → 603 passed, 4 skipped** (+14 tests).
+
+1. **Primary-learner boost actually applies** (`ledger_v95.py:_apply_shadow_update`).
+   A legacy `min(1.0, sample_weight*primary_learning_weight)` clamp erased the 10M
+   1.25× boost for exactly the high-quality rows whose base weight already hit 1.0,
+   so 10M learned no faster than 15M. The boosted weight now scales fully (bounded
+   by the per-result + total-drift caps, so >1.0 is safe). Gated
+   `Q15_V95_PRIMARY_LEARNING_BOOST` (default ON; OFF = legacy clamp). Shadow-only.
+2. **Platt identity fallback** (`ledger_v95._calibration_fit`). An unconverged /
+   near-singular fit no longer silently transforms live probabilities — it reverts
+   to identity (raw passes through), flagged `fallback=identity_unconverged` +
+   `reason=platt_unconverged_identity`, counted in `status().calibration_unconverged_fallbacks`.
+   Gated `Q15_V95_CALIBRATION_REQUIRE_CONVERGED` (default ON). Newton budget now
+   `Q15_V95_CALIBRATION_MAX_ITERS` (default 12, behaviour-identical; makes the
+   fallback deterministically testable).
+3. **App enrichment exceptions no longer freeze state** (`app.py` refresh loop). The
+   enrichment pipeline ran under `ct.time` (re-raises), so one stage's exception
+   skipped `state.update(snaps)` (stale dashboard for ALL assets) AND every
+   best-effort subsystem below. Wrapped in try/finally → partial snapshot always
+   published; `deep_evaluation_snapshots` isolated so signals/scalp/report/learn
+   still run.
+4. **Regime schema guard** (`ledger_v95.py`): `regime_challenger_weights` now carries
+   the same `CHECK(checkpoint IN ('10M','15M'))` as its siblings (fresh DBs), so an
+   accidental 7M write fails loudly instead of contaminating regime learning.
+5. **Missing-close_time is no longer silent** (`window_focus._maybe_notify`): when a
+   market is near a checkpoint but `close_key` is empty (degraded feed), a throttled
+   (60s) WARNING surfaces the dropped alert instead of returning silently.
+6. **Unknown-depth liquidity penalty** (`checkpoint_v95.analyse_v95`): when the
+   orderbook is unavailable (`depth=None`), optionally discount `liquidity_quality`
+   so an unverifiable book ranks below a confirmed-liquid one. Gated
+   `Q15_V95_PENALIZE_UNKNOWN_DEPTH` (default OFF) / `Q15_V95_UNKNOWN_DEPTH_FACTOR`
+   (0.5). Ranking-only — never an entry gate, so it cannot place a trade.
+
+**Debunked on verification (no change made):** the review's "checkpoint_v95 entry
+alerts don't retry on send failure" was a FALSE POSITIVE — `complete_notification(
+success=False)` clears `reserved_until` without setting `sent_at`, so the next cycle
+re-reserves and retries. Left the working state machine untouched.
+
+New tests: `test_q15_ledger_review_fixes.py` (boost / Platt fallback / regime CHECK),
+`test_q15_v95.py` (gated unknown-depth penalty), `test_app_refresh_loop.py`
+(enrichment-stage isolation), `test_q15_alert_send_retry.py` (empty-close_key warn).
+
+## ✅ Shipped (branch `claude/read-hand-off-5ou5op`, merged to `main`) — alert-delivery hardening
 **Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3
 fixes from a fresh reliability review (the rest of the review's findings were
 either debunked on verification — e.g. the "KeyError in `_harvest_and_submit`"

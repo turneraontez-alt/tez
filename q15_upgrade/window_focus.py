@@ -357,6 +357,7 @@ class TwoWindowFocusManager:
         self._blocker_counts: Dict[str, int] = defaultdict(int)
         self._last_error: Optional[str] = None
         self._breaker_active = False
+        self._empty_close_key_warned_at = 0.0
         self._migrate()
         # Final 10m prediction self-review (read-only post-mortems + bounded
         # auto-adaptation of decision thresholds). Hydrating the engine re-applies
@@ -1377,10 +1378,23 @@ class TwoWindowFocusManager:
     def _maybe_notify(self, close_key: str, snapshots: Mapping[str, dict], now: float) -> None:
         if not self.settings.telegram_enabled or self.notifier is None or not getattr(self.notifier, "enabled", False):
             return
-        if not close_key:
-            return  # no close_time -> cannot build a unique per-market claim key
         seconds_values = [_num(snap.get("seconds_remaining")) for snap in snapshots.values()]
         seconds_values = [value for value in seconds_values if value is not None]
+        if not close_key:
+            # No close_time -> cannot build a unique per-market claim key, so the
+            # checkpoint alert is dropped. That is correct, but it must not be
+            # SILENT: if a market is actually near a checkpoint we'd otherwise
+            # fire on, a degraded feed is costing the owner alerts. Warn (throttled
+            # to once a minute) so it surfaces instead of vanishing.
+            due = bool(seconds_values) and min(seconds_values) <= self.settings.alert_15_at_seconds
+            if due and (now - self._empty_close_key_warned_at) >= 60.0:
+                self._empty_close_key_warned_at = now
+                logger.warning(
+                    "Checkpoint alert skipped: missing close_time (empty close_key) while a "
+                    "market is %.0fs from close — degraded feed is suppressing alerts.",
+                    min(seconds_values),
+                )
+            return
         if not seconds_values:
             return
         seconds = min(seconds_values)

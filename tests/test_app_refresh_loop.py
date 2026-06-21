@@ -75,6 +75,33 @@ class TestRefreshLoopResilience(unittest.TestCase):
             published = set(appmod.state.keys())
         self.assertEqual(published, set(appmod.ASSETS))
 
+    def test_enrichment_stage_failure_still_publishes_and_completes(self):
+        # Enrichment stages run under ct.time (re-raises), not ct.safe. A raise in
+        # one stage must NOT (a) freeze the dashboard by skipping state.update, nor
+        # (b) skip the best-effort subsystems + _last_cycle_ok below it. The inner
+        # try/finally guarantees the snapshot is still published and the cycle runs
+        # to completion (proven by _last_cycle_ok being set).
+        orig = appmod.professional_v7.observe_all
+
+        def boom(*a, **k):
+            raise RuntimeError("enrichment blew up")
+
+        appmod.professional_v7.observe_all = boom
+        try:
+            appmod.refresh_loop(max_cycles=1)
+        finally:
+            appmod.professional_v7.observe_all = orig
+        self.assertIsNotNone(
+            appmod._last_cycle_ok,
+            "a failing enrichment stage must not abort the cycle",
+        )
+        with appmod.state_lock:
+            published = set(appmod.state.keys())
+        self.assertEqual(
+            published, set(appmod.ASSETS),
+            "partial snapshot must still be published when an enrichment stage fails",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

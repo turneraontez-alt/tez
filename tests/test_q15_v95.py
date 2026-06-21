@@ -197,6 +197,33 @@ class V95Tests(unittest.TestCase):
         self.assertLess(result["yes_probability"], 0.5)
         self.assertEqual(result["prediction_side"], "NO")
 
+    def test_unknown_depth_penalty_is_gated_and_off_by_default(self):
+        # Strip the Kalshi ask-size depth so _kalshi_depth() returns None (no
+        # orderbook either). Default OFF: a missing/unverifiable book must NOT
+        # silently penalize liquidity. ON: it is discounted by the configured
+        # factor so an unconfirmed book ranks below a confirmed-liquid one. This
+        # only moves trade_quality ranking; it is never an entry gate.
+        row = snapshot(spot=102.0, target=100.0)
+        row.pop("yes_ask_size", None)
+        row.pop("no_ask_size", None)
+        base = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNone(base["quote"]["ask_depth"], "depth should be unknown")
+        lq_off = base["liquidity_quality"]
+        with patch.dict(os.environ, {"Q15_V95_PENALIZE_UNKNOWN_DEPTH": "true",
+                                     "Q15_V95_UNKNOWN_DEPTH_FACTOR": "0.5"}):
+            penalized = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertAlmostEqual(penalized["liquidity_quality"], lq_off * 0.5, places=6)
+
+    def test_known_depth_is_unaffected_by_unknown_depth_flag(self):
+        # With real depth present, the flag is a no-op (the penalty branch only
+        # fires when depth is None).
+        row = snapshot(spot=102.0, target=100.0)  # keeps yes_ask_size/no_ask_size
+        off = analyse_v95(row, self.canonical(row=row), self.ledger)
+        with patch.dict(os.environ, {"Q15_V95_PENALIZE_UNKNOWN_DEPTH": "true"}):
+            on = analyse_v95(row, self.canonical(row=row), self.ledger)
+        self.assertIsNotNone(off["quote"]["ask_depth"])
+        self.assertAlmostEqual(off["liquidity_quality"], on["liquidity_quality"], places=6)
+
     def test_raw_model_signal_is_independent_of_kalshi_price(self):
         # The model's own (raw) probability must not depend on the Kalshi price...
         low = snapshot(ask=25)

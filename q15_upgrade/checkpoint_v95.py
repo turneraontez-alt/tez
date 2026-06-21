@@ -917,6 +917,12 @@ def analyse_v95(
     minimum_quality = _env_float("Q15_V95_MIN_DATA_QUALITY", 0.55, 0.20, 0.95)
     max_spread = _env_float("Q15_V95_MAX_SPREAD_CENTS", 12.0, 1.0, 50.0)
     min_depth = _env_float("Q15_V95_MIN_DEPTH_AT_ASK", 3.0, 0.0, 10000.0)
+    # Unknown depth (orderbook feed unavailable) is not the same as deep liquidity.
+    # When enabled, discount the liquidity component for an unverifiable book so it
+    # ranks below confirmed-liquid markets. Default OFF (model-scoring change); only
+    # affects trade_quality ranking, never the entry gate, so it cannot place a trade.
+    penalize_unknown_depth = _env_bool("Q15_V95_PENALIZE_UNKNOWN_DEPTH", False)
+    unknown_depth_factor = _env_float("Q15_V95_UNKNOWN_DEPTH_FACTOR", 0.5, 0.0, 1.0)
     min_seconds = _env_float("Q15_V95_MIN_SECONDS_REMAINING", 20.0, 0.0, 300.0)
     total_costs = float(costs.get("total_cents") if "total_cents" in costs else costs.get("total_cost_cents") or 0.0)
     net_edge = None if ask is None else conservative * 100.0 - ask - total_costs
@@ -926,6 +932,8 @@ def analyse_v95(
         liquidity_quality *= _clamp(1.0 - spread / max(max_spread * 1.5, 1.0), 0.0, 1.0)
     if depth is not None and min_depth > 0:
         liquidity_quality *= _clamp(depth / min_depth, 0.0, 1.0)
+    elif depth is None and penalize_unknown_depth:
+        liquidity_quality *= unknown_depth_factor
     if quote_age is not None:
         liquidity_quality *= _clamp(math.exp(-max(0.0, quote_age - 5.0) / 20.0), 0.0, 1.0)
     trade_quality = _clamp(0.40 * selected + 0.25 * data_quality + 0.20 * liquidity_quality + 0.15 * _clamp(((net_edge if net_edge is not None else -10.0) + 10.0) / 20.0, 0.0, 1.0), 0.0, 1.0)
