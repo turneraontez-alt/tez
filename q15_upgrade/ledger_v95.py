@@ -894,6 +894,22 @@ class V95Ledger:
             )
             connection.commit()
 
+    def last_official_report_at(self, interval: str) -> float | None:
+        """Most recent delivered-and-locked time for this interval across ALL
+        windows, or None. Backs a per-interval minimum-gap guard that caps the
+        same interval's report to once per window even if the window key is
+        momentarily unstable (e.g. a contract-mapping flip near the boundary)."""
+        if not self._available:
+            return None
+        interval = self._checkpoint(interval)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT MAX(locked_at) AS last FROM official_report_lock "
+                "WHERE model_version=? AND interval=?",
+                (MODEL_VERSION, interval),
+            ).fetchone()
+        return None if row is None or row["last"] is None else float(row["last"])
+
     def official_scoreboard(self) -> dict[str, Any]:
         """Official win/loss record built ONLY from delivered predictions, graded
         against the settled outcome. Interval records (15M/10M/7M) and the entry

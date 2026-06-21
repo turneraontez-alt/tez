@@ -25,6 +25,27 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — per-interval minimum-gap backstop (caps duplicate reports)
+**On the branch, deploy-pending.** Owner still saw multiple 15M/10M/7M reports after the
+always-deliver change (muting had been hiding them). The per-(interval, window) lock is sound
+within one process+DB, so the remaining single-process cause is an unstable window key (a
+contract-mapping flip near the :00/:15/:30/:45 boundary) or a restart re-fire. Added a
+restart-surviving backstop independent of the window key.
+
+- `V95Ledger.last_official_report_at(interval)` = `MAX(locked_at)` over `official_report_lock`
+  for that interval (all windows). `_send_ranked_panel` now refuses to send the SAME interval's
+  report within `Q15_V95_REPORT_MIN_GAP_SECONDS` (default 600, clamp ≤870). Legitimate same-
+  interval reports are ~900s apart (one per 15-min contract), so a sub-900 gap can only ever
+  block a duplicate — never the next window's report. Checked BEFORE the lock claim/send.
+- **Note for next session:** if duplicates persist after this, the cause is almost certainly
+  MULTIPLE BOT INSTANCES sharing the Telegram token (e.g. the Replit editor "Run" process AND a
+  Deployment, each with its own `data/` ledger → separate locks). That is infra, not code — the
+  owner must stop one instance. Asked the owner to confirm instance count.
+- **Tests** (`test_q15_ranked_panel.py`, `test_q15_v95_single_alert.py`): `last_official_report_at`
+  tracks the latest per interval; the gap guard blocks a duplicate before any send/lock. Caught a
+  self-inflicted bug too — an edit had dropped the `official_scoreboard` signature; restored, the
+  full suite is **859 passed, 4 skipped**; app imports clean.
+
 ## ✅ Shipped THIS session — official interval report ALWAYS delivers (fixes empty "Your System")
 **On the branch, deploy-pending.** Owner reported the bot "not putting out anything" and the
 Challenger-Shadow "Your System" record stuck at `0W–0L` while Shadow filled. Root cause: under

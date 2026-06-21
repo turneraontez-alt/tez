@@ -2725,6 +2725,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         if window_close is None:
             return 0, 0
 
+        # Backstop dedup: refuse to send the SAME interval's official report twice
+        # within a minimum gap, regardless of the window key. Legitimate same-
+        # interval reports are one per 15-min contract (~900s apart), so a gap below
+        # that can only ever block a duplicate (an unstable window key from a
+        # contract-mapping flip near the boundary, or a restart re-fire). Default
+        # 600s; never blocks the next window's report.
+        gap = _env_float("Q15_V95_REPORT_MIN_GAP_SECONDS", 600.0, 0.0, 870.0)
+        if gap > 0:
+            last_at = self.ledger.last_official_report_at(str(checkpoint))
+            if last_at is not None and 0.0 <= (now - last_at) < gap:
+                return 0, 0
+
         if self.ledger.report_locked(str(checkpoint), window_close, now):
             return 0, 0  # already officially reported this interval+window — no resend
         picks = _build_ranked_picks(analyses, ranking, top_k=_RANKED_PICK_COUNT)
