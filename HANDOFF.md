@@ -9,9 +9,8 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **805 passed, 12 skipped** in a bare
-container (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully
-installed; ~832/4 in a complete env).
+Tests: `python3 -m pytest tests/ -q` → **924 passed, 4 skipped** in a complete env
+(skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -25,6 +24,70 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — Background shadow-signal experiment (5 new signals + continuous A/B)
+**On branch `claude/updated-review-2x7wyr`.** Adds five experimental signals computed from data the
+system ALREADY collects, recorded next to each prediction, and graded by a continuous, significance-
+tested **out-of-sample** A/B that answers "would this signal improve the probability?" — WITHOUT
+touching the frozen champion or the live probability. Read-only, default-OFF (`Q15_V95_SHADOW_SIGNALS_ENABLED`).
+Suite **924 passed, 4 skipped** (+11 in `tests/test_shadow_signals.py`).
+- **New module `q15_upgrade/shadow_signals.py`:** `compute_signals(analysis, canonical)` →
+  five YES-oriented signals in [-1,1]: `order_flow_persistence` (#5), `book_resiliency` (#6, wick-
+  rejection replenishment proxy), `prediction_stability` (#14, flip-risk → confidence), `entropy_noise`
+  (#17, return-sign Shannon entropy → confidence), `regime_transition` (#18b, regime-boundary proximity
+  → confidence). `evaluate(rows)` fits a 1-parameter logistic *adjustment* on top of the champion prob
+  and measures the **out-of-sample** Brier reduction (time-ordered train/test split) with a paired
+  t-test; `build_report_lines`/`scores_to_dict` render it. All pure/deterministic (no clock/IO).
+- **Storage:** new additive `predictions.shadow_signal_json` column (validated `_ensure_column`
+  migration), written only on fresh insert in the SAME isolated-column pattern as `shadow_factor_json`
+  — never in `feature_json`, so it can never reach champion/challenger/calibration. Backward-compatible.
+- **Recording:** `record_prediction(..., shadow_signals=...)`; `run_cycle` computes them when the flag
+  is on (guarded; a compute failure can't break recording). `ledger.resolved_shadow_signal_rows()` +
+  `ledger.shadow_signal_experiment()` grade settled rows oldest-first.
+- **Reporting/dashboard:** compact "🧪 Experimental signals" block in the hourly Telegram report
+  (`notifications/reporting.py`, default-OFF) + new endpoint `/api/q15-v9-5/shadow-signals`.
+- **Promotion stays manual.** A signal is flagged a promotion candidate only when its out-of-sample
+  Brier reduction clears the floor AND the paired t-test is significant; nothing is auto-applied.
+- **Files:** `q15_upgrade/shadow_signals.py` (new), `q15_upgrade/ledger_v95.py`,
+  `q15_upgrade/checkpoint_v95.py`, `notifications/reporting.py`, `app.py`,
+  `tests/test_shadow_signals.py` (new, 11). **Env:** `Q15_V95_SHADOW_SIGNALS_ENABLED` (default OFF)
+  + `_MIN_ROWS`/`_TRAIN_FRACTION`/`_BRIER_FLOOR`/`_ALPHA`/`_RECENT_CANDLES` tunables.
+
+## ✅ Shipped THIS session — Updated-review fixes (Highest / Medium / Polish)
+**On branch `claude/updated-review-2x7wyr` (not merged to main — session is branch-scoped).**
+Implemented the full improvement list from the latest review. Read-only + frozen-champion
+invariants intact; every model-touching change is default-OFF `Q15_*`-gated. Suite **913 passed,
+4 skipped** (was 893; +20 in `tests/test_review_fixes_v3.py`).
+- **H1 — honest thin-evidence (`checkpoint_v95.analyse_v95` / `build_v95_message`):** evidence
+  coverage is now computed unconditionally and exposed as `evidence_coverage` / `low_evidence` /
+  `absent_features` on the analysis + snapshot (`q15_v9_5_*`). A feature below the coverage floor is
+  *absent* (quality gates it out of the logit — contribution = weight·value·quality), never a neutral
+  0.0 that reads as support. New default-OFF `Q15_V95_LOW_EVIDENCE_FLAG` adds a compact "⚠ Thin
+  evidence" note to the checkpoint card (markers preserved). `Q15_V95_LOW_EVIDENCE_MIN_COVERAGE`
+  (default 0.50) tunes the flag.
+- **H2 — canonical cent precision (new `q15_upgrade/money.py`):** one `Decimal`/banker's-rounding
+  helper shared by the ledger settlement P&L, the scoreboard, the performance store, and the live
+  money path (`net_edge_cents` as a signed edge; `ideal_entry_cents` clamped to a valid `[0,100]¢`
+  price). Kills float noise like `3.3299¢` and impossible `>100¢` levels; ledger/performance now
+  round identically (was 4-dp vs 2-dp).
+- **M1 — structural fail-closed (`analyse_v95`):** if the structural base probability fails to load,
+  the analysis no longer pushes thin volatility-derived features into the ensemble — it returns a
+  `PREDICTION_ONLY` degraded result (`structural_model_unavailable`).
+- **M2 — SQL identifier hardening (`ledger._ensure_column`):** table/column names are validated
+  against a strict identifier whitelist and the DDL must begin with the column name; the last
+  f-string-DDL gap is closed (raises `ValueError` on anything unsafe).
+- **M3 — learning observability:** `_apply_shadow_update` records the effective step magnitude and a
+  throttled "learning effectively frozen" warning when the knobs collapse every step to ~0; surfaced
+  via `status()` (`last_learning_step_magnitude`, `learning_frozen_results`).
+- **P1 — per-checkpoint dropped-row counters:** `dropped_feature_rows_by_checkpoint` so a corruption
+  confined to one interval isn't masked as system-wide (aggregate kept for compatibility).
+- **P2 — Wilson flag:** scoreboard buckets carry `ci_excludes_half`, distinguishing "clean but tiny"
+  (3-0, low_n, straddles 0.5) from "genuinely separated from chance".
+- **P3 — WS data-staleness watchdog (`spot_ws.py`):** forces a reconnect when an *open* socket stops
+  delivering ticks for `Q15_SPOT_WS_DATA_TIMEOUT` (default 45s, 0=off); `health()` now reports
+  `last_message_age_seconds` / `data_stale`.
+- **Files:** `q15_upgrade/money.py` (new), `q15_upgrade/checkpoint_v95.py`, `q15_upgrade/ledger_v95.py`,
+  `performance.py`, `spot_ws.py`, `tests/test_review_fixes_v3.py` (new, 20). **DB:** no schema change
+  beyond the existing additive `_ensure_column` migrations (now validated); fully backward-compatible.
 ## ✅ Shipped THIS session — outbox send_with_result: fix delivery mis-detection (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner asked why the "Your System delivery: 0 sent · 12 failed · 23 pending" delivery was failing.
 **It mostly WASN'T failing — delivery DETECTION was broken.** Production wires

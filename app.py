@@ -855,6 +855,11 @@ def q15_v95_scoreboard_ep():
 def q15_v95_accuracy_ep():
     return jsonify(checkpoint_v95.accuracy_report())
 
+@app.route("/api/q15-v9-5/shadow-signals")
+@app.route("/data/q15-v9-5/shadow-signals")
+def q15_v95_shadow_signals_ep():
+    return jsonify(checkpoint_v95.shadow_signal_experiment())
+
 @app.route("/api/market-cache")
 @app.route("/data/market-cache")
 def market_cache_ep():

@@ -53,6 +53,8 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import shadow_factors as cross_asset
 from . import shadow_economics
+from . import shadow_signals
+from .money import clamp_price_cents, round_edge_cents
 from notifications import manipulation_alert
 from notifications import panels_v95
 from .fast_candles import fast_canonical_candles
@@ -956,6 +958,21 @@ def analyse_v95(
     volatility = _timed(prof, "volatility", _robust_volatility, canonical)
     returns = _timed(prof, "returns", _multi_horizon_returns, canonical)
     structural = _timed(prof, "structural", _structural_probability, canonical, volatility, returns)
+    # Defense-in-depth: the structural base probability is the spine of the model
+    # (every feature is an adjustment to its logit). If it failed to load — a state
+    # the core-validity gate above normally prevents, but which a future feed/edge
+    # case could reach — we must NOT feed thin volatility-derived features into the
+    # ensemble and emit a confident-looking number. Fail closed to a prediction-only
+    # degraded result instead, with the reason surfaced.
+    if not structural.get("available") or structural.get("yes_probability") is None:
+        return {
+            **base_result, "trade_decision": "PREDICTION_ONLY",
+            "main_blocker": "structural_model_unavailable",
+            "yes_probability": None, "no_probability": None, "selected_probability": None,
+            "conservative_probability": None, "data_quality": canonical.data_quality,
+            "evidence_quality": 0.0, "evidence_coverage": 0.0, "low_evidence": True,
+            "absent_features": [], "trade_quality": 0.0,
+        }
     momentum, momentum_q, momentum_d = _timed(prof, "momentum", _momentum_feature, returns, volatility, canonical)
     flow, flow_q, flow_d = _timed(prof, "flow", _flow_feature, snapshot, canonical)
     book, book_q, book_d = _timed(prof, "book", _book_feature, snapshot, canonical)
@@ -1022,17 +1039,31 @@ def analyse_v95(
     uncertainty = 0.018 + (1.0 - data_quality) * 0.12 + float(regime.get("uncertainty", 0.08)) * 0.25
     divergence = _num(exchange_d.get("divergence_bps"), 0.0) or 0.0
     uncertainty += min(0.04, divergence / 1000.0)
+    # Evidence coverage: a feature whose feed is absent has quality 0 and so
+    # contributes NOTHING to the model logit (contribution = weight·value·quality)
+    # — it is treated as missing, never as a neutral/zero signal that masquerades
+    # as support. Coverage = the fraction of features actually backed by data
+    # (quality at/above the floor). It is computed unconditionally so the alert
+    # path can honestly flag a thin snapshot even when the haircut is disabled.
+    coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
+    feature_absent = {name: bool(q < coverage_floor) for name, q in feature_quality.items()}
+    covered = sum(1 for absent in feature_absent.values() if not absent)
+    evidence_coverage = covered / max(1, len(feature_quality))
+    absent_features = sorted(name for name, absent in feature_absent.items() if absent)
     # Evidence-coverage penalty: "insufficient evidence" must read as low
-    # confidence, not as a clean neutral signal. Features that have no data
-    # contribute nothing (quality 0), so a thin snapshot yields low coverage;
-    # low coverage widens the conservative haircut toward 0.5. Default 0.08
-    # (moderate); set to 0.0 to disable, up to 0.20 for a stronger thin-data haircut.
+    # confidence, not as a clean neutral signal. Low coverage widens the
+    # conservative haircut toward 0.5. Default 0.08 (moderate); set to 0.0 to
+    # disable, up to 0.20 for a stronger thin-data haircut.
     coverage_penalty = _env_float("Q15_V95_EVIDENCE_COVERAGE_PENALTY", 0.08, 0.0, 0.20)
     if coverage_penalty > 0.0:
-        coverage_floor = _env_float("Q15_V95_EVIDENCE_COVERAGE_FLOOR", 0.40, 0.0, 1.0)
-        covered = sum(1 for q in feature_quality.values() if q >= coverage_floor)
-        coverage = covered / max(1, len(feature_quality))
-        uncertainty += coverage_penalty * (1.0 - coverage)
+        uncertainty += coverage_penalty * (1.0 - evidence_coverage)
+    # Low-evidence flag: coverage below this fraction means the prediction rests
+    # on too few backed features to be read as well-supported. This is an
+    # observability marker only — it never changes the (frozen) model output or
+    # the entry gate; it surfaces in the snapshot and, when the default-OFF
+    # Q15_V95_LOW_EVIDENCE_FLAG is enabled, as a compact note in the alert.
+    low_evidence_min_coverage = _env_float("Q15_V95_LOW_EVIDENCE_MIN_COVERAGE", 0.50, 0.0, 1.0)
+    low_evidence = evidence_coverage < low_evidence_min_coverage
     conservative = _clamp(selected - uncertainty, 0.01, 0.99)
 
     quote = _selected_quote(snapshot, side)
@@ -1060,8 +1091,13 @@ def analyse_v95(
     unknown_depth_factor = _env_float("Q15_V95_UNKNOWN_DEPTH_FACTOR", 0.5, 0.0, 1.0)
     min_seconds = _env_float("Q15_V95_MIN_SECONDS_REMAINING", 20.0, 0.0, 300.0)
     total_costs = float(costs.get("total_cents") if "total_cents" in costs else costs.get("total_cost_cents") or 0.0)
-    net_edge = None if ask is None else conservative * 100.0 - ask - total_costs
-    ideal_entry = _clamp(conservative * 100.0 - total_costs - required_edge, 0.0, 100.0)
+    # Canonical cent precision on the money path: net_edge is a signed delta
+    # (legitimately negative, not range-bounded); ideal_entry is an absolute
+    # price that must round-trip into Kalshi's [0, 100]¢ range. Both go through
+    # q15_upgrade.money so the displayed/stored values never carry float noise
+    # like "3.3299999¢" or an impossible ">100¢" entry level.
+    net_edge = None if ask is None else round_edge_cents(conservative * 100.0 - ask - total_costs)
+    ideal_entry = clamp_price_cents(conservative * 100.0 - total_costs - required_edge, context="ideal_entry")
     liquidity_quality = 1.0
     if spread is not None:
         liquidity_quality *= _clamp(1.0 - spread / max(max_spread * 1.5, 1.0), 0.0, 1.0)
@@ -1118,6 +1154,9 @@ def analyse_v95(
         "confidence_grade": grade,
         "data_quality": data_quality,
         "evidence_quality": evidence_quality,
+        "evidence_coverage": evidence_coverage,
+        "low_evidence": low_evidence,
+        "absent_features": absent_features,
         "trade_quality": trade_quality,
         "uncertainty_penalty": uncertainty,
         "regime": regime,
@@ -1179,6 +1218,9 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_conservative_probability"] = analysis.get("conservative_probability")
     snapshot["q15_v9_5_data_quality"] = analysis.get("data_quality")
     snapshot["q15_v9_5_evidence_quality"] = analysis.get("evidence_quality")
+    snapshot["q15_v9_5_evidence_coverage"] = analysis.get("evidence_coverage")
+    snapshot["q15_v9_5_low_evidence"] = analysis.get("low_evidence")
+    snapshot["q15_v9_5_absent_features"] = analysis.get("absent_features")
     snapshot["q15_v9_5_trade_quality"] = analysis.get("trade_quality")
     snapshot["q15_v9_5_trade_decision"] = analysis.get("trade_decision")
     # Surface the blocker (e.g. the AVOID_INVALID_DATA core_errors) so the exact
@@ -1461,6 +1503,28 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             body.append("⚠ Manipulation watch")
             for asset, manip in flagged:
                 body.append(f"{asset}: {_manipulation_phrase(manip)}")
+
+    # Thin-evidence watch (default OFF): flag any top pick whose prediction rests
+    # on too few data-backed features, so a confident-looking number is read with
+    # the caveat that it is thinly supported. Observability only — the model and
+    # entry gate are unchanged; the line is compact and never alters the markers.
+    if _env_bool("Q15_V95_LOW_EVIDENCE_FLAG", False):
+        thin = [
+            (str(row["asset"]), analyses.get(str(row["asset"]), {}))
+            for row in top
+        ]
+        thin = [
+            (asset, a) for asset, a in thin
+            if a.get("prediction_available") and a.get("low_evidence")
+        ]
+        if thin:
+            body.append("")
+            body.append("⚠ Thin evidence")
+            for asset, a in thin:
+                cov = _num(a.get("evidence_coverage"))
+                cov_s = f"{cov * 100:.0f}%" if cov is not None else "n/a"
+                missing = ", ".join(a.get("absent_features") or []) or "—"
+                body.append(f"{asset}: {cov_s} backed · missing {missing}")
 
     # Unavailable picks (kept in the box so the whole card is one panel).
     for row in unavailable:
@@ -2244,6 +2308,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 cross_asset.compute_market(analyses)
                 if _env_bool("Q15_V95_SHADOW_FACTORS_ENABLED", True) else None
             )
+            # Experimental shadow-signal config, resolved once per batch (default-OFF).
+            _signals_cfg = shadow_signals.SignalConfig.from_env()
             # ONE shared frozen-snapshot id for this interval's batch. Every asset
             # in this cycle is scored from the same `now` freeze and the same data,
             # and BOTH systems (champion + shadow) are recorded from this single
@@ -2301,6 +2367,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         cross_asset.for_asset(asset, analysis, shadow_market)
                         if shadow_market is not None else None
                     )
+                    # Experimental shadow signals (default-OFF): computed from data
+                    # already on the analysis/canonical, recorded for the background
+                    # A/B only. Never touches the champion or the live probability;
+                    # a computation failure must not break the recording path.
+                    signals_row = None
+                    if _signals_cfg is not None and _signals_cfg.enabled:
+                        try:
+                            signals_row = shadow_signals.compute_signals(analysis, canonical, _signals_cfg)
+                            analysis["shadow_signals"] = signals_row
+                        except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+                            logger.debug("shadow signal compute skipped for %s: %s", asset, exc)
+                            signals_row = None
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -2325,6 +2403,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
                         flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
                         shadow_factors=xfactors_row,
+                        shadow_signals=signals_row,
                         snapshot_id=snapshot_id,
                     )
                     snapshot["q15_v9_5_snapshot_id"] = snapshot_id
@@ -3182,6 +3261,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def scoreboard(self) -> dict[str, Any]:
         """Right/wrong record by interval (15M/10M/7M) and by pick rank (#1/#2/#3)."""
         return {"version": VERSION, "read_only": True, **self.ledger.scoreboard()}
+
+    def shadow_signal_experiment(self) -> dict[str, Any]:
+        """Background A/B for the five experimental signals: out-of-sample Brier
+        change vs the champion, with significance. Read-only; promotion is manual."""
+        return {"version": VERSION, "read_only": True, **self.ledger.shadow_signal_experiment()}
 
     def accuracy_report(self) -> dict[str, Any]:
         """Honest accuracy / promotion-readiness readout over the ledger metrics."""
