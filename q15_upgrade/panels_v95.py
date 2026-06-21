@@ -189,7 +189,12 @@ def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[st
     cp = str(checkpoint).upper()
     any_entry = any(bool(p and p.get("is_entry")) for p in picks)
     marker = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
-    header = f"🔎 <b>V9.5 CHECK — {_esc(cp)} · {marker}</b>"
+    # "TOP 3 PICKS" stamps this as the OFFICIAL per-interval report (one per window,
+    # carrying the three ranked final-outcome picks). The notifier always delivers
+    # it — even on a NO-ENTRY interval — so the owner sees every interval check and
+    # the visible record / Shadow-vs-Yours comparison fills. The ENTRY RECOMMENDED /
+    # NO ENTRY YET marker is preserved for the formatter + record chain.
+    header = f"🔎 <b>V9.5 CHECK — {_esc(cp)} · TOP 3 PICKS · {marker}</b>"
 
     body: list[str] = [f"{_esc(cp)} CHECK", ""]
 

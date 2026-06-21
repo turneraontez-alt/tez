@@ -194,5 +194,40 @@ class TestSendSuppression(unittest.TestCase):
         self.assertEqual(len(self.posted), 1)
 
 
+class TestOfficialIntervalReportAlwaysDelivers(unittest.TestCase):
+    """The official per-interval report (the 'TOP 3 PICKS' ranked check) must be
+    delivered every interval — even with NO ENTRY — so the visible record and the
+    Shadow-vs-Yours comparison fill. Routine checks stay muted as before."""
+
+    # An official NO-ENTRY report carries both 'TOP 3 PICKS' and 'NO ENTRY YET'.
+    OFFICIAL = "🔎 <b>V9.5 CHECK — 15M · TOP 3 PICKS · NO ENTRY YET</b>\nbody"
+    ROUTINE = "👀 <b>15M V9.5 CHECK · NO ENTRY YET</b>\nbody"
+
+    def setUp(self):
+        self._saved = {k: os.environ.pop(k, None) for k in (
+            "Q15_ALERT_LEVEL", "Q15_V95_RANKED_REPORT_ALWAYS_DELIVER",
+        )}
+        os.environ["Q15_ALERT_LEVEL"] = "balanced"
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_official_report_delivers_under_balanced(self):
+        self.assertFalse(should_suppress_alert(self.OFFICIAL))   # delivered
+        self.assertTrue(should_suppress_alert(self.ROUTINE))     # routine still muted
+
+    def test_flag_off_restores_muting(self):
+        os.environ["Q15_V95_RANKED_REPORT_ALWAYS_DELIVER"] = "false"
+        self.assertTrue(should_suppress_alert(self.OFFICIAL))     # muted again (rollback)
+
+    def test_entry_official_report_still_delivers(self):
+        msg = "🔎 <b>V9.5 CHECK — 10M · TOP 3 PICKS · ENTRY RECOMMENDED</b>\nbody"
+        self.assertFalse(should_suppress_alert(msg))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -117,6 +117,7 @@ class RankedPanelFormatTest(unittest.TestCase):
         msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="10M", picks=picks)
         # marker preservation (suppression + per-checkpoint level key)
         self.assertIn("V9.5 CHECK", msg)
+        self.assertIn("TOP 3 PICKS", msg)        # official-report always-deliver stamp
         self.assertIn("10M CHECK", msg)
         self.assertIn("ENTRY RECOMMENDED", msg)  # BTC is an entry -> actionable
         self.assertEqual(msg.count("<pre>"), 1)
