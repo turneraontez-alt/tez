@@ -2697,10 +2697,19 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         if not self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
             return 0, 0
         # Window close basis = the top-ranked pick's contract close (all assets in
-        # the checkpoint share the 15-min window).
+        # the checkpoint share the 15-min window). This close time is the ONLY
+        # stable key for the one-report-per-window lock: it is fixed for the whole
+        # band regardless of wall-clock cycle. If it is unknown this cycle (the
+        # canonical for the top asset has not been built yet), DO NOT send — a
+        # ``None`` basis falls back to ``now // 900``, which buckets into a
+        # different window than the real settlement time and lets a second report
+        # fire once the canonical appears. Wait one cycle for the real close so the
+        # interval is reported exactly once.
         top_asset = str(ranking[0].get("asset"))
         top_canon = canonicals.get(top_asset)
         window_close = top_canon.settlement_time if top_canon is not None else None
+        if window_close is None:
+            return 0, 0
 
         if self.ledger.report_locked(str(checkpoint), window_close, now):
             return 0, 0  # already officially reported this interval+window — no resend

@@ -52,7 +52,17 @@ changed. Read-only + frozen-champion invariants intact.
 - **Tests** (`tests/test_q15_ranked_panel.py`): rewrote the panel-format suite for the
   compact layout + new fields (flip arrow gating, manipulation `— WAIT`, ENTER/WAIT/SKIP,
   `Sample: —` when no calibration, confidence oriented to the predicted side). Full suite
-  **805 passed, 12 skipped**; `import app` starts the refresh loop cleanly.
+  **836 passed, 4 skipped**; `import app` starts the refresh loop cleanly.
+- **One-report-per-interval fix** (`checkpoint_v95._send_ranked_panel`): the official
+  interval report is now suppressed when the top asset's settlement window is unknown
+  (`window_close is None`). A `None` close fell back to `now // 900` — a DIFFERENT bucket
+  than the real settlement window — so once the canonical appeared the per-window lock saw
+  a fresh key and a SECOND report fired. Now it waits one cycle for the real close, so the
+  lock key is always the settlement window and the interval is delivered exactly once.
+  The deliberate "take its time, but within the minute" behavior is the existing
+  `_decision_settled` gate (stable verdict for `Q15_V95_DECISION_STABILITY_CYCLES` cycles +
+  hold until the named 15:00/10:00/7:00 mark + a force-send safety net as the band closes).
+  Regression test in `tests/test_q15_v95_single_alert.py`.
 
 ## ✅ Shipped (branch `claude/shadow-system-reset-aeilgv`) — RESET the Challenger Shadow vs Your System comparison on deploy
 **On the branch, deploy-pending (needs a Repl restart to pick up the `model_version`
