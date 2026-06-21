@@ -122,8 +122,25 @@ def train_predictor(
         return ShadowPredictor(cfg, make_model(cfg), make_calibrator("identity")), info
 
     n_cal = max(5, int(n * calib_tail_fraction))
-    fit_X, fit_y = X[: n - n_cal], y[: n - n_cal]
-    cal_X, cal_y = X[n - n_cal:], y[n - n_cal:]
+    split = n - n_cal
+    ts = [float(t) for t in timestamps]
+    horizon = float(cfg.horizon_seconds)
+    cal_start_ts = ts[split]
+    # Point-in-time embargo at the fit/calibration boundary: drop fit rows whose
+    # label window [t, t+horizon] reaches into the calibration slice, so the
+    # calibrator is never fit on outcomes that temporally overlap the model's
+    # training labels (the tail-calibration leakage the review flagged).
+    fit_idx = [i for i in range(split) if ts[i] + horizon <= cal_start_ts]
+    fit_X = [X[i] for i in fit_idx]
+    fit_y = [y[i] for i in fit_idx]
+    cal_X, cal_y = X[split:], y[split:]
+    info["embargoed_fit_rows"] = split - len(fit_idx)
+    # If the embargo leaves too little / single-class training data, fall back to
+    # the un-embargoed split rather than degrade the live shadow fit.
+    if len(fit_y) < cfg.min_train_rows or len(set(fit_y)) < 2:
+        fit_X, fit_y = X[:split], y[:split]
+        info["embargoed_fit_rows"] = 0
+        info["embargo_skipped"] = True
     if len(set(fit_y)) < 2:
         info["fitted"] = False
         info["reason"] = "single_class_after_split"
