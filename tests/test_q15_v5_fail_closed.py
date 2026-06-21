@@ -144,3 +144,44 @@ def test_apply_snapshot_freshness_flags_crossed_book():
     out = apply_snapshot_freshness(snap, raw, now)
     assert out["v5_data_valid"] is False
     assert "crossed_orderbook" in out["v5_data_invalid_reasons"]
+
+
+def _fresh_book(now):
+    # A valid, two-sided, fresh orderbook so the only failing axis is the spot.
+    return {"yes_bid": 40.0, "yes_ask": 60.0}
+
+
+def test_stale_spot_fallback_is_gated_by_true_age(monkeypatch):
+    # The spot client serves a bounded last-good fallback with ts re-stamped to
+    # `now` (for candle continuity) but the original event time kept. The gate must
+    # judge freshness on the TRUE age, not the re-stamped one.
+    monkeypatch.delenv("Q15_V5_GATE_STALE_SPOT", raising=False)
+    now = 1000.0
+    spot = {"ok": True, "ts": now, "stale": True, "original_ts": now - 25.0}
+    raw = {"source": "rest", "spot": spot, "fetch_completed_at": now, "trades": []}
+    out = apply_snapshot_freshness(_fresh_book(now), raw, now)
+    assert out["v5_data_valid"] is False, "a 25s-old underlying must not read as fresh"
+    assert any(r.startswith("spot_stale_") for r in out["v5_data_invalid_reasons"])
+    # The reported age reflects the real underlying age, not 0s.
+    assert out["spot_age_seconds"] >= 24.0
+
+
+def test_stale_spot_within_max_age_still_valid(monkeypatch):
+    # A fallback whose true age is within the freshness budget stays valid.
+    monkeypatch.delenv("Q15_V5_GATE_STALE_SPOT", raising=False)
+    monkeypatch.setenv("Q15_V5_MAX_SOURCE_AGE_S", "5.0")
+    now = 1000.0
+    spot = {"ok": True, "ts": now, "stale": True, "original_ts": now - 2.0}
+    raw = {"source": "rest", "spot": spot, "fetch_completed_at": now, "trades": []}
+    out = apply_snapshot_freshness(_fresh_book(now), raw, now)
+    assert out["v5_data_valid"] is True
+
+
+def test_stale_spot_gate_can_be_disabled(monkeypatch):
+    # With the gate OFF, the legacy behavior (re-stamped ts reads as fresh) holds.
+    monkeypatch.setenv("Q15_V5_GATE_STALE_SPOT", "0")
+    now = 1000.0
+    spot = {"ok": True, "ts": now, "stale": True, "original_ts": now - 25.0}
+    raw = {"source": "rest", "spot": spot, "fetch_completed_at": now, "trades": []}
+    out = apply_snapshot_freshness(_fresh_book(now), raw, now)
+    assert out["v5_data_valid"] is True, "disabled gate trusts the re-stamped ts"

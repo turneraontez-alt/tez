@@ -333,6 +333,13 @@ class PublicMarketDataHub:
         self._successes = 0
         self._failures = 0
         self._last_error: str | None = None
+        # Per-asset circuit breaker: after N consecutive all-source failures stop
+        # hammering that asset's feeds for a cooldown window (just retry less; the
+        # snapshot still serves last-good/unavailable). threshold 0 disables it.
+        self.breaker_threshold = _env_int("Q15_V95_PUBLIC_BREAKER_THRESHOLD", 5, 0, 1000)
+        self.breaker_cooldown = _env_float("Q15_V95_PUBLIC_BREAKER_COOLDOWN_SECONDS", 30.0, 0.0, 600.0)
+        self._consecutive_failures: dict[str, int] = {}
+        self._open_until: dict[str, float] = {}
 
     def _pool(self) -> ThreadPoolExecutor:
         if self._executor is None:
@@ -354,6 +361,8 @@ class PublicMarketDataHub:
                 future = self._inflight.get(asset)
                 if future is not None and not future.done():
                     continue
+                if now < self._open_until.get(asset, 0.0):
+                    continue  # circuit open: back off after repeated failures
                 if now - self._requested_at.get(asset, 0.0) < self.refresh_seconds:
                     continue
                 self._requested_at[asset] = now
@@ -380,6 +389,8 @@ class PublicMarketDataHub:
                 self._cache[asset] = result
                 self._successes += 1
                 self._last_error = None
+                self._consecutive_failures[asset] = 0
+                self._open_until.pop(asset, None)
                 price = _num(result.get("composite_price"))
                 timestamp = _num(result.get("fetched_at"), time.time()) or time.time()
                 if price is not None and price > 0:
@@ -400,6 +411,10 @@ class PublicMarketDataHub:
                 self._failures += 1
                 errors = result.get("source_errors") or {}
                 self._last_error = ";".join(f"{k}:{v}" for k, v in errors.items())[:500] or "no_public_source"
+                streak = self._consecutive_failures.get(asset, 0) + 1
+                self._consecutive_failures[asset] = streak
+                if self.breaker_threshold > 0 and streak >= self.breaker_threshold:
+                    self._open_until[asset] = (_num(result.get("fetched_at"), time.time()) or time.time()) + self.breaker_cooldown
 
     def snapshot(self, asset: str, now: float | None = None) -> dict[str, Any]:
         now = now or time.time()
@@ -709,6 +724,8 @@ class PublicMarketDataHub:
         with self._lock:
             cached_assets = sorted(self._cache)
             inflight_assets = sorted(asset for asset, future in self._inflight.items() if not future.done())
+            now = time.time()
+            open_assets = sorted(a for a, until in self._open_until.items() if now < until)
         return {
             "version": VERSION,
             "enabled": self.enabled,
@@ -720,6 +737,7 @@ class PublicMarketDataHub:
             "last_error": self._last_error,
             "cached_assets": cached_assets,
             "inflight_assets": inflight_assets,
+            "breaker_open_assets": open_assets,
             "settings": {
                 "refresh_seconds": self.refresh_seconds,
                 "stale_seconds": self.stale_seconds,

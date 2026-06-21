@@ -58,3 +58,17 @@ outputType = "console"
 [userenv.shared]
 KALSHI_WS_ENABLED = "true"
 Q15_SPOT_WS_ENABLED = "true"
+# v9.5 is authoritative; the legacy v9.4 "unified" loop (~1.6s/cycle) is computed
+# then fully discarded by v9.5. Disable it to cut cycle time. Trade-off: the
+# /api/q15-v9-4/unified/* endpoints, q15_v9_4_unified_* snapshot keys, and the
+# v9.4 15M learning ledger go dark (all superseded by v9.5). Re-enable with "true".
+Q15_V94_UNIFIED_ENABLED = "false"
+Q15_ALERT_LEVEL_10M = "all"
+Q15_ALERT_LEVEL_7M = "all"
+Q15_V95_PROFILE_FEATURES = "true"
+# Read-only challenger SHADOW: runs beside the champion, records paired
+# predictions, learns from its own settled results, and reports per-15-min
+# accuracy (challenger vs current system). NOT primary — never drives live
+# output (Q15_CHALLENGER_AS_PRIMARY stays false).
+Q15_CHALLENGER_ENABLED = "true"
+Q15_CHALLENGER_AS_PRIMARY = "false"

@@ -1,5 +1,12 @@
 # CLAUDE.md — agent guide
 
+> **READ FIRST — every session, before any other file:**
+> [`ENGINEERING_GUIDELINES.md`](ENGINEERING_GUIDELINES.md) is the staff-engineer
+> meta-prompt and the standing engineering standard for this repo. Read it before
+> starting any code task and apply its substantive rules (failure modes,
+> idempotency, stale-feed/WebSocket handling, `Decimal` for prices, parameterized
+> SQL, narrow exception handling, deterministic tests, adversarial self-review).
+
 Read-only paper-trading monitor for Kalshi 15-minute crypto binaries
 (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE). It predicts YES/NO at the 15m / 10m / 7m
 checkpoints, sends Telegram alerts, and learns from officially settled results.
@@ -33,6 +40,29 @@ checkpoints, sends Telegram alerts, and learns from officially settled results.
 `checkpoint_v91/v92/v93/v94/v94_unified/v94_adaptive15.py` are frozen legacy
 layers (~7k lines). v95 subclasses the chain:
 `v95 → v94_unified → v94 → v93 → v92 → v91`. They work; skip them otherwise.
+
+## Merge policy (standing authorization — every session)
+The owner has authorized auto-merging finished work to `main` in **all** sessions.
+After completing a task and confirming the full suite passes
+(`python3 -m pytest tests/ -q`), merge the working branch into `main` and push —
+no need to ask each time. `main` is the deploy branch (GitHub Relay syncs it
+to/from the Repl). Procedure:
+1. `git fetch origin main` first (Relay pushes empty "Published your App" commits
+   to `main`; fetching avoids non-FF surprises).
+2. **Data-safety guard (the only gate): never let a merge delete existing data.**
+   Inspect `git log --stat origin/main ^<branch>` for commits that exist only on
+   `main`. If any of them *add or modify file content* (new data — not the empty
+   "Published your App" commits), the merge MUST preserve it: merge `origin/main`
+   in first / resolve keeping that content, and verify the merge diff removes no
+   `main`-only lines or files. If a merge would drop data that exists only on
+   `main`, STOP and tell the owner instead of merging.
+3. **Update `HANDOFF.md` as part of the same change**, before merging: add/refresh
+   a "Shipped THIS session" entry for the work, bump the test count, and note the
+   deploy-pending state. The handoff is kept current automatically — don't wait to
+   be asked.
+4. Merge with `--no-ff` and push `main`, then return to the working branch.
+Only merge when tests are green and the data-safety guard passes; otherwise stay
+on the branch and report why.
 
 ## Invariants (do not break)
 - Read-only. Nothing touches a real exchange order.

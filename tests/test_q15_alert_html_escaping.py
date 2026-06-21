@@ -2,7 +2,23 @@ from __future__ import annotations
 
 import unittest
 
-from q15_upgrade.window_focus import TwoWindowFocusManager
+from q15_upgrade.window_focus import TwoWindowFocusManager, _esc
+
+
+class EscQuoteTest(unittest.TestCase):
+    """_esc now escapes quotes (quote=True) so a value that ever lands inside a
+    quoted HTML attribute cannot break out of it, while the existing <, >, &
+    escaping (the cause of Telegram 'can't parse entities' 400s) is preserved."""
+
+    def test_quotes_are_escaped(self):
+        self.assertEqual(_esc('say "hi"'), "say &quot;hi&quot;")
+        self.assertEqual(_esc("o'clock"), "o&#x27;clock")
+
+    def test_angle_and_amp_still_escaped(self):
+        self.assertEqual(_esc("a < b & c > d"), "a &lt; b &amp; c &gt; d")
+
+    def test_none_is_empty(self):
+        self.assertEqual(_esc(None), "")
 
 
 class AlertHtmlEscapingTest(unittest.TestCase):
