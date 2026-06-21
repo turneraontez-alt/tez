@@ -49,7 +49,11 @@ to/from the Repl). Procedure:
    in first / resolve keeping that content, and verify the merge diff removes no
    `main`-only lines or files. If a merge would drop data that exists only on
    `main`, STOP and tell the owner instead of merging.
-3. Merge with `--no-ff` and push `main`, then return to the working branch.
+3. **Update `HANDOFF.md` as part of the same change**, before merging: add/refresh
+   a "Shipped THIS session" entry for the work, bump the test count, and note the
+   deploy-pending state. The handoff is kept current automatically — don't wait to
+   be asked.
+4. Merge with `--no-ff` and push `main`, then return to the working branch.
 Only merge when tests are green and the data-safety guard passes; otherwise stay
 on the branch and report why.
 
