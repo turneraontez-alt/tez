@@ -1786,6 +1786,37 @@ class V95Ledger:
             })
         return out
 
+    def resolved_economics_rows(self, checkpoint: str | None = None) -> list[dict[str, Any]]:
+        """Read-only export for the shadow entry-economics A/B: per settled row, the
+        decision-time probability + executable ask + live cost estimate + outcome +
+        realized paper P&L. Only rows that had an executable ask (entry_ask_cents)
+        are returned, since both gates are price gates. Outcome columns are the
+        target; nothing here feeds a live decision."""
+        if not self._available:
+            return []
+        out: list[dict[str, Any]] = []
+        query = (
+            "SELECT checkpoint, conservative_probability, entry_ask_cents, entry_cost_cents, "
+            "correct, realized_cents FROM predictions WHERE model_version=? "
+            "AND official_result IS NOT NULL AND entry_ask_cents IS NOT NULL"
+        )
+        args: list[Any] = [MODEL_VERSION]
+        if checkpoint:
+            query += " AND checkpoint=?"
+            args.append(self._checkpoint(checkpoint))
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(query, tuple(args)))
+        for row in rows:
+            out.append({
+                "checkpoint": row["checkpoint"],
+                "prob": _num(_row_get(row, "conservative_probability")),
+                "ask_cents": _num(_row_get(row, "entry_ask_cents")),
+                "cost_cents": _num(_row_get(row, "entry_cost_cents"), 0.0),
+                "correct": bool(_row_get(row, "correct")),
+                "realized_cents": _num(_row_get(row, "realized_cents")),
+            })
+        return out
+
     def scoreboard(self) -> dict[str, Any]:
         """User-facing record: how often each interval, rank, and asset was right/wrong."""
         if not self._available:

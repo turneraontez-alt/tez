@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **734 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **742 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -164,6 +164,27 @@ as a SHADOW model, built to be promoted to primary with one switch.
   compact `END-RESULT CALL · 15M & 10M` block (`Res` col + `Y+/N-` cells, + right /
   - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
   (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — entry-economics shadow A/B
+Acting on the review's #1 finding (~67% accurate but negative P&L = the entry gate
+isn't selective on price/cost). Owner: "implement it but ON in shadow so we can see
+both play out and whether it improves." New `q15_upgrade/shadow_economics.py` (pure,
+tested) runs a stricter, cost-aware gate BESIDE the live one and grades both on the
+SAME settled trades — **never changes the live recommendation** (frozen champion +
+read-only invariant intact). CONTROL replicates production exactly (`net_edge =
+P*100-ask-cost >= required_edge`, same defaults + same `Q15_V95_{cp}_REQUIRED_EDGE_CENTS`
+env). SHADOW charges the costs the live model omits (slippage 0.5¢ + adverse 0.25¢),
+enforces a hard no-trade floor (1¢), and requires risk-adjusted EV `net_edge - k*σ ≥ 0`
+(σ = binary cent-stdev, so thin-confidence edges are penalised). Shadow P&L is ALSO
+charged the extra modelled cents per entry → it must earn its selectivity, never
+flattered. Comparison computed from columns already persisted on every resolved row
+(`conservative_probability`, `entry_ask_cents`, `entry_cost_cents`, `realized_cents`)
+via read-only `V95Ledger.resolved_economics_rows()` — zero schema change. Live
+visibility: `apply_v95_policy` stamps `q15_v9_5_shadow_econ_{enter,net_edge_cents,reason}`
+for the dashboard. Hourly report gains an `ENTRY-ECONOMICS SHADOW` Live-vs-Shadow
+table (trades/win%/P&L/avg + verdict), self-silent until settled rows exist. Flags
+`Q15_SHADOW_ECON_*` in `.env.example` (default ON). +8 tests
+(`test_q15_shadow_economics.py`). Suite: **742 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — 10M setup miner (leakage-safe)
 Owner asked: find a 10M setup/combination that always predicted the outcome,

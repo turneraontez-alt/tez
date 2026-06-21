@@ -53,6 +53,7 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import manipulation_alert
 from . import panels_v95
+from . import shadow_economics
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,
@@ -1042,6 +1043,27 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_main_blocker"] = analysis.get("main_blocker")
     snapshot["q15_v9_5_net_edge_cents"] = analysis.get("net_edge_cents")
     snapshot["q15_v9_5_ideal_entry_cents"] = analysis.get("ideal_entry_cents")
+    # Shadow entry-economics (read-only A/B): what a stricter, cost-aware gate would
+    # decide on this same pick. NEVER changes the live decision — only surfaced so
+    # the live vs shadow gates can be watched live and graded in the hourly report.
+    try:
+        _se_cfg = shadow_economics.EconConfig.from_env()
+        if _se_cfg.enabled:
+            _quote = analysis.get("quote") or {}
+            _costs = analysis.get("costs") or {}
+            _ask = _num(_quote.get("ask_cents"))
+            _cost = _num(_costs.get("total_cents"))
+            if _cost is None:
+                _cost = _num(_costs.get("total_cost_cents"), 0.0) or 0.0
+            _sd = shadow_economics.shadow_gate(
+                _num(analysis.get("conservative_probability")), _ask, _cost,
+                shadow_economics.required_edge_for(analysis.get("checkpoint") or analysis.get("interval") or ""),
+                _se_cfg)
+            snapshot["q15_v9_5_shadow_econ_enter"] = bool(_sd.enter)
+            snapshot["q15_v9_5_shadow_econ_net_edge_cents"] = _sd.net_edge_cents
+            snapshot["q15_v9_5_shadow_econ_reason"] = _sd.reason
+    except Exception:
+        pass
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
     snapshot["q15_v9_5_entry_allowed"] = bool(analysis.get("entry_allowed"))
     # Suspected price-manipulation tracking (read-only; does not affect the call).
