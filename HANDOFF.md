@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **574 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **588 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -22,6 +22,40 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
+**Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3
+fixes from a fresh reliability review (the rest of the review's findings were
+either debunked on verification — e.g. the "KeyError in `_harvest_and_submit`"
+and "leaked executor" were misreads — or filed as Medium/optional follow-ups).
+
+1. **Alert send failures are no longer silently dropped** (`window_focus.py`).
+   `notifier.send()`'s return value was ignored: a Telegram 429/400/network blip
+   (send returns falsy) still advanced the alert state as if delivered, so the
+   alert was lost with no retry. New `_claim_and_send()` returns
+   `sent`/`duplicate`/`failed`; on `failed` it **releases the local claim** and
+   the caller does NOT advance state, so the next cycle retries. The dip alert and
+   all three checkpoint sends (15M/10M/7M) route through it. Preserves the
+   intentional anti-starvation advance on a *lost* claim (`duplicate`). Gated
+   `Q15_V95_ALERT_RETRY_ON_SEND_FAILURE` (default ON; OFF = legacy consume-on-fail).
+   ⚠️ The shared claim store's ledger is permanent, so a true re-fire only happens
+   in the common single-process deployment; against a shared store the retry is
+   seen as already-delivered. Either way the failure is now logged, not silent.
+2. **`_claim` now fails CLOSED on a claim-store error** (`window_focus.py`).
+   `store.claim_event()` raising was swallowed (`except: pass`) and then returned
+   `True`, so a transient store outage could let dev+prod each deliver the SAME
+   alert (cross-process duplicate). Now logs and returns `False` (skip this cycle,
+   retry once the store recovers).
+3. **Kalshi REST honors `Retry-After` on 429** (`q15_upgrade/kalshi_rest.py`).
+   429 backoff ignored the server's `Retry-After`; now parsed (delta-seconds or
+   HTTP-date) and used on the retry paths (e.g. discovery `retries=3`), capped at
+   `_MAX_RETRY_AFTER_SECONDS`=8 so a bad value can't stall the ~1s loop. The
+   per-cycle single-attempt default (`retries=1`) is unchanged on purpose — the
+   loop itself is the retry and the token bucket caps the request rate.
+
+New tests: `test_q15_alert_send_retry.py` (claim fail-closed, `_claim_and_send`
+tri-state, dip retry on/off) + `test_q15_kalshi_retry_after.py` (header parse /
+cap / fallback). Suite: **588 passed, 4 skipped** (was 574).
 
 ## ✅ Shipped THIS session — part 2 (branch `claude/read-handoff-ipxm5a`, MERGED to `main` @ `4954e7b`)
 **Not yet deployed — needs a Repl reboot to take effect.** Newer work, on top of part 1:
