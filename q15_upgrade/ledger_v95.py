@@ -334,6 +334,13 @@ class V95Ledger:
         # Observability: Platt fits that did not converge and were replaced by the
         # identity transform (see calibration_require_converged). Surfaced in stats().
         self._calibration_unconverged_fallbacks = 0
+        # Observability: read-only shadow-challenger calls that raised and were
+        # swallowed (observe/mark_sent/resolve). Production is never affected, but a
+        # misconfigured or broken shadow would otherwise be invisible — these surface
+        # in stats() (and /api/health) so "the shadow silently stopped learning" is
+        # detectable instead of being a guess.
+        self._shadow_errors = 0
+        self._last_shadow_error: str | None = None
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
@@ -600,7 +607,12 @@ class V95Ledger:
 
     @staticmethod
     def _regime_key(regime: Any) -> str:
-        return (str(regime or "UNKNOWN").strip().upper() or "UNKNOWN")
+        # Bounded to 64 chars: regime labels are short codes (e.g. "BULL_TREND"),
+        # but the value flows from upstream snapshots into the regime_challenger
+        # table key, so cap it defensively to keep an anomalous/huge string from
+        # bloating the table or the per-regime caches.
+        key = (str(regime or "UNKNOWN").strip().upper() or "UNKNOWN")
+        return key[:64]
 
     def challenger_weights(self, checkpoint: str | None = None, regime: str | None = None) -> dict[str, float]:
         """Weights for the shadow challenger.
@@ -733,8 +745,8 @@ class V95Ledger:
             runner = get_runner()
             if runner is not None:
                 runner.observe(**kw)
-        except Exception:
-            logger.debug("challenger shadow observe skipped", exc_info=True)
+        except Exception as exc:
+            self._note_shadow_error("observe", exc)
 
     def _shadow_mark_sent(self, ticker: str, checkpoint: str) -> None:
         """Tell the shadow that Your System's prediction for (ticker, checkpoint)
@@ -745,8 +757,8 @@ class V95Ledger:
             runner = get_runner()
             if runner is not None:
                 runner.mark_native_sent(str(ticker), str(checkpoint))
-        except Exception:
-            logger.debug("challenger shadow mark_sent skipped", exc_info=True)
+        except Exception as exc:
+            self._note_shadow_error("mark_sent", exc)
 
     def _shadow_resolve(self, events) -> None:
         try:
@@ -757,8 +769,19 @@ class V95Ledger:
             for ev in events:
                 runner.resolve(str(ev.get("ticker")), str(ev.get("checkpoint")),
                                str(ev.get("official_result")))
-        except Exception:
-            logger.debug("challenger shadow resolve skipped", exc_info=True)
+        except Exception as exc:
+            self._note_shadow_error("resolve", exc)
+
+    def _note_shadow_error(self, op: str, exc: BaseException) -> None:
+        """Record a swallowed shadow-challenger failure so it is observable.
+
+        Read-only wrt production: the shadow runner is purely observational, so a
+        failure here must never propagate into the alert path. We still count it
+        and keep the last message so stats()/health can show the shadow is broken
+        instead of silently degraded. The full traceback stays at DEBUG."""
+        self._shadow_errors += 1
+        self._last_shadow_error = f"{op}: {type(exc).__name__}: {exc}"
+        logger.debug("challenger shadow %s skipped", op, exc_info=True)
 
     def frozen_prediction(self, ticker: str, checkpoint: str) -> dict[str, Any] | None:
         """The frozen (first-recorded) side + flip-risk score for (ticker, checkpoint).
@@ -2366,6 +2389,14 @@ class V95Ledger:
             if _ece_n else None
         )
         alpha = _env_float("Q15_V95_PROMOTION_ALPHA", 0.05, 0.0001, 0.5)
+        # Optional Bonferroni correction across the two paired tests (vs champion AND
+        # vs baseline). Default OFF preserves the historical screening behaviour
+        # (each test at `alpha`, combined Type-I ~2*alpha). When ON, each test must
+        # clear alpha/2 so the family-wise rate stays <= alpha. Read-only: this only
+        # tightens a manual-review flag; production weights stay frozen and nothing
+        # auto-promotes either way.
+        bonferroni = _env_bool("Q15_V95_PROMOTION_BONFERRONI", False)
+        per_test_alpha = (alpha / 2.0) if bonferroni else alpha
         promotion_by_checkpoint: dict[str, dict[str, Any]] = {}
         for checkpoint in LEARNING_CHECKPOINTS:
             cp_rows = [r for r in rows if r["checkpoint"] == checkpoint]
@@ -2375,24 +2406,25 @@ class V95Ledger:
             reason = "learning_disabled" if not self.learning_enabled(checkpoint) else "insufficient_resolved_rows"
             if self.learning_enabled(checkpoint) and resolved >= self.minimum_promotion_rows:
                 # Significant paired Brier improvement over BOTH champion and baseline.
-                # Note: this runs two paired tests at the same alpha without a
-                # Bonferroni correction, so the combined false-positive rate is
-                # ~2*alpha. That is acceptable here because this is only a
-                # screening gate that flags candidates for manual review — it
-                # never promotes automatically (production_weights_frozen).
+                # Each paired test must clear `per_test_alpha`: with Bonferroni ON that
+                # is alpha/2 (family-wise <= alpha across the two tests); OFF it is the
+                # raw alpha (historical behaviour). Either way this is only a screening
+                # gate that flags candidates for manual review — it never promotes
+                # automatically (production_weights_frozen).
                 vs_champion = self._paired_better_test(cp_rows, "champion_brier", "challenger_brier")
                 vs_baseline = self._paired_better_test(cp_rows, "baseline_brier", "challenger_brier")
                 pc, pb = vs_champion["p_value"], vs_baseline["p_value"]
                 significant = (
-                    vs_champion["favored"] and pc is not None and pc < alpha
-                    and vs_baseline["favored"] and pb is not None and pb < alpha
+                    vs_champion["favored"] and pc is not None and pc < per_test_alpha
+                    and vs_baseline["favored"] and pb is not None and pb < per_test_alpha
                 )
                 candidate = bool(significant)
                 reason = "eligible_for_manual_review" if candidate else "challenger_not_significantly_better"
             promotion_by_checkpoint[checkpoint] = {
                 "candidate": candidate, "reason": reason, "resolved": resolved,
                 "learning_enabled": self.learning_enabled(checkpoint),
-                "alpha": alpha, "vs_champion": vs_champion, "vs_baseline": vs_baseline,
+                "alpha": alpha, "per_test_alpha": per_test_alpha, "bonferroni": bonferroni,
+                "vs_champion": vs_champion, "vs_baseline": vs_baseline,
             }
         primary = promotion_by_checkpoint[self.primary_learning_checkpoint]
         return {
@@ -2554,6 +2586,8 @@ class V95Ledger:
             "last_shadow_update": dict(last_update) if last_update else None,
             "dropped_feature_rows": int(self._dropped_feature_rows),
             "calibration_unconverged_fallbacks": int(self._calibration_unconverged_fallbacks),
+            "shadow_errors": int(self._shadow_errors),
+            "last_shadow_error": self._last_shadow_error,
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
             "pushed_by_checkpoint": {
                 str(r["checkpoint"]): {

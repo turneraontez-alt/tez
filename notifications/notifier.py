@@ -173,6 +173,37 @@ class TelegramNotifier:
         # last send was muted/failed). Lets the official record store proof that a
         # specific prediction was actually delivered, not merely "handled".
         self.last_message_id = None
+        # Observability: messages Telegram accepted (HTTP 200) but for which we
+        # could not read a usable message_id. The message WAS delivered; we just
+        # lack proof to attach to the official record, so the Shadow-vs-Yours
+        # comparison can silently diverge. Surface the count rather than hide it.
+        self.delivered_without_id_count = 0
+
+    @staticmethod
+    def _coerce_message_id(raw):
+        """Best-effort parse of Telegram's message_id into an int.
+
+        Telegram documents message_id as an integer, but be liberal: accept a real
+        int/float, or a numeric string (some proxies stringify it). Anything else
+        (None, non-numeric, bool) yields None — the delivery still counts, we just
+        have no id to record. Never raises."""
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw) if raw == raw else None  # drop NaN
+        if isinstance(raw, str):
+            s = raw.strip()
+            try:
+                return int(s)
+            except ValueError:
+                try:
+                    f = float(s)
+                    return int(f) if f == f else None
+                except ValueError:
+                    return None
+        return None
 
     def status(self):
         if self.enabled:
@@ -241,11 +272,21 @@ class TelegramNotifier:
                 self.sent_count += 1
                 import time as _t
                 self.last_sent_at = _t.time()
-                message_id = None
+                raw_id = None
                 try:
-                    message_id = int((((resp.json() or {}).get("result")) or {}).get("message_id"))
+                    body = resp.json() or {}
+                    raw_id = ((body.get("result") or {}).get("message_id"))
                 except (ValueError, TypeError, AttributeError):
-                    message_id = None
+                    raw_id = None
+                message_id = self._coerce_message_id(raw_id)
+                if message_id is None:
+                    # Delivered (200) but no usable id — the record loses its proof.
+                    # Count + log so the divergence is visible, not silent.
+                    self.delivered_without_id_count += 1
+                    logger.warning(
+                        "Telegram delivered but message_id unusable (raw=%r); "
+                        "official record will lack a delivery id", raw_id,
+                    )
                 self.last_message_id = message_id
                 return {"ok": True, "delivered": True, "muted": False, "message_id": message_id}
             # Telegram's error body does not echo the token, but be defensive.
