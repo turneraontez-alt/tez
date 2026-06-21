@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **588 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **611 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -22,6 +22,41 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — challenger shadow system
+**Read-only, default-OFF, zero production impact. NOT wired into the live loop yet
+(by design — single documented seam to promote it).** A new self-contained package
+`q15_upgrade/challenger/` that estimates calibrated P(Yes) for the 15-min binaries
+as a SHADOW model, built to be promoted to primary with one switch.
+
+- **Decoupled:** own `ChallengerConfig` (all flags default OFF: `Q15_CHALLENGER_ENABLED`,
+  `Q15_CHALLENGER_AS_PRIMARY`), own SQLite ledger (`data/q15_challenger_shadow_v1.sqlite3`,
+  gitignored), no order execution, no writes to production tables.
+- **Pure-python by default** (`backend=logistic`) — the deploy target has no
+  numpy/sklearn/xgboost. Optional `xgboost`/`lightgbm` backends used only if importable
+  (your depth-3 / eta-0.03 / min_child-20 / subsample-0.75 / λ-10 config is pre-wired).
+  Baselines: `market_only`, `volatility_only`.
+- **Leakage-safe:** `features.py` reads only decision-time fields (+ a `FORBIDDEN_KEYS`
+  guard); validation is **purged walk-forward + embargo** (`validation.py`); calibration
+  (Platt / isotonic / identity, `auto`-selectable) fits on a held-out fold only.
+- **8 required outputs** via `ShadowPredictor.predict` (P(Yes)/P(No)/confidence/edge-vs-
+  market/net-edge-after-costs/recommendation/top-factors/warnings). Decision logic uses
+  the EXECUTABLE ask (never midpoint), a no-trade zone, risk gates, conservative
+  fractional sizing (never Kelly).
+- **Scoring:** `ShadowLedger` records immutably pre-settlement, grades after official
+  result, `scoreboard()` reports Brier / log-loss / ECE / accuracy / Wilson-CI trade
+  stats for challenger vs control. `harness.walk_forward_evaluate` gives OOS metrics vs
+  baselines; `harness.train_predictor` freezes a live shadow predictor.
+- **Promotion seam (the "easy switch"):** `primary_probability(snapshot, champion_p, predictor=...)`
+  returns the champion unchanged when `as_primary` is OFF (byte-identical production),
+  the challenger's calibrated P(Yes) when ON+trained, champion fallback otherwise. That
+  one call is the entire integration — nothing is wired into `app.py`/`checkpoint_v95.py` yet.
+- Tests: `tests/test_challenger.py` (22) — features/leakage, logistic learning, Platt/
+  isotonic, purged-WF embargo+purge, decision gates, predictor 8-outputs+cold-start,
+  harness OOS eval, ledger record/resolve/score, promotion seam on/off/untrained.
+- ⚠️ **Data reality:** the v95 ledger has ~0 resolved rows under the current MODEL_VERSION,
+  so the challenger is cold-start (defers to market price) until data accrues. Judge it
+  ONLY on OOS log-loss/Brier/ECE/net-cents vs control once ≥ a few hundred resolved/checkpoint.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 **Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3
