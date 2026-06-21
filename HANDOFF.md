@@ -46,13 +46,23 @@ signals only.
   carries context end-to-end through `analyse_v95`, the challenger feature vector is
   now live (pct/log/normalized distance + minutes-remaining non-zero, coverage True),
   plus a guard test proving the old bid/ask-only quote collapsed those to zero.
-- Suite green locally: **710 passed, 12 skipped** (5 new; higher skip count than the
-  734-env figure above only because `flask`/`websockets` weren't installed here → the
-  two app-level files skip).
-- ⚠️ Caveat to owner: this is the *plumbing* fix. The challenger is still one pooled,
-  L2=10 logistic across all assets/checkpoints vs a specialized champion, so it may
-  still trail until that's addressed; and it needs `min_train_rows=200` before it
-  stops mirroring the market mid.
+- **Measurement tool (`scripts/challenger_eval.py`, READ-ONLY, run ON THE REPL):**
+  exports resolved production rows, reconstructs the same decision-time features,
+  and runs a purged walk-forward — POOLED vs PER-CHECKPOINT — reporting challenger
+  OOS log-loss/Brier vs the market-only / volatility-only baselines AND vs the frozen
+  champion (control prob). This is the evidence gate for the per-checkpoint split
+  decision (don't split blindly; each split sees ⅓ the data). Importable
+  `evaluate_ledger()` + CLI `main()`. Tests: `tests/test_challenger_eval_script.py` (+5).
+  Run: `python3 scripts/challenger_eval.py` (or `--min-rows 60 --splits 4` on thin data).
+- Suite green locally: **715 passed, 12 skipped** (10 new this session; higher skip
+  count than the 734-env figure above only because `flask`/`websockets` weren't
+  installed here → the two app-level files skip).
+- ⚠️ Caveat to owner: the quote fix is the *plumbing* fix. The challenger is still one
+  pooled, L2=10 logistic across all assets/checkpoints vs a specialized champion, so
+  it may still trail until that's addressed; and it needs `min_train_rows=200` before
+  it stops mirroring the market mid. **Decision held for evidence:** run
+  `scripts/challenger_eval.py` on the Repl first — split per-checkpoint only if those
+  splits actually beat POOLED out-of-sample.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-719tb9`) — updated-review fixes
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
