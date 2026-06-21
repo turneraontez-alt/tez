@@ -79,7 +79,9 @@ class AssetEngine:
 
     # -- ingest ----------------------------------------------------------
     def ingest_trades(self, new_trades, now):
-        fresh = [t for t in new_trades if t.get("id") and t["id"] not in self.seen_trade_ids]
+        # `new_trades` is normally a list from the feed, but a degraded fetch can
+        # hand back None; treat that as "no trades" rather than crashing the cycle.
+        fresh = [t for t in (new_trades or []) if t.get("id") and t["id"] not in self.seen_trade_ids]
         fresh.sort(key=lambda t: t["ts"])
         for t in fresh:
             self.seen_trade_ids.add(t["id"])

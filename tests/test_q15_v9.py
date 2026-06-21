@@ -16,7 +16,7 @@ from q15_upgrade.calibrated_edge import (
     directional_vote_metrics,
 )
 from q15_upgrade.oos_v9 import OutOfSampleEvaluator
-from q15_upgrade.outbox_v9 import ReliableTelegramOutbox
+from notifications.outbox_v9 import ReliableTelegramOutbox
 
 
 class FakeNotifier:
@@ -44,6 +44,35 @@ class FakeNotifier:
 
 class DisabledStore:
     enabled = False
+
+
+class RichFakeNotifier:
+    """A notifier exposing the rich send_with_result interface (delivered/muted/
+    message_id), like the real TelegramNotifier. ``outcomes`` is a list of result
+    dicts returned in order."""
+
+    def __init__(self, outcomes):
+        self.enabled = True
+        self.outcomes = list(outcomes)
+        self.sent_count = 0
+        self.last_error = None
+        self.last_sent_at = None
+        self.last_message_id = None
+        self.token = "SECRET"
+
+    def send_with_result(self, text):
+        r = self.outcomes.pop(0) if self.outcomes else {"ok": True, "delivered": True, "muted": False, "message_id": 1}
+        if r.get("delivered"):
+            self.sent_count += 1
+            self.last_sent_at = 1.0
+            self.last_message_id = r.get("message_id")
+            self.last_error = None
+        elif not r.get("ok"):
+            self.last_error = r.get("error") or "boom"
+        return r
+
+    def send(self, text):
+        return bool(self.send_with_result(text).get("ok"))
 
 
 class V9Tests(unittest.TestCase):
@@ -159,6 +188,49 @@ class V9Tests(unittest.TestCase):
                 # Duplicate key returns the existing SENT row; no duplicate message.
                 outbox.send("test", idempotency_key="contract:10m:entry:v9")
                 self.assertEqual(len(outbox.rows()), 1)
+                outbox.close()
+
+    def test_outbox_send_with_result_surfaces_message_id(self):
+        # The official interval report needs the Telegram message_id to record a
+        # real delivery. The outbox must pass the wrapped notifier's rich result
+        # (incl. message_id) through send_with_result, not lose it behind send().
+        with tempfile.TemporaryDirectory() as temporary:
+            raw = RichFakeNotifier([{"ok": True, "delivered": True, "muted": False, "message_id": 4242}])
+            with patch.dict(os.environ, {"Q15_V9_OUTBOX_WORKER": "false", "Q15_V9_DISABLE_NETWORK": "false"}, clear=False):
+                outbox = ReliableTelegramOutbox(
+                    DisabledStore(), raw, sqlite_path=str(Path(temporary) / "o.sqlite3"))
+                res = outbox.send_with_result("official", idempotency_key="c:10m:report")
+                self.assertEqual(res, {"ok": True, "delivered": True, "muted": False, "message_id": 4242})
+                # And the row is durably marked SENT.
+                self.assertEqual(outbox.rows()[0]["status"], "SENT")
+                outbox.close()
+
+    def test_outbox_send_with_result_failure_is_retryable_not_delivered(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw = RichFakeNotifier([{"ok": False, "delivered": False, "muted": False, "message_id": None, "error": "HTTP 429"}])
+            with patch.dict(os.environ, {"Q15_V9_OUTBOX_WORKER": "false", "Q15_V9_DISABLE_NETWORK": "false"}, clear=False):
+                outbox = ReliableTelegramOutbox(
+                    DisabledStore(), raw, sqlite_path=str(Path(temporary) / "o.sqlite3"))
+                res = outbox.send_with_result("official", idempotency_key="c:10m:report")
+                self.assertFalse(res["delivered"])
+                self.assertIsNone(res["message_id"])
+                # Not delivered, but durably queued for the worker to retry.
+                self.assertEqual(outbox.rows()[0]["status"], "FAILED_RETRYABLE")
+                outbox.close()
+
+    def test_outbox_send_with_result_legacy_bool_notifier(self):
+        # A legacy boolean notifier (no send_with_result, no message_id): a handled
+        # send still reports delivered=True, just without a proof id.
+        with tempfile.TemporaryDirectory() as temporary:
+            raw = FakeNotifier([True])
+            with patch.dict(os.environ, {"Q15_V9_OUTBOX_WORKER": "false", "Q15_V9_DISABLE_NETWORK": "false"}, clear=False):
+                outbox = ReliableTelegramOutbox(
+                    DisabledStore(), raw, sqlite_path=str(Path(temporary) / "o.sqlite3"))
+                res = outbox.send_with_result("x", idempotency_key="c:10m:report")
+                self.assertTrue(res["ok"])
+                self.assertTrue(res["delivered"])
+                self.assertIsNone(res["message_id"])
+                self.assertEqual(outbox.rows()[0]["status"], "SENT")
                 outbox.close()
 
     def test_oos_refuses_small_sample_and_reports_larger_sample(self):

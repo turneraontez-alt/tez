@@ -7,8 +7,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-import notifier as notifier_mod
-from notifier import TelegramNotifier, should_suppress_alert
+import notifications.notifier as notifier_mod
+from notifications.notifier import TelegramNotifier, should_suppress_alert
 
 
 # Final, rendered headers exactly as the user sees them in Telegram.
@@ -19,6 +19,9 @@ NONACTIONABLE = [
     "⏳ <b>10M FINAL #1 — WAIT FOR PRICE — BTC YES</b>",
     "🕒 <b>15M EARLY #1 WATCH — ETH NO</b>",
     "👀 <b>WATCH — BTC YES</b>",
+    # Startup placeholder emitted before the first v9.5 cycle populates globals;
+    # re-opens on every restart, carries no decision -> mute under balanced.
+    "🟡 Q15 V9.5 STARTUP — canonical analysis is not ready; legacy report suppressed. Check /api/q15-v9-5/diagnostics.",
 ]
 
 ACTIONABLE = [
@@ -77,6 +80,78 @@ class TestShouldSuppressAlert(unittest.TestCase):
                 os.environ["Q15_ALERT_LEVEL"] = prev
 
 
+class TestPerCheckpointAlertLevel(unittest.TestCase):
+    """Q15_ALERT_LEVEL_10M / _7M / _15M override the global level per checkpoint."""
+
+    # Routine "NO ENTRY YET" checks per checkpoint (muted under global balanced).
+    CHECK_10M = "👀 <b>10M V9.5 CHECK · NO ENTRY YET</b>\nbody"
+    CHECK_7M = "👀 <b>7M V9.5 CHECK · NO ENTRY YET</b>\nbody"
+    CHECK_15M = "👀 <b>15M V9.5 CHECK · NO ENTRY YET</b>\nbody"
+
+    def setUp(self):
+        # Clean slate: global balanced, no per-checkpoint overrides.
+        self._saved = {k: os.environ.pop(k, None) for k in (
+            "Q15_ALERT_LEVEL", "Q15_ALERT_LEVEL_10M",
+            "Q15_ALERT_LEVEL_7M", "Q15_ALERT_LEVEL_15M",
+        )}
+        os.environ["Q15_ALERT_LEVEL"] = "balanced"
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_default_inherits_global_balanced(self):
+        # No override set -> 10m/7m checks stay muted exactly as before.
+        self.assertTrue(should_suppress_alert(self.CHECK_10M))
+        self.assertTrue(should_suppress_alert(self.CHECK_7M))
+        self.assertTrue(should_suppress_alert(self.CHECK_15M))
+
+    def test_10m_override_delivers_only_10m(self):
+        os.environ["Q15_ALERT_LEVEL_10M"] = "all"
+        self.assertFalse(should_suppress_alert(self.CHECK_10M))  # delivered
+        self.assertTrue(should_suppress_alert(self.CHECK_7M))    # still muted
+        self.assertTrue(should_suppress_alert(self.CHECK_15M))   # still muted
+
+    def test_7m_override_delivers_only_7m(self):
+        os.environ["Q15_ALERT_LEVEL_7M"] = "all"
+        self.assertFalse(should_suppress_alert(self.CHECK_7M))
+        self.assertTrue(should_suppress_alert(self.CHECK_10M))
+        self.assertTrue(should_suppress_alert(self.CHECK_15M))
+
+    def test_10m_and_7m_overrides_together(self):
+        os.environ["Q15_ALERT_LEVEL_10M"] = "all"
+        os.environ["Q15_ALERT_LEVEL_7M"] = "all"
+        self.assertFalse(should_suppress_alert(self.CHECK_10M))
+        self.assertFalse(should_suppress_alert(self.CHECK_7M))
+        self.assertTrue(should_suppress_alert(self.CHECK_15M))  # 15m untouched
+
+    def test_override_can_also_mute_a_checkpoint(self):
+        # Global says deliver-all, but a per-checkpoint override re-mutes 15m.
+        os.environ["Q15_ALERT_LEVEL"] = "all"
+        os.environ["Q15_ALERT_LEVEL_15M"] = "balanced"
+        self.assertFalse(should_suppress_alert(self.CHECK_10M))  # global all
+        self.assertTrue(should_suppress_alert(self.CHECK_15M))   # re-muted
+
+    def test_override_never_overrides_actionable_header(self):
+        # An ENTRY header is delivered regardless; muting an override can't drop it.
+        os.environ["Q15_ALERT_LEVEL_10M"] = "balanced"
+        self.assertFalse(should_suppress_alert("✅ <b>10M V9.5 CHECK · ENTRY RECOMMENDED</b>"))
+
+    def test_non_checkpoint_alert_ignores_overrides(self):
+        # A dip alert carries no checkpoint label -> keeps the global level.
+        os.environ["Q15_ALERT_LEVEL_10M"] = "balanced"
+        os.environ["Q15_ALERT_LEVEL"] = "all"
+        self.assertFalse(should_suppress_alert("⚡ <b>DIP — BTC YES</b>\nask 41¢"))
+
+    def test_explicit_level_arg_bypasses_overrides(self):
+        # Passing level= explicitly is honoured as-is (used by callers/tests).
+        os.environ["Q15_ALERT_LEVEL_10M"] = "all"
+        self.assertTrue(should_suppress_alert(self.CHECK_10M, level="balanced"))
+
+
 class _Resp:
     status_code = 200
     text = "ok"
@@ -117,6 +192,41 @@ class TestSendSuppression(unittest.TestCase):
         result = n.send("👀 <b>10M V9.5 CHECK — BEST PICKS, NO ENTRY YET</b>")
         self.assertTrue(result)
         self.assertEqual(len(self.posted), 1)
+
+
+class TestOfficialIntervalReportAlwaysDelivers(unittest.TestCase):
+    """The official per-interval report (the 'TOP 3 PICKS' ranked check) must be
+    delivered every interval — even with NO ENTRY — so the visible record and the
+    Shadow-vs-Yours comparison fill. Routine checks stay muted as before."""
+
+    # An official NO-ENTRY report carries both 'TOP 3 PICKS' and 'NO ENTRY YET'.
+    OFFICIAL = "🔎 <b>V9.5 CHECK — 15M · TOP 3 PICKS · NO ENTRY YET</b>\nbody"
+    ROUTINE = "👀 <b>15M V9.5 CHECK · NO ENTRY YET</b>\nbody"
+
+    def setUp(self):
+        self._saved = {k: os.environ.pop(k, None) for k in (
+            "Q15_ALERT_LEVEL", "Q15_V95_RANKED_REPORT_ALWAYS_DELIVER",
+        )}
+        os.environ["Q15_ALERT_LEVEL"] = "balanced"
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_official_report_delivers_under_balanced(self):
+        self.assertFalse(should_suppress_alert(self.OFFICIAL))   # delivered
+        self.assertTrue(should_suppress_alert(self.ROUTINE))     # routine still muted
+
+    def test_flag_off_restores_muting(self):
+        os.environ["Q15_V95_RANKED_REPORT_ALWAYS_DELIVER"] = "false"
+        self.assertTrue(should_suppress_alert(self.OFFICIAL))     # muted again (rollback)
+
+    def test_entry_official_report_still_delivers(self):
+        msg = "🔎 <b>V9.5 CHECK — 10M · TOP 3 PICKS · ENTRY RECOMMENDED</b>\nbody"
+        self.assertFalse(should_suppress_alert(msg))
 
 
 if __name__ == "__main__":
