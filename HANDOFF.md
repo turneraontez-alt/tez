@@ -25,6 +25,18 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session (branch `claude/crypto-prediction-monitor-ygugze`) — engineering-standard meta-prompt persisted
+**Merged to `main` (docs/config only, no behavior change). Tests: 779 passed, 12 skipped.**
+Owner pasted a "Staff Engineer" meta-prompt and asked to persist it so every new
+session reads it first.
+- **`ENGINEERING_GUIDELINES.md` (new):** the full meta-prompt as the standing
+  engineering standard — system context, engineering approach, coding standards,
+  reliability requirements (WebSocket / Postgres / Telegram / model-chain),
+  testing, security, response format, adversarial review.
+- **`CLAUDE.md`:** a prominent **READ FIRST** callout at the very top points to it.
+- **`.claude/settings.json` (new):** a `SessionStart` hook injects a one-line
+  reminder to read `ENGINEERING_GUIDELINES.md` into every session's context.
+
 ## ✅ Shipped THIS session (branch `claude/replit-workspace-connect-pfspn4`) — "is anything 100% correct?" forensic audit
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Owner asked, as a Staff quant: has any variable / rule / combination historically
