@@ -104,6 +104,15 @@ as a SHADOW model, built to be promoted to primary with one switch.
   combined totals, and a side-by-side verdict. New `ledger.ranked_comparison` /
   `latest_window_cases`; shadow rows now store `close_time` for exact case grouping.
   `runner.report_message` rewritten. +2 tests. Suite: **691 passed, 4 skipped**.
+- **Report UI cleanup** (owner: "it all looks so confusing"): `runner.report_message`
+  redesigned into ONE card — only the **bold title** (`CHALLENGER SHADOW vs YOUR
+  SYSTEM`) is bright/white; *everything else* now lives inside a single `<pre>`
+  monospace block (owner: "take out the white text I only want the title"). Dropped
+  the long scoring paragraph for a 3-line plain-English note; "NATIVE" → "Yours";
+  empty `P2/P3 –` rows in the latest window are no longer printed (only ranks that
+  had a pick); totals collapsed from `C/W/acc` dual columns to `hit` (e.g. `1/2`) +
+  whole-% `acc`; one clear `Winner:` line + plain `Learning:` state. Same data, far
+  cleaner layout. Tests updated to new wording. Suite: **691 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap
