@@ -469,6 +469,35 @@ class V95Ledger:
                     UNIQUE(model_version, ticker, checkpoint, direction)
                 )"""
             )
+            # OFFICIAL RECORD — immutable snapshot of every prediction that was
+            # successfully DELIVERED to the owner before the contract closed. This
+            # is the source of truth for the public win/loss record: a prediction
+            # only counts here if it was actually sent (has a Telegram message_id)
+            # and sent_at < close_time. Rows are insert-only and NEVER edited or
+            # retroactively regraded — grading joins to predictions.official_result
+            # at read time, so the stored call stays exactly as it was sent.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS sent_predictions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_version TEXT NOT NULL,
+                    contract_id TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    record_type TEXT NOT NULL,
+                    predicted_side TEXT,
+                    probability REAL,
+                    manipulation_probability REAL,
+                    entry_decision TEXT,
+                    sent_at REAL NOT NULL,
+                    close_time REAL,
+                    message_id INTEGER,
+                    UNIQUE(model_version, contract_id, interval, record_type, message_id)
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_sent_predictions "
+                "ON sent_predictions(model_version, record_type, interval)"
+            )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
@@ -644,6 +673,96 @@ class V95Ledger:
             )
             connection.commit()
             return cur.rowcount > 0
+
+    # -- OFFICIAL RECORD: immutable sent-prediction snapshot + grading -----------
+    def record_sent_prediction(self, *, contract_id: str, asset: str, interval: str,
+                               record_type: str, predicted_side: str | None,
+                               probability: float | None, manipulation_probability: float | None,
+                               entry_decision: str | None, sent_at: float,
+                               close_time: float | None, message_id: int | None) -> bool:
+        """Append an immutable record of a prediction that was DELIVERED to the
+        owner. A row only earns a place in the official record if it was actually
+        sent before close: ``message_id`` is not None AND ``sent_at < close_time``.
+        Anything else (muted, failed, or generated after close) is rejected here so
+        it can never reach the public win/loss totals. Insert-only; never updated.
+
+        ``record_type`` is one of 'interval' (the 15M/10M/7M YES/NO call), 'entry'
+        (an ENTER NOW / ENTRY RECOMMENDED delivery), or 'manipulation'."""
+        if not self._available or not contract_id:
+            return False
+        if message_id is None:
+            return False  # not actually delivered to Telegram -> not official
+        if close_time is not None and sent_at >= float(close_time):
+            return False  # generated at/after close -> never official
+        interval = self._checkpoint(interval)
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO sent_predictions(model_version,contract_id,asset,interval,"
+                "record_type,predicted_side,probability,manipulation_probability,entry_decision,"
+                "sent_at,close_time,message_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (MODEL_VERSION, str(contract_id), str(asset), interval, str(record_type),
+                 (str(predicted_side).upper() if predicted_side else None),
+                 (float(probability) if probability is not None else None),
+                 (float(manipulation_probability) if manipulation_probability is not None else None),
+                 (str(entry_decision) if entry_decision else None),
+                 float(sent_at), (float(close_time) if close_time is not None else None),
+                 int(message_id)),
+            )
+            connection.commit()
+        return True
+
+    def official_scoreboard(self) -> dict[str, Any]:
+        """Official win/loss record built ONLY from delivered predictions, graded
+        against the settled outcome. Interval records (15M/10M/7M) and the entry
+        record split YES vs NO vs Total; the manipulation record is correct/wrong.
+        Each bucket reuses the Wilson-backed ``_win_loss`` so a thin sample is
+        flagged ``low_n`` rather than read as proven skill."""
+        empty = {"15M": {}, "10M": {}, "7M": {}, "entry": {}, "manipulation": {}}
+        if not self._available:
+            return {"available": False, **empty}
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                """SELECT s.interval AS interval, s.record_type AS record_type,
+                          s.predicted_side AS predicted_side, p.official_result AS official_result,
+                          p.realized_cents AS realized_cents
+                   FROM sent_predictions s
+                   JOIN predictions p
+                     ON p.model_version = s.model_version AND p.ticker = s.contract_id
+                    AND p.checkpoint = s.interval
+                   WHERE s.model_version = ? AND p.official_result IS NOT NULL""",
+                (MODEL_VERSION,),
+            ))
+
+        def _graded(record_type: str, interval: str | None, side: str | None) -> dict[str, Any]:
+            sel = [
+                r for r in rows
+                if str(r["record_type"]) == record_type
+                and (interval is None or str(r["interval"]) == interval)
+                and (side is None or str(r["predicted_side"] or "").upper() == side)
+            ]
+            # _win_loss keys on row["correct"]; compute it from the sent call vs
+            # the settled result so a regrade can never alter the stored prediction.
+            graded = [
+                {"correct": 1 if str(r["predicted_side"] or "").upper() == str(r["official_result"]).upper() else 0,
+                 "realized_cents": r["realized_cents"]}
+                for r in sel
+            ]
+            return self._win_loss(graded)
+
+        result: dict[str, Any] = {"available": True}
+        for interval in ("15M", "10M", "7M"):
+            result[interval] = {
+                "yes": _graded("interval", interval, "YES"),
+                "no": _graded("interval", interval, "NO"),
+                "total": _graded("interval", interval, None),
+            }
+        result["entry"] = {
+            "yes": _graded("entry", None, "YES"),
+            "no": _graded("entry", None, "NO"),
+            "total": _graded("entry", None, None),
+        }
+        result["manipulation"] = _graded("manipulation", None, None)
+        return result
 
     def pushed_slot_blocks(self, checkpoint: str, ticker: str, now: float) -> bool:
         """True if a DIFFERENT, still-open contract already holds this timeframe's

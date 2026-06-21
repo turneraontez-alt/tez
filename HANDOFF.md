@@ -23,6 +23,29 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## 🚧 IN PROGRESS (branch `claude/hand-off-review-ucy2ee`, NOT merged) — official-record + compact-panel rework
+Owner-approved multi-phase rework (decisions locked): **(1)** compact unified panel
+sent EVERY checkpoint (reverses `Q15_V95_SEND_ONLY_ON_ENTRY`) carrying the YES/NO
+call + compact records + manipulation + graduated entry guidance; **(2)** a 0–100
+entry score (30 dir-conf / 25 edge / 20 wick / 15 momentum / 10 manip) as a
+**shadow** overlay first (does NOT drive live entries until it earns OOS lift —
+champion stays frozen); **(3)** entry RECHECK = extend the existing `entry_followups`
+(ENTER NOW / KEEP WAITING / SKIP ENTRY) + manipulation grading. Records display
+compact W-L/% **with a low-n marker** (Wilson-backed). WATCH states must read clearly
+as "not an entry" and show the prior call (e.g. "now YES, was NO at 15M") — each
+interval graded on its OWN sent call (no retroactive regrade).
+
+**Done so far (Phase-1 FOUNDATION, committed to branch, inert until wired):**
+- `notifier.send_with_result()` → `{ok, delivered, muted, message_id}` + `last_message_id`;
+  `send()` stays a bool wrapper. Muted = handled-but-NOT-delivered (no message_id).
+- Ledger `sent_predictions` immutable table + `record_sent_prediction(...)` (rejects
+  no-message_id and sent_at≥close_time) + `official_scoreboard()` (15M/10M/7M YES/NO/Total,
+  entry, manipulation; graded vs settled outcome via join; Wilson low_n flags; insert-only).
+- Tests: `test_q15_official_record.py`, `test_q15_notifier_message_id.py` (+14).
+**Next:** wire `record_sent_prediction` at the panel send site, re-enable the compact
+per-checkpoint send, build the compact panel/report format (WATCH clarity + prior-side),
+then Phase 2 (shadow 0–100 score) and Phase 3 (recheck + manip grading).
+
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
 **Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip
 removal: a full audit found Telegram delivery used **3 different formats**. The
