@@ -25,6 +25,26 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — official interval report ALWAYS delivers (fixes empty "Your System")
+**On the branch, deploy-pending.** Owner reported the bot "not putting out anything" and the
+Challenger-Shadow "Your System" record stuck at `0W–0L` while Shadow filled. Root cause: under
+the default `balanced` alert level, the official interval report carries `NO ENTRY YET` and was
+MUTED on no-entry intervals — and "Your System" records only DELIVERED predictions
+(`_shadow_mark_sent` runs after the delivered-gate), so it never filled. But the spec mandates
+one 15M/10M/7M check EVERY interval with the three ranked picks.
+
+- **Fix**: the ranked panel now stamps its header `· TOP 3 PICKS ·`
+  (`panels_v95.build_ranked_checkpoint_panel`), and `notifier.should_suppress_alert` always
+  delivers a message carrying that marker — overriding the NO-ENTRY mute — gated by
+  `Q15_V95_RANKED_REPORT_ALWAYS_DELIVER` (default ON; `false` restores the old muting).
+  Routine/legacy `V9.5 CHECK · NO ENTRY YET` checks are unaffected (still muted). The
+  per-window lock still guarantees exactly ONE official report per interval, so this delivers
+  3 checks per 15-min contract (the mandated cadence), not spam. Now each delivered report runs
+  `_shadow_mark_sent`, so "Your System" fills and the owner sees every interval's picks.
+- **Tests**: `tests/test_q15_alert_suppression.py` (official delivers under balanced; flag-off
+  re-mutes; entry official delivers; routine still muted) + `tests/test_q15_ranked_panel.py`
+  (header carries `TOP 3 PICKS`). Full suite **857 passed, 4 skipped**; app imports clean.
+
 ## ✅ Shipped THIS session (branch `claude/prediction-system-rebuild-ogptop`) — compact final-outcome interval reports
 **On the branch, deploy-pending.** Reworked the visible 15M/10M/7M CHECK report from the
 verbose per-pick dump into the compact, final-outcome format the owner asked for:

@@ -54,6 +54,20 @@ _ALERT_NONACTIONABLE_MARKERS = (
 )
 _ALERT_LEVEL_DELIVER_ALL = {"all", "off", "none", "full", "verbose", "everything"}
 
+# The OFFICIAL per-interval report — one locked 15M/10M/7M check carrying the three
+# ranked final-outcome picks — is the owner's mandated output. It must be delivered
+# EVERY interval (even with no tradeable entry) so the visible record and the
+# Shadow-vs-Yours comparison fill, and so the owner sees their picks. It is
+# recognised by the "TOP 3 PICKS" stamp the ranked panel puts in its header.
+# Default ON; set Q15_V95_RANKED_REPORT_ALWAYS_DELIVER=false to fall back to the
+# old behaviour (a NO-ENTRY official report is muted under the balanced level).
+_OFFICIAL_INTERVAL_REPORT_MARKER = "TOP 3 PICKS"
+
+
+def _ranked_report_always_delivers():
+    return (os.environ.get("Q15_V95_RANKED_REPORT_ALWAYS_DELIVER", "true") or "true"
+            ).strip().lower() not in {"false", "0", "no", "off"}
+
 # Per-checkpoint overrides of Q15_ALERT_LEVEL. When one is set, that checkpoint's
 # own level governs delivery of its messages — so e.g. the 10m and 7m checks can
 # be delivered ("all") while the 15m check stays muted under the global
@@ -139,6 +153,10 @@ def should_suppress_alert(text, level=None):
     if level in _ALERT_LEVEL_DELIVER_ALL:
         return False
     if any(marker in header for marker in _ALERT_ACTIONABLE_MARKERS):
+        return False
+    # The official per-interval report always delivers (the owner's mandated check),
+    # overriding the NO-ENTRY mute, unless explicitly disabled.
+    if _OFFICIAL_INTERVAL_REPORT_MARKER in header and _ranked_report_always_delivers():
         return False
     return any(marker in header for marker in _ALERT_NONACTIONABLE_MARKERS)
 
