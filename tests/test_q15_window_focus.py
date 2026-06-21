@@ -246,9 +246,12 @@ if __name__ == "__main__":
 
 class EmptyCloseTimeClaim(unittest.TestCase):
     def _settings(self):
+        # Two-window checkpoint alerts default OFF now; this suite asserts on the
+        # claim/alert behaviour, so enable them.
         return FocusSettings(min_vote_samples=3, checkpoint_15_seconds=885,
             checkpoint_15_latest_seconds=720, checkpoint_10_seconds=600,
-            checkpoint_10_latest_seconds=480, alert_15_at_seconds=870, alert_10_at_seconds=585)
+            checkpoint_10_latest_seconds=480, alert_15_at_seconds=870, alert_10_at_seconds=585,
+            checkpoint_alerts_enabled=True)
 
     def test_missing_close_time_creates_no_empty_claim_or_alert(self):
         m = TwoWindowFocusManager(Store(), Notifier(), None, Client(), self._settings())
