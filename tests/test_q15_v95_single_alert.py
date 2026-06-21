@@ -153,5 +153,51 @@ class TestDecisionSettledGate(unittest.TestCase):
             del os.environ["Q15_V95_SINGLE_ALERT_PER_CHECKPOINT"]
 
 
+class TestRankedReportWindowGuard(unittest.TestCase):
+    """The official interval report must not send until the settlement window is
+    known: a ``None`` close falls back to ``now // 900``, a DIFFERENT bucket than
+    the real settlement window, which let a second report fire once the canonical
+    appeared. With the guard, an unknown window sends nothing and claims no lock."""
+
+    class _Ledger:
+        def __init__(self):
+            self.locked = False
+            self.lock_calls = 0
+
+        def report_locked(self, *a, **k):
+            return self.locked
+
+        def lock_official_report(self, *a, **k):
+            self.lock_calls += 1
+            self.locked = True
+            return True
+
+    class _Notifier:
+        def __init__(self):
+            self.sent = 0
+
+        def send_with_result(self, msg):
+            self.sent += 1
+            return {"ok": True, "delivered": True, "muted": False, "message_id": 1}
+
+    def _policy(self, ledger):
+        obj = CheckpointPolicyV95.__new__(CheckpointPolicyV95)
+        obj.ledger = ledger
+        obj._decision_settled = lambda *a, **k: True  # isolate the window guard
+        return obj
+
+    def test_no_send_or_lock_when_settlement_window_unknown(self):
+        led = self._Ledger()
+        notifier = self._Notifier()
+        obj = self._policy(led)
+        # canonicals empty -> the top asset has no canonical -> window_close None.
+        sent, failed = obj._send_ranked_panel(
+            "10M", _analyses(), _ranking(), {}, {}, notifier, NOW,
+        )
+        self.assertEqual((sent, failed), (0, 0))
+        self.assertEqual(notifier.sent, 0)   # nothing delivered under a bogus window
+        self.assertEqual(led.lock_calls, 0)  # and no lock claimed under it
+
+
 if __name__ == "__main__":
     unittest.main()
