@@ -20,12 +20,15 @@ class CostBreakdown:
     slippage_cents: float
     impact_cents: float
     uncertainty_margin_cents: float
+    latency_cents: float = 0.0
+    adverse_selection_cents: float = 0.0
 
     @property
     def total_cents(self) -> float:
         return (
             self.fee_cents + self.spread_cost_cents + self.slippage_cents
             + self.impact_cents + self.uncertainty_margin_cents
+            + self.latency_cents + self.adverse_selection_cents
         )
 
 
@@ -61,6 +64,8 @@ def _costs_for_side(cfg, ask_cents: float, spread_cents: float | None, uncertain
         slippage_cents=slip,
         impact_cents=cfg.market_impact_cents,
         uncertainty_margin_cents=margin,
+        latency_cents=cfg.latency_cost_cents,
+        adverse_selection_cents=cfg.adverse_selection_cents,
     )
 
 

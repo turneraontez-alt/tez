@@ -18,6 +18,7 @@ from . import features as featmod
 from .calibration import IdentityCalibrator
 from .decision import Decision, evaluate
 from .mathx import clamp
+from .ood import OODBounds, ood_score
 
 
 @dataclass
@@ -36,14 +37,22 @@ class ChallengerPrediction:
     decision: Decision | None = None
     feature_details: dict[str, float] = field(default_factory=dict)
     feature_vector: Any = None            # the full FeatureVector (decision-time context)
+    ood_score: float = 0.0
+    ood_reasons: list[str] = field(default_factory=list)
 
 
-def _confidence(fv: featmod.FeatureVector, p_yes: float, trained: bool) -> float:
+def _confidence(fv: featmod.FeatureVector, p_yes: float, trained: bool, ood: float) -> float:
+    """Confidence is NOT just distance-from-0.5 (addendum Section E).
+
+    It blends feature completeness, data freshness/quality, decisiveness, whether
+    the model is trained, and is discounted by the out-of-distribution score so a
+    confident-looking probability in an unsupported regime is correctly low.
+    """
     decisiveness = 2.0 * abs(p_yes - 0.5)
     coverage = fv.coverage_fraction
     dq = fv.data_quality if fv.data_quality is not None else coverage
     base = 0.4 * coverage + 0.3 * dq + 0.3 * decisiveness
-    return clamp((1.0 if trained else 0.4) * base, 0.0, 1.0)
+    return clamp((1.0 if trained else 0.4) * base * (1.0 - clamp(ood, 0.0, 1.0)), 0.0, 1.0)
 
 
 def _top_factors(model, fv: featmod.FeatureVector, k: int = 5) -> list[dict[str, Any]]:
@@ -87,10 +96,17 @@ class ShadowPredictor:
         p_yes = clamp(cal, 0.01, 0.99)
         p_no = 1.0 - p_yes
 
-        confidence = _confidence(fv, p_yes, trained)
+        ood, ood_reasons = ood_score(fv, OODBounds.from_config(cfg))
+        confidence = _confidence(fv, p_yes, trained, ood)
         uncertainty = 1.0 - confidence
 
         dec = evaluate(cfg, p_yes, fv, uncertainty)
+        # Fail-safe: a severe out-of-distribution observation forces NO TRADE.
+        if cfg.ood_block_trade and ood >= cfg.ood_severe_threshold and dec.action != "NO_TRADE":
+            dec.warnings = list(dec.warnings) + [f"ood_block(score={round(ood, 3)})"]
+            dec.action = "NO_TRADE"
+            dec.side = None
+            dec.hypothetical_size_fraction = 0.0
         edge_vs_market = (p_yes - fv.market_yes_prob) if fv.market_yes_prob is not None else None
 
         return ChallengerPrediction(
@@ -107,4 +123,6 @@ class ShadowPredictor:
             decision=dec,
             feature_details=fv.details,
             feature_vector=fv,
+            ood_score=round(ood, 4),
+            ood_reasons=ood_reasons,
         )

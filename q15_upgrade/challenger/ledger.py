@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     top_factors_json TEXT,
     warnings_json TEXT,
     feature_json TEXT,
+    ood_score REAL,
+    ood_reasons_json TEXT,
+    lineage_json TEXT,
     official_result TEXT,
     resolved_at REAL,
     hypothetical_pnl_cents REAL,
@@ -75,6 +78,7 @@ class ShadowLedger:
         settlement_source: str | None = None,
         created_at: float | None = None,
         model_version: str = "challenger-v1",
+        lineage: dict | None = None,
     ) -> int | None:
         dec = prediction.decision
         total_cost = dec.costs.total_cents if (dec and dec.costs) else None
@@ -101,6 +105,9 @@ class ShadowLedger:
             json.dumps(prediction.top_factors),
             json.dumps(prediction.warnings),
             json.dumps(prediction.feature_details),
+            getattr(prediction, "ood_score", None),
+            json.dumps(getattr(prediction, "ood_reasons", [])),
+            json.dumps(lineage or {}),
             None, None, None,
         )
         try:
@@ -111,8 +118,9 @@ class ShadowLedger:
                  control_prob_yes, challenger_raw_prob_yes, challenger_prob_yes, confidence,
                  edge_vs_market, net_edge_cents, recommendation, side, executable_ask_cents,
                  total_cost_cents, hypothetical_size_fraction, top_factors_json, warnings_json,
-                 feature_json, official_result, resolved_at, hypothetical_pnl_cents)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 feature_json, ood_score, ood_reasons_json, lineage_json,
+                 official_result, resolved_at, hypothetical_pnl_cents)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             self._conn.commit()

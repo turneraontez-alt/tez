@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **611 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **630 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -57,6 +57,16 @@ as a SHADOW model, built to be promoted to primary with one switch.
 - ⚠️ **Data reality:** the v95 ledger has ~0 resolved rows under the current MODEL_VERSION,
   so the challenger is cold-start (defers to market price) until data accrues. Judge it
   ONLY on OOS log-loss/Brier/ECE/net-cents vs control once ≥ a few hundred resolved/checkpoint.
+- **Governance addendum controls** (same package, all EXECUTED+TESTED): `schema.py`
+  (min contract-observation schema + validate), `features.assert_point_in_time` (reject
+  receive-after-decision), richer cost model (latency + adverse-selection cents),
+  `ood.py` (out-of-distribution score → severe forces NO TRADE; lowers confidence),
+  confidence redefined (coverage/freshness/decisiveness/OOD, not just distance-from-0.5),
+  `stats.py` (paired log-loss/Brier diff, block-bootstrap CI, McNemar, effective-N),
+  `lineage.py` (code commit + config hash + version stamps on every recorded prediction),
+  `experiment.py` (frozen PreRegistration + append-only experiment & holdout-access ledger).
+  ⚠️ DATA-DEPENDENT pieces (control reproduction, real backtest, live shadow vs production
+  feed) remain **NOT EXECUTED — REQUIRES EXTERNAL DATA**; no fabricated metrics anywhere.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 **Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3

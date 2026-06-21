@@ -89,6 +89,8 @@ class ChallengerConfig:
     slippage_fallback_cents: float = field(default_factory=lambda: _float("Q15_CHALLENGER_SLIPPAGE_FALLBACK", 0.75))
     market_impact_cents: float = field(default_factory=lambda: _float("Q15_CHALLENGER_IMPACT_CENTS", 0.25))
     uncertainty_margin_cents: float = field(default_factory=lambda: _float("Q15_CHALLENGER_UNCERTAINTY_CENTS", 1.0))
+    latency_cost_cents: float = field(default_factory=lambda: _float("Q15_CHALLENGER_LATENCY_CENTS", 0.0))
+    adverse_selection_cents: float = field(default_factory=lambda: _float("Q15_CHALLENGER_ADVERSE_CENTS", 0.0))
 
     # -- trade decision / no-trade zone --
     min_probability: float = field(default_factory=lambda: _float("Q15_CHALLENGER_MIN_PROB", 0.60))
@@ -102,6 +104,9 @@ class ChallengerConfig:
     max_uncertainty: float = field(default_factory=lambda: _float("Q15_CHALLENGER_MAX_UNCERTAINTY", 0.85))
     # Conservative fractional sizing — never full Kelly.
     max_risk_fraction_per_trade: float = field(default_factory=lambda: _float("Q15_CHALLENGER_MAX_RISK_FRAC", 0.02))
+    # Out-of-distribution fail-safe: at/above this score the default action is NO TRADE.
+    ood_severe_threshold: float = field(default_factory=lambda: _float("Q15_CHALLENGER_OOD_SEVERE", 0.5))
+    ood_block_trade: bool = field(default_factory=lambda: _bool("Q15_CHALLENGER_OOD_BLOCK", True))
 
     # -- persistence --
     db_path: str = field(default_factory=lambda: _str("Q15_CHALLENGER_DB", "data/q15_challenger_shadow_v1.sqlite3"))

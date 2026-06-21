@@ -54,6 +54,27 @@ def assert_no_leakage(used_keys) -> None:
                 raise ValueError(f"potential leakage: feature reads snapshot key '{k}'")
 
 
+def assert_point_in_time(snapshot, decision_ts: float) -> None:
+    """Reject inputs received AFTER the decision time (addendum Section C).
+
+    A feature at decision time T may use only data with receive_timestamp <= T.
+    Any key whose name encodes a receive time later than ``decision_ts`` is
+    look-ahead and raises. Event timestamps are not checked here (a stale event
+    received in time is fine); only RECEIVE times gate availability.
+    """
+    for key, value in dict(snapshot).items():
+        lk = str(key).lower()
+        if "receive" in lk and ("ts" in lk or "time" in lk):
+            try:
+                rt = float(value)
+            except (TypeError, ValueError):
+                continue
+            if rt > decision_ts:
+                raise ValueError(
+                    f"look-ahead: '{key}'={rt} received after decision_ts={decision_ts}"
+                )
+
+
 def _first(snap: Mapping[str, Any], *keys, default=None):
     for k in keys:
         if k in snap and snap[k] is not None:

@@ -36,8 +36,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from . import lineage as lineage_mod
+from . import ood as ood_mod
+from . import schema as schema_mod
+from . import stats as stats_mod
 from .calibration import make_calibrator
 from .config import ChallengerConfig
+from .experiment import ExperimentLedger, PreRegistration
 from .features import FEATURE_NAMES, FeatureVector, extract
 from .harness import ordered_vector, train_predictor, walk_forward_evaluate
 from .ledger import ShadowLedger
@@ -49,6 +54,8 @@ __all__ = [
     "FeatureVector", "FEATURE_NAMES", "extract", "make_model", "make_calibrator",
     "walk_forward_evaluate", "train_predictor", "ordered_vector",
     "build_live_predictor", "primary_probability", "run_shadow",
+    "ExperimentLedger", "PreRegistration",
+    "schema_mod", "ood_mod", "stats_mod", "lineage_mod",
 ]
 
 
@@ -97,9 +104,11 @@ def run_shadow(snapshot: Mapping[str, Any], *, predictor: ShadowPredictor,
     """Predict one contract and record it in the shadow ledger (observational)."""
     cfg = config or ChallengerConfig.from_env()
     pred = predictor.predict(snapshot)
+    calib_version = getattr(getattr(predictor, "calibrator", None), "name", "identity")
     ledger.record(
         pred, asset=asset, contract=contract, checkpoint=checkpoint,
         control_prob_yes=champion_prob_yes, settlement_source=settlement_source,
         model_version=cfg.model_version,
+        lineage=lineage_mod.lineage_record(cfg, calibrator_version=calib_version),
     )
     return pred
