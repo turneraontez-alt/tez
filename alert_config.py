@@ -82,7 +82,9 @@ class AlertConfig:
         self.report_interval_seconds = _f("REPORT_INTERVAL_S", 3600.0)
 
         # --- Scalp (short-term bounce) predictions ---
-        self.scalp_enabled = _b("SCALP_ENABLED", True)
+        # Disabled by default: the monitor focuses on the 15M/10M/7M checkpoint
+        # predictions. Set SCALP_ENABLED=true to re-enable the scalp engine.
+        self.scalp_enabled = _b("SCALP_ENABLED", False)
         self.scalp_min_move_cents = max(12.0, _f("SCALP_MIN_MOVE_CENTS", 12.0))
         self.scalp_target_cents = max(10.0, _f("SCALP_TARGET_CENTS", 10.0))
         # Min reversal tick off the extreme to confirm the snap-back has begun.

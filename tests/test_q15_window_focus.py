@@ -113,6 +113,22 @@ class Tests(unittest.TestCase):
             s["seconds_remaining"]=890-i
             m.update({"BTC":s},now+i,{})
 
+    def test_v9_probability_dropped_when_snapshot_stale(self):
+        # The canonical v9 probability overrides the live component blend, so a
+        # value carried on a stale snapshot must not resurrect a prior lean.
+        m=TwoWindowFocusManager(Store(), Notifier(), None, Client(), self.settings())
+        fresh=snap()
+        fresh["v9_uncalibrated_p_yes"]=0.82
+        fresh_p,_=m._raw_yes_probability(fresh)
+        self.assertAlmostEqual(fresh_p, 0.82, places=6)   # fresh: canonical used
+        stale=snap()
+        stale["v9_uncalibrated_p_yes"]=0.82
+        stale["data_age_seconds"]=999                     # far beyond the budget
+        stale_p,_=m._raw_yes_probability(stale)
+        # Stale: the override is dropped and we fall back to the live blend, which
+        # for this snapshot is not the injected 0.82.
+        self.assertNotAlmostEqual(stale_p, 0.82, places=6)
+
     def test_top_three_only(self):
         m=TwoWindowFocusManager(Store(), Notifier(), None, Client(), self.settings())
         now=time.time(); snaps={}
@@ -230,9 +246,12 @@ if __name__ == "__main__":
 
 class EmptyCloseTimeClaim(unittest.TestCase):
     def _settings(self):
+        # Two-window checkpoint alerts default OFF now; this suite asserts on the
+        # claim/alert behaviour, so enable them.
         return FocusSettings(min_vote_samples=3, checkpoint_15_seconds=885,
             checkpoint_15_latest_seconds=720, checkpoint_10_seconds=600,
-            checkpoint_10_latest_seconds=480, alert_15_at_seconds=870, alert_10_at_seconds=585)
+            checkpoint_10_latest_seconds=480, alert_15_at_seconds=870, alert_10_at_seconds=585,
+            checkpoint_alerts_enabled=True)
 
     def test_missing_close_time_creates_no_empty_claim_or_alert(self):
         m = TwoWindowFocusManager(Store(), Notifier(), None, Client(), self._settings())

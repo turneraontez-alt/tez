@@ -1,4 +1,5 @@
 import os
+import atexit
 import time
 import threading
 import logging
@@ -59,6 +60,10 @@ REFRESH_INTERVAL = 1.0
 DISCOVERY_INTERVAL = 30
 DETAIL_INTERVAL = 5  # refresh market detail (volume) every N seconds
 FETCH_DEADLINE = 3.0  # max seconds a cycle waits on concurrent fetches
+# A fetch still running after this long is treated as a permanently hung upstream
+# and dropped from in-flight tracking so the dict can't grow without bound over
+# the life of the loop. Generous vs FETCH_DEADLINE: only abandons true hangs.
+FETCH_INFLIGHT_TTL = float(os.environ.get("Q15_FETCH_INFLIGHT_TTL_S") or 60.0)
 
 client = KalshiClient()
 # Shared cache of immutable settled-market results. All settlement reconcilers
@@ -70,6 +75,10 @@ for _engine in engines.values():
     _engine.ob_tracker = OrderbookTracker()
 state = {}
 state_lock = threading.Lock()
+# Per-asset engine update epoch captured at snapshot-publish time, under
+# state_lock, so /api/health computes data_age from a value consistent with the
+# state it just read (instead of an unsynchronized read of engines[a]).
+engine_update_ts = {}
 _last_detail = {a: 0 for a in ASSETS}
 
 # Entry-alert subsystem (read-only; never places orders).
@@ -133,6 +142,10 @@ def _seconds_remaining(close_time_str):
         close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
         return max(0, int((close_dt - datetime.now(timezone.utc)).total_seconds()))
     except Exception:
+        # A malformed close_time still returns None (callers handle it), but log
+        # it so a bad/changed upstream timestamp format is visible instead of
+        # silently disabling every checkpoint clock.
+        logger.warning("Could not parse close_time %r", close_time_str)
         return None
 
 
@@ -240,7 +253,92 @@ def fetch_market_detail(ticker):
     return client.get_market(ticker)
 
 
-def refresh_loop():
+def _fetch_result_is_current(active, asset, result):
+    """True if a fetch result still belongs to the asset's currently-active market.
+
+    A request submitted before a market rolled over can land a cycle later with
+    the *prior* ticker. Ingesting it would reset the engine to a stale ticker, so
+    the loop drops any result whose asset is no longer active or whose ticker no
+    longer matches the active market.
+    """
+    market = active.get(asset)
+    return bool(market) and market.get("ticker") == result.get("ticker")
+
+
+def _resolve_cached_detail(detail_cache, asset, active_ticker):
+    """Last-good market detail (volume) for ``asset`` — only if it matches the
+    active ticker. Detail is cached per ticker so a rollover never reuses the
+    prior market's volume; on a ticker mismatch this returns None and the loop
+    falls back to the base market (volume 0) until fresh detail arrives.
+    """
+    cached = detail_cache.get(asset)
+    return cached[1] if (cached and cached[0] == active_ticker) else None
+
+
+def _harvest_and_submit(executor, inflight, active, now, deadline, submit_fn, stale_ttl=None):
+    """Drive the per-asset concurrent fetch with at-most-one request in flight.
+
+    Harvests any previous-cycle requests that have finished, submits a fresh
+    request for each active asset not already in flight, then waits up to
+    ``deadline`` for *this* cycle's requests. A request that is still running at
+    the deadline stays in ``inflight`` and is harvested in a later cycle, so one
+    slow upstream cannot freeze the whole dashboard. A request still running after
+    ``stale_ttl`` seconds is treated as a permanently hung upstream: it is
+    cancelled best-effort and dropped from tracking so ``inflight`` can't grow
+    without bound (and a fresh request can take its place). Returns
+    ``{asset: result}`` for everything that completed; ``inflight`` is mutated in
+    place, mapping ``asset -> (Future, submitted_at)``.
+    """
+    if stale_ttl is None:
+        stale_ttl = FETCH_INFLIGHT_TTL
+    results = {}
+    # 1) harvest any previous-cycle requests that have since finished; abandon any
+    #    that have been hung past the TTL.
+    for a in list(inflight.keys()):
+        f, submitted_at = inflight[a]
+        if f.done():
+            try:
+                results[a] = f.result()
+            except Exception as e:
+                logger.warning(f"fetch {a}: {e}")
+            del inflight[a]
+        elif now - submitted_at > stale_ttl:
+            f.cancel()  # best-effort; a running fetch can't be interrupted
+            logger.warning(f"fetch {a}: abandoned after {now - submitted_at:.0f}s in flight")
+            del inflight[a]
+    # 2) submit a fresh request only for active assets not already in flight
+    futs = {}
+    for asset, market in active.items():
+        if asset in inflight:
+            continue
+        f = executor.submit(submit_fn, asset, market, now)
+        inflight[asset] = (f, now)
+        futs[f] = asset
+    # 3) wait up to the per-cycle deadline for THIS cycle's requests; slow ones
+    #    stay in flight and are harvested in a later cycle.
+    try:
+        for fut in as_completed(list(futs.keys()), timeout=deadline):
+            a = futs[fut]
+            try:
+                results[a] = fut.result()
+            except Exception as e:
+                logger.warning(f"fetch {a}: {e}")
+            finally:
+                # Remove successful futures too; otherwise stale results repeat.
+                inflight.pop(a, None)
+    except TimeoutError:
+        slow = [futs[f] for f in futs if futs[f] in inflight]
+        logger.warning(f"fetch deadline {deadline}s exceeded; deferring {slow}")
+    return results
+
+
+def refresh_loop(max_cycles=None):
+    """The ~1s cycle that drives every subsystem.
+
+    Runs forever in production. ``max_cycles`` bounds the number of iterations so
+    the loop can be driven deterministically from tests (default ``None`` keeps
+    the production infinite behavior unchanged).
+    """
     last_discovery = 0
     current_markets = {}
     cycling = {}
@@ -248,6 +346,10 @@ def refresh_loop():
     detail_inflight = {}  # asset -> (ticker, Future) for the off-critical detail fetch
     detail_cache = {}     # asset -> (ticker, detail) last-good market volume
     executor = ThreadPoolExecutor(max_workers=8)
+    # Forever-loop: shut the pool down on interpreter exit so we don't leak the 8
+    # worker threads (the bounded-test path shuts down explicitly before return).
+    atexit.register(executor.shutdown, wait=False)
+    cycles = 0
     while True:
         cycle_clock = time.monotonic()
         cycle_start = time.time()
@@ -297,45 +399,12 @@ def refresh_loop():
             # Per-asset in-flight tracking: at most one outstanding request per
             # asset, so a persistently slow upstream cannot pile work onto the
             # executor and starve other assets' fetches.
-            results = {}
-            # 1) harvest any previous-cycle requests that have since finished
-            for a in list(inflight.keys()):
-                f = inflight[a]
-                if f.done():
-                    try:
-                        results[a] = f.result()
-                    except Exception as e:
-                        logger.warning(f"fetch {a}: {e}")
-                    del inflight[a]
-            # 2) submit a fresh request only for active assets not already in flight
-            futs = {}
-            for asset, market in active.items():
-                if asset in inflight:
-                    continue
-                f = executor.submit(
-                    fetch_asset_raw, asset, market, now,
-                    engines[asset].last_trade_ts,
-                )
-                inflight[asset] = f
-                futs[f] = asset
-            # 3) wait up to the per-cycle deadline for THIS cycle's requests;
-            #    slow ones stay in flight and are harvested in a later cycle so
-            #    one upstream stall can't freeze the whole dashboard.
-            try:
-                for fut in as_completed(list(futs.keys()), timeout=FETCH_DEADLINE):
-                    a = futs[fut]
-                    try:
-                        results[a] = fut.result()
-                    except Exception as e:
-                        logger.warning(f"fetch {a}: {e}")
-                    finally:
-                        # Remove successful futures too; otherwise stale results repeat.
-                        inflight.pop(a, None)
-            except TimeoutError:
-                slow = [futs[f] for f in futs if futs[f] in inflight]
-                logger.warning(
-                    f"fetch deadline {FETCH_DEADLINE}s exceeded; deferring {slow}"
-                )
+            def _submit_fetch(asset, market, when):
+                return fetch_asset_raw(asset, market, when, engines[asset].last_trade_ts)
+
+            results = _harvest_and_submit(
+                executor, inflight, active, now, FETCH_DEADLINE, _submit_fetch
+            )
 
             # -- decoupled market-detail (volume) refresh, off the freshness path --
             # Kalshi REST get_market can take seconds; keeping it out of the
@@ -367,7 +436,7 @@ def refresh_loop():
                 # Drop late in-flight results whose market has rolled over or
                 # is no longer active (avoids resetting an engine to a stale
                 # ticker and keeps the snapshot loop's active[a] lookups safe).
-                if a not in active or active[a].get("ticker") != r.get("ticker"):
+                if not _fetch_result_is_current(active, a, r):
                     continue
                 eng = engines[a]
                 eng.ensure_market(r["ticker"])
@@ -389,8 +458,7 @@ def refresh_loop():
             # -- build snapshots --
             for a, (r, ob_parsed, ob_delta) in prelim.items():
                 eng = engines[a]
-                cached_detail = detail_cache.get(a)
-                detail = cached_detail[1] if (cached_detail and cached_detail[0] == active[a].get("ticker")) else None
+                detail = _resolve_cached_detail(detail_cache, a, active[a].get("ticker"))
                 market = {**active[a], **(detail or {})}
                 market["_volume"] = _parse_volume(market)
                 try:
@@ -405,6 +473,7 @@ def refresh_loop():
                     eng.candles.evict(now)
                     with state_lock:
                         state[a] = snap
+                        engine_update_ts[a] = eng.last_update_ts
                 except Exception as e:
                     logger.error(f"build_snapshot {a}: {e}")
 
@@ -461,23 +530,47 @@ def refresh_loop():
                 snaps = dict(state)
             ws_health = market_data.health()
             global _last_cycle_ok, _last_learn
-            snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
-            snaps = ct.time("upgrade_enrich", upgrade.enrich_all, snaps, now, ws_health)
-            snaps = ct.time("learner_enrich", learner.enrich_and_observe, snaps, now, ws_health)
-            snaps = {
-                asset: risk_preview(enforce_fail_closed(snap))
-                for asset, snap in snaps.items()
-            }
-            snaps = ct.time("calibrated_edge", calibrated_edge.preview_all, snaps, now, ws_health)
-            snaps = ct.time("run_cycle", checkpoint_v95.run_cycle, snaps, now, ws_health, focus_manager, calibrated_edge, notifier)
-            snaps = ct.time("professional_v7", professional_v7.observe_all, snaps, now, ws_health)
-            with state_lock:
-                state.update(snaps)
-            deep_snaps = ct.time("deep_eval_snapshots", focus_manager.deep_evaluation_snapshots, snaps, signal_engine, scalp_engine)
+            try:
+                snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
+                snaps = ct.time("upgrade_enrich", upgrade.enrich_all, snaps, now, ws_health)
+                snaps = ct.time("learner_enrich", learner.enrich_and_observe, snaps, now, ws_health)
+                snaps = {
+                    asset: risk_preview(enforce_fail_closed(snap))
+                    for asset, snap in snaps.items()
+                }
+                snaps = ct.time("calibrated_edge", calibrated_edge.preview_all, snaps, now, ws_health)
+                snaps = ct.time("run_cycle", checkpoint_v95.run_cycle, snaps, now, ws_health, focus_manager, calibrated_edge, notifier)
+                snaps = ct.time("professional_v7", professional_v7.observe_all, snaps, now, ws_health)
+            except Exception:
+                # A single enrichment stage must not freeze the dashboard for every
+                # asset (the previous, now-stale snapshot would otherwise persist
+                # because state.update never ran) nor skip the best-effort
+                # subsystems below. Log it and publish whatever enrichment did
+                # complete; the next cycle retries from a clean copy of state.
+                logger.exception("Enrichment stage failed; publishing partial snapshot")
+            finally:
+                with state_lock:
+                    state.update(snaps)
+            try:
+                deep_snaps = ct.time("deep_eval_snapshots", focus_manager.deep_evaluation_snapshots, snaps, signal_engine, scalp_engine)
+            except Exception:
+                logger.exception("deep_evaluation_snapshots failed; skipping signal/scalp this cycle")
+                deep_snaps = {}
             ct.safe("signals", signal_engine.evaluate_all, deep_snaps, now, ws_health)
             ct.safe("scalp", scalp_engine.evaluate, deep_snaps, now)
             ct.safe("focus_settlement", focus_manager.reconcile_settlements, now)
             ct.safe("report", reporter.maybe_send, now)
+            # Read-only challenger shadow: deliver the per-15-min accuracy
+            # comparison (challenger vs current system). No-op when disabled.
+            try:
+                from q15_upgrade.challenger.runner import get_runner as _challenger_runner
+                _cr = _challenger_runner()
+                if _cr is not None:
+                    _cr_msg = _cr.drain_report()
+                    if _cr_msg:
+                        notifier.send(_cr_msg)
+            except Exception:
+                logger.debug("challenger shadow report skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)
@@ -497,6 +590,10 @@ def refresh_loop():
                 notifier.send(page)
         except Exception:
             logger.exception("watchdog pager failed")
+        cycles += 1
+        if max_cycles is not None and cycles >= max_cycles:
+            executor.shutdown(wait=False)
+            return
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
 
 
@@ -581,6 +678,21 @@ _COMPACT_FIELDS = (
     "q15_v9_5_ideal_entry_cents",
     "q15_v9_5_regime",
     "q15_v9_5_entry_allowed",
+    "q15_v9_5_manipulation_suspected",
+    "q15_v9_5_manipulation_reason",
+    "q15_v9_5_manipulation_lean",
+    "q15_v9_5_flip_risk_score",
+    "q15_v9_5_flip_risk_confidence",
+    "q15_v9_5_flip_risk_primary_reason",
+    "q15_v9_5_flip_risk_direction",
+    "q15_v9_5_flip_risk_evidence_count",
+    "q15_v9_5_flip_threshold",
+    "q15_v9_5_flip_threshold_source",
+    "q15_v9_5_flip_threshold_status",
+    "q15_v9_5_flip_samples",
+    "q15_v9_5_flip_probability",
+    "q15_v9_5_flip_state",
+    "q15_v9_5_flip_dashboard",
     "q15_v9_5_rank",
     "q15_v9_5_top_pick",
 )
@@ -886,8 +998,9 @@ def health():
         ages = []
         for a in ASSETS:
             s = next((x for x in live if x.get("asset") == a), None)
-            if s is not None and engines[a].last_update_ts:
-                ages.append(now - engines[a].last_update_ts)
+            ts = engine_update_ts.get(a)
+            if s is not None and ts:
+                ages.append(now - ts)
     data_age = round(max(ages), 2) if ages else None
 
     closes = sorted([s.get("close_time") for s in live if s.get("close_time")])
@@ -906,8 +1019,26 @@ def health():
         spot_ws_status = {"enabled": False}
 
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
+
+    # Surface learning-ledger health at the top level so "ledger down" (calibration
+    # silently falls back to identity) is visible without digging into
+    # q15_v9_5.ledger. Never let a ledger hiccup break the health route itself.
+    try:
+        ls = checkpoint_v95.ledger.status()
+        ledger_health = {
+            "available": bool(ls.get("available")),
+            "path": ls.get("path"),
+            "error": ls.get("error"),
+            "unique_predictions": ls.get("unique_predictions"),
+            "unique_resolved": ls.get("unique_resolved"),
+            "dropped_feature_rows": ls.get("dropped_feature_rows"),
+        }
+    except Exception as e:
+        ledger_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
+
     return jsonify({
         "status": "ok",
+        "ledger": ledger_health,
         "q15_v9_5": checkpoint_v95.health(),
         "q15_v9_1": checkpoint_v95.health(),
         "q15_v9_2": checkpoint_v95.health(),
@@ -963,7 +1094,11 @@ def _start_refresh():
             logger.info("Refresh loop started")
 
 
-_start_refresh()
+# Autostart on import keeps deployment behavior unchanged. Set
+# Q15_AUTOSTART_REFRESH=0 to import the app (routes, globals) without spawning
+# the live cycle — used by tests and offline diagnostics.
+if os.environ.get("Q15_AUTOSTART_REFRESH", "1") != "0":
+    _start_refresh()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
