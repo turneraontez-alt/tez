@@ -2795,6 +2795,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # saw as one duplicate report per minute. One attempt per window.
             if bool(result.get("muted")):
                 self.ledger.unlock_official_report(str(checkpoint), window_close, now)
+            else:
+                # A genuine (non-mute) failure: the official report was generated but
+                # not delivered. Record each generated pick as DELIVERY_FAILED in the
+                # shadow ledger with the exact error, so Your System's prediction is
+                # preserved as background (out of the visible totals) and auditable —
+                # never silently lost. Retry stays governed by the existing lock /
+                # min-gap policy above (the lock is intentionally kept on failure).
+                err = (str(result.get("error") or getattr(notifier, "last_error", None)
+                           or ("handled_no_message_id" if handled else "send_failed")))
+                mark_failed = getattr(self.ledger, "_shadow_mark_failed", None)
+                if callable(mark_failed):
+                    for pick in picks:
+                        p_asset = str(pick.get("asset"))
+                        p_canon = canonicals.get(p_asset)
+                        p_ticker = p_canon.ticker if p_canon is not None else (analyses.get(p_asset) or {}).get("ticker")
+                        if p_ticker:
+                            mark_failed(str(p_ticker), str(checkpoint), err)
             if handled:
                 self._throttled_warn(
                     f"ranked_handled_not_delivered:{checkpoint}",

@@ -760,6 +760,19 @@ class V95Ledger:
         except Exception as exc:
             self._note_shadow_error("mark_sent", exc)
 
+    def _shadow_mark_failed(self, ticker: str, checkpoint: str, error: str) -> None:
+        """Tell the shadow that Your System's official send for (ticker, checkpoint)
+        FAILED. The shadow keeps the generated pick as a background DELIVERY_FAILED
+        row (out of the visible win/loss totals) with the exact error, so it is not
+        silently lost. Read-only wrt production; never raises into the alert path."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                runner.mark_native_delivery_failed(str(ticker), str(checkpoint), str(error))
+        except Exception as exc:
+            self._note_shadow_error("mark_failed", exc)
+
     def _shadow_resolve(self, events) -> None:
         try:
             from q15_upgrade.challenger.runner import get_runner
