@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **779 passed, 4 skipped** (12 skipped in a
+Tests: `python3 -m pytest tests/ -q` → **809 passed, 4 skipped** (12 skipped in a
 bare container where `flask`/`websockets` aren't installed; skip count varies with
 cffi/crypto availability).
 
@@ -26,7 +26,7 @@ delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
 ## ✅ Shipped THIS session (branch `claude/crypto-prediction-monitor-ygugze`) — engineering-standard meta-prompt persisted
-**Merged to `main` (docs/config only, no behavior change). Tests: 779 passed, 12 skipped.**
+**Merged to `main` (docs/config only, no behavior change). Tests: 809 passed, 12 skipped.**
 Owner pasted a "Staff Engineer" meta-prompt and asked to persist it so every new
 session reads it first.
 - **`ENGINEERING_GUIDELINES.md` (new):** the full meta-prompt as the standing
@@ -36,6 +36,25 @@ session reads it first.
 - **`CLAUDE.md`:** a prominent **READ FIRST** callout at the very top points to it.
 - **`.claude/settings.json` (new):** a `SessionStart` hook injects a one-line
   reminder to read `ENGINEERING_GUIDELINES.md` into every session's context.
+
+## ✅ Shipped THIS session (branch `claude/review-update-handoff-1zful1`, MERGED to `main`) — resolution health check
+**Merged to `main` — deploy-pending (Relay syncs `main`→Repl; run it there).** Ran a
+fresh `updated-review` (held at **7.5/10**; ceiling is data/calibration, not code — all
+fan-out "criticals" collapsed on verification: locked `_LATEST_*` writes, in-code-documented
+multiple-comparison + chosen-side ECE choices, and the entry ladder blocks a >30s quote at
+`WATCH_LIQUIDITY` before the edge gate). Then, diagnosing why the v95 ledger shows ~0
+resolved: confirmed it's **environmental, not a bug** — settlement reconciliation IS wired
+into the live loop (`checkpoint_v95.run_cycle` calls `reconcile_from_signal_store` +
+`reconcile_pending_from_market(get_market, now)` every 30s, `ledger_v95.py:2129-2143`); a
+fresh CI clone just has no live exchange and the scoreboard was reset by the `MODEL_VERSION`
+bump (re-baking). A row is "resolved" only when its Kalshi market settles YES/NO and that
+official result is written back (`official_result IS NOT NULL`); closed ≠ resolved.
+- **Tool (`scripts/check_resolution.py`, READ-ONLY `mode=ro`, run ON THE REPL):** per-checkpoint
+  total/resolved/pending/stuck, calibration readiness vs the 30-row threshold, settlement
+  recency, optional `/api/health` reconcile counters, and an EMPTY/BAKING/PROGRESSING/STUCK/HEALTHY
+  verdict. Flags the Relay-paused / no-`get_market` failure mode. Imports the canonical
+  `MODEL_VERSION` (adds repo root to `sys.path`). No new tests (pure read-only diagnostic).
+- Suite green: **809 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/replit-workspace-connect-pfspn4`) — "is anything 100% correct?" forensic audit
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
