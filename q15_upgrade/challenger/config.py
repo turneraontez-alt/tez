@@ -137,14 +137,23 @@ class ChallengerConfig:
     reset_at: float = field(default_factory=lambda: _float("Q15_CHALLENGER_RESET_AT", 0.0))
 
     # -- grading rule --
-    # Your System (native/control) counts in the VISIBLE record only when that
-    # prediction was actually delivered before contract close (mark_native_sent on
-    # a real Telegram delivery). Unsent predictions stay in the ledger as internal
-    # background rows (graded for learning) but never inflate the visible Yours
-    # record. The Shadow side is exempt (read-only test). Default ON = the required
-    # behavior; OFF = legacy count-all (reversible).
+    # Whether Your System (native/control) is graded ONLY on picks actually
+    # delivered to Telegram before contract close (mark_native_sent on a real
+    # delivery), or on every prediction it generates.
+    #
+    # Default OFF: Your System is graded on the SAME generated predictions as the
+    # Shadow (which is never delivered — read-only test), so the Shadow-vs-Yours
+    # card is a true apples-to-apples model comparison and fills every window
+    # regardless of Telegram delivery health. The delivery audit line
+    # (delivery_audit) still surfaces send health separately.
+    #
+    # ON (Q15_CHALLENGER_NATIVE_SENT_ONLY=true): the legacy delivery-gated rule —
+    # only picks delivered before close count in the visible Yours record; undelivered
+    # picks stay as internal background rows (graded for learning) but never appear.
+    # This makes the visible Yours record empty whenever delivery is failing, which is
+    # why the default is OFF. Reversible.
     native_sent_only: bool = field(
-        default_factory=lambda: _bool("Q15_CHALLENGER_NATIVE_SENT_ONLY", True))
+        default_factory=lambda: _bool("Q15_CHALLENGER_NATIVE_SENT_ONLY", False))
 
     @classmethod
     def from_env(cls) -> "ChallengerConfig":

@@ -88,6 +88,69 @@ invariants intact; every model-touching change is default-OFF `Q15_*`-gated. Sui
 - **Files:** `q15_upgrade/money.py` (new), `q15_upgrade/checkpoint_v95.py`, `q15_upgrade/ledger_v95.py`,
   `performance.py`, `spot_ws.py`, `tests/test_review_fixes_v3.py` (new, 20). **DB:** no schema change
   beyond the existing additive `_ensure_column` migrations (now validated); fully backward-compatible.
+## ✅ Shipped THIS session — outbox send_with_result: fix delivery mis-detection (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner asked why the "Your System delivery: 0 sent · 12 failed · 23 pending" delivery was failing.
+**It mostly WASN'T failing — delivery DETECTION was broken.** Production wires
+`notifier = ReliableTelegramOutbox` (`app.py:91`) and passes it into `run_cycle` (`app.py:565`).
+The official interval-report path does `if hasattr(notifier, "send_with_result"): … else: delivered =
+ok and notifier.last_message_id is not None`. The outbox had **neither** `send_with_result` nor
+`last_message_id`, so it fell to the else-branch and `delivered` was **always False** even though the
+outbox's synchronous attempt actually delivered to Telegram. Consequences: every native pick recorded
+`DELIVERY_FAILED` ("handled_no_message_id"); the official `sent_predictions` scoreboard never wrote
+(it requires a message_id, `ledger_v95.py:856`); and the manipulation-alert gate saw the normal check
+as not-delivered.
+- **Fix:** `notifications/outbox_v9.py` now implements `send_with_result` (and a `_raw_send` helper +
+  `_attempt_result`) that performs the synchronous attempt and returns the wrapped notifier's real
+  `{ok, delivered, muted, message_id}`. The message_id is captured from the raw result INSIDE the
+  delivery lock (never read back from shared state) so a concurrent worker delivery can't race it.
+  Durable retry is unchanged; `send()` keeps its bool contract. Legacy bool notifiers fall back to
+  delivered=ok with no id. So the official report's message_id now flows -> official scoreboard,
+  Shadow-vs-Yours native side, and the manip-alert gate all populate truthfully.
+- **Tests:** +3 in `tests/test_q15_v9.py` (rich-result passthrough w/ message_id; failure stays
+  retryable & not-delivered; legacy bool fallback). Suite: **868 passed, 13 skipped**.
+- **Note:** this is independent of the grading-default flip below (that made the COMPARISON robust to
+  delivery; this makes delivery DETECTION truthful so the official record + manip alerts work too).
+
+## ✅ Shipped THIS session — Shadow-vs-Yours: grade Your System on generated predictions (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner: "Your System" showed all `—`/`0W–0L` while Shadow filled. **Root cause:** the
+native side was gated to picks DELIVERED to Telegram before close
+(`Q15_CHALLENGER_NATIVE_SENT_ONLY`, was default ON) while the Shadow has no such gate;
+delivery was failing (audit: 0 sent · 12 failed · 23 pending) so nothing cleared the gate.
+- **Fix (owner-chosen): default the grading rule to count-all** — `native_sent_only`
+  default flipped `True → False` in `q15_upgrade/challenger/config.py` (comment + `.env.example`
+  updated). Your System is now graded on the SAME generated predictions as the Shadow, so the
+  card is true model-vs-model and fills every window regardless of Telegram health. The
+  `Your System delivery: …` audit line stays, so send health is still visible. Reversible via
+  `Q15_CHALLENGER_NATIVE_SENT_ONLY=true`.
+- **Tests:** the two gating-mechanism tests now pin `native_sent_only=True` explicitly (they test
+  the gate, not the default); added `test_default_grades_generated_predictions_not_delivery` and
+  `test_config_default_is_count_all`. Suite: **865 passed, 13 skipped**.
+- **⚠️ Deploy note:** if the Repl has `Q15_CHALLENGER_NATIVE_SENT_ONLY=true` set explicitly in its
+  env/secrets, that OVERRIDES the new code default — unset it (or set `=false`) for the change to
+  take effect. Separately, the 12 failed deliveries mean real alerts aren't reaching Telegram; that
+  delivery failure is still unaddressed (owner chose to fix the comparison, not delivery).
+
+## ✅ Shipped THIS session — flip-learning in the decision-stats snapshot (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner asked for a single snapshot that captures BOTH manipulation tracks.
+- **`decision_stats()` now carries a `flip_learning` block** (`checkpoint_v95.py`) wrapping the
+  existing read-only ledger methods `flip_stats()` (learned flip-rate-by-risk curves + thresholds
+  per checkpoint/direction/asset) and `flip_warning_performance()` (precision / detection-rate of
+  fired warnings). Purely additive — the prior keys (`version`, `read_only`,
+  `current_trade_decisions`, `ledger`, `metrics`) are unchanged. So one capture of
+  `/api/q15-v9-5/decision-stats` (the `v95_ledger_snapshot.json` source) now shows the
+  by_manipulation reliability scoreboard AND the flip-risk learning that was previously omitted.
+- **Test:** `tests/test_q15_v95_flip_risk.py::TestDecisionStatsExposesFlipLearning` (records a real
+  NO→YES flip, asserts the curve + warning-perf surface and the old contract is preserved). Suite:
+  **863 passed, 13 skipped**.
+- **DIVERGENCE investigation (no code change):** the DIVERGENCE manipulation tell never accumulates
+  graded rows because it requires ≥35 bps (0.35%) cross-venue spot deviation
+  (`Q15_V95_MANIPULATION_DIVERGENCE_BPS`, and the `EXCHANGE_DIVERGENCE` regime is hardcoded to the
+  same 35 bps gate at `checkpoint_v95.py:647`). Major venues stay within a few bps via arbitrage, so
+  35 bps is a tail event. Corroborated by the latest snapshot: across 910 resolved predictions
+  `metrics.by_regime` has only HIGH_VOLATILITY + THRESHOLD_PIN (no EXCHANGE_DIVERGENCE) and
+  `by_manipulation.by_reason` has only PIN + ABSORPTION. Fix is operational: lower the (already
+  env-tunable) threshold to a realistic band (~8–12 bps) — pending owner's chosen value, since it
+  changes the observational scoreboard's composition (it does NOT touch predictions/edge).
 
 ## ✅ Shipped THIS session — Shadow vs Yours: synchronized snapshot + Eastern Time + reset
 **Merged to main (7e474f0), deploy-pending (Relay syncs main → Repl).** Builds on the window-grading repair below.

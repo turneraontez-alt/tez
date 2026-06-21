@@ -3352,6 +3352,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "version": VERSION, "read_only": True,
             "current_trade_decisions": counts,
             "ledger": self.ledger.status(), "metrics": self.ledger.metrics(),
+            # Flip-risk / manipulation learning track: the learned flip-rate-by-risk
+            # curves + thresholds (per checkpoint/direction/asset) and the fired-warning
+            # performance. Read-only aggregates so a single snapshot captures BOTH the
+            # manipulation-reliability scoreboard (metrics.scoreboard.by_manipulation)
+            # and the flip-risk learning that decision_stats previously omitted.
+            "flip_learning": {
+                "stats": self.ledger.flip_stats(),
+                "warning_performance": self.ledger.flip_warning_performance(),
+            },
         }
 
 
