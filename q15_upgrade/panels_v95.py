@@ -143,6 +143,65 @@ def build_checkpoint_panel(*, checkpoint: str, asset: str, side: str,
 
 
 # --------------------------------------------------------------------------- #
+#  Ranked Top-3 checkpoint panel (the official interval report)                #
+# --------------------------------------------------------------------------- #
+_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[str, Any] | None],
+                                  top_k: int = 3) -> str:
+    """Render the official interval report: exactly ``top_k`` ranked picks.
+
+    Each pick (highest confidence first) is a fully-extracted mapping carrying
+    every field the system already calculates:
+    ``{rank, asset, side, confidence, yes_prob, no_prob, entry_score,
+       manipulation_prob, price_cents, rec_low, rec_high, max_cents, wick_status,
+       flow_status, edge_cents, decision, is_entry}``. A ``None`` slot (fewer than
+    ``top_k`` valid assets) renders as ``—`` — never an invented pick.
+
+    The header keeps the ``V9.5 CHECK`` marker and an actionable/non-actionable
+    marker (``ENTRY RECOMMENDED`` / ``NO ENTRY YET``) the suppression chain keys
+    on; the body is one ``<pre>`` panel.
+    """
+    cp = str(checkpoint).upper()
+    any_entry = any(bool(p and p.get("is_entry")) for p in picks)
+    marker = "ENTRY RECOMMENDED" if any_entry else "NO ENTRY YET"
+    header = f"🔎 <b>V9.5 CHECK — {_esc(cp)} · TOP {top_k} — {marker}</b>"
+
+    body: list[str] = ["Ranked by confidence · #1 = most confident", ""]
+    for rank in range(1, top_k + 1):
+        pick = picks[rank - 1] if rank - 1 < len(picks) else None
+        medal = _MEDALS.get(rank, f"#{rank}")
+        if not pick:
+            body.append(f"{medal} #{rank} —")
+            body.append("")
+            continue
+        body.append(f"{medal} #{rank} {_esc(pick.get('asset'))} · {_side(pick.get('side'))}")
+        body.append(f"Confidence: {_pct(pick.get('confidence'), digits=0)}")
+        body.append(f"P(Yes) {_pct(pick.get('yes_prob'), digits=0)} · "
+                    f"P(No) {_pct(pick.get('no_prob'), digits=0)}")
+        es = pick.get("entry_score")
+        body.append(f"Entry score: {'—' if es is None else f'{float(es):.0f}/100'}")
+        mp = pick.get("manipulation_prob")
+        body.append(f"Manipulation: {'—' if mp is None else f'{float(mp):.0f}%'}")
+        rec = "—"
+        lo, hi = pick.get("rec_low"), pick.get("rec_high")
+        if lo is not None and hi is not None:
+            rec = f"{_cents(lo)}–{_cents(hi)}"
+        elif pick.get("max_cents") is not None:
+            rec = f"≤{_cents(pick.get('max_cents'))}"
+        body.append(f"Price: {_cents(pick.get('price_cents'))} · rec {rec} · "
+                    f"max {_cents(pick.get('max_cents'))}")
+        body.append(f"Wick/PA: {_esc(pick.get('wick_status') or '—')}")
+        body.append(f"Flow/Mom: {_esc(pick.get('flow_status') or '—')}")
+        body.append(f"Edge: {_cents(pick.get('edge_cents'))}")
+        body.append(f"Decision: {_esc(pick.get('decision') or '—')}")
+        body.append("")
+
+    return header + "\n<pre>\n" + "\n".join(body).rstrip() + "\n</pre>"
+
+
+# --------------------------------------------------------------------------- #
 #  End-of-cycle recap                                                          #
 # --------------------------------------------------------------------------- #
 def _wl(bucket: Mapping[str, Any] | None) -> tuple[int, int, Any, bool]:

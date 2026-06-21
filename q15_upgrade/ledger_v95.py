@@ -555,6 +555,19 @@ class V95Ledger:
                 "CREATE INDEX IF NOT EXISTS idx_v95_sent_predictions "
                 "ON sent_predictions(model_version, record_type, interval)"
             )
+            connection.execute(
+                # One official interval report per (interval, 15-min window). Once a
+                # report is delivered the row exists and the lock holds — later
+                # analysis never resends or replaces that interval's report.
+                """CREATE TABLE IF NOT EXISTS official_report_lock(
+                    model_version TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    window_key INTEGER NOT NULL,
+                    locked_at REAL NOT NULL,
+                    message_id INTEGER,
+                    PRIMARY KEY(model_version, interval, window_key)
+                )"""
+            )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
@@ -808,6 +821,63 @@ class V95Ledger:
             )
             connection.commit()
         return True
+
+    # -- ONE official report per interval per window (report-frequency lock) -----
+    @staticmethod
+    def _report_window_key(close_time: float | None, now: float) -> int:
+        """Bucket a contract into its 15-minute window so all assets settling
+        together share one lock. Falls back to ``now`` when close is unknown."""
+        basis = float(close_time) if close_time is not None else float(now)
+        return int(basis // 900)
+
+    def report_locked(self, interval: str, close_time: float | None, now: float) -> bool:
+        """True if an official report for this (interval, 15-min window) has already
+        been delivered — so no duplicate/recheck/resend is sent for it."""
+        if not self._available:
+            return False
+        interval = self._checkpoint(interval)
+        window_key = self._report_window_key(close_time, now)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM official_report_lock WHERE model_version=? AND interval=? "
+                "AND window_key=?",
+                (MODEL_VERSION, interval, window_key),
+            ).fetchone()
+        return row is not None
+
+    def lock_official_report(self, interval: str, close_time: float | None, now: float,
+                             message_id: int | None) -> bool:
+        """Lock this (interval, window) on a real delivery. Returns True if this
+        call created the lock (first delivery), False if it was already locked
+        (idempotent — a concurrent/duplicate send is rejected)."""
+        if not self._available:
+            return False
+        interval = self._checkpoint(interval)
+        window_key = self._report_window_key(close_time, now)
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO official_report_lock(model_version,interval,window_key,"
+                "locked_at,message_id) VALUES(?,?,?,?,?)",
+                (MODEL_VERSION, interval, window_key, float(now),
+                 (int(message_id) if message_id is not None else None)),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+
+    def unlock_official_report(self, interval: str, close_time: float | None, now: float) -> None:
+        """Release a claimed lock when the send did NOT deliver (muted/failed), so
+        the next cycle can retry. A delivered report keeps its lock permanently."""
+        if not self._available:
+            return
+        interval = self._checkpoint(interval)
+        window_key = self._report_window_key(close_time, now)
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                "DELETE FROM official_report_lock WHERE model_version=? AND interval=? "
+                "AND window_key=?",
+                (MODEL_VERSION, interval, window_key),
+            )
+            connection.commit()
 
     def official_scoreboard(self) -> dict[str, Any]:
         """Official win/loss record built ONLY from delivered predictions, graded

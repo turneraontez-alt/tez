@@ -25,6 +25,44 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session (branch `claude/monitor-challenger-shadow-system-y4yu2p`) — official interval reports: 3 ranked picks + report-frequency lock (prompt sections 1 & 2)
+**On the branch, deploy-pending.** Completes the two remaining sections of the original
+prompt — the *official* checkpoint reports (the rest was the read-only challenger
+comparison, already merged). Touches the live alert path; gated + test-backed; the
+frozen champion and the read-only invariant are untouched (the entry score is a SHADOW
+overlay, never a driver).
+
+- **Section 2 — 3 ranked picks per official report** (`panels_v95.build_ranked_checkpoint_panel`
+  + `checkpoint_v95._build_ranked_picks`/`_extract_pick`): each 15M/10M/7M report now
+  carries the top-3 picks (existing executable-trade ranking order) with every field the
+  system calculates — asset, YES/NO, confidence %, P(Yes)/P(No), **entry score**,
+  manipulation %, current price, recommended + max entry, wick/price-action status,
+  flow/momentum status, edge, final decision. Fewer than 3 valid assets → `—` for the
+  missing rank (never invented). Keeps the `V9.5 CHECK` + `ENTRY RECOMMENDED`/`NO ENTRY
+  YET` markers (single `<pre>`).
+- **Entry score** (`checkpoint_v95._entry_score`): a 0–100 read-only SHADOW composite with
+  the documented weights (30 dir-conf / 25 edge / 20 wick / 15 momentum / 10 manip), each
+  mapped to 0..1; returns `—` when the prediction is unavailable (no fabricated number).
+  Edge cap tunable via `Q15_V95_ENTRY_SCORE_EDGE_CAP`. Does NOT affect ranking or the live
+  entry decision.
+- **Section 1 — one report per interval, locked** (`ledger_v95.report_locked` /
+  `lock_official_report` / `unlock_official_report`, new `official_report_lock` table keyed
+  `(model_version, interval, 15-min window)`): exactly ONE official 15M/10M/7M report per
+  contract-window. The lock is CLAIMED before the send (cross-process dedup) and RELEASED
+  only if the send didn't deliver (muted/failed → retries next cycle); a delivered report
+  is locked permanently — later cycles keep analysing in the background but never resend or
+  replace it. `_send_ranked_panel` writes the immutable official record for EVERY delivered
+  pick (and marks each in the Challenger-Shadow "Your System" sent record, which now fills
+  ranks #2/#3 too), arming slot/follow-up for the top entry only.
+- **Wiring:** `run_cycle` calls `_send_ranked_panel` under `Q15_V95_RANKED_PANEL` (default
+  ON; OFF = legacy single-pick `_send_compact_panel`).
+- **Tests:** `tests/test_q15_ranked_panel.py` (+14) — entry-score formula/bounds/None,
+  pick extraction (incl. NO-side confidence), top-3 build (skips unavailable / leaves short),
+  panel render (all fields, missing rank `—`, markers), lock semantics (one per window,
+  reject second claim, unlock-retry, independent intervals/windows). The existing run-cycle
+  integration tests now exercise the ranked path (one send across cycles, official record
+  written). Full suite **830 passed, 4 skipped**.
+
 ## ✅ Shipped THIS session (branch `claude/monitor-challenger-shadow-system-y4yu2p`, MERGED to `main`) — Challenger Shadow vs Your System rework + RESET
 **Merged to `main` (owner-approved) — deploy-pending (needs a Repl restart to pick up
 the `model_version` v1→v2 reset).**
