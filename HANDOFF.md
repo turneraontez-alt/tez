@@ -25,6 +25,25 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — Shadow-vs-Yours: grade Your System on generated predictions (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner: "Your System" showed all `—`/`0W–0L` while Shadow filled. **Root cause:** the
+native side was gated to picks DELIVERED to Telegram before close
+(`Q15_CHALLENGER_NATIVE_SENT_ONLY`, was default ON) while the Shadow has no such gate;
+delivery was failing (audit: 0 sent · 12 failed · 23 pending) so nothing cleared the gate.
+- **Fix (owner-chosen): default the grading rule to count-all** — `native_sent_only`
+  default flipped `True → False` in `q15_upgrade/challenger/config.py` (comment + `.env.example`
+  updated). Your System is now graded on the SAME generated predictions as the Shadow, so the
+  card is true model-vs-model and fills every window regardless of Telegram health. The
+  `Your System delivery: …` audit line stays, so send health is still visible. Reversible via
+  `Q15_CHALLENGER_NATIVE_SENT_ONLY=true`.
+- **Tests:** the two gating-mechanism tests now pin `native_sent_only=True` explicitly (they test
+  the gate, not the default); added `test_default_grades_generated_predictions_not_delivery` and
+  `test_config_default_is_count_all`. Suite: **865 passed, 13 skipped**.
+- **⚠️ Deploy note:** if the Repl has `Q15_CHALLENGER_NATIVE_SENT_ONLY=true` set explicitly in its
+  env/secrets, that OVERRIDES the new code default — unset it (or set `=false`) for the change to
+  take effect. Separately, the 12 failed deliveries mean real alerts aren't reaching Telegram; that
+  delivery failure is still unaddressed (owner chose to fix the comparison, not delivery).
+
 ## ✅ Shipped THIS session — flip-learning in the decision-stats snapshot (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner asked for a single snapshot that captures BOTH manipulation tracks.
 - **`decision_stats()` now carries a `flip_learning` block** (`checkpoint_v95.py`) wrapping the

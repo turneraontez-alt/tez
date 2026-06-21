@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -254,13 +255,15 @@ class RankedComparisonTest(unittest.TestCase):
 
     def test_unsent_native_excluded_but_shadow_counts(self):
         tmp = tempfile.mkdtemp()
-        r = ShadowRunner(_cfg(tmp))
+        # Explicit delivery-gated config (native_sent_only=True): this test exercises
+        # the GATE itself, independent of the default (which is now OFF/count-all).
+        r = ShadowRunner(_cfg(tmp).with_overrides(native_sent_only=True))
         # Two assets in one 10M case; native NEVER delivered (background only).
         self._insert(r, asset="BTC", checkpoint="10M", close=1000, chal=0.9, ctrl=0.9,
                      official="YES", native_sent=0)
         self._insert(r, asset="SOL", checkpoint="10M", close=1000, chal=0.8, ctrl=0.8,
                      official="YES", native_sent=0)
-        rk = r.ranked()  # sent-gated (default)
+        rk = r.ranked()  # sent-gated (explicit)
         # Shadow (read-only test) counts both; Your System counts none (unsent).
         self.assertEqual(rk["challenger"]["overall"]["correct"], 2)
         self.assertEqual(rk["native"]["overall"], {"correct": 0, "wrong": 0, "accuracy": None})
@@ -278,7 +281,9 @@ class RankedComparisonTest(unittest.TestCase):
 
     def test_mark_native_sent_promotes_to_visible_record(self):
         tmp = tempfile.mkdtemp()
-        r = ShadowRunner(_cfg(tmp))
+        # Delivery-gated config (explicit): marking a pick delivered should promote it
+        # into the visible record. The default is now count-all, so pin the gate here.
+        r = ShadowRunner(_cfg(tmp).with_overrides(native_sent_only=True))
         self._insert(r, asset="BTC", checkpoint="10M", close=1000, chal=0.2, ctrl=0.9,
                      official="YES", native_sent=0)
         self.assertEqual(r.ranked()["native"]["overall"]["correct"], 0)  # unsent
@@ -288,6 +293,32 @@ class RankedComparisonTest(unittest.TestCase):
         # idempotent: a second mark is a no-op, count unchanged
         self.assertFalse(r.mark_native_sent("BTC-10M-1000", "10M"))
         self.assertEqual(r.ranked()["native"]["overall"]["correct"], 1)
+
+    def test_default_grades_generated_predictions_not_delivery(self):
+        # New default (Q15_CHALLENGER_NATIVE_SENT_ONLY unset -> False): Your System is
+        # graded on the predictions it GENERATES, like the Shadow — so the comparison
+        # fills every window regardless of whether Telegram delivery succeeded. Here
+        # both native picks are UNDELIVERED (native_sent=0) yet must still count.
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("Q15_CHALLENGER_NATIVE_SENT_ONLY", None)
+            tmp = tempfile.mkdtemp()
+            r = ShadowRunner(_cfg(tmp))  # _cfg does not set the flag -> uses the default
+            self.assertFalse(r.config.native_sent_only)
+            self._insert(r, asset="BTC", checkpoint="10M", close=1000, chal=0.9, ctrl=0.9,
+                         official="YES", native_sent=0)
+            self._insert(r, asset="SOL", checkpoint="10M", close=1000, chal=0.8, ctrl=0.8,
+                         official="YES", native_sent=0)
+            rk = r.ranked()
+            # Both systems now count both undelivered picks (apples-to-apples).
+            self.assertEqual(rk["challenger"]["overall"]["correct"], 2)
+            self.assertEqual(rk["native"]["overall"]["correct"], 2)
+
+    def test_config_default_is_count_all(self):
+        # Pin the default so an accidental revert to delivery-gating (which left the
+        # visible "Your System" record empty whenever delivery failed) fails loudly.
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("Q15_CHALLENGER_NATIVE_SENT_ONLY", None)
+            self.assertFalse(ChallengerConfig.from_env().native_sent_only)
 
     def test_migration_adds_native_sent_to_legacy_db(self):
         import sqlite3
