@@ -25,6 +25,29 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — outbox send_with_result: fix delivery mis-detection (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner asked why the "Your System delivery: 0 sent · 12 failed · 23 pending" delivery was failing.
+**It mostly WASN'T failing — delivery DETECTION was broken.** Production wires
+`notifier = ReliableTelegramOutbox` (`app.py:91`) and passes it into `run_cycle` (`app.py:565`).
+The official interval-report path does `if hasattr(notifier, "send_with_result"): … else: delivered =
+ok and notifier.last_message_id is not None`. The outbox had **neither** `send_with_result` nor
+`last_message_id`, so it fell to the else-branch and `delivered` was **always False** even though the
+outbox's synchronous attempt actually delivered to Telegram. Consequences: every native pick recorded
+`DELIVERY_FAILED` ("handled_no_message_id"); the official `sent_predictions` scoreboard never wrote
+(it requires a message_id, `ledger_v95.py:856`); and the manipulation-alert gate saw the normal check
+as not-delivered.
+- **Fix:** `notifications/outbox_v9.py` now implements `send_with_result` (and a `_raw_send` helper +
+  `_attempt_result`) that performs the synchronous attempt and returns the wrapped notifier's real
+  `{ok, delivered, muted, message_id}`. The message_id is captured from the raw result INSIDE the
+  delivery lock (never read back from shared state) so a concurrent worker delivery can't race it.
+  Durable retry is unchanged; `send()` keeps its bool contract. Legacy bool notifiers fall back to
+  delivered=ok with no id. So the official report's message_id now flows -> official scoreboard,
+  Shadow-vs-Yours native side, and the manip-alert gate all populate truthfully.
+- **Tests:** +3 in `tests/test_q15_v9.py` (rich-result passthrough w/ message_id; failure stays
+  retryable & not-delivered; legacy bool fallback). Suite: **868 passed, 13 skipped**.
+- **Note:** this is independent of the grading-default flip below (that made the COMPARISON robust to
+  delivery; this makes delivery DETECTION truthful so the official record + manip alerts work too).
+
 ## ✅ Shipped THIS session — Shadow-vs-Yours: grade Your System on generated predictions (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner: "Your System" showed all `—`/`0W–0L` while Shadow filled. **Root cause:** the
 native side was gated to picks DELIVERED to Telegram before close
