@@ -17,7 +17,7 @@ import os
 import statistics
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Sequence
 
@@ -263,8 +263,19 @@ class CanonicalSnapshot:
     data_quality: float
 
     def public_dict(self) -> dict[str, Any]:
-        value = asdict(self)
+        # Shallow field copy, NOT dataclasses.asdict(): asdict recursively
+        # deep-copies every field — including the ~600-row candle tuple and the
+        # full multi-exchange context/public dicts — on every analyse_v95 call
+        # (it dominated ~78% of analyse_v95 in profiling). The deep copy was also
+        # wasted on candles, which were immediately overwritten by list() below.
+        # A one-level copy is value-identical here (the result is JSON-serialised
+        # for the API and deep-copied downstream) and matches asdict's types.
+        value: dict[str, Any] = {f.name: getattr(self, f.name) for f in fields(self)}
         value["candles"] = list(self.candles)
+        value["context"] = dict(self.context)
+        value["public"] = dict(self.public)
+        value["feed_timestamps"] = dict(self.feed_timestamps)
+        value["feed_ages"] = dict(self.feed_ages)
         return value
 
 
@@ -1750,7 +1761,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 snapshot["q15_v9_5_stability"] = stability
                 snapshot["q15_v9_5_expired"] = expired
                 canonical = canonicals.get(asset)
-                if canonical is not None and analysis.get("prediction_available") and canonical.ticker:
+                # prediction_available already implies core_valid, but spot can
+                # still come from a thin public-composite fallback. An optional,
+                # default-OFF floor keeps marginal-quality snapshots out of the
+                # learning corpus so calibration trains on cleaner data.
+                min_record_dq = _env_float("Q15_V95_MIN_RECORD_DATA_QUALITY", 0.0, 0.0, 1.0)
+                record_ok = (
+                    canonical is not None
+                    and analysis.get("prediction_available")
+                    and canonical.ticker
+                    and float(analysis.get("data_quality") or 0.0) >= min_record_dq
+                )
+                if record_ok:
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
