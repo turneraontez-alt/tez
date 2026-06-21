@@ -35,16 +35,26 @@ compact W-L/% **with a low-n marker** (Wilson-backed). WATCH states must read cl
 as "not an entry" and show the prior call (e.g. "now YES, was NO at 15M") — each
 interval graded on its OWN sent call (no retroactive regrade).
 
-**Done so far (Phase-1 FOUNDATION, committed to branch, inert until wired):**
+**Layout (locked with owner):** hourly report UNCHANGED. Live 15M/10M/7M panels are
+forward-looking only (manipulation + prediction w/ WATCH clarity + prior-side flip +
+graduated entry guidance), NO W-L. A single END-OF-CYCLE RECAP fires once after a
+contract settles: per-interval hit/miss + flips + predictability + the entry result +
+manipulation call + the RUNNING official totals. Records show W-L/% with a low-n marker.
+
+**Done so far (Phase-1 FOUNDATION + FORMATTERS, committed to branch, inert until wired):**
 - `notifier.send_with_result()` → `{ok, delivered, muted, message_id}` + `last_message_id`;
   `send()` stays a bool wrapper. Muted = handled-but-NOT-delivered (no message_id).
 - Ledger `sent_predictions` immutable table + `record_sent_prediction(...)` (rejects
   no-message_id and sent_at≥close_time) + `official_scoreboard()` (15M/10M/7M YES/NO/Total,
   entry, manipulation; graded vs settled outcome via join; Wilson low_n flags; insert-only).
-- Tests: `test_q15_official_record.py`, `test_q15_notifier_message_id.py` (+14).
-**Next:** wire `record_sent_prediction` at the panel send site, re-enable the compact
-per-checkpoint send, build the compact panel/report format (WATCH clarity + prior-side),
-then Phase 2 (shadow 0–100 score) and Phase 3 (recheck + manip grading).
+- `q15_upgrade/panels_v95.py` — pure `build_checkpoint_panel()` + `build_cycle_recap()`
+  (single `<pre>`, keeps `V9.5 CHECK` marker, flip/WATCH clarity, running-record block).
+- Tests: `test_q15_official_record.py`, `test_q15_notifier_message_id.py`, `test_q15_panels.py` (+24).
+**Next (wiring, the risky part — live send/decision path):** at each checkpoint, build the
+panel, send via `send_with_result`, write the per-interval official record with the
+message_id; re-enable the compact per-checkpoint send (reverse `Q15_V95_SEND_ONLY_ON_ENTRY`);
+fire the recap once on settlement; route the recap past the legacy reformatters.
+Then Phase 2 (shadow 0–100 score on the panel) and Phase 3 (recheck + manip grading rule).
 
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
 **Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip
