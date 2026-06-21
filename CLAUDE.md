@@ -1,5 +1,12 @@
 # CLAUDE.md — agent guide
 
+> **READ FIRST — every session, before any other file:**
+> [`ENGINEERING_GUIDELINES.md`](ENGINEERING_GUIDELINES.md) is the staff-engineer
+> meta-prompt and the standing engineering standard for this repo. Read it before
+> starting any code task and apply its substantive rules (failure modes,
+> idempotency, stale-feed/WebSocket handling, `Decimal` for prices, parameterized
+> SQL, narrow exception handling, deterministic tests, adversarial self-review).
+
 Read-only paper-trading monitor for Kalshi 15-minute crypto binaries
 (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE). It predicts YES/NO at the 15m / 10m / 7m
 checkpoints, sends Telegram alerts, and learns from officially settled results.
