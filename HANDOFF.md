@@ -50,11 +50,20 @@ manipulation call + the RUNNING official totals. Records show W-L/% with a low-n
 - `q15_upgrade/panels_v95.py` — pure `build_checkpoint_panel()` + `build_cycle_recap()`
   (single `<pre>`, keeps `V9.5 CHECK` marker, flip/WATCH clarity, running-record block).
 - Tests: `test_q15_official_record.py`, `test_q15_notifier_message_id.py`, `test_q15_panels.py` (+24).
-**Next (wiring, the risky part — live send/decision path):** at each checkpoint, build the
-panel, send via `send_with_result`, write the per-interval official record with the
-message_id; re-enable the compact per-checkpoint send (reverse `Q15_V95_SEND_ONLY_ON_ENTRY`);
-fire the recap once on settlement; route the recap past the legacy reformatters.
-Then Phase 2 (shadow 0–100 score on the panel) and Phase 3 (recheck + manip grading rule).
+**WIRED (live, default ON via `Q15_V95_COMPACT_PANEL`; legacy entry-only path preserved
+under the flag):** `checkpoint_v95._send_compact_panel` sends the forward-looking panel
+for the top-ranked pick once per checkpoint+window (reuses the reserve/settle dedup),
+maps analysis → panel (manipulation block, prediction w/ prior-side flip, graduated entry
+state from `trade_decision`), and on a real delivery writes the immutable official record
+from the Telegram message_id: `interval` always, `entry` + slot/pushed/follow-up when the
+pick is ENTRY_RECOMMENDED, `manipulation` (direction-after) when flagged. Muted = no
+message_id = not official. `build_compact_checkpoint_panel` + helpers do the mapping.
+Tests: `test_q15_v95.py::test_compact_panel_writes_official_record`, reworked
+`test_no_entry_checkpoint_panel_behaviour`. Suite 632 → 633.
+
+**Next:** fire the END-OF-CYCLE RECAP once on settlement (new `ledger.contract_recap()` +
+`build_cycle_recap` + dedup + reformatter-bypass). Then Phase 2 (shadow 0–100 score on the
+panel) and Phase 3 (entry recheck + manipulation grading rule).
 
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
 **Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip

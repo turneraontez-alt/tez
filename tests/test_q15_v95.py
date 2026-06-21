@@ -108,9 +108,18 @@ class FakeNotifier:
     def __init__(self):
         self.enabled = True
         self.messages = []
+        self._mid = 1000
+        self.last_message_id = None
     def send(self, text, *args, **kwargs):
         self.messages.append(str(text))
+        self._mid += 1
+        self.last_message_id = self._mid
         return True
+    def send_with_result(self, text):
+        self.messages.append(str(text))
+        self._mid += 1
+        self.last_message_id = self._mid
+        return {"ok": True, "delivered": True, "muted": False, "message_id": self._mid}
 
 
 class FakeStore:
@@ -135,6 +144,14 @@ class V95Tests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+        # Clear the module-level "latest" caches a run_cycle leaves behind so a
+        # test that drives run_cycle cannot bleed state into a later test.
+        import q15_upgrade.checkpoint_v95 as _cp
+        with _cp._LATEST_LOCK:
+            _cp._LATEST_ANALYSES.clear()
+            _cp._LATEST_RANKING.clear()
+            _cp._LATEST_LEDGER.clear()
+            _cp._LATEST_CHECKPOINT = "UNKNOWN"
 
     def canonical(self, row=None, cached=None, pub=None, ctx=None, checkpoint="10M"):
         row = row or snapshot(checkpoint=checkpoint)
@@ -513,6 +530,34 @@ class V95Tests(unittest.TestCase):
                 policy.run_cycle({"BNB": dict(row)}, NOW+offset, {}, None, None, notifier)
         self.assertEqual(len(notifier.messages), 1)
         self.assertIn("V9.5 CHECK", notifier.messages[0])
+
+    def test_compact_panel_writes_official_record(self):
+        # The compact panel (default) sends a V9.5 CHECK panel every checkpoint and
+        # records the delivered call in the immutable official record with its
+        # Telegram message_id.
+        from contextlib import closing
+        notifier = FakeNotifier()
+        store = FakeStore()
+        with patch.dict(os.environ, {"Q15_V95_LEDGER_DB": str(Path(self.temp.name)/"official.sqlite3")}, clear=False):
+            with patch.object(CheckpointPolicyV94Unified, "__init__", lambda self, *a, **k: None):
+                policy = CheckpointPolicyV95(store)
+        policy.market_data = FakeHub()
+        policy._candle_cache = {"BNB": {row["start_time"]: row for row in candles()}}
+        policy._latest_context = {"BNB": context()}
+        policy._context_lock = threading.RLock()
+        policy._candles = lambda asset: list(policy._candle_cache[asset].values())
+        with patch.object(CheckpointPolicyV94Unified, "run_cycle", lambda self, snapshots, *a: snapshots):
+            row = snapshot(spot=102.0, target=100.0)  # above strike -> YES lean
+            for offset in range(4):
+                policy.run_cycle({"BNB": dict(row)}, NOW + offset, {}, None, None, notifier)
+        self.assertTrue(any("V9.5 CHECK" in m for m in notifier.messages))
+        with closing(policy.ledger._connect()) as conn:
+            rows = list(conn.execute(
+                "SELECT interval, record_type, predicted_side, message_id "
+                "FROM sent_predictions WHERE record_type='interval'"))
+        self.assertEqual(len(rows), 1, "exactly one interval official record for the deduped panel")
+        self.assertEqual(str(rows[0]["interval"]), "10M")
+        self.assertIsNotNone(rows[0]["message_id"])
 
     def test_policy_records_unique_prediction(self):
         notifier = FakeNotifier()
