@@ -23,7 +23,24 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session (branch `claude/read-hand-off-719tb9`) — updated-review fixes
+## ✅ Shipped THIS session (branch `claude/manipulation-score-review-ibt7i0`) — manipulation-score refactor
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Reviewed and clarified the suspected-manipulation score (`_manipulation_signal` in
+`checkpoint_v95.py`) without changing its output. Split the monolith into small,
+named, type-hinted helpers (`_manipulation_divergence_threshold_bps`,
+`_absorption_lean`, `_collect_manipulation_tells`, `_manipulation_score`); replaced
+magic numbers with documented constants (3 tells, 0.34 absorption bonus, 1.0 cap,
+35-bps divergence band) with **explicit units** (basis points / 0..1 score). Added an
+optional **per-asset** divergence band (`Q15_V95_MANIPULATION_DIVERGENCE_BPS_<ASSET>`,
+defaults to the global 35-bps so behaviour is unchanged when unset) and a debug log on
+suspicion only. Fixed a latent **unit mismatch** in `_panel_manipulation`: the
+fallback manipulation score (0..1) is now rescaled to the panel's 0..100 `risk`/level
+scale (the flip-risk path was always 0..100; the fallback is effectively dead in
+production since flip-risk is attached every cycle). Verified byte-for-byte output
+parity on 10 representative inputs. Suite **+27 manipulation tests**
+(`tests/test_q15_v95_manipulation.py`: 13 → 40), full run **740 passed, 12 skipped**.
+
+## ✅ Shipped earlier (branch `claude/read-hand-off-719tb9`) — updated-review fixes
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Ran a fresh fan-out `updated-review` (overall **7.5/10**, up from 7.0), then
 adversarially verified every "critical/high" finding — the three headline bugs all
