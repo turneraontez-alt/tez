@@ -64,6 +64,37 @@ changed. Read-only + frozen-champion invariants intact.
   hold until the named 15:00/10:00/7:00 mark + a force-send safety net as the band closes).
   Regression test in `tests/test_q15_v95_single_alert.py`.
 
+## ✅ Shipped THIS session — shadow FACTOR LAB + all-stats CLI
+**On the branch, deploy-pending.** Adds a read-only, shadow-mode factor-attribution
+layer over the official predictions the system ALREADY records, plus a single command to
+dump every stat on the Repl. Nothing here is auto-applied: the frozen champion, live
+predictions, and entry decisions are untouched; promotion stays manual.
+
+- **No new data collection needed** — `predictions.feature_json` already stores every
+  decision-time factor per prediction, graded against the settled `official_result`. The
+  new `V95Ledger.resolved_factor_rows([checkpoint])` exports those settled rows (factors +
+  final result + `correct`/`changed_before_close` targets); factors are decision-time only,
+  so there is no look-ahead in the inputs.
+- **`q15_upgrade/factor_lab.py`** (pure, dependency-free, deterministic): per factor,
+  overall and split by interval/regime — *fired* count, *final-aligned reliability* with a
+  Wilson lower bound (the rest were temporary/misleading moves), *probability shift*
+  (YES-rate when it leaned YES minus when it leaned NO), *accuracy lift* vs base, and
+  *final-change rate*. Plus agreeing-pair **combinations** and a **promotion gate** that
+  marks a factor *promotion-ready* only when it clears: enough samples, Wilson-LB
+  reliability ≥ threshold, out-of-sample consistency across a time split, and a measurable
+  shift. The gate REPORTS readiness; it never applies anything.
+- **`scripts/stats.py`** — the one command: `python3 scripts/stats.py` prints ledger
+  status, the official W/L record (15M/10M/7M · YES/NO · entry · manip), and the factor
+  lab. Flags: `--ledger PATH`, `--checkpoint 10M`, `--detail`, `--min-samples`,
+  `--reliability`, `--deadzone`. Read-only; opens the real `data/` ledger.
+- **Not yet collected:** funding/OI/sentiment/correlated-asset factors aren't in
+  `feature_json` (no verified feed exists), so the lab analyses the factors actually
+  present and does not fabricate the rest. Adding a new source is a separate ingestion task.
+- **Tests** (`tests/test_q15_factor_lab.py`, `tests/test_q15_stats_cli.py`): Wilson bound,
+  reliability/deadzone/misleading-factor math, all four promotion-gate rejections, the
+  export shape + filter, and the CLI end-to-end against a real temp ledger. Full suite
+  **848 passed, 4 skipped**.
+
 ## ✅ Shipped (branch `claude/shadow-system-reset-aeilgv`) — RESET the Challenger Shadow vs Your System comparison on deploy
 **On the branch, deploy-pending (needs a Repl restart to pick up the `model_version`
 v2→v3 reset).** Owner: reset the visible "CHALLENGER SHADOW vs YOUR SYSTEM" comparison
