@@ -361,6 +361,32 @@ class TestRunCycleRecordsRankAndSevenMinute(unittest.TestCase):
             cp95._LATEST_LEDGER.clear()
             cp95._LATEST_CHECKPOINT = "UNKNOWN"
 
+    def test_no_entry_checkpoint_is_muted(self):
+        # A pricey ask -> no executable edge -> no recommended entry. With the
+        # default entry-only delivery, NO checkpoint alert should be sent even
+        # after the decision settles over several cycles.
+        now = time.time()
+
+        class FM:
+            def update(self, snaps, now, wsh):
+                return snaps
+
+        class CE:
+            def enrich_all(self, snaps, now, wsh):
+                return snaps
+
+        notifier = self.FakeNotifier()
+        for i in range(5):
+            snaps = {"BNB": self._snapshot(asset="BNB", checkpoint="10M", ask=98.0,
+                                           target=100.0, spot=101.0)}
+            for s in snaps.values():
+                s["seconds_remaining"] = 600
+                s["underlying_candles_5s"] = self._candles()[-12:]
+                s["close_time"] = now + 600
+            self.policy.run_cycle(dict(snaps), now + i, {}, FM(), CE(), notifier)
+        checkpoint_msgs = [m for m in notifier.messages if "V9.5 CHECK" in m]
+        self.assertEqual(checkpoint_msgs, [])  # no entry -> muted entirely
+
     def test_cycle_buckets_seven_minute_and_persists_rank(self):
         now = time.time()
         snaps = {
