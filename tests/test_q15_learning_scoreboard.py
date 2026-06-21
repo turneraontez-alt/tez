@@ -111,6 +111,23 @@ class TestLedgerScoreboard(unittest.TestCase):
         led.resolve_ticker("M-1", "YES")
         self.assertIn("scoreboard", led.metrics())
 
+    def test_metrics_reports_expected_calibration_error(self):
+        led = _mk_ledger()
+        # Two predictions at selected_probability 0.70 → both in the 70-75% band.
+        # One wins, one loses → actual win rate 0.50 vs mean predicted 0.70.
+        _record(led, "C-1", "10M", "YES", 1)
+        _record(led, "C-2", "10M", "YES", 1)
+        led.resolve_ticker("C-1", "YES")  # correct
+        led.resolve_ticker("C-2", "NO")   # wrong
+        m = led.metrics()
+        self.assertIn("expected_calibration_error", m)
+        self.assertAlmostEqual(m["expected_calibration_error"], 0.20, places=6)
+
+    def test_ece_is_none_without_resolved_rows(self):
+        led = _mk_ledger()
+        _record(led, "C-3", "10M", "YES", 1)  # recorded, never resolved
+        self.assertIsNone(led.metrics()["expected_calibration_error"])
+
     def test_rank_persists_across_reopen(self):
         path = tempfile.mktemp(suffix=".sqlite3")
         led = V95Ledger(path)

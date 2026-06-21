@@ -9,8 +9,9 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **737 passed, 4 skipped** (12 skipped in a
-bare container where `flask`/`websockets` aren't installed).
+Tests: `python3 -m pytest tests/ -q` → **779 passed, 4 skipped** (12 skipped in a
+bare container where `flask`/`websockets` aren't installed; skip count varies with
+cffi/crypto availability).
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -67,7 +68,24 @@ read-only forensic rule-miner to answer it honestly. **Cannot be run from a CI c
   truly stays 100% on the untouched recent test set. No historical pattern should ever
   be called guaranteed for future markets.
 
-## ✅ Shipped earlier THIS session (branch `claude/replit-workspace-connect-pfspn4`) — shadow challenger was feature-starved
+## ✅ Shipped (branch `claude/manipulation-score-review-ibt7i0`) — manipulation-score refactor
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Reviewed and clarified the suspected-manipulation score (`_manipulation_signal` in
+`checkpoint_v95.py`) without changing its output. Split the monolith into small,
+named, type-hinted helpers (`_manipulation_divergence_threshold_bps`,
+`_absorption_lean`, `_collect_manipulation_tells`, `_manipulation_score`); replaced
+magic numbers with documented constants (3 tells, 0.34 absorption bonus, 1.0 cap,
+35-bps divergence band) with **explicit units** (basis points / 0..1 score). Added an
+optional **per-asset** divergence band (`Q15_V95_MANIPULATION_DIVERGENCE_BPS_<ASSET>`,
+defaults to the global 35-bps so behaviour is unchanged when unset) and a debug log on
+suspicion only. Fixed a latent **unit mismatch** in `_panel_manipulation`: the
+fallback manipulation score (0..1) is now rescaled to the panel's 0..100 `risk`/level
+scale (the flip-risk path was always 0..100; the fallback is effectively dead in
+production since flip-risk is attached every cycle). Verified byte-for-byte output
+parity on 10 representative inputs. Suite **+27 manipulation tests**
+(`tests/test_q15_v95_manipulation.py`: 13 → 40), full run **740 passed, 12 skipped**.
+
+## ✅ Shipped (branch `claude/replit-workspace-connect-pfspn4`) — shadow challenger was feature-starved
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Diagnosed "shadow learning system doing horrible": the read-only challenger was
 **blind to the dominant drivers of a 15-minute binary**. The production prediction
@@ -108,7 +126,42 @@ signals only.
   `scripts/challenger_eval.py` on the Repl first — split per-checkpoint only if those
   splits actually beat POOLED out-of-sample.
 
-## ✅ Shipped THIS session (branch `claude/read-hand-off-719tb9`) — updated-review fixes
+## ✅ Shipped (branch `claude/updated-review-vy09iw`) — updated-review fixes
+**On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
+Ran a fresh fan-out `updated-review` (held at **7.5/10** — no code had moved since
+the prior review), then implemented every actionable item. Adversarial verification
+again collapsed several fan-out "criticals" (the calibration `_data_version` cache
+re-checks under lock before storing at `ledger_v95.py:1591`; both `target`-division
+sites already guard `0` via `and target`; the per-checkpoint alert-level env read
+already `.strip().lower()`s at `notifier.py:114`) — those were left untouched. Suite
+**713 → 720 passed, 12 skipped** (+7). All changes `Q15_*`-gated and reversible.
+
+- **Highest — stale-spot fails closed honestly** (`v5_hardening.apply_snapshot_freshness`):
+  the bounded last-good fallback re-stamps `ts=now` for candle continuity, which let a
+  stale underlying read as fresh past the freshness gate. Now (default-ON
+  `Q15_V5_GATE_STALE_SPOT`) the gate honors `original_ts`, so a 25s-old price reports its
+  TRUE age and trips `spot_stale_…` → `v5_data_valid=False`. Tests in
+  `test_q15_v5_fail_closed.py` (+3: gated true-age, within-budget still valid, gate-off
+  legacy path).
+- **Medium — public-price freshness is tunable** (`checkpoint_v95.build_canonical_snapshot`):
+  the previously-hardcoded `exp(-(age-5)/30)` is now `Q15_V95_PUBLIC_PRICE_GRACE_SECONDS` /
+  `Q15_V95_PUBLIC_PRICE_DECAY_SECONDS` (named honestly — tau is an e-folding constant, NOT
+  a half-life). Test asserts a tighter decay lowers `data_quality` for the same snapshot.
+- **Medium — ECE in the scoreboard** (`ledger_v95.metrics`): added
+  `expected_calibration_error` = count-weighted mean |predicted−actual| over the 50–100%
+  bands (observational only, never steers a decision). Tests in
+  `test_q15_learning_scoreboard.py` (+2: 0.20 ECE case, None without resolved rows).
+- **Medium — in-flight TTL + executor shutdown** (`app._harvest_and_submit`, `refresh_loop`):
+  a permanently hung fetch is now cancelled/dropped past `Q15_FETCH_INFLIGHT_TTL_S` (60s)
+  so `inflight` can't grow unbounded; `inflight` now maps `asset -> (Future, submitted_at)`.
+  The pool is shut down on the bounded-test return and via `atexit` for the forever-loop.
+  Test in `test_app_fetch_inflight.py` (+1: abandon-and-replace past TTL).
+- **Polish — return-coordinate contract** (`checkpoint_v95._multi_horizon_returns`):
+  documented the candle=log / public=simple-fractional contract and now drop a public
+  return outside (−1, 1) (percent-scaled / already-log) before `log1p`, which would
+  otherwise raise/-inf. Test in `test_q15_v95.py` (+1, plus the freshness test = +2 there).
+
+## ✅ Shipped earlier (branch `claude/read-hand-off-719tb9`) — updated-review fixes
 **On the branch, NOT merged to `main` (per this session's branch policy), deploy-pending.**
 Ran a fresh fan-out `updated-review` (overall **7.5/10**, up from 7.0), then
 adversarially verified every "critical/high" finding — the three headline bugs all
@@ -249,6 +302,27 @@ as a SHADOW model, built to be promoted to primary with one switch.
   compact `END-RESULT CALL · 15M & 10M` block (`Res` col + `Y+/N-` cells, + right /
   - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
   (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
+
+## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — entry-economics shadow A/B
+Acting on the review's #1 finding (~67% accurate but negative P&L = the entry gate
+isn't selective on price/cost). Owner: "implement it but ON in shadow so we can see
+both play out and whether it improves." New `q15_upgrade/shadow_economics.py` (pure,
+tested) runs a stricter, cost-aware gate BESIDE the live one and grades both on the
+SAME settled trades — **never changes the live recommendation** (frozen champion +
+read-only invariant intact). CONTROL replicates production exactly (`net_edge =
+P*100-ask-cost >= required_edge`, same defaults + same `Q15_V95_{cp}_REQUIRED_EDGE_CENTS`
+env). SHADOW charges the costs the live model omits (slippage 0.5¢ + adverse 0.25¢),
+enforces a hard no-trade floor (1¢), and requires risk-adjusted EV `net_edge - k*σ ≥ 0`
+(σ = binary cent-stdev, so thin-confidence edges are penalised). Shadow P&L is ALSO
+charged the extra modelled cents per entry → it must earn its selectivity, never
+flattered. Comparison computed from columns already persisted on every resolved row
+(`conservative_probability`, `entry_ask_cents`, `entry_cost_cents`, `realized_cents`)
+via read-only `V95Ledger.resolved_economics_rows()` — zero schema change. Live
+visibility: `apply_v95_policy` stamps `q15_v9_5_shadow_econ_{enter,net_edge_cents,reason}`
+for the dashboard. Hourly report gains an `ENTRY-ECONOMICS SHADOW` Live-vs-Shadow
+table (trades/win%/P&L/avg + verdict), self-silent until settled rows exist. Flags
+`Q15_SHADOW_ECON_*` in `.env.example` (default ON). +8 tests
+(`test_q15_shadow_economics.py`). Suite: **742 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — 10M setup miner (leakage-safe)
 Owner asked: find a 10M setup/combination that always predicted the outcome,

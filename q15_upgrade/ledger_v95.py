@@ -1786,6 +1786,37 @@ class V95Ledger:
             })
         return out
 
+    def resolved_economics_rows(self, checkpoint: str | None = None) -> list[dict[str, Any]]:
+        """Read-only export for the shadow entry-economics A/B: per settled row, the
+        decision-time probability + executable ask + live cost estimate + outcome +
+        realized paper P&L. Only rows that had an executable ask (entry_ask_cents)
+        are returned, since both gates are price gates. Outcome columns are the
+        target; nothing here feeds a live decision."""
+        if not self._available:
+            return []
+        out: list[dict[str, Any]] = []
+        query = (
+            "SELECT checkpoint, conservative_probability, entry_ask_cents, entry_cost_cents, "
+            "correct, realized_cents FROM predictions WHERE model_version=? "
+            "AND official_result IS NOT NULL AND entry_ask_cents IS NOT NULL"
+        )
+        args: list[Any] = [MODEL_VERSION]
+        if checkpoint:
+            query += " AND checkpoint=?"
+            args.append(self._checkpoint(checkpoint))
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(query, tuple(args)))
+        for row in rows:
+            out.append({
+                "checkpoint": row["checkpoint"],
+                "prob": _num(_row_get(row, "conservative_probability")),
+                "ask_cents": _num(_row_get(row, "entry_ask_cents")),
+                "cost_cents": _num(_row_get(row, "entry_cost_cents"), 0.0),
+                "correct": bool(_row_get(row, "correct")),
+                "realized_cents": _num(_row_get(row, "realized_cents")),
+            })
+        return out
+
     def scoreboard(self) -> dict[str, Any]:
         """User-facing record: how often each interval, rank, and asset was right/wrong."""
         if not self._available:
@@ -2156,6 +2187,16 @@ class V95Ledger:
                     "mean_predicted": sum(float(r["selected_probability"]) for r in chosen) / len(chosen),
                     "actual_win_rate": sum(int(r["correct"] or 0) for r in chosen) / len(chosen),
                 })
+        # Expected Calibration Error: count-weighted mean |predicted - actual| over
+        # the populated bins. The canonical second-order calibration stat alongside
+        # Brier/log-loss; observational only (never steers a live decision). Bands
+        # only span [50%, 100%) — the selected side's probability is always >= 0.5 —
+        # so this is the ECE of the chosen-side confidence.
+        _ece_n = sum(b["count"] for b in bins)
+        ece = (
+            sum(b["count"] * abs(b["mean_predicted"] - b["actual_win_rate"]) for b in bins) / _ece_n
+            if _ece_n else None
+        )
         alpha = _env_float("Q15_V95_PROMOTION_ALPHA", 0.05, 0.0001, 0.5)
         promotion_by_checkpoint: dict[str, dict[str, Any]] = {}
         for checkpoint in LEARNING_CHECKPOINTS:
@@ -2190,7 +2231,8 @@ class V95Ledger:
             "available": True, "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "overall": overall, "by_checkpoint": by_checkpoint, "by_regime": by_regime,
             "scoreboard": self._scoreboard_rows(rows),
-            "calibration_bands": bins, "promotion_candidate": bool(primary["candidate"]),
+            "calibration_bands": bins, "expected_calibration_error": ece,
+            "promotion_candidate": bool(primary["candidate"]),
             "promotion_reason": str(primary["reason"]), "promotion_by_checkpoint": promotion_by_checkpoint,
             "primary_learning_checkpoint": self.primary_learning_checkpoint,
             "automatic_promotion": False, "minimum_promotion_rows": self.minimum_promotion_rows,

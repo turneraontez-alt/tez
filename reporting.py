@@ -151,6 +151,29 @@ class HourlyReporter:
             logger.warning(f"setup scan skipped: {e}")
             return []
 
+    def _shadow_economics_lines(self):
+        """Compact live-vs-shadow entry-economics A/B for the hourly report. Reads
+        only settled rows; never affects live decisions. Silent when disabled, no
+        ledger, or no settled rows with an executable ask yet."""
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "resolved_economics_rows"):
+            return []
+        try:
+            from q15_upgrade import shadow_economics
+            cfg = shadow_economics.EconConfig.from_env()
+            if not cfg.enabled:
+                return []
+            rows = ledger.resolved_economics_rows()
+            if not rows:
+                return []
+            cmp = shadow_economics.compare(rows, cfg)
+            if cmp.rows_considered == 0:
+                return []
+            return ["", *shadow_economics.build_report_lines(cmp)]
+        except Exception as e:
+            logger.warning(f"shadow economics A/B skipped: {e}")
+            return []
+
     @staticmethod
     def _pushed_vs_background_lines(sb):
         """Two separate records: predictions actually PUSHED to the user vs every
@@ -339,6 +362,10 @@ class HourlyReporter:
         # combination of decision-time conditions that predicts the outcome.
         # Self-silencing until enough settled rows exist to discover + validate.
         body.extend(self._setup_scan_lines())
+
+        # Entry-economics shadow A/B: live price gate vs a stricter cost-aware gate,
+        # graded on the same settled trades. Read-only; live recs are unchanged.
+        body.extend(self._shadow_economics_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:

@@ -53,6 +53,7 @@ from .checkpoint_v94_unified import (
 from . import flip_risk
 from . import manipulation_alert
 from . import panels_v95
+from . import shadow_economics
 from .fast_candles import fast_canonical_candles
 from .ledger_v95 import (
     CHAMPION_WEIGHTS,
@@ -302,7 +303,12 @@ def build_canonical_snapshot(
         if public_age is None:
             public_freshness = 0.45
         else:
-            public_freshness = _clamp(math.exp(-max(0.0, public_age - 5.0) / 30.0), 0.0, 1.0)
+            # exp(-(age-grace)/tau): freshness 1.0 within `grace`, then an
+            # e-folding decay with time constant `tau` seconds (NOT a half-life;
+            # at age=grace+tau freshness is e^-1 ≈ 0.37).
+            grace = _env_float("Q15_V95_PUBLIC_PRICE_GRACE_SECONDS", 5.0, 0.0, 60.0)
+            tau = _env_float("Q15_V95_PUBLIC_PRICE_DECAY_SECONDS", 30.0, 2.0, 600.0)
+            public_freshness = _clamp(math.exp(-max(0.0, public_age - grace) / tau), 0.0, 1.0)
     candidates: list[tuple[float, float]] = []
     if snapshot_spot is not None and snapshot_spot > 0:
         candidates.append((snapshot_spot, 1.0))
@@ -418,11 +424,19 @@ def _shadow_vol_per_min(volatility: Mapping[str, Any] | None) -> float | None:
 
 
 def _multi_horizon_returns(canonical: CanonicalSnapshot) -> dict[str, float | None]:
+    # Coordinate contract: `_window_return` yields LOG returns (candle space); the
+    # public feed quotes SIMPLE fractional returns (e.g. 0.012 == +1.2%), which we
+    # lift into log space with log1p before blending. A value outside (-1, 1) can't
+    # be a plausible short-horizon fractional return (it's likely percent-scaled or
+    # already-log from a feed change) and would make log1p raise/-inf, so it is
+    # dropped rather than trusted — the candle return then stands alone.
     result = {f"return_{seconds}s": _window_return(canonical.candles, float(seconds)) for seconds in (5, 15, 30, 60, 180, 900, 1800)}
     public_returns = canonical.public.get("price_returns") if isinstance(canonical.public.get("price_returns"), Mapping) else {}
     for seconds in (5, 15, 30, 60, 180):
         key = f"return_{seconds}s"
         public_value = _num(public_returns.get(key))
+        if public_value is not None and not (-1.0 < public_value < 1.0):
+            public_value = None  # implausible coordinate; don't blend it
         candle_value = result.get(key)
         if public_value is not None and candle_value is not None:
             result[key] = 0.65 * candle_value + 0.35 * math.log1p(public_value)
@@ -745,64 +759,165 @@ def _market_anchored_probability(model_yes: float, market_yes: float | None,
     }
 
 
+# --- Suspected price-manipulation tracking (read-only) -----------------------
+# A composite "are large players pushing the price around?" suspicion, built
+# ENTIRELY from tells the engine already computed this cycle. It never changes
+# the prediction or the edge — it is observational only.
+#
+# Three independent tells near a binary strike, each contributes one "reason":
+#   ABSORPTION — aggressive taker flow eaten by resting orders without price
+#                moving (someone defending a level). The ONLY directional tell,
+#                so it also yields a ``lean`` (the side a flip would go toward).
+#   PIN        — price stapled to the strike with repeated crossings; the
+#                outcome is unstable and prone to flip at settlement.
+#   DIVERGENCE — one public venue (e.g. Coinbase vs OKX) pushed off the others'
+#                consensus by at least the configured basis-point band.
+MANIPULATION_TELL_ABSORPTION = "ABSORPTION"
+MANIPULATION_TELL_PIN = "PIN"
+MANIPULATION_TELL_DIVERGENCE = "DIVERGENCE"
+
+# Regime names (mirrors the labels produced by ``_regime``) that imply a tell.
+_REGIME_THRESHOLD_PIN = "THRESHOLD_PIN"
+_REGIME_EXCHANGE_DIVERGENCE = "EXCHANGE_DIVERGENCE"
+
+# Score model (all on a 0..1 "fraction of tells present" scale):
+#   score = (#tells / TOTAL_TELLS) + ABSORPTION_BONUS (if absorption fired),
+#           capped at SCORE_MAX and rounded to SCORE_DECIMALS.
+# The absorption bonus weights the score toward the one directional flip tell.
+_MANIPULATION_TELLS_TOTAL = 3  # ABSORPTION + PIN + DIVERGENCE
+_MANIPULATION_ABSORPTION_SCORE_BONUS = 0.34
+_MANIPULATION_SCORE_MAX = 1.0
+_MANIPULATION_SCORE_DECIMALS = 4
+
+# Default cross-venue divergence band, in basis points, at/above which the
+# DIVERGENCE tell fires. Overridable globally or per asset (see below).
+_MANIPULATION_DEFAULT_DIVERGENCE_BPS = 35.0
+
 _MANIPULATION_REASON_PHRASES = {
-    "ABSORPTION": "order-wall absorption",
-    "PIN": "strike pin (outcome unstable)",
-    "DIVERGENCE": "cross-exchange divergence",
+    MANIPULATION_TELL_ABSORPTION: "order-wall absorption",
+    MANIPULATION_TELL_PIN: "strike pin (outcome unstable)",
+    MANIPULATION_TELL_DIVERGENCE: "cross-exchange divergence",
 }
+
+def _no_manipulation() -> dict[str, Any]:
+    """A fresh 'nothing flagged' result (fresh ``reasons`` list each call)."""
+    return {"suspected": False, "reasons": [], "lean": None, "score": 0.0}
+
+
+def _manipulation_divergence_threshold_bps(asset: str | None) -> float:
+    """Cross-venue divergence band (basis points) at/above which DIVERGENCE fires.
+
+    Defaults to ``Q15_V95_MANIPULATION_DIVERGENCE_BPS`` (35 bps). A per-asset
+    override ``Q15_V95_MANIPULATION_DIVERGENCE_BPS_<ASSET>`` lets noisier assets
+    (e.g. DOGE) use a wider band without changing the global default; when the
+    per-asset variable is unset the behaviour is identical to the global one.
+    """
+    global_default = _env_float(
+        "Q15_V95_MANIPULATION_DIVERGENCE_BPS",
+        _MANIPULATION_DEFAULT_DIVERGENCE_BPS, 0.0, 500.0,
+    )
+    if not asset:
+        return global_default
+    override_var = f"Q15_V95_MANIPULATION_DIVERGENCE_BPS_{asset.strip().upper()}"
+    if override_var in os.environ:
+        return _env_float(override_var, global_default, 0.0, 500.0)
+    return global_default
+
+
+def _absorption_lean(absorption: Mapping[str, Any]) -> str | None:
+    """Side an absorbed order flow is likely to flip toward, or ``None``.
+
+    Sign convention follows ``_absorption_feature``: positive aggressive flow
+    that fails to lift price is bearish (leans ``NO``); negative flow that fails
+    to push price down is bullish (leans ``YES``); zero/missing flow has no lean.
+    """
+    flow = _num(absorption.get("flow"), 0.0) or 0.0
+    if flow > 0.0:
+        return "NO"
+    if flow < 0.0:
+        return "YES"
+    return None
+
+
+def _collect_manipulation_tells(
+    regime_name: str,
+    absorption: Mapping[str, Any],
+    exchange: Mapping[str, Any],
+    divergence_threshold_bps: float,
+) -> tuple[list[str], str | None]:
+    """Return ``(tells, lean)`` for the manipulation tells firing this cycle.
+
+    ``tells`` is built in a fixed order (ABSORPTION, PIN, DIVERGENCE) so the
+    downstream phrasing reads consistently; ``lean`` is set only by the
+    directional ABSORPTION tell. ``divergence_threshold_bps`` is in basis points.
+    """
+    tells: list[str] = []
+    lean: str | None = None
+
+    if absorption.get("available") and absorption.get("absorbed"):
+        tells.append(MANIPULATION_TELL_ABSORPTION)
+        lean = _absorption_lean(absorption)
+
+    if regime_name == _REGIME_THRESHOLD_PIN:
+        tells.append(MANIPULATION_TELL_PIN)
+
+    divergence_bps = max(0.0, _num(exchange.get("divergence_bps"), 0.0) or 0.0)
+    if regime_name == _REGIME_EXCHANGE_DIVERGENCE or divergence_bps >= divergence_threshold_bps:
+        tells.append(MANIPULATION_TELL_DIVERGENCE)
+
+    return tells, lean
+
+
+def _manipulation_score(tells: Sequence[str]) -> float:
+    """0..1 suspicion score for the firing ``tells`` (empty -> ``0.0``).
+
+    Fraction of the three possible tells present, plus a fixed bonus when the
+    directional ABSORPTION tell fired, capped at 1.0 and rounded.
+    """
+    if not tells:
+        return 0.0
+    fraction = len(tells) / _MANIPULATION_TELLS_TOTAL
+    bonus = (_MANIPULATION_ABSORPTION_SCORE_BONUS
+             if MANIPULATION_TELL_ABSORPTION in tells else 0.0)
+    score = min(_MANIPULATION_SCORE_MAX, fraction + bonus)
+    return round(score, _MANIPULATION_SCORE_DECIMALS)
 
 
 def _manipulation_signal(regime: Mapping[str, Any], absorption: Mapping[str, Any],
-                         exchange: Mapping[str, Any]) -> dict[str, Any]:
+                         exchange: Mapping[str, Any], *,
+                         asset: str | None = None) -> dict[str, Any]:
     """Read-only suspicion that large players are pushing the price around.
 
-    Composed ENTIRELY from signals the model already computed this cycle — it
-    never changes the prediction or the edge. Three classic "big spender" tells
-    near a binary strike:
+    Pure, deterministic, side-effect free (apart from optional debug logging):
+    given the same inputs it always returns the same ``{suspected, reasons,
+    lean, score}`` dict. See the module-level notes above for the three tells.
 
-      * ABSORPTION — aggressive taker flow getting eaten by resting orders
-        without price moving (someone defending a level); the most *directional*
-        flip signal, so it also returns a ``lean`` (the side it is likely to
-        reverse toward).
-      * PIN — price stapled to the strike with repeated crossings: the outcome
-        is unstable and prone to flip at settlement.
-      * DIVERGENCE — one public venue pushed off the others' consensus.
-
-    Returns ``{suspected, reasons, lean, score}``. Disable via
-    ``Q15_V95_MANIPULATION_TRACKING=false``; ``Q15_V95_MANIPULATION_MIN_SIGNALS``
-    (default 1) sets how many tells must agree to flag.
+    Configuration (all via env):
+      * ``Q15_V95_MANIPULATION_TRACKING`` (default on) — master switch.
+      * ``Q15_V95_MANIPULATION_MIN_SIGNALS`` (1..3, default 1) — how many tells
+        must agree before the signal is flagged as suspected.
+      * ``Q15_V95_MANIPULATION_DIVERGENCE_BPS`` (default 35) and the per-asset
+        ``..._<ASSET>`` override — the DIVERGENCE band in basis points.
     """
     if not _env_bool("Q15_V95_MANIPULATION_TRACKING", True):
-        return {"suspected": False, "reasons": [], "lean": None, "score": 0.0}
+        return _no_manipulation()
+
     regime_name = str((regime or {}).get("name") or "")
-    absorption = absorption or {}
-    exchange = exchange or {}
-    divergence = _num(exchange.get("divergence_bps"), 0.0) or 0.0
-    div_threshold = _env_float("Q15_V95_MANIPULATION_DIVERGENCE_BPS", 35.0, 0.0, 500.0)
+    threshold_bps = _manipulation_divergence_threshold_bps(asset)
+    tells, lean = _collect_manipulation_tells(
+        regime_name, absorption or {}, exchange or {}, threshold_bps)
 
-    reasons: list[str] = []
-    lean: str | None = None
-    if absorption.get("available") and absorption.get("absorbed"):
-        reasons.append("ABSORPTION")
-        flow = _num(absorption.get("flow"), 0.0) or 0.0
-        # Positive aggressive flow failing to lift price is bearish (leans NO);
-        # negative flow failing to push price down is bullish (leans YES).
-        lean = "NO" if flow > 0 else "YES" if flow < 0 else None
-    if regime_name == "THRESHOLD_PIN":
-        reasons.append("PIN")
-    if regime_name == "EXCHANGE_DIVERGENCE" or divergence >= div_threshold:
-        reasons.append("DIVERGENCE")
+    min_tells = int(_env_float("Q15_V95_MANIPULATION_MIN_SIGNALS", 1.0, 1.0, 3.0))
+    if len(tells) < min_tells:
+        return _no_manipulation()
 
-    min_signals = int(_env_float("Q15_V95_MANIPULATION_MIN_SIGNALS", 1.0, 1.0, 3.0))
-    suspected = len(reasons) >= min_signals
-    # Weighted toward absorption (the directional flip tell).
-    score = min(1.0, len(reasons) / 3.0 + (0.34 if "ABSORPTION" in reasons else 0.0))
-    return {
-        "suspected": suspected,
-        "reasons": reasons if suspected else [],
-        "lean": (lean if suspected else None),
-        "score": round(score, 4) if suspected else 0.0,
-    }
+    score = _manipulation_score(tells)
+    logger.debug(
+        "manipulation suspected asset=%s regime=%s tells=%s lean=%s score=%.4f "
+        "divergence_threshold_bps=%.1f",
+        asset, regime_name, tells, lean, score, threshold_bps,
+    )
+    return {"suspected": True, "reasons": tells, "lean": lean, "score": score}
 
 
 def _manipulation_phrase(manip: Mapping[str, Any]) -> str:
@@ -1016,7 +1131,7 @@ def analyse_v95(
             "exchange_consensus": exchange_d, "derivatives": derivatives_d,
             "absorption": absorption_d,
         },
-        "manipulation": _manipulation_signal(regime, absorption_d, exchange_d),
+        "manipulation": _manipulation_signal(regime, absorption_d, exchange_d, asset=canonical.asset),
         "contributions": contributions,
         "challenger_contributions": challenger_contributions,
         "supporting_factors": supporting,
@@ -1070,6 +1185,27 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     snapshot["q15_v9_5_main_blocker"] = analysis.get("main_blocker")
     snapshot["q15_v9_5_net_edge_cents"] = analysis.get("net_edge_cents")
     snapshot["q15_v9_5_ideal_entry_cents"] = analysis.get("ideal_entry_cents")
+    # Shadow entry-economics (read-only A/B): what a stricter, cost-aware gate would
+    # decide on this same pick. NEVER changes the live decision — only surfaced so
+    # the live vs shadow gates can be watched live and graded in the hourly report.
+    try:
+        _se_cfg = shadow_economics.EconConfig.from_env()
+        if _se_cfg.enabled:
+            _quote = analysis.get("quote") or {}
+            _costs = analysis.get("costs") or {}
+            _ask = _num(_quote.get("ask_cents"))
+            _cost = _num(_costs.get("total_cents"))
+            if _cost is None:
+                _cost = _num(_costs.get("total_cost_cents"), 0.0) or 0.0
+            _sd = shadow_economics.shadow_gate(
+                _num(analysis.get("conservative_probability")), _ask, _cost,
+                shadow_economics.required_edge_for(analysis.get("checkpoint") or analysis.get("interval") or ""),
+                _se_cfg)
+            snapshot["q15_v9_5_shadow_econ_enter"] = bool(_sd.enter)
+            snapshot["q15_v9_5_shadow_econ_net_edge_cents"] = _sd.net_edge_cents
+            snapshot["q15_v9_5_shadow_econ_reason"] = _sd.reason
+    except Exception:
+        pass
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
     snapshot["q15_v9_5_entry_allowed"] = bool(analysis.get("entry_allowed"))
     # Suspected price-manipulation tracking (read-only; does not affect the call).
@@ -1498,19 +1634,28 @@ def _direction_after_side(analysis: Mapping[str, Any]) -> str | None:
     return lean if lean in {"YES", "NO"} else None
 
 
+_PANEL_RISK_HIGH = 60.0   # 0..100 panel scale
+_PANEL_RISK_MEDIUM = 35.0
+
+
 def _panel_manipulation(analysis: Mapping[str, Any]) -> dict[str, Any] | None:
     """Map the read-only manipulation/flip signals into the panel's MANIPULATION
-    block, or None when nothing is flagged. ``risk`` is a 0..100 number."""
+    block, or None when nothing is flagged. ``risk`` is a 0..100 number.
+
+    The flip-risk score is already 0..100; the fallback manipulation score is on
+    a 0..1 scale, so it is rescaled to 0..100 here to keep ``risk`` and the
+    level thresholds (which are 0..100) in consistent units.
+    """
     fr = analysis.get("flip_risk") or {}
     manip = analysis.get("manipulation") or {}
-    score = fr.get("score")
+    score = _num(fr.get("score"))
     if score is None:
-        score = manip.get("score")
-    suspected = bool(manip.get("suspected")) or (score is not None and float(score) >= 60.0)
+        manip_score = _num(manip.get("score"))  # 0..1 -> rescale to 0..100
+        score = manip_score * 100.0 if manip_score is not None else None
+    suspected = bool(manip.get("suspected")) or (score is not None and score >= _PANEL_RISK_HIGH)
     if not suspected or score is None:
         return None
-    score = float(score)
-    level = "HIGH" if score >= 60.0 else "MEDIUM" if score >= 35.0 else "LOW"
+    level = "HIGH" if score >= _PANEL_RISK_HIGH else "MEDIUM" if score >= _PANEL_RISK_MEDIUM else "LOW"
     reasons = list(manip.get("reasons") or [])
     if not reasons and fr.get("primary_reason"):
         reasons = [str(fr.get("primary_reason"))]
