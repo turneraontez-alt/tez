@@ -95,6 +95,53 @@ class PromotionGateTest(unittest.TestCase):
         self.assertTrue(any("oos" in r for r in wick["promotion"]["reasons"]))
 
 
+class CombinationsByIntervalTest(unittest.TestCase):
+    def test_combo_carries_per_interval_breakdown(self):
+        # Two factors that agree, across all three intervals, settling their way.
+        rows = []
+        t = 0
+        for iv in ("15M", "10M", "7M"):
+            for _ in range(20):
+                rows.append(_row(0.5, "YES", checkpoint=iv, factor="wick", t=t)); t += 1
+            # add the second factor (momentum) to the same rows by merging features
+        # rebuild rows with both factors present so they "agree"
+        rows = []
+        t = 0
+        for iv in ("15M", "10M", "7M"):
+            for _ in range(20):
+                rows.append({
+                    "created_at": t, "checkpoint": iv, "regime": "trend",
+                    "predicted_side": "YES", "result": "YES",
+                    "changed_before_close": 0, "correct": 1,
+                    "features": {"wick": 0.5, "momentum": 0.5},
+                }); t += 1
+        rep = factor_lab.analyze(rows, min_samples=20)
+        combo = next(c for c in rep["combinations"]
+                     if set(c["factors"]) == {"wick", "momentum"})
+        self.assertIn("by_interval", combo)
+        for iv in ("15M", "10M", "7M"):
+            self.assertIn(iv, combo["by_interval"])
+            self.assertEqual(combo["by_interval"][iv]["fired"], 20)
+            self.assertAlmostEqual(combo["by_interval"][iv]["reliability"], 1.0)
+
+    def test_render_shows_interval_breakdown_line(self):
+        rows = []
+        t = 0
+        for iv in ("15M", "10M", "7M"):
+            for _ in range(20):
+                rows.append({
+                    "created_at": t, "checkpoint": iv, "regime": "trend",
+                    "predicted_side": "YES", "result": "YES",
+                    "changed_before_close": 0, "correct": 1,
+                    "features": {"wick": 0.5, "momentum": 0.5},
+                }); t += 1
+        rep = factor_lab.analyze(rows, min_samples=20)
+        text = "\n".join(factor_lab.format_report(rep))
+        self.assertIn("by interval", text)
+        self.assertIn("15M", text)
+        self.assertIn("7M", text)
+
+
 class RenderTest(unittest.TestCase):
     def test_format_report_is_compact_text(self):
         rows = [_row(0.6, "YES", correct=1, t=i) for i in range(30)] + \

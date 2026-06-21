@@ -25,6 +25,13 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — factor-lab combinations broken down by interval
+**On the branch, deploy-pending.** Owner wanted to see whether the strongest agreeing factor
+pairs are stronger at 15M vs 10M vs 7M. `factor_lab._combos` now attaches a per-interval
+breakdown to each combination, and `format_report` renders it under each pair
+(`15M xx%(n)  10M xx%(n)  7M xx%(n)`). `scripts/stats.py` shows it automatically. Read-only;
+no model change. Tests in `tests/test_q15_factor_lab.py`. Full suite **863 passed, 4 skipped**.
+
 ## ✅ Shipped THIS session — consolidated all pure Telegram code into a `notifications/` package
 **On the branch, deploy-pending.** Owner: put all Telegram-notification files in one folder.
 Moved the PURE delivery/formatting modules into a new top-level `notifications/` package (history
