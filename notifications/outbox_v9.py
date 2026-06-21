@@ -363,12 +363,10 @@ class ReliableTelegramOutbox:
         contract_id = None
         return contract_id, checkpoint, alert_type
 
-    def send(self, text: str, idempotency_key: str | None = None, **_: Any) -> bool:
-        if not self.enabled:
-            return False
+    def _enqueue(self, text: str, idempotency_key: str | None) -> dict[str, Any]:
         key = self._key(str(text), idempotency_key)
         contract_id, checkpoint, alert_type = self._metadata(str(text))
-        row = self.backend.enqueue({
+        return self.backend.enqueue({
             "idempotency_key": key,
             "contract_id": contract_id,
             "checkpoint": checkpoint,
@@ -377,6 +375,11 @@ class ReliableTelegramOutbox:
             "created_at": _now(),
             "next_attempt_at": _now(),
         })
+
+    def send(self, text: str, idempotency_key: str | None = None, **_: Any) -> bool:
+        if not self.enabled:
+            return False
+        row = self._enqueue(str(text), idempotency_key)
         if not row:
             self.last_error = "outbox_enqueue_failed"
             return False
@@ -387,30 +390,90 @@ class ReliableTelegramOutbox:
         # True means durably accepted by the outbox, not necessarily delivered.
         return True
 
+    def send_with_result(self, text: str, idempotency_key: str | None = None, **_: Any) -> dict[str, Any]:
+        """Outbox-backed equivalent of ``TelegramNotifier.send_with_result``.
+
+        Returns ``{ok, delivered, muted, message_id}`` describing the SYNCHRONOUS
+        first attempt, while still enqueuing durably so the background worker
+        retries on failure. The message_id is taken from the wrapped notifier's
+        own result *inside* the locked attempt — never read back from shared
+        notifier state afterwards — so a concurrent worker delivery cannot race it.
+
+        Without this, callers that branch on ``send_with_result`` (the official
+        interval report) fall back to reading ``last_message_id`` off the outbox,
+        which it does not have, so a real delivery is mis-scored as a failure and
+        the official record / Shadow-vs-Yours native side never fill.
+        """
+        base = {"ok": False, "delivered": False, "muted": False, "message_id": None}
+        if not self.enabled:
+            return dict(base)
+        row = self._enqueue(str(text), idempotency_key)
+        if not row:
+            self.last_error = "outbox_enqueue_failed"
+            return dict(base)
+        if row.get("status") == "SENT":
+            # Idempotent dedup: an identical message already delivered. Handled, but
+            # there is no fresh message_id to attach for this call.
+            return {"ok": True, "delivered": True, "muted": False, "message_id": None}
+        if self.network_disabled:
+            # Durably queued; the worker is disabled, so nothing was attempted now.
+            return {"ok": True, "delivered": False, "muted": False, "message_id": None}
+        res = self._attempt_result(int(row["id"]))
+        return {"ok": bool(res.get("ok")), "delivered": bool(res.get("delivered")),
+                "muted": bool(res.get("muted")), "message_id": res.get("message_id")}
+
+    def _raw_send(self, payload: str) -> dict[str, Any]:
+        """Deliver one payload through the wrapped notifier, normalized to
+        ``{ok, delivered, muted, message_id, error}``.
+
+        Prefers the rich ``send_with_result`` interface (which carries the Telegram
+        message_id) and falls back to the boolean ``send`` for legacy notifiers,
+        where a handled send counts as delivered and exposes no id."""
+        token = getattr(self.raw, "token", None)
+        if hasattr(self.raw, "send_with_result"):
+            try:
+                result = self.raw.send_with_result(payload) or {}
+            except Exception as exc:
+                return {"ok": False, "delivered": False, "muted": False,
+                        "message_id": None, "error": _safe_error(exc, token)}
+            ok = bool(result.get("ok"))
+            return {"ok": ok, "delivered": bool(result.get("delivered")),
+                    "muted": bool(result.get("muted")), "message_id": result.get("message_id"),
+                    "error": None if ok else _safe_error(getattr(self.raw, "last_error", None), token)}
+        try:
+            ok = bool(self.raw.send(payload))
+        except Exception as exc:
+            return {"ok": False, "delivered": False, "muted": False,
+                    "message_id": None, "error": _safe_error(exc, token)}
+        return {"ok": ok, "delivered": ok, "muted": False,
+                "message_id": getattr(self.raw, "last_message_id", None),
+                "error": None if ok else _safe_error(getattr(self.raw, "last_error", None), token)}
+
     def _attempt(self, row_id: int | None = None) -> bool:
+        # True when a claimed row was handled (delivered or an intentional mute);
+        # False when nothing was due or the attempt failed (so the worker backs off).
+        return bool(self._attempt_result(row_id).get("ok"))
+
+    def _attempt_result(self, row_id: int | None = None) -> dict[str, Any]:
         with self._delivery_lock:
             row = self.backend.claim(row_id)
             if not row:
-                return False
+                return {"ok": False, "delivered": False, "muted": False, "message_id": None}
             attempts_before = int(row.get("attempt_count") or 0)
-            try:
-                delivered = bool(self.raw.send(row["payload"]))
-                error = None if delivered else _safe_error(getattr(self.raw, "last_error", None), getattr(self.raw, "token", None))
-            except Exception as exc:
-                delivered = False
-                error = _safe_error(exc, getattr(self.raw, "token", None))
-            if delivered:
+            res = self._raw_send(row["payload"])
+            if res["ok"]:
+                # Handled (delivered OR an intentional mute) -> durably done, no retry.
                 self.backend.complete(int(row["id"]), True, None, None, False)
                 self.sent_count = int(getattr(self.raw, "sent_count", self.sent_count + 1) or self.sent_count + 1)
                 self.last_sent_at = getattr(self.raw, "last_sent_at", _now())
                 self.last_error = None
-                return True
+                return res
             attempt_number = attempts_before + 1
             dead = attempt_number >= self.max_attempts
             backoff = self.BACKOFF_SECONDS[min(attempt_number - 1, len(self.BACKOFF_SECONDS) - 1)]
-            self.backend.complete(int(row["id"]), False, error, _now() + backoff, dead)
-            self.last_error = error
-            return False
+            self.backend.complete(int(row["id"]), False, res.get("error"), _now() + backoff, dead)
+            self.last_error = res.get("error")
+            return res
 
     def _run(self) -> None:
         while not self._stop.wait(2.0):
