@@ -1868,6 +1868,52 @@ class V95Ledger:
             })
         return out
 
+    def resolved_factor_rows(self, checkpoint: str | None = None) -> list[dict[str, Any]]:
+        """Read-only export for the shadow FACTOR LAB: every settled official
+        prediction with its DECISION-TIME factor values, the final settled result,
+        and the settlement-derived analysis TARGETS (``correct`` and
+        ``changed_before_close``). Outcome columns are the target of the analysis —
+        never re-exposed as a factor — so there is no look-ahead in the factors
+        themselves. Unparseable feature JSON is skipped, never guessed.
+
+        Optional ``checkpoint`` filters to one interval; ``None`` returns all.
+        """
+        if not self._available:
+            return []
+        query = (
+            "SELECT created_at, checkpoint, asset, regime, predicted_side, "
+            "official_result, changed_before_close, correct, selected_probability, "
+            "feature_json FROM predictions WHERE model_version=? "
+            "AND official_result IS NOT NULL"
+        )
+        params: list[Any] = [MODEL_VERSION]
+        if checkpoint is not None:
+            query += " AND checkpoint=?"
+            params.append(str(checkpoint).upper())
+        query += " ORDER BY created_at ASC"
+        out: list[dict[str, Any]] = []
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(query, tuple(params)))
+        for row in rows:
+            try:
+                features = json.loads(str(row["feature_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(features, dict):
+                continue
+            out.append({
+                "created_at": float(row["created_at"]),
+                "checkpoint": str(row["checkpoint"]).upper(),
+                "asset": row["asset"],
+                "regime": row["regime"],
+                "predicted_side": str(row["predicted_side"] or "").upper(),
+                "result": str(row["official_result"]).upper(),
+                "changed_before_close": int(row["changed_before_close"] or 0),
+                "correct": (None if row["correct"] is None else int(row["correct"])),
+                "features": features,
+            })
+        return out
+
     def resolved_economics_rows(self, checkpoint: str | None = None) -> list[dict[str, Any]]:
         """Read-only export for the shadow entry-economics A/B: per settled row, the
         decision-time probability + executable ask + live cost estimate + outcome +
