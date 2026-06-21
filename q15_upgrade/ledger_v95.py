@@ -823,6 +823,34 @@ class V95Ledger:
         except Exception as exc:
             self._note_shadow_error("mark_failed", exc)
 
+    def _shadow_mark_pending(self, ticker: str, checkpoint: str, delivery_key: str) -> None:
+        """Tell the shadow that Your System's official report for (ticker, checkpoint)
+        was durably QUEUED in the outbox under ``delivery_key`` — outcome to be
+        reconciled from the outbox's true status later (so a background-worker
+        delivery is credited, not mis-scored as a failure). Read-only wrt
+        production; never raises into the alert path."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                runner.mark_native_pending(str(ticker), str(checkpoint), str(delivery_key))
+        except Exception as exc:
+            self._note_shadow_error("mark_pending", exc)
+
+    def _shadow_reconcile_delivery(self, status_lookup: Any) -> dict[str, int]:
+        """Reconcile pending native picks against the outbox's true delivery status
+        (``status_lookup(key) -> 'SENT'|'DEAD_LETTER'|...|None``). Promotes picks
+        whose official report actually delivered (sync OR worker) and fails only
+        those whose report dead-lettered. Read-only wrt production; never raises."""
+        try:
+            from q15_upgrade.challenger.runner import get_runner
+            runner = get_runner()
+            if runner is not None:
+                return runner.reconcile_native_delivery(status_lookup)
+        except Exception as exc:
+            self._note_shadow_error("reconcile_delivery", exc)
+        return {"promoted": 0, "failed": 0}
+
     def _shadow_resolve(self, events) -> None:
         try:
             from q15_upgrade.challenger.runner import get_runner

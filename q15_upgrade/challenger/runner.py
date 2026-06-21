@@ -134,6 +134,27 @@ class ShadowRunner:
             logger.exception("challenger shadow mark_native_delivery_failed failed (ignored)")
             return False
 
+    def mark_native_pending(self, ticker: str, checkpoint: str, delivery_key: str) -> bool:
+        """Tag a generated pick with its official report's outbox key (durably
+        queued, outcome TBD). Never raises into the production send path."""
+        try:
+            return self.ledger.mark_native_pending(
+                str(ticker), str(checkpoint), str(delivery_key),
+                model_version=self.config.model_version)
+        except Exception:
+            logger.exception("challenger shadow mark_native_pending failed (ignored)")
+            return False
+
+    def reconcile_native_delivery(self, status_lookup: Any) -> dict:
+        """Resolve pending native picks from the outbox's true delivery status.
+        Never raises into the production path."""
+        try:
+            return self.ledger.reconcile_native_delivery(
+                status_lookup, model_version=self.config.model_version)
+        except Exception:
+            logger.exception("challenger shadow reconcile_native_delivery failed (ignored)")
+            return {"promoted": 0, "failed": 0}
+
     def delivery_audit(self) -> dict:
         try:
             return self.ledger.delivery_audit(model_version=self.config.model_version)

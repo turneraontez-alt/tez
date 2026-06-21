@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **924 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **937 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
 ## ⚙️ Merge policy (NEW — applies every session)
@@ -23,6 +23,33 @@ origin/main ^<branch>`); if any add/modify real file content (NOT the empty
 the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
+
+## ✅ Shipped THIS session — Fix Shadow-vs-Yours "0 sent · N failed" delivery mis-accounting
+**On branch `claude/updated-review-2x7wyr`.** Root cause: Your System's native picks were marked
+`DELIVERY_FAILED` the instant the **synchronous** outbox attempt didn't return delivered — but the
+notifier is the async `ReliableTelegramOutbox`, whose **background worker** delivers most reports on
+retry (that's why the owner keeps RECEIVING reports while the record showed `0 sent · 39 failed`).
+The sync attempt routinely loses to the worker's `claim()` (`outbox_v9.py:118-120`) or hits a Telegram
+429, so it was never a real failure. Suite **937 passed, 4 skipped** (+7 `tests/test_delivery_reconcile.py`).
+- **Fix — credit from the outbox's TRUE status, not the sync attempt:** the official report is now
+  enqueued with a deterministic idempotency key (`v95-official:{checkpoint}:{window_close}`); a
+  synchronously-undelivered (non-mute) send tags each pick **PENDING** under that key instead of
+  failing it; and `run_cycle` reconciles each cycle — `SENT` (sync OR worker) → credited, `DEAD_LETTER`
+  → failed, transient → still pending. Same applied to the compact-panel fallback.
+- **New plumbing:** `ReliableTelegramOutbox.status_by_key` (+ both backends); challenger
+  `ledger.mark_native_pending` / `reconcile_native_delivery` (+ new `native_delivery_key` column,
+  additive migration); runner + `ledger_v95._shadow_mark_pending` / `_shadow_reconcile_delivery`
+  wrappers; `checkpoint_v95._send_with_optional_key`. Read-only wrt production; what reaches Telegram
+  is unchanged — only HOW Your System's record is computed.
+- **Rate-limit investigation (the "why so many failures"):** there is NO proactive pacing or
+  `429`/`Retry-After` handling. The worker is naturally paced (~0.5 msg/s, `outbox_v9.py:502`) and
+  reliable; the UNPACED synchronous burst (official report + flip + follow-up + hourly in one cycle)
+  exceeds Telegram's ~1 msg/s/chat limit → 429 → fixed 30s+ backoff → late worker delivery. The
+  accounting fix makes the record correct regardless. **Optional follow-up (not done):** a min-interval
+  send pacer + `Retry-After` parsing to cut the 429 rate.
+- **Files:** `notifications/outbox_v9.py`, `q15_upgrade/challenger/{ledger,runner}.py`,
+  `q15_upgrade/ledger_v95.py`, `q15_upgrade/checkpoint_v95.py`, `tests/test_delivery_reconcile.py` (new, 7).
+  **DB:** additive `shadow_predictions.native_delivery_key`; backward-compatible.
 
 ## ✅ Shipped THIS session — Background shadow-signal experiment (5 new signals + continuous A/B)
 **On branch `claude/updated-review-2x7wyr`.** Adds five experimental signals computed from data the
