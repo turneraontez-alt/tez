@@ -92,7 +92,9 @@ class TestDegradedV95Message(unittest.TestCase):
         self.assertIn("Top picks", msg)
         self.assertIn("Side", msg)
         self.assertIn("Edge", msg)
-        self.assertIn("Best:", msg)          # the one-line headline
+        # The headline is either the recommended BEST ENTRY block or, when nothing
+        # qualifies, NO ENTRY RECOMMENDED — one source of truth with the detail.
+        self.assertTrue(("🏆 BEST ENTRY" in msg) or ("NO ENTRY RECOMMENDED" in msg))
         # Must NOT carry the hourly-report reroute marker.
         self.assertNotIn("Hourly Report —", msg)
         self.assertNotIn("None", msg)

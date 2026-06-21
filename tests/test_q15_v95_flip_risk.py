@@ -113,11 +113,13 @@ class TestAlertStateMachine(unittest.TestCase):
     def _thr(self, status="Learned"):
         return fr.ThresholdResolution(80.0, "BTC 10M NO → YES", status, 40, 30)
 
-    def _run(self, risk, n, prior=None, t0=100.0, flip_prob=0.5):
+    def _run(self, risk, n, prior=None, t0=100.0, flip_prob=0.5, flip_prob_lower=0.85):
+        # Default flip_prob_lower clears the hit-rate gate so these tests exercise
+        # the persistence/evidence/hysteresis machine in isolation.
         d = None
         for i in range(n):
             d, prior = fr.evaluate_alert(risk=risk, threshold=self._thr(), flip_probability=flip_prob,
-                                         prior=prior, now=t0 + i)
+                                         prior=prior, now=t0 + i, flip_prob_lower=flip_prob_lower)
         return d, prior
 
     def test_requires_persistence(self):
@@ -141,7 +143,7 @@ class TestAlertStateMachine(unittest.TestCase):
     def test_dedup_after_first_fire(self):
         _, st = self._run(self._risk(85), 3)
         d, _ = fr.evaluate_alert(risk=self._risk(85), threshold=self._thr(),
-                                 flip_probability=0.5, prior=st, now=500.0)
+                                 flip_probability=0.5, prior=st, now=500.0, flip_prob_lower=0.85)
         self.assertFalse(d.should_send)
         self.assertEqual(d.reason, "deduplicated")
 
@@ -149,7 +151,7 @@ class TestAlertStateMachine(unittest.TestCase):
         _, st = self._run(self._risk(85), 3)
         # Drop below threshold - hysteresis (80-10=70) resets the latch.
         d, st = fr.evaluate_alert(risk=self._risk(65), threshold=self._thr(),
-                                  flip_probability=0.5, prior=st, now=600.0)
+                                  flip_probability=0.5, prior=st, now=600.0, flip_prob_lower=0.85)
         self.assertFalse(st["latched"])
         d2, _ = self._run(self._risk(85), 3, prior=st, t0=700.0)
         self.assertTrue(d2.should_send)  # re-armed
@@ -158,6 +160,38 @@ class TestAlertStateMachine(unittest.TestCase):
         d, _ = self._run(self._risk(85, conf=10), 5)  # below min_confidence 40
         self.assertFalse(d.should_send)
         self.assertEqual(d.reason, "confidence")
+
+    def test_hitrate_gate_blocks_until_reliable(self):
+        # No bucket history (flip_prob_lower=None) -> dormant on "hitrate".
+        d, _ = self._run(self._risk(85), 5, flip_prob_lower=None)
+        self.assertFalse(d.should_send)
+        self.assertEqual(d.reason, "hitrate")
+        # A point-estimate that is high but with a low Wilson bound still blocks.
+        d2, _ = self._run(self._risk(85), 5, flip_prob_lower=0.55)
+        self.assertFalse(d2.should_send)
+        self.assertEqual(d2.reason, "hitrate")
+        # Lower bound clears 70% -> fires once persistence is met (3 obs).
+        d3, _ = self._run(self._risk(85), 3, flip_prob_lower=0.72)
+        self.assertTrue(d3.should_send)
+
+
+class TestHitRateReliability(unittest.TestCase):
+    def test_wilson_lower_bound_grows_with_samples(self):
+        # Same 80% point rate, more samples -> tighter, higher lower bound.
+        small = fr.wilson_lower_bound(4, 5)
+        large = fr.wilson_lower_bound(80, 100)
+        self.assertLess(small, large)
+        self.assertGreater(large, 0.70)   # 80/100 is reliably >70%
+        self.assertLess(small, 0.70)      # 4/5 is not
+        self.assertIsNone(fr.wilson_lower_bound(0, 0))
+
+    def test_bucket_reliability_reads_counts(self):
+        buckets = {"80-89": {"n": 100, "flips": 80, "flip_rate": 0.8}}
+        lower, n = fr.bucket_flip_reliability(85, buckets)
+        self.assertEqual(n, 100)
+        self.assertGreater(lower, 0.70)
+        self.assertEqual(fr.bucket_flip_reliability(85, None), (None, 0))
+        self.assertEqual(fr.bucket_flip_reliability(20, buckets), (None, 0))
 
 
 # ----------------------------------------------------------------- ledger learning
@@ -280,6 +314,52 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("CONFIRMED PREDICTION FLIP — BTC 10M", msg)
         self.assertIn("Previous prediction: NO", msg)
         self.assertIn("New prediction: YES", msg)
+
+
+class TestPushedAccountingAndSlots(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.led = V95Ledger(os.path.join(self.tmp.name, "l.sqlite3"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_pushed_vs_background_kept_separate(self):
+        # Two pushed (one right, one wrong) and one background (right).
+        _rec(self.led, "p1", "10M", "YES", 20); self.led.mark_pushed("p1", "10M")
+        self.led.resolve_ticker("p1", "YES", time.time() + 700)        # pushed correct
+        _rec(self.led, "p2", "10M", "YES", 20); self.led.mark_pushed("p2", "10M")
+        self.led.resolve_ticker("p2", "NO", time.time() + 700)         # pushed wrong
+        _rec(self.led, "b1", "10M", "YES", 20)                          # background
+        self.led.resolve_ticker("b1", "YES", time.time() + 700)        # background correct
+
+        sb = self.led.scoreboard()
+        pushed = sb["by_pushed"]["pushed"]
+        bg = sb["by_pushed"]["background"]
+        self.assertEqual((pushed["right"], pushed["wrong"], pushed["n"]), (1, 1, 2))
+        self.assertEqual(pushed["accuracy"], 0.5)
+        # Background's correct one must NOT leak into the pushed record.
+        self.assertEqual((bg["right"], bg["n"]), (1, 1))
+        self.assertEqual(sb["pushed_by_checkpoint"]["10M"]["n"], 2)
+        # status() exposes the compact pushed record the live alert renders.
+        self.assertEqual(self.led.status()["pushed_by_checkpoint"]["10M"]["accuracy"], 0.5)
+
+    def test_one_active_slot_per_timeframe(self):
+        now = 1000.0
+        # First 10M push claims the slot until its contract closes at now+600.
+        self.assertFalse(self.led.pushed_slot_blocks("10M", "c1", now))
+        self.assertTrue(self.led.claim_pushed_slot("10M", "c1", now + 600, now))
+        # A different contract is blocked while c1 is still open.
+        self.assertTrue(self.led.pushed_slot_blocks("10M", "c2", now + 10))
+        self.assertFalse(self.led.claim_pushed_slot("10M", "c2", now + 600, now + 10))
+        # The same contract is never blocked by itself (re-confirm is fine).
+        self.assertFalse(self.led.pushed_slot_blocks("10M", "c1", now + 10))
+        # A different timeframe has its own independent slot.
+        self.assertFalse(self.led.pushed_slot_blocks("15M", "c2", now + 10))
+        # Once c1 closes, the slot frees and c2 can take it.
+        self.assertFalse(self.led.pushed_slot_blocks("10M", "c2", now + 601))
+        self.assertIsNone(self.led.active_pushed_slot("10M", now + 601))
+        self.assertTrue(self.led.claim_pushed_slot("10M", "c2", now + 1200, now + 601))
 
 
 if __name__ == "__main__":

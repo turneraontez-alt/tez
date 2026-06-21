@@ -32,6 +32,9 @@ _ALERT_ACTIONABLE_MARKERS = (
     "INVALIDAT",
     "REVERSAL",
     "HOLD",
+    # The one post-entry follow-up check (hold / take-profit / avoid / exit) is
+    # always actionable — never mute it.
+    "FOLLOW-UP",
 )
 _ALERT_NONACTIONABLE_MARKERS = (
     "NO ENTRY YET",

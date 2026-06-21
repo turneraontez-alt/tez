@@ -124,7 +124,28 @@ class HourlyReporter:
         # Only mention the footnote if some bucket is actually flagged thin.
         if any("*" in (r or "") for _header, group in groups for r in group):
             table.append("* under 10 settled — not yet reliable")
-        return [headline, ""] + table + self._manipulation_lines(sb)
+        return [headline, ""] + table + self._pushed_vs_background_lines(sb) + self._manipulation_lines(sb)
+
+    @staticmethod
+    def _pushed_vs_background_lines(sb):
+        """Two separate records: predictions actually PUSHED to the user vs every
+        background observation. Background never inflates the pushed number."""
+        bp = sb.get("by_pushed") or {}
+        pushed, bg = bp.get("pushed") or {}, bp.get("background") or {}
+        if not ((pushed.get("n") or 0) or (bg.get("n") or 0)):
+            return []
+
+        def _line(label, d):
+            n = d.get("n") or 0
+            if not n:
+                return f"{label:<12}{'0-0':>6}{'—':>6}"
+            acc = d.get("accuracy")
+            acc_s = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "-"
+            wl = f"{d.get('right', 0)}-{d.get('wrong', 0)}"
+            return f"{label:<12}{wl:>6}{acc_s:>6}"
+
+        return ["", "PUSHED vs BACKGROUND", f"{'':<12}{'W-L':>6}{'Acc':>6}",
+                _line("Pushed", pushed), _line("Background", bg)]
 
     @staticmethod
     def _manipulation_lines(sb):

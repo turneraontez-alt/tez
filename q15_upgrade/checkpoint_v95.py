@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import os
 import statistics
@@ -19,6 +20,8 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 from .checkpoint_v94_unified import (
     CheckpointPolicyV94Unified,
@@ -1145,7 +1148,16 @@ def _c(value: Any, signed: bool = False) -> str:
     return f"{parsed:+.0f}¢" if signed else f"{parsed:.0f}¢"
 
 
-def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None) -> str:
+def _seconds_phrase(value: Any) -> str:
+    """`~Xm Ys left` entry-deadline phrase from seconds-remaining, or `—`."""
+    secs = _num(value)
+    if secs is None or secs < 0:
+        return "—"
+    total = int(secs)
+    return f"~{total // 60}m {total % 60:02d}s left"
+
+
+def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]], ledger_status: Mapping[str, Any], result_events: Sequence[Mapping[str, Any]] | None = None, followup_remaining: bool = True) -> str:
     """Render the checkpoint alert in the hourly-report house style.
 
     A bold header, a one-line headline, then a compact ``<pre>`` monospace table
@@ -1172,30 +1184,55 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
     available = [r for r in top if analyses.get(str(r["asset"]), {}).get("prediction_available")]
     unavailable = [r for r in top if not analyses.get(str(r["asset"]), {}).get("prediction_available")]
 
-    # One concise headline: the single highest-confidence prediction, with its
-    # direction, confidence %, grade, stability trend, interval and Yes/No split.
-    best = _best_pick(analyses, ranking)
-    if best is not None and analyses.get(best[0], {}).get("prediction_available"):
-        b_asset, a = best
-        side = a.get("prediction_side") or "—"
-        net = a.get("net_edge_cents")
-        grade = a.get("confidence_grade") or "—"
-        conf = _pct0(a.get("selected_probability"))
-        stab = a.get("stability")
-        tag = f" · {stab}" if stab else ""
-        if a.get("entry_allowed"):
-            body.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · edge {_c(net, signed=True)}")
-        elif net is not None:
-            need = a.get("required_edge_cents")
-            body.append(
-                f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · "
-                f"edge {_c(net, signed=True)} (need {_c(need)}) — holding"
-            )
-        else:
-            body.append(f"Best: {b_asset} {side} {conf} (grade {grade}){tag} · no executable edge — holding")
-        body.append(f"P(Yes) {_pct0(a.get('yes_probability'))} · P(No) {_pct0(a.get('no_probability'))} · {checkpoint} interval")
+    # The recommended BEST ENTRY is rank #1 of the qualifying entries — the SAME
+    # ranking the detailed table below renders, so the top summary and detail can
+    # never disagree. Only an asset with an actual recommended entry is eligible.
+    best_entry = _best_entry(analyses, ranking)
+    pbc = (ledger_status.get("pushed_by_checkpoint") or {}).get(checkpoint) or {}
+    p_settled = int(pbc.get("settled") or 0)
+    p_acc = pbc.get("accuracy")
+    p_acc_s = f"{p_acc * 100:.0f}%" if isinstance(p_acc, (int, float)) else "n/a"
+    if best_entry is not None:
+        be_asset, ba = best_entry
+        be_side = ba.get("prediction_side") or "—"
+        _ne = _num(ba.get("net_edge_cents"))
+        ne_s = f"{_ne:+.1f}¢" if _ne is not None else "—"
+        body += [
+            f"🏆 BEST ENTRY — {be_asset} {be_side}",
+            f"Interval: {checkpoint}",
+            "Entry status: RECOMMENDED",
+            f"Probability: {_fmt_probability(ba.get('selected_probability'))}",
+            f"Recommended entry: {_c(ba.get('ideal_entry_cents'))} or lower",
+            f"Conservative net edge: {ne_s}",
+            f"Follow-up check remaining: {'YES' if followup_remaining else 'NO'}",
+            f"P(Yes) {_pct0(ba.get('yes_probability'))} · P(No) {_pct0(ba.get('no_probability'))}",
+            f"Type: checkpoint entry · entry by {_seconds_phrase(ba.get('seconds_remaining'))} · "
+            f"pushed {checkpoint} acc {p_acc_s} (n={p_settled})",
+        ]
     else:
-        body.append("No prediction available this cycle")
+        # No qualifying entry. Show NO ENTRY RECOMMENDED, plus the single best
+        # prediction we are watching (held), so the card still informs.
+        body.append("👀 NO ENTRY RECOMMENDED")
+        best = _best_pick(analyses, ranking)
+        if best is not None and analyses.get(best[0], {}).get("prediction_available"):
+            b_asset, a = best
+            side = a.get("prediction_side") or "—"
+            net = a.get("net_edge_cents")
+            grade = a.get("confidence_grade") or "—"
+            conf = _pct0(a.get("selected_probability"))
+            stab = a.get("stability")
+            tag = f" · {stab}" if stab else ""
+            if net is not None:
+                need = a.get("required_edge_cents")
+                body.append(
+                    f"Watching: {b_asset} {side} {conf} (grade {grade}){tag} · "
+                    f"edge {_c(net, signed=True)} (need {_c(need)}) — holding"
+                )
+            else:
+                body.append(f"Watching: {b_asset} {side} {conf} (grade {grade}){tag} · no executable edge — holding")
+            body.append(f"P(Yes) {_pct0(a.get('yes_probability'))} · P(No) {_pct0(a.get('no_probability'))} · {checkpoint} interval")
+        else:
+            body.append("No prediction available this cycle")
 
     # Aligned monospace table of the available picks (model vs market + edge).
     if available:
@@ -1294,6 +1331,84 @@ def _iso_from_epoch(epoch: float) -> str:
         return datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
     except (TypeError, ValueError, OSError):
         return datetime.now(timezone.utc).isoformat()
+
+
+def _best_entry(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple[str, Mapping[str, Any]] | None:
+    """The single recommended BEST ENTRY: rank #1 of the qualifying entries.
+
+    This is the ONE source of truth for "best entry" — derived from the SAME
+    ``ranking`` (``rank_analyses``) the detailed table renders, never an
+    independent confidence-only calculation. ``rank_analyses`` floats every
+    ENTRY_RECOMMENDED pick (priority 8) above all non-entries and orders them by
+    conservative net edge → confidence → data quality, so the first entry-allowed
+    row is also the overall rank #1 whenever any entry qualifies. Only an asset
+    with an actual recommended entry is eligible. Returns ``(asset, analysis)`` or
+    ``None`` when nothing qualifies.
+    """
+    for row in ranking:
+        asset = str(row.get("asset"))
+        a = analyses.get(asset)
+        if a and a.get("entry_allowed"):
+            return asset, a
+    return None
+
+
+def _best_entry_consistent(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> bool:
+    """Validation guard: the displayed best entry MUST equal rank #1 of the
+    detailed ranking. True when there is no entry, or the first entry-allowed row
+    in the ranking is also ``ranking[0]`` (top summary and detail agree). The
+    alert is suppressed if this fails, so a top/detail mismatch can never ship.
+    """
+    best = _best_entry(analyses, ranking)
+    if best is None:
+        return True
+    return bool(ranking) and str(ranking[0].get("asset")) == best[0]
+
+
+def _followup_verdict(recommended_side: str, a: Mapping[str, Any] | None) -> tuple[str, str]:
+    """Read-only verdict for the one follow-up check. Returns (tag, advice) where
+    tag is an actionable header token (HOLD / EXIT / REVERSAL) the notifier won't
+    suppress. Covers hold / take-profit / avoid / exit / side-change."""
+    if a is None:
+        return "EXIT", "Contract no longer active — interval ended. No further action."
+    cur_side = str(a.get("prediction_side") or "").upper()
+    rec = str(recommended_side or "").upper()
+    if cur_side and rec and cur_side != rec:
+        return "REVERSAL", f"SIDE CHANGED → now {cur_side}. Avoid adding; exit if already in."
+    if not a.get("entry_allowed"):
+        return "EXIT", (f"Entry no longer valid ({_decision_label(a.get('trade_decision'))}). "
+                        "Avoid new entry; take profit / exit if filled.")
+    flip_score = _num((a.get("flip_risk") or {}).get("score"), 0.0) or 0.0
+    if flip_score >= _env_float("Q15_V95_FOLLOWUP_FLIP_RISK_SCORE", 70.0, 0.0, 100.0):
+        return "HOLD", "Still valid but elevated reversal risk — consider taking profit / tightening."
+    ask = _c((a.get("quote") or {}).get("ask_cents"))
+    return "HOLD", f"Still valid — HOLD. Entry ≤ {_c(a.get('ideal_entry_cents'))} (ask {ask})."
+
+
+def _followup_checkpoints() -> set[str]:
+    """Intervals eligible for the one follow-up check (15M and 10M by default;
+    7M is the final short leg and is excluded). Override via
+    Q15_V95_FOLLOWUP_CHECKPOINTS (comma-separated)."""
+    raw = os.environ.get("Q15_V95_FOLLOWUP_CHECKPOINTS", "15M,10M")
+    return {tok.strip().upper() for tok in raw.split(",") if tok.strip()}
+
+
+def build_followup_message(checkpoint: str, asset: str, recommended_side: str,
+                           a: Mapping[str, Any] | None) -> str:
+    """The single per-interval follow-up alert confirming a recommended entry."""
+    tag, advice = _followup_verdict(recommended_side, a)
+    header = f"🔁 <b>FOLLOW-UP — {asset} {checkpoint} · {tag}</b>"
+    cur = str((a or {}).get("prediction_side") or "—").upper()
+    status = "still valid" if (a and a.get("entry_allowed")) else "not valid"
+    body = [
+        f"Recommended side: {recommended_side or '—'}",
+        f"Current side: {cur}",
+        f"Entry status now: {status}",
+        f"Verdict: {advice}",
+        "",
+        "Paper monitor · not advice · no orders placed",
+    ]
+    return header + "\n<pre>\n" + "\n".join(body) + "\n</pre>"
 
 
 def _best_pick(analyses: Mapping[str, Mapping[str, Any]], ranking: Sequence[Mapping[str, Any]]) -> tuple[str, Mapping[str, Any]] | None:
@@ -1626,6 +1741,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 expired = _checkpoint_expired(checkpoint, seconds_left)
                 analysis["interval"] = checkpoint
                 analysis["expired"] = expired
+                analysis["seconds_remaining"] = seconds_left
                 snapshot["q15_v9_5_interval"] = checkpoint
                 snapshot["q15_v9_5_confidence_grade"] = analysis.get("confidence_grade")
                 snapshot["q15_v9_5_selected_probability"] = analysis.get("selected_probability")
@@ -1713,11 +1829,43 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
                     self.ledger.reconcile_flip_warnings()
             ledger_status = self.ledger.status()
-            message = build_v95_message(checkpoint, analyses, ranking, ledger_status, result_events) if ranking else None
+            # The recommended BEST ENTRY is rank #1 of the qualifying entries — the
+            # single source of truth shared by the alert's top summary and detail.
+            best_entry = _best_entry(analyses, ranking)
+            top_entry_ticker = top_entry_close = top_entry_asset = top_entry_side = None
+            if best_entry is not None:
+                _be_asset, _be_a = best_entry
+                top_entry_asset = _be_asset
+                top_entry_side = str(_be_a.get("prediction_side") or "")
+                _can = canonicals.get(_be_asset)
+                if _can is not None and _can.ticker:
+                    top_entry_ticker = _can.ticker
+                    top_entry_close = _can.settlement_time
+            followup_remaining = not (
+                top_entry_ticker is not None
+                and self.ledger.followup_already_sent(top_entry_ticker, checkpoint)
+            )
+            message = build_v95_message(
+                checkpoint, analyses, ranking, ledger_status, result_events,
+                followup_remaining=followup_remaining,
+            ) if ranking else None
             # Discard all parent V9.4 messages. V9.5 owns the final state machine.
             deferred.suppress_all(generated_message=message is not None)
             sent = failed = 0
-            if message and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+            # Validation guard: never ship an alert whose top BEST ENTRY disagrees
+            # with rank #1 of the detailed ranking.
+            consistent = _best_entry_consistent(analyses, ranking)
+            if not consistent:
+                logger.error("V9.5 best-entry mismatch — suppressing alert (top != detail rank #1)")
+            # One active prediction per timeframe: if a different, still-open
+            # contract already holds this checkpoint's slot, do not push a second
+            # prediction for the same time frame — leave the active one untouched.
+            one_active = _env_bool("Q15_V95_ONE_ACTIVE_PER_TIMEFRAME", True)
+            slot_locked = bool(
+                one_active and top_entry_ticker is not None
+                and self.ledger.pushed_slot_blocks(checkpoint, top_entry_ticker, now)
+            )
+            if message and consistent and not slot_locked and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
                 event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
                 previous = self.ledger.notification_state(event_key)
                 state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
@@ -1729,8 +1877,27 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     fresh = _BufferedNotifier(notifier)
                     sent, failed, _ = fresh.flush(message)
                     self.ledger.complete_notification(event_key=permit_key, success=sent > 0 and failed == 0, now=now)
+                    # On a delivered entry recommendation, claim the timeframe slot,
+                    # mark the prediction pushed (separate pushed accuracy), and arm
+                    # the one follow-up check for this contract+interval.
+                    if sent > 0 and top_entry_ticker is not None:
+                        self.ledger.claim_pushed_slot(checkpoint, top_entry_ticker, top_entry_close, now)
+                        self.ledger.mark_pushed(top_entry_ticker, checkpoint)
+                        if (_env_bool("Q15_V95_ENTRY_FOLLOWUP_ENABLED", True)
+                                and checkpoint in _followup_checkpoints()):
+                            self.ledger.arm_entry_followup(
+                                ticker=top_entry_ticker, checkpoint=checkpoint,
+                                asset=str(top_entry_asset or ""), side=str(top_entry_side or ""),
+                                now=now, delay=_env_float("Q15_V95_FOLLOWUP_DELAY_SECONDS", 120.0, 15.0, 600.0),
+                            )
                 else:
                     self._telegram_suppressed_v95 += 1
+            elif slot_locked or not consistent:
+                self._telegram_suppressed_v95 += 1
+            # Fire any due follow-up checks (exactly one per contract+interval).
+            fu_sent, fu_failed = self._dispatch_entry_followups(canonicals, analyses, notifier, now)
+            flip_sent += fu_sent
+            flip_failed += fu_failed
             self._telegram_sent_v95 += sent + flip_sent
             self._telegram_failed_v95 += failed + flip_failed
             self._cycles += 1
@@ -1887,12 +2054,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             asset_stats, overall_stats, asset=asset, checkpoint=checkpoint, direction=direction,
         )
         scope = asset_stats if (asset_stats and threshold.status == "Learned") else overall_stats
-        flip_prob = flip_risk.estimate_flip_probability(ra.score, (scope or {}).get("buckets"))
+        buckets = (scope or {}).get("buckets")
+        flip_prob = flip_risk.estimate_flip_probability(ra.score, buckets)
+        # Reliability-aware "≥X% chance of being right" estimate for this risk level
+        # (Wilson lower bound of the bucket flip-rate) + its sample size. The gate
+        # keeps flips dormant until this clears Q15_V95_FLIP_MIN_HITRATE.
+        flip_prob_lower, flip_samples = flip_risk.bucket_flip_reliability(ra.score, buckets)
 
         key = (str(asset), str(checkpoint), str(ticker))
         decision, new_state = flip_risk.evaluate_alert(
             risk=ra, threshold=threshold, flip_probability=flip_prob,
-            prior=self._flip_alert_state.get(key), now=now,
+            prior=self._flip_alert_state.get(key), now=now, flip_prob_lower=flip_prob_lower,
         )
         self._flip_alert_state[key] = new_state
         if len(self._flip_alert_state) > 256:
@@ -1904,10 +2076,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         snapshot["q15_v9_5_flip_threshold_status"] = threshold.status
         snapshot["q15_v9_5_flip_samples"] = threshold.samples
         snapshot["q15_v9_5_flip_probability"] = flip_prob
+        snapshot["q15_v9_5_flip_hitrate_lower"] = flip_prob_lower
+        snapshot["q15_v9_5_flip_hitrate_samples"] = flip_samples
         snapshot["q15_v9_5_flip_state"] = decision.state
         snapshot["q15_v9_5_flip_dashboard"] = flip_risk.dashboard_block(
             risk=ra, threshold=threshold, flip_probability=flip_prob,
             state=decision.state, persistence=decision.persistence,
+            flip_prob_lower=flip_prob_lower, flip_samples=flip_samples,
         )
 
         sent = failed = 0
@@ -1938,6 +2113,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             msg = flip_risk.format_high_flip_risk(
                 asset=asset, checkpoint=checkpoint, current_side=side, risk=ra,
                 threshold=threshold, flip_probability=flip_prob, persistence=decision.persistence,
+                flip_prob_lower=flip_prob_lower, flip_samples=flip_samples,
             )
             s, f, _ = _BufferedNotifier(notifier).flush(msg)
             sent += s
@@ -1947,6 +2123,40 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     asset=asset, checkpoint=checkpoint, ticker=str(ticker), direction=direction,
                     risk_score=ra.score, flip_probability=flip_prob, confidence=ra.confidence, now=now,
                 )
+        return sent, failed
+
+    def _dispatch_entry_followups(self, canonicals: Mapping[str, Any], analyses: Mapping[str, Any],
+                                  notifier: Any, now: float) -> tuple[int, int]:
+        """Fire the single due follow-up per (contract, interval).
+
+        Read-only re-check of a previously recommended entry: confirms whether it
+        is still valid, whether the side changed, and advises hold / take-profit /
+        avoid / exit. Each follow-up fires at most once and is then consumed, so no
+        repeats. If the contract is no longer live this cycle the (now pointless)
+        follow-up is consumed without sending. Returns (sent, failed)."""
+        if not _env_bool("Q15_V95_ENTRY_FOLLOWUP_ENABLED", True):
+            return 0, 0
+        due = self.ledger.due_followups(now)
+        if not due:
+            return 0, 0
+        by_ticker: dict[str, tuple[str, Mapping[str, Any]]] = {}
+        for asset, can in (canonicals or {}).items():
+            tk = getattr(can, "ticker", None)
+            if can is not None and tk and asset in analyses:
+                by_ticker[str(tk)] = (asset, analyses[asset])
+        sent = failed = 0
+        for f in due:
+            ticker, cp = f["ticker"], f["checkpoint"]
+            cur = by_ticker.get(ticker)
+            if cur is None:
+                self.ledger.mark_followup_sent(ticker, cp, now)  # contract gone; consume
+                continue
+            asset, a = cur
+            msg = build_followup_message(cp, f.get("asset") or asset, f.get("side") or "", a)
+            s, fl, _ = _BufferedNotifier(notifier).flush(msg)
+            sent += s
+            failed += fl
+            self.ledger.mark_followup_sent(ticker, cp, now)
         return sent, failed
 
     def predictions(self) -> dict[str, Any]:
