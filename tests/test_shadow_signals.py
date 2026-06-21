@@ -60,6 +60,36 @@ class ComputeSignalsTests(unittest.TestCase):
         for value in signals.values():
             self.assertEqual(value, 0.0)
 
+    def test_order_flow_persistence_not_dead_on_candle_gap(self):
+        # Review repair: flow present but no recent candle-returns to confirm
+        # drift must carry a damped flow lean, not collapse to 0.0.
+        class _Bare:
+            yes_is_higher = True
+            candles = ()
+        analysis = {"yes_probability": 0.5, "feature_values": {"flow": 0.8}}
+        signals = shadow_signals.compute_signals(analysis, _Bare())
+        self.assertAlmostEqual(signals["order_flow_persistence"], 0.4, places=6)
+
+    def test_prediction_stability_neutral_when_flip_risk_absent(self):
+        # Review repair: a MISSING flip-risk score must read as neutral (0.5),
+        # not "perfectly stable" (1.0) which would amplify the lean to full.
+        class _Bare:
+            yes_is_higher = True
+            candles = ()
+        analysis = {"yes_probability": 0.9}  # lean = +0.8, no flip_risk key
+        signals = shadow_signals.compute_signals(analysis, _Bare())
+        self.assertAlmostEqual(signals["prediction_stability"], 0.4, places=6)
+
+    def test_regime_transition_deconfidences_when_inputs_absent(self):
+        # Review repair: no regime inputs at all → unknown (transition_prob 0.5),
+        # so the lean is moderately de-confidenced rather than left at full.
+        class _Bare:
+            yes_is_higher = True
+            candles = ()
+        analysis = {"yes_probability": 0.9}  # lean = +0.8, no regime/threshold/vol
+        signals = shadow_signals.compute_signals(analysis, _Bare())
+        self.assertAlmostEqual(signals["regime_transition"], 0.4, places=6)
+
     def test_entropy_signal_shrinks_with_noise(self):
         # A clean one-directional candle series -> low entropy -> stronger
         # entropy_noise magnitude than an oscillating (noisy) series.
@@ -182,13 +212,22 @@ class ReportingAndGatingTests(unittest.TestCase):
         lines = shadow_signals.build_report_lines(scores)
         self.assertTrue(any("Experimental signals" in ln for ln in lines))
 
-    def test_experiment_default_off_and_endpoint_shape(self):
+    def test_experiment_default_on_and_endpoint_shape(self):
+        # Collection now defaults ON (observational A/B only — never feeds the
+        # live probability), so the evidence can actually accumulate.
         os.environ.pop("Q15_V95_SHADOW_SIGNALS_ENABLED", None)
         exp = self.ledger.shadow_signal_experiment()
         self.assertIn("signals", exp)
-        self.assertFalse(exp["enabled"])
+        self.assertTrue(exp["enabled"])
         self.assertEqual(exp["rows_considered"], 0)
         self.assertEqual(set(exp["signals"]), set(shadow_signals.SIGNAL_NAMES))
+
+    def test_experiment_can_be_disabled_via_env(self):
+        os.environ["Q15_V95_SHADOW_SIGNALS_ENABLED"] = "0"
+        try:
+            self.assertFalse(shadow_signals.SignalConfig.from_env().enabled)
+        finally:
+            os.environ.pop("Q15_V95_SHADOW_SIGNALS_ENABLED", None)
 
 
 if __name__ == "__main__":

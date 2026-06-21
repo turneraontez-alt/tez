@@ -9,8 +9,66 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **937 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **949 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## ✅ Shipped THIS session — Implemented the updated-review fixes (critical → polish)
+**On branch `claude/updated-review-ecyp4x`.** Worked the latest auditor review's
+confirmed findings end-to-end; suite **949 passed, 4 skipped** (+~13). All
+read-only wrt real exchanges; frozen champion untouched; live probability path
+byte-for-byte unchanged unless an explicit default-OFF flag is set.
+- **CRITICAL — per-asset ingest isolation** (`app.py`): wrapped the ingest loop
+  (ensure_market/ingest_trades/ingest_spot/parse_orderbook) in a per-asset
+  try/except so one poisoned tick no longer aborts the loop and starves every
+  other asset of a snapshot that cycle. Test: `test_app_loop_degraded_paths.py::
+  TestIngestExceptionIsolation`.
+- **HIGHEST — isotonic calibration** (`ledger_v95.py`): added pure PAVA
+  `_isotonic_fit`/`_isotonic_predict`, computed over the same resolved rows and
+  applied by `calibrate()` ONLY when `Q15_V95_CALIBRATION_ISOTONIC=1`
+  (DEFAULT OFF → live = Platt, unchanged). Targets the recorded high-band
+  UNDER-confidence (pred ~0.78 → win ~0.95) a slope-capped Platt can't bend.
+  Tests: `test_review_fixes_v4.py`.
+- **MEDIUM — shadow-signal data collection ON by default**
+  (`shadow_signals.py`): `Q15_V95_SHADOW_SIGNALS_ENABLED` now defaults True.
+  Verified the signals are write-only to `predictions.shadow_signal_json` and
+  read back only by the OOS A/B — they never touch the live probability — so the
+  5 features can finally accrue evidence while staying in shadow.
+- **MEDIUM — repaired 3 shadow features** (`shadow_signals.py`):
+  order_flow_persistence now carries a damped flow lean on candle gaps instead
+  of going dead at 0.0; prediction_stability treats a MISSING flip-risk as
+  neutral (0.5) not "perfectly stable"; regime_transition de-confidences (0.5)
+  when all regime inputs are absent instead of assuming "no transition".
+- **POLISH — p-value precision** (`ledger_v95._round_p`): strong promotion
+  p-values no longer flatten to 0.0 at 6dp. **POLISH — flip-alert honesty**
+  (`ledger_v95.flip_warning_performance` + `reporting._flip_scoreboard`): the
+  disabled high-flip-risk channel is now labelled "alerts disabled" rather than
+  reading as 0-detected/100%-missed.
+- **Examined, NOT a bug:** ticker↔asset "mismatch" (Kalshi tickers are
+  market-unique; recorded together per market) and rank double-counting
+  (`prediction_id` is the PK) — documented, no code change.
+- **DB:** no schema change (isotonic fit is in-memory; shadow_signal_json column
+  already existed). **Restart/ET/grading/dedup** re-verified end-to-end.
+- **Files:** `app.py`, `q15_upgrade/ledger_v95.py`, `q15_upgrade/shadow_signals.py`,
+  `notifications/reporting.py`, `.gitignore`, + tests
+  (`test_review_fixes_v4.py` new; updated `test_app_loop_degraded_paths.py`,
+  `test_shadow_signals.py`, `test_q15_v95_significance.py`,
+  `test_q15_learning_scoreboard.py`).
+
+## ✅ Shipped earlier THIS session — Expanded `updated-review` into a full system auditor
+**On branch `claude/updated-review-ecyp4x`, merged to `main`.** Rewrote
+`.claude/skills/updated-review/SKILL.md` (skill-only; no app/test change, suite
+unchanged at **906 passed, 13 skipped** in this container env). The skill now
+grades **Shadow** and **Your System** separately (/100) from real ledger records
+(`V95Ledger().scoreboard()`/`official_scoreboard()`/`shadow_signal_experiment()`,
+challenger `ShadowLedger` + `challenger/stats.py` paired tests), compares
+15M/10M/7M and #1/#2/#3 ranking **only on matched snapshot+timestamp rows**
+(no look-ahead credit), tests the 5 background features against
+`shadow_signals.SIGNAL_NAMES` (HELPING/HURTING/INSUFFICIENT/BROKEN, OOS-gated),
+runs the full live-workflow bug checklist (confirmed vs suspected), checks
+whether the last review's recommendations landed, and emits the owner's fixed
+output template. Read-only; rules forbid inventing numbers (label
+`INSUFFICIENT DATA (n=…)`). NOTE: container `data/*.sqlite3` are seed/empty
+copies — real numbers populate when run against live Replit data.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -34,6 +92,22 @@ audit). Strictly read-only — never writes, skips an absent store instead of cr
 Tests: `tests/test_learning_progress.py` (3). Suite **940 passed, 4 skipped**.
 - Note: in a fresh web clone the committed DBs are a post-reset SEED (14 v95 preds, 0 resolved, 0
   weight updates; shadow DB not committed) — real numbers appear when run on the Repl.
+
+## ✅ Shipped — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner: the END-RESULT CALL didn't fill #2/#3 (15M) or any rank at 10M/7M, and wanted the comparison reset.
+- **END-RESULT CALL is now a ranked #1/#2/#3 grid across ALL three intervals** (`challenger/runner.py`),
+  Shadow vs Your System, graded ✓/✗, built from `latest_window_cases` (same data as LAST WINDOW). Every
+  interval and rank is always rendered; empty slots read — instead of being omitted. The old per-asset
+  layout (which hard-coded #2/#3 to — because a single asset has one pick per interval, and dropped
+  intervals with no pick) is gone. `latest_window_end_results` stays on the ledger (still unit-tested).
+  Header "END-RESULT CALL · 15M, 10M & 7M" preserved.
+- **Reset (Shadow-vs-Yours only):** `model_version` default bumped `challenger-v4 → challenger-v5`
+  (`challenger/config.py`, `.env.example`). v5 starts empty; v1..v4 stay archived as
+  PRE-SYNCHRONIZED-RESET (never deleted, never scored). Takes effect on deploy to `main`. The CYCLE
+  CLOSED running record (official sent_predictions) was deliberately NOT reset.
+- **Tests:** `test_default_model_version_is_v5_fresh_reset` + `test_end_result_call_is_ranked_grid_all_intervals`.
+  Suite: **869 passed, 13 skipped**. **⚠️ Deploy note:** if the Repl pins `Q15_CHALLENGER_MODEL_VERSION`
+  in its env, that overrides the new default — unset it (or set `=challenger-v5`) for the reset to apply.
 
 ## ✅ Shipped THIS session — Fix Shadow-vs-Yours "0 sent · N failed" delivery mis-accounting
 **On branch `claude/updated-review-2x7wyr`.** Root cause: Your System's native picks were marked
@@ -126,7 +200,13 @@ invariants intact; every model-touching change is default-OFF `Q15_*`-gated. Sui
 - **Files:** `q15_upgrade/money.py` (new), `q15_upgrade/checkpoint_v95.py`, `q15_upgrade/ledger_v95.py`,
   `performance.py`, `spot_ws.py`, `tests/test_review_fixes_v3.py` (new, 20). **DB:** no schema change
   beyond the existing additive `_ensure_column` migrations (now validated); fully backward-compatible.
+
 ## ✅ Shipped THIS session — outbox send_with_result: fix delivery mis-detection (branch `claude/manipulation-learning-progress-liqs9z`)
+> NOTE: a parallel `updated-review` session on `main` fixed the SAME delivery mis-accounting via
+> per-cycle outbox-status reconciliation (`status_by_key` + `mark_native_pending` /
+> `reconcile_native_delivery`). Both fixes now coexist after the merge: this branch's
+> `send_with_result` gives the synchronous attempt a truthful delivered/message_id result, and the
+> reconciliation path credits later worker-retry deliveries. Belt-and-suspenders, not conflicting.
 Owner asked why the "Your System delivery: 0 sent · 12 failed · 23 pending" delivery was failing.
 **It mostly WASN'T failing — delivery DETECTION was broken.** Production wires
 `notifier = ReliableTelegramOutbox` (`app.py:91`) and passes it into `run_cycle` (`app.py:565`).

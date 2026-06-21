@@ -341,10 +341,20 @@ class TestHourlyFlipScoreboard(unittest.TestCase):
         # Learned flip-rate curve carried through as its own mini-table.
         self.assertIn("LEARNED FLIP RATE", text)
 
-    def test_flip_table_empty_until_warned(self):
-        empty = {"overall": {"alerts": 0}, "by_checkpoint": {}, "by_direction": {}, "by_asset": {}}
+    def test_flip_table_empty_until_warned_when_alerts_armed(self):
+        # Alerts armed but nothing tripped yet, no learned curve -> empty.
+        empty = {"overall": {"alerts": 0}, "alerts_enabled": True,
+                 "by_checkpoint": {}, "by_direction": {}, "by_asset": {}}
         out = self._reporter(_FakeFlipLedger(empty, {"available": False}))._flip_scoreboard()
         self.assertEqual(out, [])
+
+    def test_flip_table_notes_disabled_channel(self):
+        # Alerts OFF (default): the empty record must be labelled as a disabled
+        # channel, not left blank (which reads as a detection failure).
+        empty = {"overall": {"alerts": 0}, "alerts_enabled": False,
+                 "by_checkpoint": {}, "by_direction": {}, "by_asset": {}}
+        out = self._reporter(_FakeFlipLedger(empty, {"available": False}))._flip_scoreboard()
+        self.assertTrue(any("disabled" in ln.lower() for ln in out))
 
     def test_flip_table_safe_without_methods(self):
         # build_report's fake ledger may lack the flip methods entirely.

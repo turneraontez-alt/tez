@@ -19,7 +19,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-from q15_upgrade.ledger_v95 import V95Ledger, _two_sided_p
+from q15_upgrade.ledger_v95 import V95Ledger, _two_sided_p, _round_p
 
 
 def _rows(diff, jitter=0.0, n=40):
@@ -40,6 +40,15 @@ class TestTwoSidedP(unittest.TestCase):
 
     def test_zero_statistic_is_p_one(self):
         self.assertAlmostEqual(_two_sided_p(0.0), 1.0, places=6)
+
+    def test_round_p_preserves_strong_results(self):
+        # A very strong p-value must NOT flatten to 0.0 (the old fixed 6-dp bug).
+        self.assertGreater(_round_p(1e-9), 0.0)
+        self.assertGreater(_round_p(3.21e-8), 0.0)
+        # Ordinary p-values keep 6-dp behaviour; None and 0 pass through.
+        self.assertEqual(_round_p(0.05), 0.05)
+        self.assertIsNone(_round_p(None))
+        self.assertEqual(_round_p(0.0), 0.0)
 
     def test_large_finite_statistic_is_significant(self):
         # A genuine, finite separation still reads as significant (regression guard

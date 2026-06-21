@@ -123,7 +123,13 @@ class SignalConfig:
     @classmethod
     def from_env(cls) -> "SignalConfig":
         return cls(
-            enabled=_env_bool("Q15_V95_SHADOW_SIGNALS_ENABLED", False),
+            # Collection is ON by default: the signals are written to
+            # predictions.shadow_signal_json and read back ONLY by the
+            # out-of-sample A/B (resolved_shadow_signal_rows -> evaluate). They
+            # never touch the live champion probability, so collecting them is
+            # pure observation — and without collection the A/B can never
+            # accumulate the evidence needed to judge them. Set to "0" to stop.
+            enabled=_env_bool("Q15_V95_SHADOW_SIGNALS_ENABLED", True),
             recent_candles=_env_int("Q15_V95_SHADOW_SIGNALS_RECENT_CANDLES", 24, 4, 240),
             min_rows=_env_int("Q15_V95_SHADOW_SIGNALS_MIN_ROWS", 40, 10, 100000),
             train_fraction=_env_float("Q15_V95_SHADOW_SIGNALS_TRAIN_FRACTION", 0.70, 0.50, 0.90),
@@ -182,6 +188,7 @@ def compute_signals(analysis: Mapping[str, Any], canonical: Any, config: SignalC
         threshold_d = details["threshold_interaction"]
 
     # --- #5 order-flow persistence: flow direction confirmed by price drift ---
+    flow_present = features.get("flow") is not None
     flow_yes = _clamp(orientation * (_num(features.get("flow"), 0.0) or 0.0), -1.0, 1.0)
     persistence = 0.0
     if returns and abs(flow_yes) > 1e-9:
@@ -190,6 +197,11 @@ def compute_signals(analysis: Mapping[str, Any], canonical: Any, config: SignalC
         flow_price_sign = 1.0 if (orientation * flow_yes) >= 0 else -1.0
         agree = sum(1 for r in returns if (r >= 0) == (flow_price_sign >= 0)) / len(returns)
         persistence = flow_yes * (2.0 * agree - 1.0)
+    elif flow_present and abs(flow_yes) > 1e-9:
+        # Candle gap (no recent returns to confirm drift): instead of going dead
+        # at 0.0, carry a damped flow lean so the signal still reflects the flow
+        # we DO have. Halved because the price-drift confirmation is unavailable.
+        persistence = 0.5 * flow_yes
     order_flow_persistence = _clamp(persistence, -1.0, 1.0)
 
     # --- #6 book resiliency: wick-rejection footprint of defended liquidity ----
@@ -210,8 +222,14 @@ def compute_signals(analysis: Mapping[str, Any], canonical: Any, config: SignalC
             book_resiliency = _clamp(orientation * (net / rng_sum), -1.0, 1.0)
 
     # --- #14 prediction stability: amplify the lean when the pick is stable -----
-    flip = _num((analysis.get("flip_risk") or {}).get("score"), 0.0) or 0.0
-    stability = _clamp(1.0 - flip, 0.0, 1.0)
+    flip_raw = (analysis.get("flip_risk") or {}).get("score")
+    if flip_raw is None:
+        # Unknown flip risk must NOT be read as "perfectly stable" (which would
+        # amplify the lean to full strength). Treat absence as neutral.
+        stability = 0.5
+    else:
+        flip = _num(flip_raw, 0.0) or 0.0
+        stability = _clamp(1.0 - flip, 0.0, 1.0)
     prediction_stability = _clamp(lean * stability, -1.0, 1.0)
 
     # --- #17 entropy / noise: shrink the lean when returns look directionless ----
@@ -223,13 +241,25 @@ def compute_signals(analysis: Mapping[str, Any], canonical: Any, config: SignalC
     entropy_noise = _clamp(lean * (1.0 - noise), -1.0, 1.0)
 
     # --- #18b regime transition: de-confidence near a regime boundary ----------
-    crossings = _num(threshold_d.get("crossings"), 0.0) or 0.0
-    one_minute_sigma = _num(regime.get("one_minute_sigma"), _num(volatility.get("sigma_per_sqrt_second"), 0.0)) or 0.0
-    divergence = _num((analysis.get("feature_details") or {}).get("exchange_consensus", {}).get("divergence_bps"), 0.0) or 0.0
+    crossings_raw = threshold_d.get("crossings")
+    sigma_raw = regime.get("one_minute_sigma")
+    if sigma_raw is None:
+        sigma_raw = volatility.get("sigma_per_sqrt_second")
+    div_raw = ((analysis.get("feature_details") or {}).get("exchange_consensus", {}) or {}).get("divergence_bps")
+    regime_inputs_present = any(v is not None for v in (crossings_raw, sigma_raw, div_raw))
+    crossings = _num(crossings_raw, 0.0) or 0.0
+    one_minute_sigma = _num(sigma_raw, 0.0) or 0.0
+    divergence = _num(div_raw, 0.0) or 0.0
     crossings_norm = _clamp(crossings / 6.0, 0.0, 1.0)
     vol_norm = _clamp(one_minute_sigma / 0.0045, 0.0, 1.0)
     div_norm = _clamp(divergence / 35.0, 0.0, 1.0)
-    transition_prob = _clamp(0.40 * crossings_norm + 0.30 * vol_norm + 0.30 * div_norm, 0.0, 1.0)
+    if regime_inputs_present:
+        transition_prob = _clamp(0.40 * crossings_norm + 0.30 * vol_norm + 0.30 * div_norm, 0.0, 1.0)
+    else:
+        # No regime inputs at all → unknown, not "no transition". A neutral
+        # transition probability moderately de-confidences rather than leaving
+        # the lean at full strength on missing data.
+        transition_prob = 0.5
     regime_transition = _clamp(lean * (1.0 - transition_prob), -1.0, 1.0)
 
     return {
