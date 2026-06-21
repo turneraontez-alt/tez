@@ -113,6 +113,17 @@ as a SHADOW model, built to be promoted to primary with one switch.
   had a pick); totals collapsed from `C/W/acc` dual columns to `hit` (e.g. `1/2`) +
   whole-% `acc`; one clear `Winner:` line + plain `Learning:` state. Same data, far
   cleaner layout. Tests updated to new wording. Suite: **691 passed, 4 skipped**.
+- **End-result section** (owner: "add a different section where at 10M and 15M they
+  both predict the end result, keep what you already have, make it clean"). NOTE:
+  the ranked report scores **directional accuracy only** — it does NOT read the
+  shadow's `recommendation` (BUY_YES/BUY_NO/NO_TRADE); a no-trade is **never** a
+  loss (P&L is computed for traded rows only in `scoreboard()`, NO_TRADE = sit-out
+  = 0). New `ledger.latest_window_end_results(checkpoints=("15M","10M"))`: for the
+  latest settled 15-min window (bucketed by the 900s boundary), per asset, each
+  model's predicted side + hit at 15M and 10M vs the actual result. Rendered as a
+  compact `END-RESULT CALL · 15M & 10M` block (`Res` col + `Y+/N-` cells, + right /
+  - wrong) inside the same `<pre>` card, between LAST WINDOW and TOTALS. +1 test
+  (`test_end_result_section`). Suite: **692 passed, 4 skipped**.
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap

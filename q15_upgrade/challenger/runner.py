@@ -173,6 +173,30 @@ class ShadowRunner:
                     n = self._pick_str(nps[i]) if i < len(nps) else ""
                     body.append(f" #{i+1}  {c}{n}".rstrip())
 
+        # End-result calls at 15M & 10M, per asset — did both models call the
+        # final outcome right as the window counted down? (Y/N + right/wrong.)
+        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=("15M", "10M"))
+        if er["assets"]:
+            cps = list(er["checkpoints"])
+            w = len(cps) * 4
+            body += ["", "END-RESULT CALL · 15M & 10M",
+                     "(side Y/N · + right · - wrong)",
+                     f"{'':<5}{'Res':<4}{'Shadow':<{w}} {'Yours':<{w}}",
+                     f"{'':<5}{'':<4}" + "".join(f"{cp:<4}" for cp in cps)
+                     + " " + "".join(f"{cp:<4}" for cp in cps)]
+
+            def cell(entry) -> str:
+                if not entry:
+                    return "-".ljust(4)
+                side, hit = entry
+                return f"{side[0]}{'+' if hit else '-'}".ljust(4)
+
+            for a in er["assets"]:
+                res = a["official"][0]
+                sh = "".join(cell(a["checkpoints"].get(cp, {}).get("challenger")) for cp in cps)
+                nv_ = "".join(cell(a["checkpoints"].get(cp, {}).get("native")) for cp in cps)
+                body.append(f"{a['asset'][:4]:<5}{res:<4}{sh} {nv_}".rstrip())
+
         # Running totals — hit (correct/total) + accuracy, both models side by side.
         body += ["", f"TOTALS · {rk['n_cases']} cases",
                  f"{'':<6}{'Shadow':>12}{'Yours':>14}",
