@@ -82,7 +82,18 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## ✅ Shipped THIS session — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
+## ✅ Shipped THIS session — Read-only learning-progress report tool
+**On branch `claude/updated-review-2x7wyr`.** `tools/learning_progress.py` dumps the live state of
+every learning subsystem in one shot — run it **on the Repl** (where the live SQLite ledgers are):
+`python3 tools/learning_progress.py` (human) or `--json`. It opens the production v95 ledger and the
+Shadow-vs-Yours challenger ledger directly and calls the SAME builders the `/api/q15-v9-5/*` endpoints
+use (scoreboard, calibration/metrics, accuracy, shadow-signal A/B, ranked comparison, native delivery
+audit). Strictly read-only — never writes, skips an absent store instead of creating an empty one.
+Tests: `tests/test_learning_progress.py` (3). Suite **940 passed, 4 skipped**.
+- Note: in a fresh web clone the committed DBs are a post-reset SEED (14 v95 preds, 0 resolved, 0
+  weight updates; shadow DB not committed) — real numbers appear when run on the Repl.
+
+## ✅ Shipped — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner: the END-RESULT CALL didn't fill #2/#3 (15M) or any rank at 10M/7M, and wanted the comparison reset.
 - **END-RESULT CALL is now a ranked #1/#2/#3 grid across ALL three intervals** (`challenger/runner.py`),
   Shadow vs Your System, graded ✓/✗, built from `latest_window_cases` (same data as LAST WINDOW). Every
