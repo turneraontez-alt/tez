@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **630 passed, 4 skipped**.
+Tests: `python3 -m pytest tests/ -q` → **635 passed, 4 skipped**.
 
 ## ⚙️ Merge policy (NEW — applies every session)
 Finished + green work **auto-merges to `main`** without asking (owner-authorized;
@@ -67,6 +67,20 @@ as a SHADOW model, built to be promoted to primary with one switch.
   `experiment.py` (frozen PreRegistration + append-only experiment & holdout-access ledger).
   ⚠️ DATA-DEPENDENT pieces (control reproduction, real backtest, live shadow vs production
   feed) remain **NOT EXECUTED — REQUIRES EXTERNAL DATA**; no fabricated metrics anywhere.
+- **Extraction bridge** (`extract_bridge.py`, EXECUTED+TESTED): `export_production_ledger`
+  (read-only `SELECT *` JSONL dump to run on the Repl), `load_jsonl`, `inspect_feature_json`,
+  `rows_to_samples` → (ts, feature_dicts, y, control_probs, groups) for the harness. Reuses
+  `features.extract` so shadow == live features. Feature mapping is defensive pending
+  confirmation of the real `feature_json` keys (run `inspect_feature_json` on the dump first).
+- **Owner sent an AGGREGATE ledger snapshot** (metrics/scoreboard, NOT row-level) on 2026-06.
+  MEASURED facts from it (real production data, 301 resolved): overall acc 67.4%, champion
+  log-loss 0.600 vs market-baseline 0.723 (champion has real skill); shadow challenger NOT
+  promotable (10M vs-champion p=0.37; 15M effect below floor) — matches the gate. **ECE=0.069
+  with systematic UNDER-confidence above 0.60** (predicts 60-65% → wins 80%; predicts 75%+ →
+  wins ~100%): a real, actionable recalibration opportunity. Realized P&L NEGATIVE overall
+  (-496c/295) despite 67% acc — SOL/DOGE/XRP bleed, BNB/ETH/BTC positive. 15M is the weak
+  checkpoint (51.6%), 7M strong (76.8%). Row-level export still needed to train/eval the
+  challenger for real (aggregate can't reconstruct per-row features).
 
 ## ✅ Shipped THIS session (branch `claude/read-hand-off-5ou5op`) — alert-delivery hardening
 **Not yet deployed — needs a Repl reboot to take effect.** Implemented the top-3

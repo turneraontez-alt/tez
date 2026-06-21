@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from . import extract_bridge
 from . import lineage as lineage_mod
 from . import ood as ood_mod
 from . import schema as schema_mod
@@ -55,7 +56,7 @@ __all__ = [
     "walk_forward_evaluate", "train_predictor", "ordered_vector",
     "build_live_predictor", "primary_probability", "run_shadow",
     "ExperimentLedger", "PreRegistration",
-    "schema_mod", "ood_mod", "stats_mod", "lineage_mod",
+    "schema_mod", "ood_mod", "stats_mod", "lineage_mod", "extract_bridge",
 ]
 
 
