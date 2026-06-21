@@ -23,7 +23,10 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
-## 🚧 IN PROGRESS (branch `claude/hand-off-review-ucy2ee`, NOT merged) — official-record + compact-panel rework
+## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — PHASE 1: official-record + compact panels + recap
+**Merged — not yet deployed (needs a Repl reboot).** Phases 2 (shadow 0–100 score on
+the panel) and 3 (entry recheck + manipulation grading rule) are still TODO; see the
+multi-phase plan below. Phase 1 is complete + green (637 passed, 4 skipped).
 Owner-approved multi-phase rework (decisions locked): **(1)** compact unified panel
 sent EVERY checkpoint (reverses `Q15_V95_SEND_ONLY_ON_ENTRY`) carrying the YES/NO
 call + compact records + manipulation + graduated entry guidance; **(2)** a 0–100
@@ -61,9 +64,19 @@ message_id = not official. `build_compact_checkpoint_panel` + helpers do the map
 Tests: `test_q15_v95.py::test_compact_panel_writes_official_record`, reworked
 `test_no_entry_checkpoint_panel_behaviour`. Suite 632 → 633.
 
-**Next:** fire the END-OF-CYCLE RECAP once on settlement (new `ledger.contract_recap()` +
-`build_cycle_recap` + dedup + reformatter-bypass). Then Phase 2 (shadow 0–100 score on the
-panel) and Phase 3 (entry recheck + manipulation grading rule).
+**RECAP (live, gated `Q15_V95_CYCLE_RECAP` default ON):** on settlement,
+`checkpoint_v95._send_cycle_recaps` fires ONE `CYCLE CLOSED` recap per settled ticker
+(deduped via a `recap:<ticker>` reservation), built from `ledger.contract_recap()` —
+per-interval hit/miss + flips + entry result + manipulation call, graded only on what was
+officially delivered — rendered via `panels_v95.build_cycle_recap` with the running
+`official_scoreboard` totals. `format_telegram_message` bypasses `CYCLE CLOSED` so the
+recap is never re-rendered by the legacy chain. Suite 633 → **637**.
+
+**Next — Phase 2:** the 0–100 entry score (30 dir-conf / 25 edge / 20 wick / 15 momentum /
+10 manip) as a SHADOW value shown on the panel (does NOT drive live entries; champion
+frozen) + the WAIT target range. **Phase 3:** retrofit `entry_followups` into the
+ENTER NOW / KEEP WAITING / SKIP ENTRY recheck (price/trigger-driven) + the manipulation
+grading rule (default: direction-after vs settled outcome — confirm with owner).
 
 ## ✅ Shipped THIS session (branch `claude/hand-off-review-ucy2ee`, MERGED to `main`) — consolidated Telegram UI
 **Merged to `main` — not yet deployed (needs a Repl reboot).** Follow-up to the flip
