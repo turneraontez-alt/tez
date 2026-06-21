@@ -2164,6 +2164,17 @@ def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]
     return bridged, stats
 
 
+def _send_with_optional_key(notifier: Any, message: str, idempotency_key: str) -> dict[str, Any]:
+    """Call ``notifier.send_with_result`` with a stable idempotency key when the
+    notifier supports one (the reliable outbox), falling back transparently for a
+    bare notifier whose signature is ``send_with_result(text)``. The key lets the
+    delivery be reconciled later from the outbox's true status."""
+    try:
+        return notifier.send_with_result(message, idempotency_key=idempotency_key)
+    except TypeError:
+        return notifier.send_with_result(message)
+
+
 class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     VERSION = VERSION
 
@@ -2556,6 +2567,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             self._telegram_sent_v95 += sent + flip_sent
             self._telegram_failed_v95 += failed + flip_failed
             self._cycles += 1
+            # Reconcile Your System's Shadow-vs-Yours delivery record from the
+            # outbox's TRUE status: an official report that failed its synchronous
+            # attempt but was delivered by the background worker is now credited
+            # SENT (no longer mis-scored as failed), and a pick is marked
+            # DELIVERY_FAILED only when its report dead-letters. Cheap; once per
+            # cycle; read-only wrt production; never raises into the loop.
+            status_lookup = getattr(notifier, "status_by_key", None)
+            if callable(status_lookup) and hasattr(self.ledger, "_shadow_reconcile_delivery"):
+                self.ledger._shadow_reconcile_delivery(status_lookup)
             self._last_error = None
             with self._v95_lock:
                 self._latest_v95 = copy.deepcopy(analyses)
@@ -2739,8 +2759,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             prior_side = (self.ledger.frozen_prediction(str(ticker), prior_cp) or {}).get("side")
         message = build_compact_checkpoint_panel(checkpoint, asset, analysis, prior_side)
 
+        # Stable outbox key so the native record can be credited from the outbox's
+        # true delivery (sync OR background-worker retry), keyed to the same
+        # window basis the lock uses.
+        window_basis = close_time if close_time is not None else now
+        report_key = f"v95-compact:{checkpoint}:{int(window_basis)}"
         if hasattr(notifier, "send_with_result"):
-            result = notifier.send_with_result(message)
+            result = _send_with_optional_key(notifier, message, report_key)
         else:  # legacy/bare notifier: treat a truthy send as handled, no message_id
             ok = bool(notifier.send(message)) if notifier is not None else False
             result = {"ok": ok, "delivered": ok and getattr(notifier, "last_message_id", None) is not None,
@@ -2748,6 +2773,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         handled = bool(result.get("ok"))
         delivered = bool(result.get("delivered"))
         self.ledger.complete_notification(event_key=permit_key, success=handled, now=now)
+        # Durably queued but not synchronously delivered, and not a mute: tag the
+        # top pick PENDING under this key so the per-cycle reconcile credits a
+        # later worker delivery instead of leaving it silently uncounted.
+        if handled and not delivered and not bool(result.get("muted")) and ticker:
+            mark_pending = getattr(self.ledger, "_shadow_mark_pending", None)
+            if callable(mark_pending):
+                mark_pending(str(ticker), str(checkpoint), report_key)
 
         # Handled-but-not-delivered = the send was accepted yet produced no
         # message_id (muted, or a notifier that reports success without one).
@@ -2881,8 +2913,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
 
         message = panels_v95.build_ranked_checkpoint_panel(
             checkpoint=checkpoint, picks=picks, top_k=_RANKED_PICK_COUNT)
+        # Deterministic outbox key for THIS official report (one per interval+window,
+        # matching the once-per-window lock). It lets the Shadow-vs-Yours native
+        # record be credited from the outbox's TRUE delivery — a sync OR a
+        # background-worker retry — instead of only the synchronous first attempt,
+        # which an async, retrying outbox routinely fails (rate limit / worker race).
+        report_key = f"v95-official:{checkpoint}:{int(window_close)}"
         if hasattr(notifier, "send_with_result"):
-            result = notifier.send_with_result(message)
+            result = _send_with_optional_key(notifier, message, report_key)
         else:
             ok = bool(notifier.send(message)) if notifier is not None else False
             result = {"ok": ok, "delivered": ok and getattr(notifier, "last_message_id", None) is not None,
@@ -2900,22 +2938,22 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             if bool(result.get("muted")):
                 self.ledger.unlock_official_report(str(checkpoint), window_close, now)
             else:
-                # A genuine (non-mute) failure: the official report was generated but
-                # not delivered. Record each generated pick as DELIVERY_FAILED in the
-                # shadow ledger with the exact error, so Your System's prediction is
-                # preserved as background (out of the visible totals) and auditable —
-                # never silently lost. Retry stays governed by the existing lock /
-                # min-gap policy above (the lock is intentionally kept on failure).
-                err = (str(result.get("error") or getattr(notifier, "last_error", None)
-                           or ("handled_no_message_id" if handled else "send_failed")))
-                mark_failed = getattr(self.ledger, "_shadow_mark_failed", None)
-                if callable(mark_failed):
+                # A non-mute, synchronously-undelivered send is NOT a failure: the
+                # report is durably queued in the outbox and the background worker
+                # will retry it (that worker is what actually delivers most reports).
+                # Tag each generated pick PENDING under this report's key; the true
+                # outcome — SENT on a real worker delivery, or DELIVERY_FAILED only
+                # when the outbox dead-letters — is resolved by reconcile_native_delivery
+                # each cycle. This is the fix for "0 sent · N failed" while reports
+                # are in fact being received. Retry stays governed by the lock/min-gap.
+                mark_pending = getattr(self.ledger, "_shadow_mark_pending", None)
+                if callable(mark_pending):
                     for pick in picks:
                         p_asset = str(pick.get("asset"))
                         p_canon = canonicals.get(p_asset)
                         p_ticker = p_canon.ticker if p_canon is not None else (analyses.get(p_asset) or {}).get("ticker")
                         if p_ticker:
-                            mark_failed(str(p_ticker), str(checkpoint), err)
+                            mark_pending(str(p_ticker), str(checkpoint), report_key)
             if handled:
                 self._throttled_warn(
                     f"ranked_handled_not_delivered:{checkpoint}",
