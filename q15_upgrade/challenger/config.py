@@ -123,11 +123,12 @@ class ChallengerConfig:
     # visible stats. Bumped v1 -> v2 -> v3 (each bump is one reset-on-deploy); the
     # v3 comparison only grades predictions recorded after the new version goes
     # live (its reset_at is stamped on first record). Override with
-    # Q15_CHALLENGER_MODEL_VERSION. Bumped v3 -> v4 for the SYNCHRONIZED reset: v4
-    # only grades predictions made simultaneously from one frozen snapshot under
-    # Eastern-Time display. Every prior version (v1/v2/v3) stays archived in the same
-    # file as PRE-SYNCHRONIZED-RESET and is never mixed into the v4 visible record.
-    model_version: str = field(default_factory=lambda: _str("Q15_CHALLENGER_MODEL_VERSION", "challenger-v4"))
+    # Q15_CHALLENGER_MODEL_VERSION. Bumped v3 -> v4 for the SYNCHRONIZED reset, then
+    # v4 -> v5 for an owner-requested fresh start (clears the sparse post-fix record).
+    # v5 only grades predictions made simultaneously from one frozen snapshot under
+    # Eastern-Time display. Every prior version (v1..v4) stays archived in the same
+    # file as PRE-SYNCHRONIZED-RESET and is never mixed into the v5 visible record.
+    model_version: str = field(default_factory=lambda: _str("Q15_CHALLENGER_MODEL_VERSION", "challenger-v5"))
 
     # -- reset / comparison window --
     # Optional explicit reset timestamp (epoch seconds, UTC). When unset (0) the

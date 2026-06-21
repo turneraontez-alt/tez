@@ -182,11 +182,14 @@ class RankedComparisonTest(unittest.TestCase):
         rk = r.ranked()
         self.assertEqual(rk["n_cases"], 0)  # pre-reset row excluded from the record
 
-    def test_default_model_version_is_v4_synchronized_reset(self):
+    def test_default_model_version_is_v5_fresh_reset(self):
         # The default model_version is the reset key: pinning it makes an accidental
         # edit (or a forgotten reset-on-deploy) fail loudly rather than silently
-        # keep scoring the old comparison. v4 = the synchronized-snapshot reset.
-        self.assertEqual(ChallengerConfig.from_env().model_version, "challenger-v4")
+        # keep scoring the old comparison. v5 = the owner-requested fresh reset that
+        # clears the sparse post-delivery-fix record (v1..v4 stay archived).
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("Q15_CHALLENGER_MODEL_VERSION", None)
+            self.assertEqual(ChallengerConfig.from_env().model_version, "challenger-v5")
 
     def test_v4_reset_archives_prior_versions(self):
         # Fresh v4 comparison: settled rows from prior versions (v1/v2/v3) stay
@@ -242,6 +245,27 @@ class RankedComparisonTest(unittest.TestCase):
         self.assertEqual(a["checkpoints"]["10M"]["native"], ("YES", True))
         msg = r.report_message()
         self.assertIn("END-RESULT CALL", msg)
+
+    def test_end_result_call_is_ranked_grid_all_intervals(self):
+        # The END-RESULT CALL now shows ranked #1/#2/#3 picks at EVERY interval
+        # (Shadow vs Yours), graded, with empty slots as — rather than the old
+        # per-asset layout that left #2/#3 and unpicked intervals blank/omitted.
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        # Latest window has a 15M pick only; 10M/7M must still render (as —).
+        self._insert(r, asset="BTC", checkpoint="15M", close=2000, chal=0.8, ctrl=0.7, official="YES")
+        msg = r.report_message().replace("<pre>", "").replace("</pre>", "")
+        # Header preserved; ranked Shadow-vs-Yours rows present.
+        self.assertIn("END-RESULT CALL · 15M, 10M & 7M", msg)
+        # The section renders all three intervals and ranks #1-#3 with the | Yours: split.
+        end = msg.split("END-RESULT CALL", 1)[1].split("ALL-TIME RANK RESULTS", 1)[0]
+        for cp in ("15M", "10M", "7M"):
+            self.assertIn(cp, end)
+        for rank in ("#1 Shadow:", "#2 Shadow:", "#3 Shadow:"):
+            self.assertIn(rank, end)
+        self.assertIn("| Yours:", end)
+        # The 15M #1 pick is graded (BTC YES vs YES -> correct).
+        self.assertIn("BTC YES ✓", end)
 
     def test_distinct_cases_by_checkpoint_and_window(self):
         tmp = tempfile.mkdtemp()

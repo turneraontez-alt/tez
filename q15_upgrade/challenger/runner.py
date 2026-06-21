@@ -255,28 +255,23 @@ class ShadowRunner:
                     n = self._pick(nvk[i] if i < len(nvk) else None)
                     body.append(f"#{i+1} Shadow: {c} | Yours: {n}")
 
-        # ---- END-RESULT CALL: all three ranks across all three intervals ----
-        er = self.ledger.latest_window_end_results(model_version=mv, checkpoints=tuple(cps),
-                                                   native_sent_only=sent_only)
-        if er["assets"]:
+        # ---- END-RESULT CALL: the latest settled window's ranked #1/#2/#3 picks at
+        # EVERY interval (15M/10M/7M), Shadow vs Your System, each graded against the
+        # actual settled result (✓/✗). Every interval and every rank is always shown
+        # — a slot with no pick reads — rather than being omitted — so the grid is
+        # never silently truncated to whichever interval happened to have a pick. ----
+        if win["close"]:
             body += ["", "END-RESULT CALL · 15M, 10M & 7M",
-                     "✓ = correct | ✗ = wrong | — = no official prediction"]
-
-            def _interval_line(cp, entry) -> str:
-                # An asset has at most one locked prediction per interval -> rank #1;
-                # ranks #2/#3 never apply to a single asset, shown as —.
-                if not entry:
-                    return f"{cp}: #1 {self._NONE} | #2 {self._NONE} | #3 {self._NONE}"
-                side, hit = entry
-                return f"{cp}: #1 {side} {self._mark(hit)} | #2 {self._NONE} | #3 {self._NONE}"
-
-            for a in er["assets"]:
-                body += ["", f"{a['asset']} · RESULT {a['official']}", "Shadow:"]
-                for cp in cps:
-                    body.append(_interval_line(cp, a["checkpoints"].get(cp, {}).get("challenger")))
-                body.append("Your System:")
-                for cp in cps:
-                    body.append(_interval_line(cp, a["checkpoints"].get(cp, {}).get("native")))
+                     "✓ = correct | ✗ = wrong | — = no pick"]
+            for cp in cps:
+                picks = win["checkpoints"].get(cp) or {}
+                cpk = picks.get("challenger") or []
+                nvk = picks.get("native") or []
+                body += ["", cp]
+                for i in range(top_k):
+                    c = self._pick(cpk[i] if i < len(cpk) else None)
+                    n = self._pick(nvk[i] if i < len(nvk) else None)
+                    body.append(f"#{i + 1} Shadow: {c} | Yours: {n}")
 
         # ---- ALL-TIME RANK RESULTS: per rank/interval + combined totals ----
         rbc = self.ledger.ranked_by_checkpoint(model_version=mv, top_k=top_k, checkpoints=tuple(cps),

@@ -25,6 +25,22 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## ✅ Shipped THIS session — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
+Owner: the END-RESULT CALL didn't fill #2/#3 (15M) or any rank at 10M/7M, and wanted the comparison reset.
+- **END-RESULT CALL is now a ranked #1/#2/#3 grid across ALL three intervals** (`challenger/runner.py`),
+  Shadow vs Your System, graded ✓/✗, built from `latest_window_cases` (same data as LAST WINDOW). Every
+  interval and rank is always rendered; empty slots read — instead of being omitted. The old per-asset
+  layout (which hard-coded #2/#3 to — because a single asset has one pick per interval, and dropped
+  intervals with no pick) is gone. `latest_window_end_results` stays on the ledger (still unit-tested).
+  Header "END-RESULT CALL · 15M, 10M & 7M" preserved.
+- **Reset (Shadow-vs-Yours only):** `model_version` default bumped `challenger-v4 → challenger-v5`
+  (`challenger/config.py`, `.env.example`). v5 starts empty; v1..v4 stay archived as
+  PRE-SYNCHRONIZED-RESET (never deleted, never scored). Takes effect on deploy to `main`. The CYCLE
+  CLOSED running record (official sent_predictions) was deliberately NOT reset.
+- **Tests:** `test_default_model_version_is_v5_fresh_reset` + `test_end_result_call_is_ranked_grid_all_intervals`.
+  Suite: **869 passed, 13 skipped**. **⚠️ Deploy note:** if the Repl pins `Q15_CHALLENGER_MODEL_VERSION`
+  in its env, that overrides the new default — unset it (or set `=challenger-v5`) for the reset to apply.
+
 ## ✅ Shipped THIS session — outbox send_with_result: fix delivery mis-detection (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner asked why the "Your System delivery: 0 sent · 12 failed · 23 pending" delivery was failing.
 **It mostly WASN'T failing — delivery DETECTION was broken.** Production wires
