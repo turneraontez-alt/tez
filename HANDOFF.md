@@ -98,6 +98,16 @@ Owner: don't leave empty slots — fill every interval/rank with the best real d
   `test_end_result_grid_prefers_fuller_window_to_fill_ranks` (+ existing grid test). `latest_window_cases`
   still powers the strict LAST WINDOW section (unchanged). Suite: **920 passed, 13 skipped**.
 
+## ✅ Shipped THIS session — Read-only learning-progress report tool (merged from `claude/updated-review-2x7wyr`)
+`tools/learning_progress.py` dumps the live state of every learning subsystem in one shot — run it **on
+the Repl** (where the live SQLite ledgers are): `python3 tools/learning_progress.py` (human) or `--json`.
+It opens the production v95 ledger and the Shadow-vs-Yours challenger ledger directly and calls the SAME
+builders the `/api/q15-v9-5/*` endpoints use (scoreboard, calibration/metrics, accuracy, shadow-signal
+A/B, ranked comparison, native delivery audit). Strictly read-only — never writes, skips an absent store
+instead of creating an empty one. Tests: `tests/test_learning_progress.py`.
+- Note: in a fresh web clone the committed DBs are a post-reset SEED (14 v95 preds, 0 resolved, 0
+  weight updates; shadow DB not committed) — real numbers appear when run on the Repl.
+
 ## ✅ Shipped earlier THIS session — Shadow-vs-Yours: ranked END-RESULT grid + v5 reset (branch `claude/manipulation-learning-progress-liqs9z`)
 Owner: the END-RESULT CALL didn't fill #2/#3 (15M) or any rank at 10M/7M, and wanted the comparison reset.
 - **END-RESULT CALL is now a ranked #1/#2/#3 grid across ALL three intervals** (`challenger/runner.py`),
