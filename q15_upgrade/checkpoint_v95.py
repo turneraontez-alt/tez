@@ -1629,7 +1629,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 snapshot["q15_v9_5_stability"] = stability
                 snapshot["q15_v9_5_expired"] = expired
                 canonical = canonicals.get(asset)
-                if canonical is not None and analysis.get("prediction_available") and canonical.ticker:
+                # prediction_available already implies core_valid, but spot can
+                # still come from a thin public-composite fallback. An optional,
+                # default-OFF floor keeps marginal-quality snapshots out of the
+                # learning corpus so calibration trains on cleaner data.
+                min_record_dq = _env_float("Q15_V95_MIN_RECORD_DATA_QUALITY", 0.0, 0.0, 1.0)
+                record_ok = (
+                    canonical is not None
+                    and analysis.get("prediction_available")
+                    and canonical.ticker
+                    and float(analysis.get("data_quality") or 0.0) >= min_record_dq
+                )
+                if record_ok:
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
