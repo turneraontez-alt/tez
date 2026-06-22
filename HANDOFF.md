@@ -42,6 +42,14 @@ checkpoint the relationship REVERSES: 7M fresh 91.7% (+2.83¢) vs 7M persistent 
 fresh 71.9% (+1.32¢) vs 10M persistent 69.2% (−2.9¢). So the real signal is **freshness near close,
 not persistence** — `by_persistence` ships BOTH the pooled and the `by_checkpoint` (honest) views so
 the confound stays visible. Best manipulation subset on record: **fresh-flag @ 7M (91.7%, +2.83¢, n=84)**.
+**Then validated & exposed that signal** (`by_persistence.fresh_near_close`, side-split). OOS-checked:
+accuracy holds out-of-sample (older half 92.9% → newer half 90.5%), NOT a recent-regime artifact
+(spread over 2 days, 4/84 recent), and concentrates on the **NO side: fresh-near-close·NO = 97.7%,
++8.92¢, n=43, Wilson CI [0.879, 0.996]** — the strongest manipulation subset found. Caveat: P&L noisier
+than accuracy (test half −1¢), so it's a confidence signal first. NOT wired into the champion (frozen);
+`fresh_near_close` is the tracked artifact to earn a future default-OFF activation after a LIVE
+validation window. Activation path (next): a default-OFF Q15-gated confidence/quality boost for a
+fresh 7M NO-side manipulation flag, computed point-in-time from the contract's prior-checkpoint state.
 
 ## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
 **Suite 1066 passed / 13 skipped** in a complete env (+45 tests:

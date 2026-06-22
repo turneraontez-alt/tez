@@ -473,6 +473,18 @@ class TestManipulationScoreboardDimensions(unittest.TestCase):
         self.assertEqual(bp["by_checkpoint"]["15M"]["fresh"]["n"], 1)
         self.assertEqual(bp["by_checkpoint"]["7M"]["fresh"]["n"], 1)
 
+    def test_fresh_near_close_isolates_fresh_7m_by_side(self):
+        # Fresh-7M NO (right) and YES (wrong); plus a PERSISTENT 7M flag (prior 15M)
+        # that must be EXCLUDED from fresh_near_close.
+        self._rec("F1", "7M", "NO", "NO", True, "PIN")    # fresh-7M, NO, right
+        self._rec("F2", "7M", "YES", "NO", True, "PIN")   # fresh-7M, YES, wrong
+        self._rec("G", "15M", "NO", "NO", True, "PIN")    # earlier flag for G
+        self._rec("G", "7M", "NO", "NO", True, "PIN")     # G@7M is persistent -> excluded
+        fnc = self.led.scoreboard()["by_manipulation"]["by_persistence"]["fresh_near_close"]
+        self.assertEqual(fnc["all"]["n"], 2)              # F1, F2 only (not G@7M)
+        self.assertEqual((fnc["NO"]["n"], fnc["NO"]["right"]), (1, 1))
+        self.assertEqual((fnc["YES"]["n"], fnc["YES"]["right"]), (1, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

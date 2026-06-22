@@ -2611,6 +2611,16 @@ class V95Ledger:
                 tag = "persistent" if prior >= 1 else "fresh"
                 (persistent_flag if prior >= 1 else fresh_flag).append(r)
                 persist_by_cp[cp][tag].append(r)
+        # Fresh-near-close: a manipulation tell that FIRST appears at the 7M check
+        # (not seen at 15M/10M) is the strongest manipulation subset on the live
+        # record — and it concentrates on the NO side. Isolated here, with the side
+        # split, as the candidate signal to validate live before any activation.
+        _fresh_7m = persist_by_cp.get(TRACKED_CHECKPOINTS[-1], {}).get("fresh", [])
+        fresh_near_close = {
+            "all": self._win_loss(_fresh_7m),
+            "YES": self._win_loss([r for r in _fresh_7m if str(_row_get(r, "predicted_side") or "").upper() == "YES"]),
+            "NO": self._win_loss([r for r in _fresh_7m if str(_row_get(r, "predicted_side") or "").upper() == "NO"]),
+        }
         by_persistence = {
             "fresh_flag": self._win_loss(fresh_flag),
             "persistent_flag": self._win_loss(persistent_flag),
@@ -2618,6 +2628,7 @@ class V95Ledger:
                 cp: {"fresh": self._win_loss(v["fresh"]), "persistent": self._win_loss(v["persistent"])}
                 for cp, v in persist_by_cp.items()
             },
+            "fresh_near_close": fresh_near_close,
         }
         return {
             "suspected": self._win_loss(suspected),
