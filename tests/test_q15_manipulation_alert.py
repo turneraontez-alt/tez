@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -126,6 +127,7 @@ class DispatchGlueTest(unittest.TestCase):
         self.assertEqual((s, f), (0, 0))
         self.assertEqual(notif.sent, [])
 
+    @mock.patch.dict(os.environ, {"Q15_V95_MANIPULATION_ALERTS_ENABLED": "1"})
     def test_sends_one_combined_alert_then_dedups(self):
         normal = {"10M": NormalCheck(checkpoint="10M", delivered=True, asset="BTC",
                                      side="YES", action="ENTRY_RECOMMENDED")}
@@ -142,6 +144,20 @@ class DispatchGlueTest(unittest.TestCase):
         s2, f2 = mgr._dispatch_manipulation_alerts("10M", notif, now=1001.0)
         self.assertEqual(s2, 0)
         self.assertEqual(len(notif.sent), 1)
+
+    def test_manipulation_alerts_off_by_default(self):
+        # The delivered manip alert was anti-predictive on the live record
+        # (23.7% correct, n=59), so the standalone alert now defaults OFF: a fully
+        # qualifying finding sends nothing unless explicitly re-enabled.
+        normal = {"10M": NormalCheck(checkpoint="10M", delivered=True, asset="BTC",
+                                     side="YES", action="ENTRY_RECOMMENDED")}
+        mgr = self._manager([_cand()], normal)
+        notif = self._Notifier()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("Q15_V95_MANIPULATION_ALERTS_ENABLED", None)
+            s, f = mgr._dispatch_manipulation_alerts("10M", notif, now=1000.0)
+        self.assertEqual((s, f), (0, 0))
+        self.assertEqual(notif.sent, [])
 
     def test_only_processes_current_interval(self):
         normal = {"10M": NormalCheck(checkpoint="10M", delivered=True, side="YES")}

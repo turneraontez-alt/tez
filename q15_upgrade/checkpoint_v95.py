@@ -2078,6 +2078,49 @@ def _resolve_checkpoint(
     return "7M"
 
 
+def _interval_alerts_enabled(checkpoint: str) -> bool:
+    """Whether a resolved checkpoint may DELIVER actionable alerts to the owner.
+
+    On the live record the 15M checkpoint is a coin flip (~53%, Wilson CI
+    includes 50%) and loses money per pick, so its alert delivery defaults OFF
+    (set ``Q15_V95_15M_ALERTS_ENABLED=1`` to restore it). The prediction is
+    still recorded observationally for learning and the timing experiment — only
+    the Telegram delivery / official actionable record is suppressed. The
+    skilled 10M/7M checkpoints always deliver."""
+    if str(checkpoint).upper() == "15M":
+        return _env_bool("Q15_V95_15M_ALERTS_ENABLED", False)
+    return True
+
+
+def _timing_experiment_marks() -> list[int]:
+    """Extra time-to-close marks (seconds) at which to capture an OBSERVATIONAL
+    timing-experiment prediction. Default 13/12/11 min (780/720/660s) so we can
+    MEASURE where, between the 15M and 10M checkpoints, accuracy crosses into a
+    usable edge — instead of guessing. An empty value disables collection."""
+    raw = os.environ.get("Q15_V95_TIMING_EXPERIMENT_SECONDS")
+    if raw is None:
+        raw = "780,720,660"
+    marks: list[int] = []
+    for part in str(raw).replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(float(part))
+        except (TypeError, ValueError):
+            continue
+        if 0 < value <= 1800 and value not in marks:
+            marks.append(value)
+    return marks
+
+
+def _timing_experiment_band() -> float:
+    """Half-width (seconds) of the capture window around each timing mark. Wide
+    enough that a slow refresh cycle can't skip a mark, narrow enough not to
+    overlap a neighbour."""
+    return _env_float("Q15_V95_TIMING_EXPERIMENT_BAND_SECONDS", 6.0, 1.0, 60.0)
+
+
 def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]], now: float) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Inject one canonical candle/flow/book view before the legacy parent runs.
 
@@ -2438,6 +2481,26 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     )
                     flip_sent += _fsent
                     flip_failed += _ffailed
+                    # OBSERVATIONAL entry-timing experiment: when this cycle sits on
+                    # a configured extra mark (e.g. 13/12/11 min left) capture the
+                    # model's call there so we can later MEASURE which entry time
+                    # crosses into an edge. Never delivered; first write per
+                    # (contract, mark) wins; graded on settlement. Read-only.
+                    _tmarks = _timing_experiment_marks()
+                    if _tmarks and seconds_left is not None:
+                        _band = _timing_experiment_band()
+                        for _mark in _tmarks:
+                            if abs(seconds_left - _mark) <= _band:
+                                self.ledger.record_timing_observation(
+                                    contract=canonical.ticker, mark_seconds=_mark, asset=asset,
+                                    predicted_side=str(analysis.get("prediction_side") or "") or None,
+                                    yes_probability=analysis.get("yes_probability"),
+                                    selected_probability=analysis.get("selected_probability"),
+                                    confidence_grade=analysis.get("confidence_grade"),
+                                    created_at=now, close_time=canonical.settlement_time,
+                                    snapshot_id=snapshot_id,
+                                )
+                                break
 
             _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
@@ -2479,6 +2542,10 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 and self.ledger.followup_already_sent(top_entry_ticker, checkpoint)
             )
             sent = failed = 0
+            # Whether this resolved checkpoint may DELIVER actionable alerts. 15M
+            # delivery defaults OFF (coin-flip, loses money); the prediction was
+            # still recorded above for learning. 10M/7M always deliver.
+            deliver_alerts = _interval_alerts_enabled(checkpoint)
             # COMPACT PANEL (default ON): one forward-looking V9.5 CHECK panel for
             # the top-ranked pick every checkpoint, with the immutable official
             # record written from the delivered Telegram message_id. The legacy
@@ -2488,7 +2555,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 # RANKED PANEL (default ON): one locked official report per interval
                 # carrying the top-3 ranked picks. Falls back to the single-pick
                 # compact panel under the flag for rollback.
-                if _env_bool("Q15_V95_RANKED_PANEL", True):
+                if not deliver_alerts:
+                    sent, failed = 0, 0
+                elif _env_bool("Q15_V95_RANKED_PANEL", True):
                     sent, failed = self._send_ranked_panel(
                         checkpoint, analyses, ranking, canonicals, parent_output, notifier, now,
                     )
@@ -2521,7 +2590,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     one_active and top_entry_ticker is not None
                     and self.ledger.pushed_slot_blocks(checkpoint, top_entry_ticker, now)
                 )
-                if message and consistent and not slot_locked and not no_entry_muted and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
+                if deliver_alerts and message and consistent and not slot_locked and not no_entry_muted and self._decision_settled(checkpoint, analyses, ranking, parent_output, now):
                     event_key, desired_state, fingerprint = _notification_identity(checkpoint, analyses, ranking, now)
                     previous = self.ledger.notification_state(event_key)
                     state = "ENTRY_WITHDRAWN" if previous == "ENTRY_RECOMMENDED" and desired_state != "ENTRY_RECOMMENDED" else desired_state
@@ -2553,15 +2622,24 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # Manipulation alerts: only AFTER the normal check above was delivered,
             # only on high-probability findings that change its recommendation, and
             # combined into one concise alert. Detection ran all cycle regardless.
-            ma_sent, ma_failed = self._dispatch_manipulation_alerts(checkpoint, notifier, now)
+            # Suppressed entirely on a non-delivering interval (e.g. 15M-off).
+            if deliver_alerts:
+                ma_sent, ma_failed = self._dispatch_manipulation_alerts(checkpoint, notifier, now)
+            else:
+                ma_sent, ma_failed = 0, 0
             flip_sent += ma_sent
             flip_failed += ma_failed
             # End-of-cycle recap: one close-out per contract that just settled.
+            # Recaps report SETTLED results (not predictions) so they fire on every
+            # interval regardless of the alert gate.
             rc_sent, rc_failed = self._send_cycle_recaps(result_events, notifier, now)
             sent += rc_sent
             failed += rc_failed
             # Fire any due follow-up checks (exactly one per contract+interval).
-            fu_sent, fu_failed = self._dispatch_entry_followups(canonicals, analyses, notifier, now)
+            if deliver_alerts:
+                fu_sent, fu_failed = self._dispatch_entry_followups(canonicals, analyses, notifier, now)
+            else:
+                fu_sent, fu_failed = 0, 0
             flip_sent += fu_sent
             flip_failed += fu_failed
             self._telegram_sent_v95 += sent + flip_sent
@@ -3211,7 +3289,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         that qualifies is combined into a single concise alert. Returns (sent,
         failed)."""
         candidates = list(getattr(self, "_manip_candidates", []))
-        if not candidates or not _env_bool("Q15_V95_MANIPULATION_ALERTS_ENABLED", True):
+        # Default OFF: on the live official record the delivered manipulation alert
+        # was directionally WRONG (23.7% correct, n=59, Wilson CI excludes 50% on
+        # the low side) — an anti-signal. Detection/tracking still runs for the
+        # learning record; only the standalone alert delivery is suppressed.
+        if not candidates or not _env_bool("Q15_V95_MANIPULATION_ALERTS_ENABLED", False):
             return 0, 0
         normal = self._normal_check.get(str(checkpoint))
         min_prob = _env_float("Q15_V95_MANIPULATION_ALERT_MIN_PROBABILITY", 0.70, 0.0, 1.0)
