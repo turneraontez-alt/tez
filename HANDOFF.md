@@ -82,6 +82,23 @@ the merge drops no `main`-only lines/files — then merge back. If a merge would
 delete data that only exists on `main`, STOP and report. (This already caught a
 6.3k-line `health_snapshot.json` + a perf commit another chat had pushed to `main`.)
 
+## 🔬 Shipped THIS session — diagnostic: capture Kalshi's INSTANT determined outcome (step 1 of instant settlement)
+Owner: Kalshi gives the result instantly after the timeframe but takes a while to actually settle — can we
+use the instant result? Investigation: BOTH settlement paths (`ledger_v95.reconcile_pending_from_market:1429`,
+`market_cache._resolved_result:36`) only accept `market["result"] ∈ {YES,NO}` and skip otherwise; nothing
+reads `status`/`settlement_value`/`expiration_value`. Reconcile runs every 30s. So if Kalshi populates
+`result` only at FINAL settlement (the laggy part) we ignore the instant determination → the grid/official
+record wait needlessly. This SUPERSEDES the earlier spot-vs-strike "provisional ~" plan: Kalshi's own
+determined value is authoritative (no near-strike guessing risk).
+- **Step 1 (this commit, read-only):** `reconcile_pending_from_market` now CAPTURES closed-but-`result`-empty
+  markets — curated determination fields (`status`, `settlement_value`, `expiration_value`, `floor/cap_strike`,
+  `strike_type`, …) + the full key list — into the return under `undetermined_market_samples`
+  (+`undetermined_closed_count`), surfaced at **`/api/q15-v9-5/learning` → `last_market_reconcile`**. Bounded by
+  `Q15_V95_UNDETERMINED_SAMPLE_LIMIT` (default 8). +2 tests; suite **925 passed, 13 skipped**.
+- **Step 2 (NEXT, after one deployed window):** read the confirmed instant field and resolve from it
+  (treat as official, or provisional-until-`result` finalizes). Don't guess the field blind — a wrong
+  strike/value field would invert a result in the money path.
+
 ## ✅ Shipped THIS session — END-RESULT grid "tries its best on each one" (no needless blanks)
 Owner: don't leave empty slots — fill every interval/rank with the best real data available.
 - **Root cause of blanks:** the grid fed from `latest_window_cases`, which forces ALL three intervals

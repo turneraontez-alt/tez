@@ -1343,6 +1343,30 @@ class V95Ledger:
             return None
         return side if outcome == "win" else ("NO" if side == "YES" else "YES")
 
+    # DIAGNOSTIC (read-only): when a CLOSED market has no `result` yet, capture what
+    # Kalshi DOES expose so we can wire instant settlement to the field that carries
+    # the determined outcome (Kalshi sets `result` only at final settlement, which
+    # lags the determination). Curated determination-relevant fields + the full key
+    # list; scalar values only (market objects carry no secrets, but stay defensive).
+    _MARKET_DIAG_KEYS = (
+        "status", "result", "settlement_value", "expiration_value", "settled_time",
+        "expiration_time", "close_time", "close_ts", "floor_strike", "cap_strike",
+        "strike_type", "can_close_early", "last_price", "yes_bid", "yes_ask",
+    )
+
+    @classmethod
+    def _undetermined_market_sample(cls, ticker: str, market: Mapping[str, Any]) -> dict[str, Any]:
+        sample: dict[str, Any] = {"ticker": str(ticker)}
+        for key in cls._MARKET_DIAG_KEYS:
+            if key in market:
+                value = market.get(key)
+                sample[key] = value if isinstance(value, (str, int, float, bool)) or value is None else type(value).__name__
+        try:
+            sample["all_keys"] = sorted(str(k) for k in market.keys())
+        except (AttributeError, TypeError):
+            sample["all_keys"] = []
+        return sample
+
     def reconcile_from_signal_store(self, signal_store: Any) -> dict[str, Any]:
         if not self._available:
             return {"available": False, "reason": self._last_error or "ledger_unavailable"}
@@ -1410,6 +1434,8 @@ class V95Ledger:
         tickers = [str(row["ticker"]) for row in rows if row["ticker"]]
         resolved = learned = calls = 0
         events: list[dict[str, Any]] = []
+        undetermined: list[dict[str, Any]] = []  # closed-but-no-result diagnostic samples
+        undetermined_limit = _env_int("Q15_V95_UNDETERMINED_SAMPLE_LIMIT", 8, 0, 50)
         started = time.monotonic()
         budget_exceeded = False
         for ticker in tickers:
@@ -1428,6 +1454,11 @@ class V95Ledger:
                 continue
             result = str(market.get("result") or "").upper()
             if result not in {"YES", "NO"}:
+                # Closed but `result` not populated yet. Capture the raw fields once
+                # so we can identify which field carries Kalshi's INSTANT determined
+                # outcome (so settlement need not wait for the laggy `result`).
+                if len(undetermined) < undetermined_limit:
+                    undetermined.append(self._undetermined_market_sample(ticker, market))
                 continue  # not officially resolved yet
             outcome_time = _parse_ts(market.get("close_time") or market.get("settled_at")) or now
             outcome = self.resolve_ticker(ticker, result, outcome_time)
@@ -1440,6 +1471,10 @@ class V95Ledger:
             "budget_seconds": budget, "budget_exceeded": budget_exceeded,
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "result_events": events[:20],
+            # Closed contracts still missing `result` this pass, with their raw Kalshi
+            # fields — so /api/q15-v9-5/learning shows what the instant outcome field is.
+            "undetermined_closed_count": len(undetermined),
+            "undetermined_market_samples": undetermined,
         }
 
     @staticmethod
