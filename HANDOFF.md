@@ -25,6 +25,42 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Ultoim Build: separate read-only research reporting system
+**Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
+`q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,
+default-OFF hooks (`checkpoint_v95.run_cycle` observe + `app.py` reconcile).
+Read-only; never trades; production byte-identical when `Q15_ULTOIM_ENABLED`
+unset. In-process (own worker thread, like the polymarket shadow) — no `.replit`
+change. Deploy-pending on `main` + a Repl Stop ▸ Run to load it.
+- **What it is:** a SEPARATE research system (own DB `data/q15_ultoim_v1.sqlite3`,
+  own model_version `ultoim-build-v1`, own counters/reset marker, own Telegram
+  channel via `Q15_ULTOIM_TELEGRAM_CHAT_ID` reusing `TELEGRAM_BOT_TOKEN`). Reuses
+  the champion's frozen per-asset analysis (read-only) to publish exactly 3 picks
+  at **12M / 10M / 7M** (12M replaces the toxic 15M per this session's findings).
+- **Picks apply the session's analysis:** ranked by **quality × net-edge (value)**
+  not raw confidence; **multi-factor A/B/C grade** (calibration, data/evidence
+  quality, model agreement, flip risk, manipulation anti-signal, the validated
+  YES-quality veto via order-flow-persistence/book-resiliency) — never probability
+  alone. Records hypothetical P&L per pick.
+- **Flip = active research:** ensemble stability score (flip_risk_score +
+  prediction_stability + book_resiliency + order_flow_persistence), recorded with
+  decision/original/expected-side; graded at settlement (genuine flip = locked
+  side != official result). Weighted LOW in the grade until it beats
+  flip_risk_score OOS. Never claimed validated.
+- **Compact Telegram only** (`ULTOIM BUILD · 12M` / medal / asset side / Grade /
+  Outcome% / `Research mode · read-only`); all calc/feature internals stay in the DB.
+- **Records + safety:** immutable picks (UNIQUE model_version,ticker,interval);
+  one report per (interval, window) via `ultoim_report_lock`; settlement grading
+  via the SHARED `market_cache` (ground truth, no record-mixing); delivery-failed
+  picks kept for learning but EXCLUDED from the visible scoreboard; missing/failed
+  never counted as losses; restart-safe (no double record/grade) — all tested.
+- **Files:** `q15_upgrade/ultoim/{__init__,config,ledger,ranker,flip_research,
+  panel,telegram,runner}.py` (new), `tests/test_ultoim_build.py` (new),
+  `q15_upgrade/checkpoint_v95.py` (+observe hook), `app.py` (+reconcile hook),
+  `.env.example`.
+- **Deploy:** set `Q15_ULTOIM_ENABLED=true` + `Q15_ULTOIM_TELEGRAM_CHAT_ID=<chat>`
+  in the Repl, then **Stop ▸ Run**. (Also recommend `Q15_V95_SHADOW_SIGNALS_ENABLED=true`.)
+
 ## ✅ Shipped THIS session — Hourly learning-snapshot export to a dedicated branch
 **Suite 1036 passed / 4 skipped** in a complete env (+12 tests). New worker
 `tools/learning_export.py` + `tests/test_learning_export.py`; wired into `.replit`
