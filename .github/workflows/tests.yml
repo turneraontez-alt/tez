@@ -23,7 +23,13 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest "websockets>=12.0" flask cffi cryptography
+          # Install the declared runtime deps (requests, flask, websockets,
+          # cryptography, psycopg2-binary, tzdata) so the app-level test modules
+          # import cleanly instead of erroring on collection. requirements.txt is
+          # the single source of truth, so adding a runtime dep there can never
+          # silently break CI again. cffi is cryptography's build/runtime helper.
+          pip install -r requirements.txt
+          pip install pytest cffi
 
       - name: Show build_info
         run: cat build_info.json || echo "(no build_info.json)"

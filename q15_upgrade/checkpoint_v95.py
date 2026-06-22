@@ -1944,6 +1944,10 @@ def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[st
         "asset": asset,
         "side": side,
         "confidence": confidence,
+        # The champion's A/B/C/D confidence grade (computed once in analyse_v95
+        # from selected_probability + data_quality). Surfaced — never recomputed
+        # — so the check panel shows the SAME grade the rest of the system uses.
+        "confidence_grade": analysis.get("confidence_grade"),
         "yes_prob": yes_p,
         "no_prob": no_p,
         # compact decision block (headline pick)

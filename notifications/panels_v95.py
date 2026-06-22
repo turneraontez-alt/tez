@@ -66,6 +66,12 @@ def _side(value: Any) -> str:
     return s if s in {"YES", "NO"} else "—"
 
 
+def _grade(value: Any) -> str:
+    """A pick's A/B/C/D confidence grade, or em-dash when absent/invalid."""
+    g = str(value or "").strip().upper()
+    return g if g in {"A", "B", "C", "D"} else "—"
+
+
 # --------------------------------------------------------------------------- #
 #  Live checkpoint panel                                                       #
 # --------------------------------------------------------------------------- #
@@ -189,7 +195,8 @@ def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[st
     plus one compact decision block.
 
     Each visible line answers only the questions that matter for the close:
-    the three most-likely settled sides (``asset side — confidence``, #1 first),
+    the three most-likely settled sides (``asset side — confidence · grade``, #1
+    first, where grade is the champion's A/B/C/D confidence grade),
     then a single decision block keyed to the headline (#1) pick — genuine-flip
     risk, temporary-manipulation risk, the ENTER/WAIT/SKIP call, the best entry
     price, the one strongest reason, and the calibration sample. All the detailed
@@ -197,8 +204,9 @@ def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[st
     than ``top_k`` valid assets) renders as ``—`` — never an invented pick.
 
     Each pick is a fully-extracted mapping (see ``checkpoint_v95._extract_pick``):
-    ``{rank, asset, side, confidence, flip_prob, flip_side, manip_prob,
-       entry_label, best_entry_max, main_reason, sample, is_entry, ...}``.
+    ``{rank, asset, side, confidence, confidence_grade, flip_prob, flip_side,
+       manip_prob, entry_label, best_entry_max, main_reason, sample, is_entry,
+       ...}``.
 
     The header keeps the ``V9.5 CHECK`` marker and an actionable/non-actionable
     marker (``ENTRY RECOMMENDED`` / ``NO ENTRY YET``) the suppression chain keys
@@ -224,7 +232,8 @@ def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[st
             body.append(f"{medal} —")
             continue
         body.append(f"{medal} {_esc(pick.get('asset'))} {_side(pick.get('side'))} "
-                    f"— {_pct(pick.get('confidence'), digits=0)}")
+                    f"— {_pct(pick.get('confidence'), digits=0)} "
+                    f"· {_grade(pick.get('confidence_grade'))}")
 
     # --- one decision block, keyed to the headline (#1) pick ---
     head = next((p for p in picks if p), None)
