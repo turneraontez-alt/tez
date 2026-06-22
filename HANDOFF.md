@@ -25,6 +25,23 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Manipulation detection: tunable PIN tell + scoreboard discrimination
+**Suite 1028 passed / 13 skipped** (+7 tests) on this container's env. Branch
+`claude/ultracode-mode-question-5aj8un` (PR #20, draft). Read-only, **defaults byte-identical**.
+Motivated by the live record: the manipulation flag fires on ~76% of markets at baseline
+accuracy (no edge), driven by an over-firing PIN tell.
+- **`checkpoint_v95.py`** — new default-OFF knob `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA`
+  narrows the observational PIN *tell* below the regime's 0.25 band (recommended 0.15 to
+  validate). The FROZEN `THRESHOLD_PIN` *regime* (feeds champion uncertainty) is untouched;
+  `_pin_tell_passes` keeps the tell when the knob is unset or the measurement is missing.
+- **`ledger_v95.py`** — `_by_manipulation` scoreboard now adds `by_reason_isolated`
+  (single-tell-only buckets), `by_checkpoint`, and `by_side` (all purely additive; old keys
+  unchanged). On the live ledger this immediately separates **ABSORPTION-only 74.3% / −0.17¢**
+  (the edge) from **PIN-only 67.0% / −4.82¢** (the noise), and shows manip-flagged **NO side
+  is +0.74¢ vs YES −10.21¢** — structure the blended view hid.
+- Next: with `by_reason_isolated` now measurable, validate the PIN tightening out-of-sample,
+  then consider promoting a stricter default (significance-tested, per invariants).
+
 ## ✅ Shipped THIS session — Ultoim Build: separate read-only research reporting system
 **Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
 `q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,

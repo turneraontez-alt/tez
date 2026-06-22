@@ -2495,20 +2495,50 @@ class V95Ledger:
         def _flag(row: sqlite3.Row) -> int:
             return int(_row_get(row, "manipulation_suspected") or 0)
 
+        def _reasons(row: sqlite3.Row) -> set[str]:
+            return {p.strip().upper() for p in str(_row_get(row, "manipulation_reason") or "").split(",") if p.strip()}
+
         suspected = [r for r in rows if _flag(r) == 1]
         clean = [r for r in rows if _flag(r) == 0]
         by_reason: dict[str, Any] = {}
+        by_reason_isolated: dict[str, Any] = {}
         for reason in self._MANIPULATION_REASONS:
-            bucket = [
-                r for r in rows
-                if reason in {p.strip().upper() for p in str(_row_get(r, "manipulation_reason") or "").split(",") if p.strip()}
-            ]
+            bucket = [r for r in rows if reason in _reasons(r)]
             if bucket:
                 by_reason[reason] = self._win_loss(bucket)
+            # The isolated bucket holds rows whose ONLY tell is this reason, so a
+            # genuinely accurate single tell (e.g. ABSORPTION) is not blended with
+            # the noisier combined rows it co-fires in. This is the cut that shows
+            # which tell actually discriminates.
+            isolated = [r for r in rows if _reasons(r) == {reason}]
+            if isolated:
+                by_reason_isolated[reason] = self._win_loss(isolated)
+
+        def _split(subset: Sequence[sqlite3.Row]) -> dict[str, Any]:
+            return {
+                "suspected": self._win_loss([r for r in subset if _flag(r) == 1]),
+                "clean": self._win_loss([r for r in subset if _flag(r) == 0]),
+            }
+
+        # Suspected-vs-clean split along the same dimensions the top-level
+        # scoreboard tracks (interval, side) but that manipulation previously
+        # blended away — so "is the flag predictive at 7M? on the NO side?" is
+        # answerable rather than averaged out.
+        by_checkpoint = {
+            cp: _split([r for r in rows if r["checkpoint"] == cp])
+            for cp in TRACKED_CHECKPOINTS
+        }
+        by_side = {
+            side: _split([r for r in rows if str(_row_get(r, "predicted_side") or "").upper() == side])
+            for side in ("YES", "NO")
+        }
         return {
             "suspected": self._win_loss(suspected),
             "clean": self._win_loss(clean),
             "by_reason": by_reason,
+            "by_reason_isolated": by_reason_isolated,
+            "by_checkpoint": by_checkpoint,
+            "by_side": by_side,
         }
 
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:

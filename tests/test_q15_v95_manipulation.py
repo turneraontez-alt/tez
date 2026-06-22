@@ -352,5 +352,95 @@ class TestTrackingDisabledScore(unittest.TestCase):
         self.assertEqual(sig, {"suspected": False, "reasons": [], "lean": None, "score": 0.0})
 
 
+class TestPinTellTightening(unittest.TestCase):
+    """The optional, default-OFF stricter distance band for the PIN tell.
+
+    The THRESHOLD_PIN regime (frozen champion) is untouched; only the read-only
+    PIN tell may be narrowed, and only when the operator opts in.
+    """
+
+    def tearDown(self):
+        os.environ.pop("Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA", None)
+
+    def test_default_is_byte_identical(self):
+        # No knob set: PIN fires for THRESHOLD_PIN regardless of distance_sigma.
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.24}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])
+
+    def test_knob_suppresses_pin_outside_band(self):
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "0.15"
+        # distance_sigma above the stricter band -> PIN tell suppressed (regime
+        # still THRESHOLD_PIN, but the observational flag does not fire).
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.22}, {"available": False}, {})
+        self.assertNotIn("PIN", sig["reasons"])
+        self.assertFalse(sig["suspected"])
+
+    def test_knob_keeps_pin_inside_band(self):
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "0.15"
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.05}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])
+
+    def test_missing_measurement_keeps_pin(self):
+        # Knob set but no distance_sigma available: never silently drop the tell.
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "0.15"
+        sig = _manipulation_signal({"name": "THRESHOLD_PIN"}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])
+
+    def test_invalid_knob_is_ignored(self):
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "not-a-number"
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.9}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])  # unparseable -> no tightening
+
+
+class TestManipulationScoreboardDimensions(unittest.TestCase):
+    """The added by_checkpoint / by_side / by_reason_isolated breakdowns."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.led = V95Ledger(os.path.join(self.tmp.name, "l.sqlite3"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _rec(self, tkr, checkpoint, side, result, manip, reason):
+        self.led.record_prediction(
+            ticker=tkr, asset="BTC", checkpoint=checkpoint, created_at=1000.0, close_time=2000.0,
+            predicted_side=side, raw_yes_probability=0.6, calibrated_yes_probability=0.6,
+            challenger_yes_probability=0.6, baseline_yes_probability=0.6, selected_probability=0.65,
+            conservative_probability=0.6, data_quality=0.7, evidence_quality=0.7, trade_quality=0.6,
+            trade_decision="WATCH_PRICE", regime="NORMAL", features={}, contributions={},
+            quote={"ask_cents": 50}, rank=1, costs={"total_cents": 2}, confidence_grade="B",
+            manipulation_suspected=manip, manipulation_reason=reason)
+        self.led.resolve_ticker(tkr, result, 2100.0)
+
+    def test_isolated_reason_excludes_combined_rows(self):
+        # ABSORPTION-only (right) vs ABSORPTION+PIN combined (wrong): the isolated
+        # bucket must hold only the single-tell row, while by_reason holds both.
+        self._rec("AA", "10M", "YES", "YES", True, "ABSORPTION")
+        self._rec("BB", "10M", "YES", "NO", True, "PIN,ABSORPTION")
+        bm = self.led.scoreboard()["by_manipulation"]
+        self.assertEqual(bm["by_reason"]["ABSORPTION"]["n"], 2)        # both rows
+        self.assertEqual(bm["by_reason_isolated"]["ABSORPTION"]["n"], 1)  # only AA
+        self.assertEqual(bm["by_reason_isolated"]["ABSORPTION"]["right"], 1)
+        # The combined row is not isolated under PIN either.
+        self.assertNotIn("PIN", bm["by_reason_isolated"])
+
+    def test_by_checkpoint_and_by_side_split(self):
+        self._rec("A1", "7M", "NO", "NO", True, "PIN")    # 7M, NO, suspected, right
+        self._rec("A2", "7M", "NO", "YES", False, None)   # 7M, NO, clean, wrong
+        self._rec("A3", "15M", "YES", "YES", True, "PIN") # 15M, YES, suspected, right
+        bm = self.led.scoreboard()["by_manipulation"]
+        self.assertEqual(bm["by_checkpoint"]["7M"]["suspected"]["n"], 1)
+        self.assertEqual(bm["by_checkpoint"]["7M"]["clean"]["n"], 1)
+        self.assertEqual(bm["by_checkpoint"]["15M"]["suspected"]["right"], 1)
+        self.assertEqual(bm["by_side"]["NO"]["suspected"]["n"], 1)
+        self.assertEqual(bm["by_side"]["YES"]["suspected"]["n"], 1)
+        self.assertEqual(bm["by_side"]["NO"]["clean"]["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
