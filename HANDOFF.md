@@ -25,9 +25,32 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## 🟡 Done THIS session — NOT merged to main (branch `claude/challenger-shadow-comparison-zo7fhq`, draft PR #16) — A/B/C/D grade on the V9.5 CHECK
-**Suite 1001 passed / 4 skipped** in a complete env (+2 tests). Lives only on the feature branch
-as draft PR #16 — `main` is untouched. Awaiting review/approval before any merge.
+## ✅ Shipped THIS session — Polymarket Up/Down shadow (read-only, default-OFF)
+**Suite 1024 passed / 4 skipped** in a complete env (+23 tests). New package
+`q15_upgrade/polymarket/` — a SECOND read-only shadow, sibling to the challenger.
+- **Why it's a separate contract, not a Kalshi match:** Polymarket's 15-min crypto
+  markets are **Up/Down** ("close >= window-open price", Chainlink/Binance), whereas we
+  trade Kalshi **strike** markets ("≥ $X", CF/Coinbase). Different YES meaning + price
+  source → never matched/merged. We grade against Polymarket's OWN result and compare
+  **our model vs the Polymarket market on that same up/down contract** (valid), never
+  Kalshi-outcome vs Polymarket-outcome (invalid).
+- **What it does (when `Q15_POLYMARKET_ENABLED=true`):** at 15M/10M/7M it freezes the
+  champion's snapshot, computes OUR `P(up)` via `probability.updown_probability` (the
+  champion's `_structural_probability` math re-thresholded at the open price), records
+  Polymarket's executable book, and after close grades model + market. Emits a compact
+  `POLYMARKET SHADOW` card; "NO MATCHING MARKET" for assets Polymarket doesn't list.
+- **Reliability:** all HTTP + SQLite work runs on the shadow's OWN background worker
+  (`runner.py` queue + daemon); `observe()`/`reconcile()` only enqueue, so the live ~1s
+  loop never blocks. Ledger `check_same_thread=False` + write lock. Default-OFF ⇒
+  production byte-identical. Wiring: `checkpoint_v95` observe hook + `app.py` drain.
+- **Live-validation TODO:** confirm the Gamma field names for the "price to beat"
+  (window-open reference) and the resolution payload against the live API. `client.py`
+  parses tolerantly and degrades to None (market-only grading) rather than guessing —
+  enabling it can't crash/fabricate, but OUR-model grading needs that field wired.
+
+## ✅ Shipped earlier THIS session (PR #16, merged to main) — A/B/C/D grade on the V9.5 CHECK
+**Suite 1001 passed / 4 skipped** in a complete env (+2 tests). Merged to `main` via
+`scripts/ship.sh` after the owner authorized always-ship.
 - **Grade restored on the official check** — `build_ranked_checkpoint_panel` now renders each
   ranked pick as `medal asset side — confidence% · GRADE` (e.g. `🥇 SOL NO — 72% · B`). The
   grade is the champion's existing A/B/C/D `confidence_grade` (computed once in `analyse_v95`

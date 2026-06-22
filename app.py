@@ -622,6 +622,19 @@ def refresh_loop(max_cycles=None):
                         notifier.send(_cr_msg)
             except Exception:
                 logger.debug("challenger shadow report skipped", exc_info=True)
+            # Read-only Polymarket up/down shadow: enqueue a settlement reconcile
+            # (throttled) and deliver its compact card. No-op when disabled; all
+            # network/DB work runs on the shadow's own worker, never this loop.
+            try:
+                from q15_upgrade.polymarket.runner import get_runner as _polymarket_runner
+                _pr = _polymarket_runner()
+                if _pr is not None:
+                    _pr.reconcile(now)
+                    _pr_msg = _pr.drain_report()
+                    if _pr_msg:
+                        notifier.send(_pr_msg)
+            except Exception:
+                logger.debug("polymarket shadow report skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)

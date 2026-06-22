@@ -1,7 +1,7 @@
 {
-  "commit": "096fca6",
+  "commit": "8d174cb",
   "branch": "claude/challenger-shadow-comparison-zo7fhq",
-  "committed_at": "2026-06-22T04:34:08Z",
-  "summary": "A/B/C/D confidence grade on V9.5 CHECK picks + CI installs requirements.txt",
-  "tests": "1001 passed, 4 skipped in 23.37s"
+  "committed_at": "2026-06-22T05:04:18Z",
+  "summary": "read-only Polymarket Up/Down shadow (default-OFF, separate from Kalshi)",
+  "tests": "1024 passed, 4 skipped in 25.03s"
 }
