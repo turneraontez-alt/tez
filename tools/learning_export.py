@@ -61,6 +61,13 @@ REPO = os.environ.get("LEARNING_EXPORT_REPO") or os.environ.get(
 BRANCH = os.environ.get("LEARNING_EXPORT_BRANCH", "learning-snapshots")
 INTERVAL = max(60, int(os.environ.get("LEARNING_EXPORT_INTERVAL", "3600")))
 WORKDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# When launched as `python3 tools/learning_export.py`, Python puts the script's
+# dir (tools/) on sys.path[0] — NOT the repo root — so the lazy
+# `from q15_upgrade import ...` used by the scoreboard builders can't resolve.
+# Put the repo root on the path explicitly so curated scoreboards build no
+# matter how the worker is launched.
+if WORKDIR not in sys.path:
+    sys.path.insert(0, WORKDIR)
 DATA_DIR = os.environ.get("LEARNING_EXPORT_DATA_DIR") or os.environ.get(
     "Q15_DATA_DIR", "data"
 )

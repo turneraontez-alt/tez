@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -222,3 +223,37 @@ def test_main_without_token_does_not_run(monkeypatch):
 
 def test_url_embeds_token():
     assert lx._url("owner/repo", "Tk") == "https://x-access-token:Tk@github.com/owner/repo.git"
+
+
+def test_scoreboards_build_when_launched_as_script(tmp_path, monkeypatch):
+    """Regression: when run as ``python3 tools/learning_export.py`` the repo root
+    is NOT on sys.path, so the lazy ``from q15_upgrade import ...`` used by the
+    scoreboard builders would fail and scoreboards would come back as errors.
+    The module must put the repo root on the path itself. Exercised in a
+    subprocess whose cwd is OUTSIDE the repo (so only the module's own fix can
+    make q15_upgrade importable)."""
+    data_dir = tmp_path / "data"
+    _point_ledgers_at(monkeypatch, data_dir)
+    _make_v95_db(data_dir / "q15_v95_ledger_v1.sqlite3")
+
+    module_path = Path(lx.__file__).resolve()
+    driver = (
+        "import importlib.util, json, sys\n"
+        f"spec = importlib.util.spec_from_file_location('lx', {str(module_path)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "from datetime import datetime, timezone\n"
+        f"snap, _ = m.build_snapshot({str(data_dir)!r}, "
+        "now=datetime(2026,6,22,tzinfo=timezone.utc), head_commit=None, build_info=None)\n"
+        "print(json.dumps(snap['scoreboards']))\n"
+    )
+    # cwd OUTSIDE the repo; PYTHONPATH cleared so nothing else leaks the repo in.
+    env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
+    res = subprocess.run(
+        [sys.executable, "-c", driver], cwd=tmp_path, capture_output=True,
+        text=True, env=env,
+    )
+    assert res.returncode == 0, res.stderr
+    scoreboards = json.loads(res.stdout.strip().splitlines()[-1])
+    assert "error" not in scoreboards.get("v95", {}), scoreboards
+    assert scoreboards["v95"]["scoreboard"]["available"] is True
+
