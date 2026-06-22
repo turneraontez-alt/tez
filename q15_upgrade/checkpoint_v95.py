@@ -1620,7 +1620,23 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             body.append("")
             body.append("⚠ Manipulation watch")
             for asset, manip in flagged:
-                body.append(f"{asset}: {_manipulation_phrase(manip)}")
+                line = f"{asset}: {_manipulation_phrase(manip)}"
+                # Highest-accuracy manipulation subset on record: a fresh tell that
+                # first appears at the 7M close. Print the predicted side and the
+                # LIVE historical hit-rate (+ sample) so NO (~97%) and YES (~85%)
+                # are weighted differently; below the min sample, say "building".
+                fnc = (analyses.get(asset, {}) or {}).get("fresh_manip_near_close")
+                if isinstance(fnc, Mapping):
+                    side = str(fnc.get("side") or "")
+                    n = int(fnc.get("n") or 0)
+                    right = int(fnc.get("right") or 0)
+                    acc = fnc.get("accuracy")
+                    min_n = int(_env_float("Q15_V95_SCOREBOARD_MIN_N", 10, 1, 1000))
+                    if n >= min_n and acc is not None:
+                        line += f" · 🎯 FRESH 7M·{side} — predicted {side} {float(acc) * 100:.1f}% right ({right}/{n})"
+                    else:
+                        line += f" · 🎯 FRESH 7M·{side} — high-confidence (building, n={n})"
+                body.append(line)
 
     # Thin-evidence watch (default OFF): flag any top pick whose prediction rests
     # on too few data-backed features, so a confident-looking number is read with
@@ -2622,6 +2638,22 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     analysis["snapshot_id"] = snapshot_id
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
+                    # Fresh-near-close manipulation tag (default-ON, observability
+                    # only). A manipulation tell that FIRST appears at the closing 7M
+                    # check (not seen at this contract's 15M/10M) is the highest-
+                    # accuracy manipulation subset on the live record — strongest on
+                    # the NO side (97.7%), present but weaker on YES (~85%). Surfaced
+                    # as an alert marker WITH the live per-side hit-rate so the owner
+                    # can weight NO vs YES; it NEVER alters the frozen probability,
+                    # edge, or entry decision. Point-in-time: the earlier checkpoints
+                    # are already recorded, so the lookup has no look-ahead.
+                    _fresh_side = str(analysis.get("prediction_side") or "").upper()
+                    if (checkpoint == "7M"
+                            and _env_bool("Q15_V95_FRESH_MANIP_TAG", True)
+                            and (analysis.get("manipulation") or {}).get("suspected")
+                            and _fresh_side in ("YES", "NO")
+                            and not self.ledger.manipulation_flagged_before(canonical.ticker, checkpoint)):
+                        analysis["fresh_manip_near_close"] = self.ledger.fresh_near_close_rate(_fresh_side)
                     # Flag (without mutating the graded prediction) when the live
                     # side drifts from the locked one before close — the stability
                     # / change-rate metric per interval.
@@ -2731,6 +2763,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     _ur.observe(analyses=analyses, canonicals=canonicals, now=now)
             except Exception:
                 logger.debug("ultoim observe skipped", exc_info=True)
+            # Interval-timing research capture (read-only; default-OFF). Records the
+            # frozen analysis at eight marks (15M..7M) into its own ledger for entry/
+            # confirmation/defensive-timing study. Never trades, sends, or changes the
+            # champion; a failure must not disturb the cycle.
+            try:
+                from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                _irr = _ir_runner()
+                if _irr is not None:
+                    _irr.observe(analyses=analyses, canonicals=canonicals, now=now)
+            except Exception:
+                logger.debug("interval-research observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
@@ -2750,6 +2793,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 # Score fired flip warnings against whether the prediction flipped.
                 if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
                     self.ledger.reconcile_flip_warnings()
+                # Interval-timing research: attach settled outcomes to any captured
+                # intervals (read-only; default-OFF; never affects production).
+                try:
+                    from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                    _irr = _ir_runner()
+                    if _irr is not None:
+                        _irr.resolve_settled(result_events, now)
+                except Exception:
+                    logger.debug("interval-research resolve skipped", exc_info=True)
             ledger_status = self.ledger.status()
             # The recommended BEST ENTRY is rank #1 of the qualifying entries — the
             # single source of truth shared by the alert's top summary and detail.

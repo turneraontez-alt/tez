@@ -978,6 +978,67 @@ class V95Ledger:
             )
         return prediction_id, inserted
 
+    def manipulation_flagged_before(self, ticker: str, checkpoint: str) -> bool:
+        """Was manipulation suspected for this contract at an EARLIER checkpoint
+        (one with MORE time remaining than ``checkpoint``)?
+
+        Point-in-time and read-only: it only inspects checkpoints that precede the
+        given one (e.g. 15M/10M when asked about 7M), so it mirrors exactly what the
+        live path can know when the later checkpoint fires — no look-ahead. Used to
+        identify a FRESH manipulation tell (one that first appears near close).
+        """
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        try:
+            earlier = TRACKED_CHECKPOINTS[:TRACKED_CHECKPOINTS.index(checkpoint)]
+        except ValueError:
+            return False
+        if not earlier:
+            return False
+        placeholders = ",".join("?" for _ in earlier)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM predictions WHERE model_version=? AND ticker=? "
+                f"AND checkpoint IN ({placeholders}) AND manipulation_suspected=1 LIMIT 1",
+                (MODEL_VERSION, ticker, *earlier),
+            ).fetchone()
+        return row is not None
+
+    def fresh_near_close_rate(self, side: str) -> dict[str, Any]:
+        """Historical settle-rate of the fresh-near-close bucket for ``side``.
+
+        Counts RESOLVED closing-checkpoint (7M) predictions on ``side`` where
+        manipulation was suspected at 7M but NOT at any earlier checkpoint of the
+        same contract (a tell that first appears near close). Read-only; the live
+        prediction being tagged is unresolved and so never counts itself. Used to
+        print the live hit-rate on the alert tag.
+        """
+        side = str(side or "").upper()
+        out: dict[str, Any] = {"side": side, "n": 0, "right": 0, "accuracy": None}
+        if not self._available or side not in ("YES", "NO"):
+            return out
+        last = TRACKED_CHECKPOINTS[-1]
+        earlier = TRACKED_CHECKPOINTS[:-1]
+        if not earlier:
+            return out
+        placeholders = ",".join("?" for _ in earlier)
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT p.correct FROM predictions p "
+                "WHERE p.model_version=? AND p.checkpoint=? AND p.predicted_side=? "
+                "AND p.manipulation_suspected=1 AND p.official_result IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM predictions e WHERE e.model_version=p.model_version "
+                f"AND e.ticker=p.ticker AND e.checkpoint IN ({placeholders}) AND e.manipulation_suspected=1)",
+                (MODEL_VERSION, last, side, *earlier),
+            ).fetchall()
+        n = len(rows)
+        right = sum(1 for r in rows if int(r[0] or 0) == 1)
+        out["n"] = n
+        out["right"] = right
+        out["accuracy"] = round(right / n, 4) if n else None
+        return out
+
     # -- read-only challenger shadow (default-OFF; never affects production) --
     def _shadow_observe(self, **kw) -> None:
         try:
@@ -2550,6 +2611,86 @@ class V95Ledger:
             side: _split([r for r in rows if str(_row_get(r, "predicted_side") or "").upper() == side])
             for side in ("YES", "NO")
         }
+        # Reason-type x side. The record's two real discriminators are the
+        # ABSORPTION tell (directional/structural — more reliable) and the NO side;
+        # bare PIN over-fires and barely separates. Crossing them lets the
+        # "ABSORPTION-confirmed NO-side" subset (the hypothesised genuine signal) be
+        # read against "bare PIN" noise before any reason/side gate is considered.
+        # ``absorption`` = any firing row carrying the ABSORPTION tell; ``pin_only``
+        # = rows whose ONLY tell is PIN.
+        def _side_split(subset: Sequence[sqlite3.Row]) -> dict[str, Any]:
+            return {
+                side: self._win_loss(
+                    [r for r in subset if str(_row_get(r, "predicted_side") or "").upper() == side]
+                )
+                for side in ("YES", "NO")
+            }
+
+        by_reason_side = {
+            "absorption": _side_split([r for r in rows if "ABSORPTION" in _reasons(r)]),
+            "pin_only": _side_split([r for r in rows if _reasons(r) == {"PIN"}]),
+        }
+
+        # Persistence (point-in-time, no look-ahead): for each FLAGGED row, did the
+        # manipulation flag also fire at an EARLIER checkpoint of the same contract?
+        # A tell that persists 15M->10M->7M is more likely to be real than a one-off
+        # blip, so this is the lever to test before a fixed "decision time". Only
+        # checkpoints with MORE time remaining (earlier in the contract's life) count
+        # toward "prior", mirroring what a live feature could actually know — the
+        # current row never sees its own later checkpoints.
+        _cp_order = {cp: i for i, cp in enumerate(TRACKED_CHECKPOINTS)}
+        by_ticker: dict[str, list[sqlite3.Row]] = {}
+        for r in rows:
+            tk = str(_row_get(r, "ticker") or "")
+            if tk:
+                by_ticker.setdefault(tk, []).append(r)
+        fresh_flag: list[sqlite3.Row] = []
+        persistent_flag: list[sqlite3.Row] = []
+        # Per-checkpoint split is the HONEST read: the pooled fresh-vs-persistent gap
+        # is confounded by interval (15M flags are ALWAYS fresh and 15M is the weak
+        # interval), so persistence must be judged WITHIN a checkpoint. On the live
+        # record the pooled view flatters persistence while the controlled view
+        # reverses it (fresh near close discriminates better) — keep both so the
+        # confound is visible, not hidden.
+        persist_by_cp: dict[str, dict[str, list[sqlite3.Row]]] = {
+            cp: {"fresh": [], "persistent": []} for cp in TRACKED_CHECKPOINTS
+        }
+        for trows in by_ticker.values():
+            for r in trows:
+                if _flag(r) != 1:
+                    continue
+                cp = str(r["checkpoint"])
+                order = _cp_order.get(cp)
+                if order is None:
+                    fresh_flag.append(r)
+                    continue
+                prior = sum(
+                    1 for o in trows
+                    if _flag(o) == 1
+                    and _cp_order.get(str(o["checkpoint"]), order) < order
+                )
+                tag = "persistent" if prior >= 1 else "fresh"
+                (persistent_flag if prior >= 1 else fresh_flag).append(r)
+                persist_by_cp[cp][tag].append(r)
+        # Fresh-near-close: a manipulation tell that FIRST appears at the 7M check
+        # (not seen at 15M/10M) is the strongest manipulation subset on the live
+        # record — and it concentrates on the NO side. Isolated here, with the side
+        # split, as the candidate signal to validate live before any activation.
+        _fresh_7m = persist_by_cp.get(TRACKED_CHECKPOINTS[-1], {}).get("fresh", [])
+        fresh_near_close = {
+            "all": self._win_loss(_fresh_7m),
+            "YES": self._win_loss([r for r in _fresh_7m if str(_row_get(r, "predicted_side") or "").upper() == "YES"]),
+            "NO": self._win_loss([r for r in _fresh_7m if str(_row_get(r, "predicted_side") or "").upper() == "NO"]),
+        }
+        by_persistence = {
+            "fresh_flag": self._win_loss(fresh_flag),
+            "persistent_flag": self._win_loss(persistent_flag),
+            "by_checkpoint": {
+                cp: {"fresh": self._win_loss(v["fresh"]), "persistent": self._win_loss(v["persistent"])}
+                for cp, v in persist_by_cp.items()
+            },
+            "fresh_near_close": fresh_near_close,
+        }
         return {
             "suspected": self._win_loss(suspected),
             "clean": self._win_loss(clean),
@@ -2557,6 +2698,8 @@ class V95Ledger:
             "by_reason_isolated": by_reason_isolated,
             "by_checkpoint": by_checkpoint,
             "by_side": by_side,
+            "by_reason_side": by_reason_side,
+            "by_persistence": by_persistence,
         }
 
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
@@ -2792,7 +2935,7 @@ class V95Ledger:
             rows = list(connection.execute(
                 "SELECT checkpoint, correct, rank, asset, realized_cents, "
                 "predicted_side, official_result, confidence_grade, changed_before_close, "
-                "manipulation_suspected, manipulation_reason, pushed "
+                "manipulation_suspected, manipulation_reason, pushed, ticker "
                 "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
                 (MODEL_VERSION,),
             ))
