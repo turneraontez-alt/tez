@@ -1,0 +1,119 @@
+cat > /tmp/tez_review_dump.py <<'PYEOF'
+#!/usr/bin/env python3
+"""Read-only dump of every record the updated-review needs. Writes nothing."""
+import json, os, sys, sqlite3, time, platform
+sys.path.insert(0, os.getcwd())  # importable when run from the repo root
+OUT = {}
+
+def cap(label, fn):
+    try: OUT[label] = fn()
+    except Exception as e: OUT[label] = {"_error": f"{type(e).__name__}: {e}"}
+
+def _env():
+    info = {"python": sys.version.split()[0], "platform": platform.platform(),
+            "cwd": os.getcwd(), "time": time.strftime("%Y-%m-%d %H:%M:%S %Z"), "dbs": {}}
+    for label, default, env in (
+        ("v95", "data/q15_v95_ledger_v1.sqlite3", "Q15_V95_LEDGER_DB"),
+        ("challenger", "data/q15_challenger_shadow_v1.sqlite3", "Q15_CHALLENGER_DB")):
+        p = os.environ.get(env) or default; ex = os.path.exists(p)
+        info["dbs"][label] = {"path": p, "exists": ex, "bytes": (os.path.getsize(p) if ex else 0),
+            "mtime": (time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p))) if ex else None)}
+    return info
+cap("env", _env)
+
+def _counts(path):
+    if not os.path.exists(path): return {"_missing": path}
+    con = sqlite3.connect(path); cur = con.cursor(); out = {}
+    for (t,) in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        try: out[t] = cur.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        except Exception as e: out[t] = f"ERR {e}"
+    con.close(); return out
+
+def _v95():
+    from q15_upgrade import ledger_v95
+    L = ledger_v95.V95Ledger(); res = {"db_path": str(L.path)}
+    for name in ("scoreboard","official_scoreboard","shadow_signal_experiment",
+                 "flip_warning_performance","flip_stats","metrics"):
+        fn = getattr(L, name, None)
+        if callable(fn):
+            try: res[name] = fn()
+            except Exception as e: res[name] = {"_error": f"{type(e).__name__}: {e}"}
+    cal = {}
+    for cp in ("15M","10M","7M"):
+        row = {}
+        for raw in (0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9):
+            try: row[str(raw)] = L.calibrate(raw, cp)
+            except Exception as e: row[str(raw)] = f"ERR {e}"
+        cal[cp] = row
+    res["calibration_probe"] = cal
+    res["row_counts"] = _counts(str(L.path))
+    try:
+        con = sqlite3.connect(str(L.path)); cur = con.cursor()
+        q = ("SELECT checkpoint, predicted_side, "
+             "SUM(CASE WHEN predicted_side=official_result THEN 1 ELSE 0 END) AS correct, "
+             "COUNT(*) AS n FROM predictions WHERE official_result IS NOT NULL "
+             "GROUP BY checkpoint, predicted_side")
+        res["sql_resolved_by_cp_side"] = [dict(zip(("checkpoint","side","correct","n"), r))
+                                          for r in cur.execute(q).fetchall()]
+        con.close()
+    except Exception as e: res["sql_resolved_by_cp_side"] = {"_error": str(e)}
+    return res
+cap("v95", _v95)
+
+def _challenger():
+    res = {}; mv = os.environ.get("Q15_CHALLENGER_MODEL_VERSION", "challenger-v1")
+    dbp = os.environ.get("Q15_CHALLENGER_DB", "data/q15_challenger_shadow_v1.sqlite3")
+    res["model_version_env"] = mv; res["db_path"] = dbp; res["row_counts"] = _counts(dbp)
+    try:
+        from q15_upgrade.challenger.runner import get_runner, is_enabled
+        res["is_enabled"] = bool(is_enabled()); r = get_runner()
+        if r is not None:
+            for name in ("comparison","ranked"):
+                fn = getattr(r, name, None)
+                if callable(fn):
+                    try: res[f"runner_{name}"] = fn()
+                    except Exception as e: res[f"runner_{name}"] = {"_error": str(e)}
+            try: res["runner_report_message"] = r.report_message()
+            except Exception as e: res["runner_report_message"] = f"ERR {e}"
+        else: res["runner"] = "get_runner() returned None (challenger disabled?)"
+    except Exception as e: res["runner"] = {"_error": f"{type(e).__name__}: {e}"}
+    try:
+        from q15_upgrade.challenger.ledger import ShadowLedger
+        SL = ShadowLedger(dbp)
+        for ver in dict.fromkeys([mv, "challenger-v1"]):
+            block = {}
+            for name in ("scoreboard","comparison","ranked_comparison"):
+                fn = getattr(SL, name, None)
+                if callable(fn):
+                    try: block[name] = fn(ver)
+                    except TypeError:
+                        try: block[name] = fn(model_version=ver)
+                        except Exception as e: block[name] = {"_error": str(e)}
+                    except Exception as e: block[name] = {"_error": str(e)}
+            res[f"ledger[{ver}]"] = block
+    except Exception as e: res["ledger"] = {"_error": f"{type(e).__name__}: {e}"}
+    try:
+        if os.path.exists(dbp):
+            con = sqlite3.connect(dbp); cur = con.cursor()
+            q = ("SELECT checkpoint, official_result, control_prob_yes, challenger_prob_yes "
+                 "FROM shadow_predictions WHERE official_result IS NOT NULL "
+                 "AND control_prob_yes IS NOT NULL AND challenger_prob_yes IS NOT NULL")
+            agg = {}
+            for cp, outcome, pc, pch in cur.execute(q).fetchall():
+                d = agg.setdefault(cp, {"n":0,"control_correct":0,"challenger_correct":0,
+                                        "both":0,"control_only":0,"challenger_only":0})
+                yes = str(outcome).upper()=="YES"; cc=(pc>0.5)==yes; hc=(pch>0.5)==yes
+                d["n"]+=1; d["control_correct"]+=cc; d["challenger_correct"]+=hc
+                if cc and hc: d["both"]+=1
+                elif cc and not hc: d["control_only"]+=1
+                elif hc and not cc: d["challenger_only"]+=1
+            res["sql_matched_by_cp"] = agg; con.close()
+    except Exception as e: res["sql_matched_by_cp"] = {"_error": str(e)}
+    return res
+cap("challenger", _challenger)
+
+blob = json.dumps(OUT, default=str, indent=2)
+open("/tmp/tez_review_dump.json","w").write(blob)
+print(blob)
+PYEOF
+python3 /tmp/tez_review_dump.py</parameter>
