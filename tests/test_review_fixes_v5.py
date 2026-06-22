@@ -165,10 +165,12 @@ class CalibrationIsotonicFallbackTests(unittest.TestCase):
             led.resolve_ticker(tk, "YES" if yes else "NO", NOW + i + 1)
 
     def test_unconverged_identity_when_fallback_off(self):
-        # Starve Platt of iterations so it cannot converge -> identity no-op.
+        # Starve Platt of iterations so it cannot converge -> identity no-op. Opt
+        # out of the auto isotonic-fallback + OOS-select to test the legacy path.
         os.environ["Q15_V95_CALIBRATION_MAX_ITERS"] = "1"
+        os.environ["Q15_V95_CALIBRATION_ISOTONIC_FALLBACK"] = "0"
+        os.environ["Q15_V95_CALIBRATION_OOS_SELECT"] = "0"
         os.environ.pop("Q15_V95_CALIBRATION_ISOTONIC", None)
-        os.environ.pop("Q15_V95_CALIBRATION_ISOTONIC_FALLBACK", None)
         led = self._ledger()
         self._seed_underconfident(led)
         res = led.calibrate(0.70, "15M", "BNB")
@@ -178,6 +180,7 @@ class CalibrationIsotonicFallbackTests(unittest.TestCase):
     def test_isotonic_fallback_calibrates_unconverged_fit(self):
         os.environ["Q15_V95_CALIBRATION_MAX_ITERS"] = "1"
         os.environ["Q15_V95_CALIBRATION_ISOTONIC_FALLBACK"] = "1"
+        os.environ["Q15_V95_CALIBRATION_OOS_SELECT"] = "0"  # test the explicit fallback path
         os.environ.pop("Q15_V95_CALIBRATION_ISOTONIC", None)
         led = self._ledger()
         self._seed_underconfident(led)

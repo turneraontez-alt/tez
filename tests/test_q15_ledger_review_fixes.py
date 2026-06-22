@@ -104,6 +104,8 @@ class PlattIdentityFallbackTest(unittest.TestCase):
         led = _mk_ledger()
         led.calibration_require_converged = True
         led._calibration_max_iters = 1  # force non-convergence on real data
+        led._calibration_isotonic_fallback = False  # exercise the legacy identity path
+        led._calibration_oos_select = False
         _seed(led, n=40)
         out = led.calibrate(0.80, "10M", "ETH")
         self.assertTrue(out["active"])
@@ -119,6 +121,8 @@ class PlattIdentityFallbackTest(unittest.TestCase):
         led = _mk_ledger()
         led.calibration_require_converged = False
         led._calibration_max_iters = 1
+        led._calibration_isotonic_fallback = False  # exercise the legacy Platt path
+        led._calibration_oos_select = False
         _seed(led, n=40)
         out = led.calibrate(0.80, "10M", "ETH")
         self.assertTrue(out["active"])

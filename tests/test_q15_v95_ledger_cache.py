@@ -19,6 +19,11 @@ from q15_upgrade.ledger_v95 import V95Ledger
 def _mk_ledger():
     led = V95Ledger(tempfile.mktemp(suffix=".sqlite3"))
     led._cache_enabled = True  # don't depend on the ambient env
+    # These tests pin the parametric Platt-fit cache; opt out of the new auto
+    # isotonic-fallback / OOS-self-select so the applied method is deterministically
+    # Platt (with intercept/slope) regardless of the seed's OOS outcome.
+    led._calibration_isotonic_fallback = False
+    led._calibration_oos_select = False
     return led
 
 

@@ -215,6 +215,56 @@ def _isotonic_predict(anchors: Sequence[tuple[float, float]], x: float) -> float
     return anchors[-1][1]
 
 
+def _fit_platt(xy: Sequence[tuple[float, float]], max_iters: int, slope_min: float,
+               slope_max: float, intercept_cap: float, reg: float = 0.20) -> tuple[float, float, bool, int]:
+    """Penalised logistic (Platt) fit y ~ sigmoid(intercept + slope*x).
+
+    Convergence is judged on the APPLIED (post-clamp) step, not the raw Newton
+    step, so a coefficient pinned at its clamp (a constrained optimum — e.g. an
+    under-confident model whose slope wants to exceed the ceiling) counts as
+    converged instead of looping forever and falling back to identity."""
+    intercept, slope = 0.0, 1.0
+    converged = False
+    iterations = 0
+    for _ in range(max_iters):
+        iterations += 1
+        g0 = -reg * intercept
+        g1 = -reg * (slope - 1.0)
+        h00 = reg
+        h01 = 0.0
+        h11 = reg
+        for x, y in xy:
+            p = _sigmoid(intercept + slope * x)
+            residual = y - p
+            variance = max(1e-6, p * (1.0 - p))
+            g0 += residual
+            g1 += residual * x
+            h00 += variance
+            h01 += variance * x
+            h11 += variance * x * x
+        determinant = h00 * h11 - h01 * h01
+        if determinant <= 1e-12:
+            break
+        d0 = (g0 * h11 - g1 * h01) / determinant
+        d1 = (g1 * h00 - g0 * h01) / determinant
+        new_intercept = _clamp(intercept + d0, -intercept_cap, intercept_cap)
+        new_slope = _clamp(slope + d1, slope_min, slope_max)
+        applied = abs(new_intercept - intercept) + abs(new_slope - slope)
+        intercept, slope = new_intercept, new_slope
+        if applied < 1e-6:
+            converged = True
+            break
+    return intercept, slope, converged, iterations
+
+
+def _brier(pairs: Sequence[tuple[float, float]]) -> float | None:
+    """Mean squared error of predicted probability vs binary outcome."""
+    pairs = list(pairs)
+    if not pairs:
+        return None
+    return sum((p - y) ** 2 for p, y in pairs) / len(pairs)
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -364,26 +414,28 @@ class V95Ledger:
         # falls back to the identity transform (raw probability passes through),
         # surfaced via the fit's ``reason`` + ``fallback`` and the stats() counter.
         self.calibration_require_converged = _env_bool("Q15_V95_CALIBRATION_REQUIRE_CONVERGED", True)
-        # Newton-step budget for the Platt fit. Default 12 is unchanged; exposed so
-        # convergence behaviour (and its identity fallback) is deterministically
-        # exercisable and tunable without editing code.
-        self._calibration_max_iters = _env_int("Q15_V95_CALIBRATION_MAX_ITERS", 12, 1, 100)
-        # Isotonic (monotonic, non-parametric) calibration. DEFAULT OFF: live
-        # probabilities keep the 2-parameter Platt transform exactly as today.
-        # The recorded calibration bands show the champion is systematically
-        # UNDER-confident at the high end (predicts ~0.78 where it wins ~0.95) —
-        # a curve a 2-parameter Platt (slope-capped at 1.50) cannot bend out.
-        # Isotonic regression can. It is wired in but gated so it can be measured
-        # against Platt in shadow first and only activated once it proves out.
+        # Newton-step budget for the Platt fit. Raised to 50 (was 12): an
+        # UNDER-confident model needs a slope > 1 and more steps to reach it.
+        self._calibration_max_iters = _env_int("Q15_V95_CALIBRATION_MAX_ITERS", 50, 1, 500)
+        # Platt coefficient clamps. The slope CEILING was 1.50 — too low for an
+        # under-confident model (it wants slope ~2 to sharpen 0.78 toward 0.95),
+        # so the Newton step pinned at the clamp and the fit reported "unconverged"
+        # forever -> identity. Widened, and convergence is now judged on the
+        # APPLIED (post-clamp) step so a constrained optimum counts as converged.
+        self._calibration_slope_min = _env_float("Q15_V95_CALIBRATION_SLOPE_MIN", 0.40, 0.05, 1.0)
+        self._calibration_slope_max = _env_float("Q15_V95_CALIBRATION_SLOPE_MAX", 3.00, 1.0, 10.0)
+        self._calibration_intercept_cap = _env_float("Q15_V95_CALIBRATION_INTERCEPT_CAP", 1.50, 0.25, 5.0)
         self._calibration_isotonic = _env_bool("Q15_V95_CALIBRATION_ISOTONIC", False)
-        # Isotonic ONLY as the unconverged-Platt fallback. DEFAULT OFF. On the live
-        # record Platt fails to converge at every checkpoint, so calibration ships
-        # as identity (raw passes through — effectively NO calibration despite
-        # 350-420 resolved rows/checkpoint). With this ON, an unconverged fit uses
-        # the isotonic curve (which needs no convergence) instead of identity,
-        # while a converged Platt fit is left byte-for-byte unchanged. Kept gated
-        # so it can be validated OOS before it touches a live (real-money) alert.
-        self._calibration_isotonic_fallback = _env_bool("Q15_V95_CALIBRATION_ISOTONIC_FALLBACK", False)
+        self._calibration_isotonic_fallback = _env_bool("Q15_V95_CALIBRATION_ISOTONIC_FALLBACK", True)
+        # OOS-SELF-SELECTING calibration (DEFAULT ON, safe-by-construction). Split
+        # resolved rows chronologically (train older / test newer), measure the
+        # held-out Brier of identity vs Platt vs isotonic, and apply the BEST method
+        # only if it beats identity by the floor — otherwise identity. So enabling
+        # calibration can only help or no-op out of sample, never silently ship a
+        # worse transform. This is the validated "turn calibration on" path.
+        self._calibration_oos_select = _env_bool("Q15_V95_CALIBRATION_OOS_SELECT", True)
+        self._calibration_oos_floor = _env_float("Q15_V95_CALIBRATION_OOS_FLOOR", 0.0005, 0.0, 0.5)
+        self._calibration_oos_test_fraction = _env_float("Q15_V95_CALIBRATION_OOS_TEST_FRACTION", 0.30, 0.1, 0.5)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
@@ -2154,33 +2206,113 @@ class V95Ledger:
         fit = self._calibration_fit(checkpoint, asset)
         if not fit["active"]:
             return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
-        # Apply isotonic when explicitly selected, OR (default-OFF fallback) only
-        # when Platt fell back to identity for non-convergence — turning the
-        # current live no-op into a real, monotonic calibration.
-        unconverged = fit.get("fallback") == "identity_unconverged"
-        use_isotonic = bool(fit.get("isotonic")) and (
-            self._calibration_isotonic
-            or (self._calibration_isotonic_fallback and unconverged)
-        )
-        if use_isotonic:
+        method, reason = self._select_calibration_method(fit)
+        base = {"active": True, "rows": fit["rows"], "scope": fit["scope"], "method": method, "reason": reason}
+        if method == "isotonic" and fit.get("isotonic"):
             iso = _isotonic_predict(fit["isotonic"], raw)
             if iso is not None:
-                return {
-                    "probability": _clamp(iso, 0.01, 0.99), "active": True,
-                    "reason": "isotonic_unconverged_fallback" if (unconverged and not self._calibration_isotonic)
-                    else "isotonic_current_version",
-                    "rows": fit["rows"], "scope": fit["scope"], "method": "isotonic",
-                }
-        calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
-        result = {
-            "probability": calibrated, "active": True,
-            "reason": fit.get("reason", "platt_current_version"),
-            "rows": fit["rows"], "intercept": fit["intercept"], "slope": fit["slope"],
-            "scope": fit["scope"],
-        }
+                return {**base, "probability": _clamp(iso, 0.01, 0.99)}
+        if method == "platt":
+            calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
+            result = {**base, "probability": calibrated,
+                      "intercept": fit["intercept"], "slope": fit["slope"]}
+            if fit.get("fallback"):
+                result["fallback"] = fit["fallback"]
+            return result
+        # identity (incl. OOS-no-gain / unconverged): raw passes through unchanged.
+        # The APPLIED transform is identity, hence intercept 0 / slope 1.
+        result = {**base, "probability": raw, "intercept": 0.0, "slope": 1.0}
         if fit.get("fallback"):
             result["fallback"] = fit["fallback"]
         return result
+
+    def _select_calibration_method(self, fit: Mapping[str, Any]) -> tuple[str, str]:
+        """Decide which transform to APPLY for this fit. Priority:
+        1. explicit isotonic override (Q15_V95_CALIBRATION_ISOTONIC);
+        2. OOS self-selection (default): apply the held-out best (Platt/isotonic)
+           only if it beats identity by the floor — else identity;
+        3. legacy fallback: isotonic-on-unconverged, else Platt.
+        Returns (method, reason)."""
+        unconverged = fit.get("fallback") == "identity_unconverged"
+        if self._calibration_isotonic and fit.get("isotonic"):
+            return "isotonic", "isotonic_forced"
+        oos = fit.get("oos") or {}
+        if self._calibration_oos_select and oos.get("available"):
+            if oos.get("improves") and oos.get("best_method") in {"platt", "isotonic"}:
+                return oos["best_method"], f"oos_selected_{oos['best_method']}"
+            return "identity", "oos_no_gain_identity"
+        if self._calibration_isotonic_fallback and unconverged and fit.get("isotonic"):
+            return "isotonic", "isotonic_unconverged_fallback"
+        if unconverged:
+            return "identity", "platt_unconverged_identity"
+        return "platt", "platt_current_version"
+
+    def _calibration_oos(self, rows_chrono: Sequence[sqlite3.Row]) -> dict[str, Any]:
+        """Chronological out-of-sample Brier of identity vs Platt vs isotonic.
+
+        Fit each method on the OLDER train fold, score the NEWER test fold. Picks
+        the lowest test Brier and flags whether it beats identity by the floor, so
+        calibrate() can apply a transform only when it is OOS-proven to help.
+        ``rows_chrono`` is oldest-first."""
+        n = len(rows_chrono)
+        out: dict[str, Any] = {"available": False, "n": n}
+        test_n = int(round(self._calibration_oos_test_fraction * n))
+        split = n - test_n
+        if split < self.minimum_calibration_rows or test_n < 20:
+            out["reason"] = "insufficient_for_oos"
+            return out
+        train, test = rows_chrono[:split], rows_chrono[split:]
+        xy_train = [(_clamp(_logit(float(r["raw_yes_probability"])), -4.0, 4.0),
+                     1.0 if r["official_result"] == "YES" else 0.0) for r in train]
+        i_tr, s_tr, conv_tr, _ = _fit_platt(
+            xy_train, self._calibration_max_iters, self._calibration_slope_min,
+            self._calibration_slope_max, self._calibration_intercept_cap)
+        iso_tr = _isotonic_fit([(_clamp(float(r["raw_yes_probability"]), 0.01, 0.99),
+                                 1.0 if r["official_result"] == "YES" else 0.0) for r in train])
+        ident_pairs, platt_pairs, iso_pairs = [], [], []
+        for r in test:
+            raw = _clamp(float(r["raw_yes_probability"]), 0.01, 0.99)
+            y = 1.0 if r["official_result"] == "YES" else 0.0
+            ident_pairs.append((raw, y))
+            platt_pairs.append((_clamp(_sigmoid(i_tr + s_tr * _clamp(_logit(raw), -4.0, 4.0)), 0.01, 0.99), y))
+            iso = _isotonic_predict(iso_tr, raw)
+            iso_pairs.append((_clamp(iso if iso is not None else raw, 0.01, 0.99), y))
+        briers = {"identity": _brier(ident_pairs), "platt": _brier(platt_pairs),
+                  "isotonic": _brier(iso_pairs)}
+        identity_brier = briers["identity"]
+        best_method = min(briers, key=lambda k: briers[k])
+        best_brier = briers[best_method]
+        improves = bool(best_method != "identity" and identity_brier is not None
+                        and best_brier is not None
+                        and (identity_brier - best_brier) >= self._calibration_oos_floor)
+        return {
+            "available": True, "n_train": split, "n_test": test_n,
+            "identity_brier": round(identity_brier, 6) if identity_brier is not None else None,
+            "platt_brier": round(briers["platt"], 6) if briers["platt"] is not None else None,
+            "isotonic_brier": round(briers["isotonic"], 6) if briers["isotonic"] is not None else None,
+            "best_method": best_method, "best_brier": round(best_brier, 6) if best_brier is not None else None,
+            "improves": improves, "platt_converged": conv_tr,
+        }
+
+    def calibration_experiment(self, checkpoint: str | None = None) -> dict[str, Any]:
+        """A/B the calibration methods out of sample, per checkpoint — the numbers
+        the next review reads to confirm isotonic/Platt vs identity Brier. Read-only."""
+        out: dict[str, Any] = {"available": bool(self._available), "by_checkpoint": {}}
+        if not self._available:
+            return {"available": False, "by_checkpoint": {}}
+        cps = [str(checkpoint).upper()] if checkpoint else ["15M", "10M", "7M"]
+        for cp in cps:
+            fit = self._calibration_fit(cp, None)
+            oos = (fit.get("oos") or {}) if fit.get("active") else {}
+            method, reason = (self._select_calibration_method(fit) if fit.get("active")
+                              else ("identity", fit.get("reason", "inactive")))
+            out["by_checkpoint"][cp] = {
+                "rows": fit.get("rows", 0), "applied_method": method, "reason": reason,
+                "platt_converged": fit.get("converged"),
+                "platt_slope": round(fit.get("fitted_slope"), 4) if fit.get("fitted_slope") is not None else None,
+                "oos": oos,
+            }
+        return out
 
     def _calibration_fit(self, checkpoint: str, asset: str | None) -> dict[str, Any]:
         """Cached Platt fit for (checkpoint, asset). Pure function of the resolved
@@ -2210,56 +2342,25 @@ class V95Ledger:
         if len(rows) < self.minimum_calibration_rows:
             fit: dict[str, Any] = {"active": False, "reason": "insufficient_resolved_rows", "rows": len(rows)}
         else:
-            # Penalized logistic regression y ~ intercept + slope*logit(raw_p).
-            intercept, slope = 0.0, 1.0
-            converged = False
-            iterations = 0
-            for _ in range(self._calibration_max_iters):
-                iterations += 1
-                g0 = -0.20 * intercept
-                g1 = -0.20 * (slope - 1.0)
-                h00 = 0.20
-                h01 = 0.0
-                h11 = 0.20
-                for row in rows:
-                    x = _clamp(_logit(float(row["raw_yes_probability"])), -4.0, 4.0)
-                    y = 1.0 if row["official_result"] == "YES" else 0.0
-                    p = _sigmoid(intercept + slope * x)
-                    residual = y - p
-                    variance = max(1e-6, p * (1.0 - p))
-                    g0 += residual
-                    g1 += residual * x
-                    h00 += variance
-                    h01 += variance * x
-                    h11 += variance * x * x
-                determinant = h00 * h11 - h01 * h01
-                if determinant <= 1e-9:
-                    break
-                d0 = (g0 * h11 - g1 * h01) / determinant
-                d1 = (g1 * h00 - g0 * h01) / determinant
-                intercept = _clamp(intercept + d0, -0.75, 0.75)
-                slope = _clamp(slope + d1, 0.50, 1.50)
-                if abs(d0) + abs(d1) < 1e-6:
-                    converged = True
-                    break
+            # Penalised logistic regression on ALL resolved rows, via the shared
+            # solver (wider clamps + clamp-aware convergence).
+            xy_all = [(_clamp(_logit(float(r["raw_yes_probability"])), -4.0, 4.0),
+                       1.0 if r["official_result"] == "YES" else 0.0) for r in rows]
+            intercept, slope, converged, iterations = _fit_platt(
+                xy_all, self._calibration_max_iters, self._calibration_slope_min,
+                self._calibration_slope_max, self._calibration_intercept_cap)
             reason = "platt_current_version"
             fallback = None
-            if not converged:
-                # Rare given regularization; surface it instead of silently
-                # shipping an unconverged calibrator.
+            if not converged and self.calibration_require_converged:
                 logger.warning(
                     "Platt calibration did not converge for checkpoint=%s scope=%s rows=%d "
                     "after %d iterations (intercept=%.4f slope=%.4f)",
                     checkpoint, scope, len(rows), iterations, intercept, slope,
                 )
-                if self.calibration_require_converged:
-                    # Don't transform live probabilities with an untrusted fit:
-                    # revert the APPLIED transform to identity (raw passes through),
-                    # but keep the attempted coefficients for diagnostics.
-                    fallback = "identity_unconverged"
-                    reason = "platt_unconverged_identity"
-                    with self._lock:
-                        self._calibration_unconverged_fallbacks += 1
+                fallback = "identity_unconverged"
+                reason = "platt_unconverged_identity"
+                with self._lock:
+                    self._calibration_unconverged_fallbacks += 1
             fit = {"active": True, "reason": reason, "rows": len(rows),
                    "intercept": 0.0 if fallback else intercept,
                    "slope": 1.0 if fallback else slope, "scope": scope,
@@ -2267,16 +2368,16 @@ class V95Ledger:
                    "fitted_intercept": intercept, "fitted_slope": slope}
             if fallback:
                 fit["fallback"] = fallback
-            # Isotonic curve over the SAME resolved rows. Computed only when the
-            # option is on; robust even where Platt fell back to identity. Stored
-            # on the (in-memory cached) fit and applied by calibrate() — gated so
-            # the default live path is byte-for-byte the Platt transform.
-            if self._calibration_isotonic or self._calibration_isotonic_fallback:
-                fit["isotonic"] = _isotonic_fit([
-                    (_clamp(float(r["raw_yes_probability"]), 0.01, 0.99),
-                     1.0 if r["official_result"] == "YES" else 0.0)
-                    for r in rows
-                ])
+            # Isotonic curve over the SAME resolved rows (robust, no convergence).
+            fit["isotonic"] = _isotonic_fit([
+                (_clamp(float(r["raw_yes_probability"]), 0.01, 0.99),
+                 1.0 if r["official_result"] == "YES" else 0.0)
+                for r in rows
+            ])
+            # Out-of-sample self-validation: fit on the OLDER train fold, score the
+            # NEWER test fold's Brier for identity / Platt / isotonic. The rows came
+            # back resolved_at DESC (newest first) — reverse to chronological.
+            fit["oos"] = self._calibration_oos(list(reversed(rows)))
         if self._cache_enabled:
             with self._lock:
                 # Only cache if no resolution landed during the (unlocked) solve.

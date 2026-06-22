@@ -9,8 +9,37 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **986 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **994 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## ✅ Shipped THIS session (branch `claude/trusting-bardeen-yufks0`) — champion-review fixes (calibration + edge levers)
+**Suite 994 passed, 4 skipped (+8).** Frozen champion WEIGHTS untouched; these act on
+the post-model calibration layer + entry-gate knobs. Deploy-pending on `main`.
+- **OOS self-selecting calibration (DEFAULT ON, safe-by-construction)** — `ledger_v95`:
+  `_calibration_fit` now splits resolved rows chronologically (older train / newer test) and
+  `calibrate()` applies the held-out-best of {identity, Platt, isotonic} ONLY if it beats
+  identity by `Q15_V95_CALIBRATION_OOS_FLOOR` — else identity. So "turning calibration on"
+  can only help or no-op OOS, never silently ship a worse transform. This is the validated
+  answer to the under-confidence (predicts 0.78 / wins 0.95) with NO change to the frozen model.
+- **Platt convergence fix** — the slope ceiling was 1.50 (an under-confident model needs ~2 to
+  sharpen), so Newton pinned at the clamp and looped → "unconverged" → identity forever. Now:
+  wider clamp (`SLOPE_MAX=3.0`), higher budget (`MAX_ITERS=50`), and convergence judged on the
+  APPLIED (post-clamp) step so a constrained optimum counts as converged. Verified: under-confident
+  data now reaches slope ~2.2 and maps 0.70 → ~0.87.
+- **calibration_experiment()** — per-checkpoint OOS Brier of identity vs Platt vs isotonic +
+  the applied method; the numbers the next review reads to confirm the lift with real data.
+- **Adverse-selection cost adder** (`Q15_V95_EDGE_ADVERSE_SELECTION_CENTS`, default 0.0): added
+  to the edge's total_costs; the shadow-econ A/B measures the ~1c gap. Flip on once it proves out.
+- **Volatility-aware edge bar** (`Q15_V95_EDGE_VOLATILITY_SCALING`, default OFF): required_edge
+  *= 1 + k*(2c-1)^2, so extreme-conviction favourites need a thicker cushion.
+- **15M min-prob default raised 0.58 → 0.60** (15M is a coin flip; 0.58 admitted near-random picks).
+- **Refactors:** shared `_fit_platt` helper + `_brier`; `_select_calibration_method`. Helpers/flags:
+  `_calibration_oos`, `Q15_V95_CALIBRATION_OOS_SELECT/FLOOR/TEST_FRACTION`,
+  `CALIBRATION_SLOPE_MIN/MAX`, `CALIBRATION_INTERCEPT_CAP`; `CALIBRATION_ISOTONIC_FALLBACK`
+  default flipped OFF→ON. Legacy calibration mechanics-tests opt into the legacy path explicitly.
+- **Files:** `q15_upgrade/ledger_v95.py`, `q15_upgrade/checkpoint_v95.py`, `.env.example`,
+  `tests/test_champion_fixes.py` (new), `tests/test_q15_ledger_review_fixes.py`,
+  `tests/test_q15_v95_ledger_cache.py`, `tests/test_review_fixes_v5.py`.
 
 ## ✅ Shipped THIS session (branch `claude/trusting-bardeen-yufks0`) — flip-decision engine, net-edge gate, rank-by-skill
 **Suite 986 passed, 4 skipped (+16).** Read-only wrt real exchanges; frozen-champion
