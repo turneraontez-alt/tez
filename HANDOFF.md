@@ -9,8 +9,19 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **949 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **957 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## ✅ Shipped THIS session (branch `claude/optimistic-wright-zv15es`) — CLAUDE.md cleanup
+**Docs-only.** Tightened the agent guide; no code/test change, suite **957 passed,
+4 skipped**. Deploy-pending on `main`.
+- Dropped the stale "31 test files" count (live suite is ~957) — removed the brittle
+  number rather than re-hardcode one that rots.
+- Collapsed the READ-FIRST blockquote to a pointer; the SessionStart hook already
+  restates the `ENGINEERING_GUIDELINES` rule list at the start of every session.
+- Tightened the `notifications/` note and the Merge-policy wording, preserving every
+  rule intact (data-safety guard, STOP rule, HANDOFF update, 4-step procedure).
+- Invariants section untouched. **Files:** `CLAUDE.md` only.
 
 ## ✅ Shipped THIS session — Implemented the updated-review fixes (critical → polish)
 **On branch `claude/updated-review-ecyp4x`.** Worked the latest auditor review's
