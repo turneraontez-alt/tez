@@ -164,11 +164,8 @@ class UltoimRunner:
                 "confidence_grade": pick.get("confidence_grade"),
                 "data_quality": pick.get("data_quality"),
                 "evidence_quality": pick.get("evidence_quality"),
-                "model_agreement": ranker.model_agreement([
-                    pick.get("calibrated_yes_probability"),
-                    pick.get("challenger_yes_probability"),
-                    pick.get("baseline_yes_probability"),
-                ]),
+                "model_agreement": ranker.model_agreement(
+                    ranker.agreement_probs(pick, self.config)),
                 "manipulation_suspected": 1 if pick.get("manipulation_suspected") else 0,
                 "flip_probability": pick.get("flip_probability"),
                 "flip_decision": pick.get("flip_decision"),

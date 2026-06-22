@@ -9,8 +9,8 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1066 passed** (13 skipped this env; ~4 in a
-complete env — skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
+Tests: `python3 -m pytest tests/ -q` → **1133 passed** (4 skipped in a complete env;
+skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
 - **Ship to main with one command:** `scripts/ship.sh "summary"` — fetches origin/main,
@@ -24,6 +24,27 @@ complete env — skip count rises when `flask`/`websockets`/cffi/crypto aren't i
   (the Relay syncs files but the app doesn't hot-reload). `running_commit`/`matches_checkout`
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
+
+## ✅ Shipped THIS session — Ultoim grade fix: "always C" → real A/B/C spread (branch `claude/magical-cannon-6dkv8s`)
+**Suite 1133 passed / 4 skipped** (+5 ultoim tests). Diagnosed via the live snapshot
+(`learning-snapshots` + pre-reset `tez_review_dump.json`): the Ultoim multi-factor grade was
+stuck at C on **every** pick because `quality_score` multiplied a base term (already small —
+`(side_prob-0.5)/0.49`) by ~5 sub-1.0 penalty factors, compounding every score under the B
+line. Real proof: all 12 stored ultoim picks were C (quality_score 0.015–0.471; the B cutoff
+was 0.48, so the best pick ever missed B by 0.009).
+- **Fix (all in `q15_upgrade/ultoim/{ranker,config,runner}.py`):** `quality_score` is now a
+  **weighted average** of positive signals (confidence 0.50 / data 0.15 / evidence 0.15 /
+  agreement 0.20) — not a product — so a strong setup lands high. Confidence uses the
+  **calibrated** chosen-side probability (champion is under-confident). The unvalidated,
+  miscalibrated **challenger is excluded** from the agreement term by default
+  (`Q15_ULTOIM_GRADE_INCLUDES_CHALLENGER=false`). Validated vetoes (YES-quality, flip, manip)
+  stay as bounded multiplicative penalties. `grade_b_min` recalibrated 0.48 → **0.50** to match
+  the new ~0.35–0.70 range. All knobs env-tunable; manip penalty promoted to config.
+- **Re-grading the 12 real picks with the shipped defaults: 3 A / 5 B / 4 C** (was 12 C).
+- **Tests:** `tests/test_ultoim_build.py` +5 (strong→A regression, weak→C, monotonic in
+  calibrated confidence, challenger-excluded-by-default, recalibrated default cutoff). Existing
+  penalty/ranking tests unchanged and green. `.env.example` documents the new vars.
+- Research-only + read-only; the champion and live alerts are untouched.
 
 ## ✅ Shipped THIS session — Interval-timing research collector (default-OFF, prospective)
 **Suite 1096 passed / 13 skipped** (+14 tests). New package `q15_upgrade/interval_research/`

@@ -1,7 +1,7 @@
 {
-  "commit": "d041530",
-  "branch": "claude/optimistic-cray-fnnu3d",
-  "committed_at": "2026-06-22T18:04:08Z",
-  "summary": "Challenger v6 research + Entry Economics v1 (two read-only workstreams)",
-  "tests": "1075 passed, 13 skipped in 35.50s"
+  "commit": "2bb1460",
+  "branch": "claude/magical-cannon-6dkv8s",
+  "committed_at": "2026-06-22T22:10:36Z",
+  "summary": "ultoim: weighted-average grade fix (always-C -> real A/B/C spread)",
+  "tests": "1133 passed, 4 skipped in 41.52s"
 }
