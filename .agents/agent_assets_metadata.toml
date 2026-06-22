@@ -12,3 +12,9 @@ id = "uc6I4FR48jdaa8pdSSlRv"
 uri = "file://v95_ledger_snapshot.json"
 type = "unspecified"
 title = "v95_ledger_snapshot.json — decision-stats (fresh)"
+
+[[outputs]]
+id = "DnpMRA17kx-BtnP5pGZJz"
+uri = "file://tez_review_dump.json"
+type = "unspecified"
+title = "tez_review_dump.json — full ledger + challenger review dump"
