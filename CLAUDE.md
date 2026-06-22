@@ -3,6 +3,11 @@
 > **READ FIRST:** [`ENGINEERING_GUIDELINES.md`](ENGINEERING_GUIDELINES.md) is the
 > standing engineering standard for this repo — read it before any code task. The
 > SessionStart hook restates it and its rule list at the start of every session.
+>
+> **Operating standard (applies to every model):** work at maximum effort and
+> rigor on every task, and use parallel subagents for substantive multi-step or
+> fan-out work. See "Operating standard — effort and orchestration" at the top of
+> the guidelines.
 
 Read-only paper-trading monitor for Kalshi 15-minute crypto binaries
 (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE). It predicts YES/NO at the 15m / 10m / 7m
