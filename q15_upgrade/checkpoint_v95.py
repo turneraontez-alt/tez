@@ -2543,6 +2543,31 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         ticker=canonical.ticker, checkpoint=checkpoint,
                         current_side=str(analysis["prediction_side"]),
                     )
+                    # Read-only Polymarket up/down shadow (default-OFF; never
+                    # affects production). Reuses the champion's frozen snapshot:
+                    # OUR P(up) is the same structural model re-thresholded at the
+                    # Polymarket window-open price. observe() only enqueues — the
+                    # HTTP/DB work happens on the shadow's worker, not this loop.
+                    try:
+                        from q15_upgrade.polymarket.runner import get_runner as _poly_runner
+                        _pr = _poly_runner()
+                        if _pr is not None:
+                            _vol = analysis.get("volatility") or {}
+                            _struct = analysis.get("structural") or {}
+                            _secs = canonical.seconds_remaining
+                            _psd = _struct.get("projected_signed_drift")
+                            _orient = 1.0 if canonical.yes_is_higher else -1.0
+                            _drift = ((_orient * float(_psd) / _secs)
+                                      if (_psd is not None and _secs) else 0.0)
+                            _pr.observe(
+                                asset=asset, checkpoint=checkpoint, spot=canonical.spot,
+                                sigma_per_sqrt_second=_vol.get("sigma_per_sqrt_second"),
+                                drift_per_second=_drift, seconds_remaining=_secs,
+                                close_time=canonical.settlement_time,
+                                snapshot_id=snapshot_id, now=now,
+                            )
+                    except Exception:
+                        logger.debug("polymarket shadow observe skipped", exc_info=True)
                     # Flip-risk overlay: learned threshold, flip-probability, alert
                     # state machine + dashboard, and confirmed-flip detection. Sends
                     # are gated (dormant until a learned threshold exists); CONFIRMED
