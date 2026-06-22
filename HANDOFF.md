@@ -12,6 +12,23 @@ may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 Tests: `python3 -m pytest tests/ -q` → **957 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
+## ✅ Shipped THIS session (branch `claude/modest-curie-9eex8c`) — default effort level → xhigh
+**Harness config only — no app/test change; suite unchanged at 957 passed, 4 skipped.**
+Deploy-pending on `main`. Owner asked to set the session to `ultracode` as a persistent
+default. Per the Claude Code docs `ultracode` is **session-only by design** and explicitly
+excluded from saved config (not part of the `effortLevel` setting, the `--effort` flag, or
+`CLAUDE_CODE_EFFORT_LEVEL`) — so it cannot be persisted, and on the web/cloud env the
+`/effort` command that would set it per-session is unavailable. Closest durable option:
+- Added top-level `"effortLevel": "xhigh"` to `.claude/settings.json` (the highest
+  *persistable* effort). Gives ultracode's deep reasoning depth but NOT its automatic
+  workflow orchestration (that piece has no persistent setting).
+- **Caveats:** web honoring of `effortLevel` from `settings.json` isn't doc-confirmed (only
+  *hooks* are documented to carry into cloud sessions); the guaranteed-on-web alternative is
+  the `CLAUDE_CODE_EFFORT_LEVEL=xhigh` env var in the claude.ai/code environment config. The
+  setting applies repo-wide (higher cost/latency per turn for anyone using this repo).
+- No test added: this changes Claude Code harness behavior, not the prediction app's behavior
+  (the suite tests the app). **Files:** `.claude/settings.json` only.
+
 ## ✅ Shipped THIS session (branch `claude/optimistic-wright-zv15es`) — CLAUDE.md cleanup
 **Docs-only.** Tightened the agent guide; no code/test change, suite **957 passed,
 4 skipped**. Deploy-pending on `main`.
