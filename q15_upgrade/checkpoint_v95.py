@@ -1078,9 +1078,18 @@ def analyse_v95(
     # does not change live entry behavior; both stay overridable via env.
     _checkpoint = canonical.checkpoint if canonical.checkpoint in ("10M", "15M", "7M") else "10M"
     _required_edge_default = {"10M": 6.0, "7M": 6.0, "15M": 4.0}.get(_checkpoint, 4.0)
-    _min_prob_default = {"10M": 0.60, "7M": 0.60, "15M": 0.58}.get(_checkpoint, 0.58)
+    # 15M min-prob raised 0.58 -> 0.60 (the live record shows 15M is a coin flip,
+    # so a 0.58 gate admits near-random picks). Overridable via env.
+    _min_prob_default = {"10M": 0.60, "7M": 0.60, "15M": 0.60}.get(_checkpoint, 0.60)
     required_edge = _env_float(f"Q15_V95_{_checkpoint}_REQUIRED_EDGE_CENTS", _required_edge_default, 0.0, 25.0)
     minimum_probability = _env_float(f"Q15_V95_{_checkpoint}_MIN_PROBABILITY", _min_prob_default, 0.50, 0.90)
+    # Volatility-aware edge bar (DEFAULT OFF). Scale the required edge up for
+    # extreme-conviction (favourite) picks — those near 0/1 are hit hardest by
+    # slippage/adverse selection, so they need a thicker cushion. At conservative
+    # = 0.5 the factor is 1.0 (no change). required_edge *= 1 + k*(2c-1)^2.
+    if _env_bool("Q15_V95_EDGE_VOLATILITY_SCALING", False):
+        _vol_k = _env_float("Q15_V95_EDGE_VOLATILITY_K", 1.0, 0.0, 5.0)
+        required_edge = required_edge * (1.0 + _vol_k * (2.0 * conservative - 1.0) ** 2)
     minimum_quality = _env_float("Q15_V95_MIN_DATA_QUALITY", 0.55, 0.20, 0.95)
     max_spread = _env_float("Q15_V95_MAX_SPREAD_CENTS", 12.0, 1.0, 50.0)
     min_depth = _env_float("Q15_V95_MIN_DEPTH_AT_ASK", 3.0, 0.0, 10000.0)
@@ -1092,6 +1101,11 @@ def analyse_v95(
     unknown_depth_factor = _env_float("Q15_V95_UNKNOWN_DEPTH_FACTOR", 0.5, 0.0, 1.0)
     min_seconds = _env_float("Q15_V95_MIN_SECONDS_REMAINING", 20.0, 0.0, 300.0)
     total_costs = float(costs.get("total_cents") if "total_cents" in costs else costs.get("total_cost_cents") or 0.0)
+    # Adverse-selection adder (DEFAULT 0.0 — no live change). The base cost model
+    # assumes a fill at ask with half-spread slippage and omits adverse selection;
+    # the shadow-economics A/B measures the ~1c gap. Set this once that delta
+    # proves out, to stop the edge over-admitting thin-margin favourites.
+    total_costs += _env_float("Q15_V95_EDGE_ADVERSE_SELECTION_CENTS", 0.0, 0.0, 25.0)
     # Canonical cent precision on the money path: net_edge is a signed delta
     # (legitimately negative, not range-bounded); ideal_entry is an absolute
     # price that must round-trip into Kalshi's [0, 100]¢ range. Both go through
