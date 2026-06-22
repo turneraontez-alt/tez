@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **1061 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -25,7 +25,43 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Ultoim Build: separate read-only research reporting system
+## ✅ Shipped THIS session — Fix Shadow-vs-Your-System native grading (the "5:30 DOGE" bug)
+**Suite 1061 passed / 4 skipped** in a complete env (+9 tests:
+`tests/test_challenger_native_side_grading.py`). Deploy-pending on `main` + a Repl
+Stop ▸ Run; **then run the one-time backfill** (below) on the Repl.
+- **The bug (owner-reported):** the *Challenger Shadow vs Your System* report showed
+  a settled prediction (the 5:30 DOGE) as a CORRECT guess when production had it
+  WRONG. Root cause: the report re-derived the native "Your System" side from the
+  RAW champion prob (`control_prob_yes = raw_yes_probability`), but production's sent
+  `predicted_side` comes from the CALIBRATED prob. Raw vs calibrated land on opposite
+  sides of 0.5 in ~34% of rows → ~38% of native picks mis-graded; "Your System"
+  read **49%** vs its true **~69%** (made the challenger look competitive).
+- **Audited EVERY learning system** (4 parallel deep audits, verified against the real
+  `learning-snapshots` ledgers). CLEAN: production `ledger_v95` (1720/1720 grade on
+  the authoritative `predicted_side`/`correct`), Postgres `performance.py`/`db.py`,
+  `window_focus` grading, `shadow_signals`, `self_review`, `accuracy_report`,
+  `setup_miner`. The inaccuracy was confined to the challenger comparison + two
+  cosmetic/offline labels.
+- **The fix (challenger only; production untouched):** capture production's ACTUAL
+  decision on each shadow row — new columns `native_predicted_side` (calibrated sent
+  side, the ✓/✗ source of truth), `native_prob_yes` (calibrated prob), `native_rank`
+  (production's cross-asset rank). Grade/rank the native side from them in every
+  method (`_rank`/`_ranking_models`/`ranked_comparison`/`ranked_by_checkpoint`/
+  `latest_window_cases`/`best_filled_window_cases`/`latest_window_end_results`/
+  `comparison`/`scoreboard` control accuracy). Legacy rows fall back to the old raw
+  behaviour. Challenger side unchanged (it already grades on its own calibrated prob).
+  Verified on real data: native grade now equals production in **150/150** matched
+  rows (0 mismatches), native accuracy 49%→69%, control accuracy 49%→68%.
+- **Also fixed:** `extract_bridge` OOS champion prob now prefers CALIBRATED (offline
+  promotion eval showed champion ~50% vs true ~68%); `shadow_economics` control arm
+  relabelled **"Price gate"** (was "Live" — it only replays the edge threshold, not
+  production's full gate, so it overstated live entries 27 vs 4).
+- **⚠️ ONE-TIME BACKFILL (run on the Repl after deploy):**
+  `python3 -m tools.backfill_shadow_native_side` (add `--dry-run` first). It stamps
+  production's decision onto the 1171 pre-fix shadow rows so the all-time records
+  re-grade correctly. Read-only wrt production; idempotent.
+
+## ✅ Shipped (prior session) — Ultoim Build: separate read-only research reporting system
 **Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
 `q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,
 default-OFF hooks (`checkpoint_v95.run_cycle` observe + `app.py` reconcile).

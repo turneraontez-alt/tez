@@ -95,7 +95,10 @@ class CompareTest(unittest.TestCase):
         cmp = se.compare(self._rows(), se.EconConfig())
         text = "\n".join(se.build_report_lines(cmp))
         self.assertIn("ENTRY-ECONOMICS SHADOW", text)
-        self.assertIn("Live", text)
+        # The control arm is the edge-threshold baseline, labelled honestly as
+        # "Price gate" (NOT "Live": production applies further gates before entry).
+        self.assertIn("Price gate", text)
+        self.assertNotIn("Live", text)
         self.assertIn("Shadow", text)
         self.assertIn("read-only", text.lower())
 

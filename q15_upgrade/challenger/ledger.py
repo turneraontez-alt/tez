@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     settlement_source TEXT,
     yes_bid REAL, yes_ask REAL, no_bid REAL, no_ask REAL,
     control_prob_yes REAL,
+    native_predicted_side TEXT,
+    native_prob_yes REAL,
+    native_rank INTEGER,
     challenger_raw_prob_yes REAL,
     challenger_prob_yes REAL,
     confidence REAL,
@@ -128,6 +131,17 @@ class ShadowLedger:
             # so a pick is credited SENT only when its report actually reached
             # Telegram, and DELIVERY_FAILED only when the outbox exhausts retries.
             ("native_delivery_key", "ADD COLUMN native_delivery_key TEXT"),
+            # Production ("Your System") DECISION captured at observe time so the
+            # comparison grades/ranks the native side by what production ACTUALLY
+            # predicted — its sent ``predicted_side`` (from the CALIBRATED prob),
+            # its calibrated probability, and its cross-asset ``rank`` — NOT the raw
+            # champion probability stored in ``control_prob_yes``. Raw and calibrated
+            # land on opposite sides of 0.5 in ~34% of rows, so deriving the side
+            # from the raw prob mis-graded ~38% of native picks (a real loss showed
+            # as ✓). Nullable; legacy rows fall back to ``control_prob_yes >= 0.5``.
+            ("native_predicted_side", "ADD COLUMN native_predicted_side TEXT"),
+            ("native_prob_yes", "ADD COLUMN native_prob_yes REAL"),
+            ("native_rank", "ADD COLUMN native_rank INTEGER"),
         ):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE shadow_predictions {ddl}")
@@ -301,6 +315,9 @@ class ShadowLedger:
         contract: str | None,
         checkpoint: str | None,
         control_prob_yes: float | None,
+        native_predicted_side: str | None = None,
+        native_prob_yes: float | None = None,
+        native_rank: int | None = None,
         settlement_source: str | None = None,
         created_at: float | None = None,
         close_time: float | None = None,
@@ -311,6 +328,20 @@ class ShadowLedger:
         dec = prediction.decision
         total_cost = dec.costs.total_cents if (dec and dec.costs) else None
         fv = prediction.feature_vector
+        # Normalise the captured production decision (defensive: only YES/NO sides,
+        # numeric prob/rank are stored; anything else is dropped to NULL so a bad
+        # value never silently mis-grades).
+        nps = str(native_predicted_side).upper() if native_predicted_side is not None else None
+        if nps not in ("YES", "NO"):
+            nps = None
+        try:
+            npy = float(native_prob_yes) if native_prob_yes is not None else None
+        except (TypeError, ValueError):
+            npy = None
+        try:
+            nrk = int(native_rank) if native_rank is not None else None
+        except (TypeError, ValueError):
+            nrk = None
         row = (
             created_at if created_at is not None else time.time(),
             model_version, asset, contract, checkpoint,
@@ -339,6 +370,7 @@ class ShadowLedger:
             json.dumps(lineage or {}),
             None, None, None,
             snapshot_id,
+            nps, npy, nrk,
         )
         try:
             cur = self._conn.execute(
@@ -349,8 +381,9 @@ class ShadowLedger:
                  edge_vs_market, net_edge_cents, recommendation, side, executable_ask_cents,
                  total_cost_cents, hypothetical_size_fraction, top_factors_json, warnings_json,
                  feature_json, ood_score, ood_reasons_json, lineage_json,
-                 official_result, resolved_at, hypothetical_pnl_cents, snapshot_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 official_result, resolved_at, hypothetical_pnl_cents, snapshot_id,
+                 native_predicted_side, native_prob_yes, native_rank)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             self._conn.commit()
@@ -411,7 +444,8 @@ class ShadowLedger:
 
     def scoreboard(self, model_version: str = "challenger-v1") -> dict[str, Any]:
         rows = list(self._conn.execute(
-            "SELECT challenger_prob_yes, control_prob_yes, official_result, recommendation, "
+            "SELECT challenger_prob_yes, control_prob_yes, native_prob_yes, "
+            "official_result, recommendation, "
             "hypothetical_pnl_cents FROM shadow_predictions "
             "WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
@@ -423,8 +457,15 @@ class ShadowLedger:
             return out
         y = [1 if str(r["official_result"]).upper() == "YES" else 0 for r in rows]
         ch = [clamp(float(r["challenger_prob_yes"]), 1e-6, 1 - 1e-6) for r in rows]
-        ct = [clamp(float(r["control_prob_yes"]), 1e-6, 1 - 1e-6) if r["control_prob_yes"] is not None else None
-              for r in rows]
+        # Control = the champion's FINAL (calibrated) probability — the value the
+        # system actually produces — so its accuracy/Brier match production and the
+        # challenger-vs-champion comparison is calibrated-vs-calibrated (fair).
+        # Legacy rows lacking the captured calibrated prob fall back to the raw
+        # ``control_prob_yes``.
+        def _control_prob(r):
+            v = r["native_prob_yes"] if r["native_prob_yes"] is not None else r["control_prob_yes"]
+            return clamp(float(v), 1e-6, 1 - 1e-6) if v is not None else None
+        ct = [_control_prob(r) for r in rows]
 
         out["challenger"] = _prob_metrics(ch, y)
         if all(c is not None for c in ct):
@@ -451,7 +492,9 @@ class ShadowLedger:
         at one checkpoint; its members are the per-asset predictions in it."""
         rows = list(self._conn.execute(
             "SELECT checkpoint, close_time, created_at, asset, challenger_prob_yes, "
-            "control_prob_yes, official_result, native_sent FROM shadow_predictions "
+            "control_prob_yes, native_predicted_side, native_rank, "
+            "COALESCE(native_prob_yes, control_prob_yes) AS native_rank_prob, "
+            "official_result, native_sent FROM shadow_predictions "
             "WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
         ))
@@ -469,31 +512,69 @@ class ShadowLedger:
         return cases
 
     @staticmethod
-    def _rank(rows, prob_key, sent_only: bool = False):
-        """Rank a case's predictions by confidence (decisiveness = |p-0.5|), desc.
+    def _explicit_side(stored_side, fallback_prob) -> str | None:
+        """The authoritative YES/NO side: the model's STORED decided side when it
+        is a valid YES/NO, else derived from ``fallback_prob >= 0.5`` (legacy rows
+        that predate decision capture). None only when neither is usable.
 
-        Decisiveness is used for BOTH models so the ranking is comparable. With
-        ``sent_only`` (used for the native "Your System" side), only predictions
-        that were actually delivered before close (``native_sent``) are eligible —
-        unsent rows stay background and never enter the visible record. Each
-        returned entry: (asset, side, correct)."""
+        This is the fix for the mis-grade: the native champion's sent side comes
+        from its CALIBRATED probability, so re-thresholding the raw probability it
+        was stored with flipped the call (and the ✓/✗) on ~38% of rows."""
+        if stored_side is not None:
+            s = str(stored_side).upper()
+            if s in ("YES", "NO"):
+                return s
+        if fallback_prob is not None:
+            return "YES" if float(fallback_prob) >= 0.5 else "NO"
+        return None
+
+    @staticmethod
+    def _rank(rows, prob_key, sent_only: bool = False,
+              side_key: str | None = None, rank_key: str | None = None):
+        """Rank a case's predictions by confidence and grade each (asset, side, correct).
+
+        Confidence ORDER: by ``rank_key`` (the model's own cross-asset rank, lower =
+        more confident) when present, else by decisiveness ``|prob_key - 0.5|`` desc.
+        SIDE / correctness: ``side_key`` (the model's AUTHORITATIVE decided side) when
+        present and valid, else ``prob_key >= 0.5`` (legacy fallback). For the native
+        "Your System" side this means the ✓/✗ matches the side production ACTUALLY
+        sent (from its calibrated prob), and #1/#2/#3 follow production's real rank —
+        not the raw champion probability the row was stored with. With ``sent_only``
+        only delivered-before-close (``native_sent``) rows are eligible."""
         cand = [r for r in rows if r[prob_key] is not None
                 and (not sent_only or r["native_sent"])]
-        cand.sort(key=lambda r: abs(float(r[prob_key]) - 0.5), reverse=True)
+
+        def _order(r):
+            rv = r[rank_key] if rank_key is not None else None
+            if rv is not None:
+                # Ranked rows first, by production rank ascending (#1 most confident).
+                return (0, float(rv), 0.0)
+            # Unranked: most decisive first (negate so higher decisiveness sorts earlier).
+            return (1, 0.0, -abs(float(r[prob_key]) - 0.5))
+        cand.sort(key=_order)
         out = []
         for r in cand:
-            side = "YES" if float(r[prob_key]) >= 0.5 else "NO"
+            stored = r[side_key] if side_key is not None else None
+            side = ShadowLedger._explicit_side(stored, r[prob_key])
             correct = side == str(r["official_result"]).upper()
             out.append((r["asset"], side, correct))
         return out
 
-    # Per-model ranking config: (probability column, sent-gated?). The native
-    # "Your System" side is sent-gated (visible only if delivered before close);
-    # the challenger shadow is a read-only test and counts every created row.
+    # Per-model ranking config. The native "Your System" side is graded/ranked from
+    # production's CAPTURED decision (side, calibrated prob, rank) and is sent-gated
+    # (visible only if delivered before close); the challenger shadow is graded on
+    # its own calibrated ``challenger_prob_yes`` (the value that drives its decision)
+    # and counts every created row. Keys: prob (confidence-ranking column, also the
+    # side fallback), sent (sent-gated?), side_key (authoritative side column or None),
+    # rank_key (explicit rank column or None).
     @staticmethod
-    def _ranking_models(native_sent_only: bool) -> dict[str, tuple[str, bool]]:
-        return {"challenger": ("challenger_prob_yes", False),
-                "native": ("control_prob_yes", bool(native_sent_only))}
+    def _ranking_models(native_sent_only: bool) -> dict[str, dict]:
+        return {
+            "challenger": {"prob": "challenger_prob_yes", "sent": False,
+                           "side_key": None, "rank_key": None},
+            "native": {"prob": "native_rank_prob", "sent": bool(native_sent_only),
+                       "side_key": "native_predicted_side", "rank_key": "native_rank"},
+        }
 
     def ranked_comparison(self, model_version: str = "challenger-v1", top_k: int = 3,
                           native_sent_only: bool = True) -> dict[str, Any]:
@@ -508,8 +589,9 @@ class ShadowLedger:
         models = self._ranking_models(native_sent_only)
         stats = {m: {k: {"correct": 0, "wrong": 0} for k in range(1, top_k + 1)} for m in models}
         for case_rows in cases.values():
-            for m, (pk, sent_only) in models.items():
-                ranked = self._rank(case_rows, pk, sent_only=sent_only)
+            for m, spec in models.items():
+                ranked = self._rank(case_rows, spec["prob"], sent_only=spec["sent"],
+                                    side_key=spec["side_key"], rank_key=spec["rank_key"])
                 for k in range(min(top_k, len(ranked))):
                     _, _, correct = ranked[k]
                     stats[m][k + 1]["correct" if correct else "wrong"] += 1
@@ -560,8 +642,9 @@ class ShadowLedger:
             bucket = by_cp.get(cp)
             if bucket is None:
                 continue
-            for m, (pk, sent_only) in models.items():
-                ranked = self._rank(case_rows, pk, sent_only=sent_only)
+            for m, spec in models.items():
+                ranked = self._rank(case_rows, spec["prob"], sent_only=spec["sent"],
+                                    side_key=spec["side_key"], rank_key=spec["rank_key"])
                 for k in range(min(top_k, len(ranked))):
                     _, _, correct = ranked[k]
                     bucket[m][k + 1]["correct" if correct else "wrong"] += 1
@@ -606,8 +689,10 @@ class ShadowLedger:
                 continue
             out["checkpoints"][cp] = {
                 "challenger": self._rank(rows, "challenger_prob_yes")[:top_k],
-                "native": self._rank(rows, "control_prob_yes",
-                                     sent_only=bool(native_sent_only))[:top_k],
+                "native": self._rank(rows, "native_rank_prob",
+                                     sent_only=bool(native_sent_only),
+                                     side_key="native_predicted_side",
+                                     rank_key="native_rank")[:top_k],
             }
         return out
 
@@ -641,8 +726,10 @@ class ShadowLedger:
             out["checkpoints"][cp] = {
                 "close": float(wid) * WINDOW_SECONDS,
                 "challenger": self._rank(rows, "challenger_prob_yes")[:top_k],
-                "native": self._rank(rows, "control_prob_yes",
-                                     sent_only=bool(native_sent_only))[:top_k],
+                "native": self._rank(rows, "native_rank_prob",
+                                     sent_only=bool(native_sent_only),
+                                     side_key="native_predicted_side",
+                                     rank_key="native_rank")[:top_k],
             }
         return out
 
@@ -662,7 +749,8 @@ class ShadowLedger:
         """
         rows = list(self._conn.execute(
             "SELECT checkpoint, close_time, created_at, asset, challenger_prob_yes, "
-            "control_prob_yes, official_result, native_sent FROM shadow_predictions "
+            "control_prob_yes, native_predicted_side, native_prob_yes, "
+            "official_result, native_sent FROM shadow_predictions "
             "WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
         ))
@@ -688,17 +776,29 @@ class ShadowLedger:
             a = by_asset.setdefault(str(r["asset"]), {
                 "asset": str(r["asset"]), "official": official, "checkpoints": {}})
 
-            def _side_hit(prob, _official=official, gated=False, _sent=r["native_sent"]):
-                # A gated (native) call shows only if delivered before close;
-                # otherwise it reads as "no official prediction" (—).
-                if prob is None or (gated and native_sent_only and not _sent):
+            def _challenger_hit(prob, _official=official):
+                if prob is None:
                     return None
                 side = "YES" if float(prob) >= 0.5 else "NO"
                 return (side, side == _official)
 
+            def _native_hit(_official=official, _sent=r["native_sent"],
+                            _stored=r["native_predicted_side"],
+                            _fallback=(r["native_prob_yes"] if r["native_prob_yes"] is not None
+                                       else r["control_prob_yes"])):
+                # Grade by the side production ACTUALLY sent (calibrated decision),
+                # not the raw prob the row was stored with. A gated (native) call
+                # shows only if delivered before close; otherwise it reads "—".
+                if native_sent_only and not _sent:
+                    return None
+                side = ShadowLedger._explicit_side(_stored, _fallback)
+                if side is None:
+                    return None
+                return (side, side == _official)
+
             a["checkpoints"][str(r["checkpoint"])] = {
-                "challenger": _side_hit(r["challenger_prob_yes"]),
-                "native": _side_hit(r["control_prob_yes"], gated=True),
+                "challenger": _challenger_hit(r["challenger_prob_yes"]),
+                "native": _native_hit(),
             }
         return {"close": close_ts, "checkpoints": list(checkpoints),
                 "assets": sorted(by_asset.values(), key=lambda x: x["asset"])}
@@ -713,7 +813,8 @@ class ShadowLedger:
         only delivered-before-close predictions when sent-gated.
         """
         rows = list(self._conn.execute(
-            "SELECT checkpoint, challenger_prob_yes, control_prob_yes, official_result, "
+            "SELECT checkpoint, challenger_prob_yes, control_prob_yes, "
+            "native_predicted_side, native_prob_yes, official_result, "
             "native_sent FROM shadow_predictions WHERE model_version=? AND official_result IS NOT NULL",
             (model_version,),
         ))
@@ -724,10 +825,18 @@ class ShadowLedger:
                 return {"n": 0, "challenger_accuracy": None, "current_accuracy": None}
             cy = sum(1 for r in subset
                      if (float(r["challenger_prob_yes"]) >= 0.5) == (str(r["official_result"]).upper() == "YES"))
-            ctl = [r for r in subset if r["control_prob_yes"] is not None
+            # Native ("Your System") accuracy grades the side production ACTUALLY
+            # sent (its calibrated decision), not the raw champion prob.
+            ctl = [r for r in subset
+                   if (r["native_predicted_side"] is not None or r["control_prob_yes"] is not None)
                    and (not native_sent_only or r["native_sent"])]
-            cu = sum(1 for r in ctl
-                     if (float(r["control_prob_yes"]) >= 0.5) == (str(r["official_result"]).upper() == "YES"))
+            cu = 0
+            for r in ctl:
+                side = ShadowLedger._explicit_side(
+                    r["native_predicted_side"],
+                    r["native_prob_yes"] if r["native_prob_yes"] is not None else r["control_prob_yes"])
+                if side == str(r["official_result"]).upper():
+                    cu += 1
             return {
                 "n": n,
                 "challenger_accuracy": round(cy / n, 4),
@@ -738,6 +847,57 @@ class ShadowLedger:
         for cp in sorted({str(r["checkpoint"]) for r in rows}):
             out["by_checkpoint"][cp] = _acc([r for r in rows if str(r["checkpoint"]) == cp])
         return out
+
+    # ---- one-time repair for rows recorded before native-decision capture ----
+    def backfill_native_decisions(self, lookup, model_version: str = "challenger-v1") -> dict[str, int]:
+        """Stamp production's captured decision (predicted_side, calibrated prob,
+        rank) onto existing rows that predate decision capture, so the historical
+        record is re-graded by the side production ACTUALLY sent rather than the raw
+        champion prob it was stored with.
+
+        ``lookup(contract, checkpoint)`` returns ``(predicted_side, calibrated_prob_yes,
+        rank)`` for the matching production prediction, or ``None`` when there is no
+        match. Only rows still missing ``native_predicted_side`` are touched; a
+        captured decision is never overwritten. Read-only wrt production. Returns
+        ``{"scanned", "updated", "unmatched"}``."""
+        rows = self._conn.execute(
+            "SELECT id, contract, checkpoint FROM shadow_predictions "
+            "WHERE model_version=? AND native_predicted_side IS NULL",
+            (model_version,),
+        ).fetchall()
+        scanned = updated = unmatched = 0
+        for r in rows:
+            scanned += 1
+            try:
+                info = lookup(r["contract"], r["checkpoint"])
+            except (KeyError, TypeError, ValueError):
+                info = None
+            if not info:
+                unmatched += 1
+                continue
+            side = info[0] if len(info) > 0 else None
+            s = str(side).upper() if side is not None else None
+            if s not in ("YES", "NO"):
+                unmatched += 1
+                continue
+            try:
+                p = float(info[1]) if len(info) > 1 and info[1] is not None else None
+            except (TypeError, ValueError):
+                p = None
+            try:
+                rk = int(info[2]) if len(info) > 2 and info[2] is not None else None
+            except (TypeError, ValueError):
+                rk = None
+            self._conn.execute(
+                "UPDATE shadow_predictions SET native_predicted_side=?, "
+                "native_prob_yes=COALESCE(?, native_prob_yes), "
+                "native_rank=COALESCE(?, native_rank) WHERE id=?",
+                (s, p, rk, r["id"]),
+            )
+            updated += 1
+        if updated:
+            self._conn.commit()
+        return {"scanned": scanned, "updated": updated, "unmatched": unmatched}
 
 
 def _prob_metrics(p: list[float], y: list[int], bins: int = 10) -> dict[str, Any]:

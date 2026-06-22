@@ -966,9 +966,17 @@ class V95Ledger:
                 )
             connection.commit()
         if inserted:
+            # Pass production's ACTUAL decision (the sent ``predicted_side`` from the
+            # CALIBRATED prob, the calibrated prob itself, and the cross-asset rank)
+            # alongside the raw champion prob, so the Shadow-vs-Your-System report
+            # grades/ranks "Your System" by what it really predicted — not by
+            # re-thresholding the raw probability (which flips the side, and the
+            # ✓/✗, on ~38% of rows).
             self._shadow_observe(
                 ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=created_at,
                 close_time=close_time, control_prob_yes=raw_yes_probability,
+                native_predicted_side=predicted_side,
+                native_prob_yes=calibrated_yes_probability, native_rank=rank_value,
                 features=features, quote=quote, snapshot_id=snapshot_id,
             )
         return prediction_id, inserted

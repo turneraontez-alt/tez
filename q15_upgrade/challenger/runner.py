@@ -85,7 +85,10 @@ class ShadowRunner:
     def observe(self, *, ticker: str, asset: str, checkpoint: str, created_at: float,
                 close_time: float | None, control_prob_yes: float | None,
                 features: Mapping[str, Any], quote: Mapping[str, Any],
-                snapshot_id: str | None = None) -> None:
+                snapshot_id: str | None = None,
+                native_predicted_side: str | None = None,
+                native_prob_yes: float | None = None,
+                native_rank: int | None = None) -> None:
         try:
             snap = _build_snapshot(features, quote)
             pred = self.predictor.predict(snap)
@@ -102,7 +105,10 @@ class ShadowRunner:
             # same information cutoff, same prediction time. No newer data is fetched.
             self.ledger.record(
                 pred, asset=asset, contract=ticker, checkpoint=checkpoint,
-                control_prob_yes=control_prob_yes, created_at=created_at,
+                control_prob_yes=control_prob_yes,
+                native_predicted_side=native_predicted_side,
+                native_prob_yes=native_prob_yes, native_rank=native_rank,
+                created_at=created_at,
                 close_time=close_time, model_version=self.config.model_version,
                 lineage=lineage_record(self.config, calibrator_version=calib),
                 snapshot_id=snapshot_id,

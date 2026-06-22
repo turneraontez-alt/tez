@@ -11,7 +11,11 @@ Both gates are evaluated on identical, already-settled rows (same side, same
 realized outcome), so the comparison isolates the ONE thing that differs: which
 trades each gate lets in.
 
-  * CONTROL (replicates production exactly): enter iff ``net_edge >= required_edge``.
+  * CONTROL (the live PRICE gate — the edge threshold only): enter iff
+    ``net_edge >= required_edge``. NB: production applies further gates (min
+    probability, data/spread/depth quality, time) before it recommends an entry,
+    so this arm is the price-gate BASELINE, not a replay of production's actual
+    entries; it is labelled "Price gate" in the report (not "Live") for that reason.
   * SHADOW (the proposal): charge the extra real costs the live model omits
     (slippage + adverse selection), require the edge to clear a hard no-trade
     floor, and require a risk-adjusted EV ``net_edge - k*sigma >= 0`` (sigma is the
@@ -43,7 +47,8 @@ def _env_float(name: str, default: float) -> float:
 
 def required_edge_for(checkpoint: str) -> float:
     """The live required-edge for a checkpoint — same default + same env var the
-    production gate reads, so the control arm matches production exactly."""
+    production gate reads, so the control arm matches the live PRICE gate (the edge
+    threshold; production applies additional gates before an actual entry)."""
     cp = str(checkpoint).upper()
     base = _REQUIRED_EDGE_DEFAULT.get(cp, 4.0)
     return _env_float(f"Q15_V95_{cp}_REQUIRED_EDGE_CENTS", base)
@@ -208,7 +213,9 @@ def build_report_lines(cmp: Comparison) -> list[str]:
     def row(label, arm):
         return (f"{label:<10}{arm.n_entries:>7}{_pct(arm.win_rate):>6}"
                 f"{_c(arm.total_pnl_cents, signed=True):>8}{_c(arm.avg_pnl_cents, signed=True):>7}")
-    lines.append(row("Live", cmp.control))
+    # "Price gate" — NOT "Live": this arm is the edge-threshold baseline, not a
+    # replay of production's actual recommended entries (which clear further gates).
+    lines.append(row("Price gate", cmp.control))
     lines.append(row("Shadow", cmp.shadow))
     # Verdict.
     if cmp.control.n_entries == 0 and cmp.shadow.n_entries == 0:
