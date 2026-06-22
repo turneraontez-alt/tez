@@ -26,15 +26,19 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
 ## ✅ Shipped THIS session (branch `claude/challenger-shadow-comparison-zo7fhq`) — A/B/C/D grade on the V9.5 CHECK
-**+2 tests** (ranked-panel grade render + missing-grade dash); suite green locally
-(969 passed / 13 skipped here — partial env). Pushed to the feature branch as a draft PR
-(not merged to main).
+**Suite 1001 passed / 4 skipped** in a complete env (+2 tests). Pushed to the feature branch as
+a draft PR (#16); not merged to main.
 - **Grade restored on the official check** — `build_ranked_checkpoint_panel` now renders each
   ranked pick as `medal asset side — confidence% · GRADE` (e.g. `🥇 SOL NO — 72% · B`). The
   grade is the champion's existing A/B/C/D `confidence_grade` (computed once in `analyse_v95`
   from selected_probability + data_quality), **surfaced — never recomputed**: `_extract_pick`
   adds `confidence_grade` to the pick contract and a defensive `panels_v95._grade()` maps it to
   `A/B/C/D` or `—`. No change to scoring, suppression markers, or the `V9.5 CHECK` tag.
+- **CI fix (pre-existing red, not from this change)** — `.github/workflows/tests.yml` installed
+  `pytest websockets flask cffi cryptography` but NOT `requests` (a hard import in
+  `kalshi_rest`/`notifier`/`spot_client`), so 16 app-level modules errored on collection and CI
+  was red on `main` too. Now installs `-r requirements.txt` (single source of truth) + `pytest`/
+  `cffi`, so those modules import and run. Verified: full suite green with the real runtime deps.
 
 ## ✅ Shipped a prior session (branch `claude/trusting-bardeen-yufks0`) — champion-review fixes (calibration + edge levers)
 **Suite 994 passed, 4 skipped (+8).** Frozen champion WEIGHTS untouched; these act on
