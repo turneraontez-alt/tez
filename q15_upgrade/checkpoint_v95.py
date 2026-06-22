@@ -2633,6 +2633,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
             _t["v95_sub"] = {k: round(v, 3) for k, v in _sub.items()}
+            # Read-only Ultoim Build research overlay (default-OFF; SEPARATE DB +
+            # Telegram channel; never affects production). Reuses the champion's
+            # frozen per-asset analyses (with shadow_signals + flip_risk attached
+            # above). observe() only extracts compact fields and enqueues — all
+            # ranking/grading/DB/Telegram run on Ultoim's own worker thread.
+            try:
+                from q15_upgrade.ultoim.runner import get_runner as _ultoim_runner
+                _ur = _ultoim_runner()
+                if _ur is not None:
+                    _ur.observe(analyses=analyses, canonicals=canonicals, now=now)
+            except Exception:
+                logger.debug("ultoim observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now

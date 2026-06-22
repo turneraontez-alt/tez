@@ -635,6 +635,16 @@ def refresh_loop(max_cycles=None):
                         notifier.send(_pr_msg)
             except Exception:
                 logger.debug("polymarket shadow report skipped", exc_info=True)
+            # Read-only Ultoim Build research overlay: enqueue a settlement
+            # reconcile (throttled) against the shared Kalshi result cache. No-op
+            # when disabled; all grading/DB/Telegram run on Ultoim's own worker.
+            try:
+                from q15_upgrade.ultoim.runner import get_runner as _ultoim_runner
+                _ur = _ultoim_runner()
+                if _ur is not None:
+                    _ur.reconcile(now, market_cache)
+            except Exception:
+                logger.debug("ultoim reconcile skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)

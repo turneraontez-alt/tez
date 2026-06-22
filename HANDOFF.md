@@ -25,6 +25,84 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Ultoim Build: separate read-only research reporting system
+**Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
+`q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,
+default-OFF hooks (`checkpoint_v95.run_cycle` observe + `app.py` reconcile).
+Read-only; never trades. **Default ON** as a read-only collector but stays MUTED
+(records, never delivers) until `Q15_ULTOIM_TELEGRAM_CHAT_ID` is set, so default-on
+is safe and silent; `Q15_ULTOIM_ENABLED=false` makes the app byte-identical. Tests
+stay deterministic via `tests/conftest.py` (autouse: Ultoim off in the suite).
+In-process (own worker thread, like the polymarket shadow) — no `.replit` change.
+Deploy-pending on `main` + a Repl Stop ▸ Run to load it.
+- **What it is:** a SEPARATE research system (own DB `data/q15_ultoim_v1.sqlite3`,
+  own model_version `ultoim-build-v1`, own counters/reset marker, own Telegram
+  channel via `Q15_ULTOIM_TELEGRAM_CHAT_ID` reusing `TELEGRAM_BOT_TOKEN`). Reuses
+  the champion's frozen per-asset analysis (read-only) to publish exactly 3 picks
+  at **12M / 10M / 7M** (12M replaces the toxic 15M per this session's findings).
+- **Picks apply the session's analysis:** ranked by **quality × net-edge (value)**
+  not raw confidence; **multi-factor A/B/C grade** (calibration, data/evidence
+  quality, model agreement, flip risk, manipulation anti-signal, the validated
+  YES-quality veto via order-flow-persistence/book-resiliency) — never probability
+  alone. Records hypothetical P&L per pick.
+- **Flip = active research:** ensemble stability score (flip_risk_score +
+  prediction_stability + book_resiliency + order_flow_persistence), recorded with
+  decision/original/expected-side; graded at settlement (genuine flip = locked
+  side != official result). Weighted LOW in the grade until it beats
+  flip_risk_score OOS. Never claimed validated.
+- **Compact Telegram only** (`ULTOIM BUILD · 12M` / medal / asset side / Grade /
+  Outcome% / `Research mode · read-only`); all calc/feature internals stay in the DB.
+- **Records + safety:** immutable picks (UNIQUE model_version,ticker,interval);
+  one report per (interval, window) via `ultoim_report_lock`; settlement grading
+  via the SHARED `market_cache` (ground truth, no record-mixing); delivery-failed
+  picks kept for learning but EXCLUDED from the visible scoreboard; missing/failed
+  never counted as losses; restart-safe (no double record/grade) — all tested.
+- **Files:** `q15_upgrade/ultoim/{__init__,config,ledger,ranker,flip_research,
+  panel,telegram,runner}.py` (new), `tests/test_ultoim_build.py` (new),
+  `q15_upgrade/checkpoint_v95.py` (+observe hook), `app.py` (+reconcile hook),
+  `.env.example`.
+- **Deploy:** already ON by default (records silently). To DELIVER, set
+  `Q15_ULTOIM_TELEGRAM_CHAT_ID=<chat>` in the Repl, then **Stop ▸ Run**.
+  `Q15_V95_SHADOW_SIGNALS_ENABLED` is already default ON (feeds grade + flip).
+
+## ✅ Shipped THIS session — Hourly learning-snapshot export to a dedicated branch
+**Suite 1036 passed / 4 skipped** in a complete env (+12 tests). New worker
+`tools/learning_export.py` + `tests/test_learning_export.py`; wired into `.replit`
+as a third parallel workflow ("Learning Export"). Read-only wrt the ledgers and
+the real exchanges; frozen champion untouched. Deploy-pending on `main` AND needs
+a Repl Stop ▸ Run to start the new worker.
+- **Why:** a fresh review container has no `data/*.sqlite3` (gitignored), so
+  `updated-review` could only grade code, not real records. The Repl now publishes
+  the live learning ledgers hourly so any session can pull real data.
+- **What it does:** hourly, takes a *consistent* read-only SQLite online-backup of
+  every `data/*.sqlite3`, builds `learning_snapshot.json` (v95 + challenger
+  scoreboards, official W/L, the 5-feature shadow A/B, timing experiment, flip
+  perf, per-table row counts) + gzipped raw DBs, and **force-pushes one orphan
+  commit** to the dedicated **`learning-snapshots`** branch.
+- **Why a side branch, not `main`:** the GitHub Relay two-way-syncs only `main`
+  every ~20s; a Repl-regenerated file on `main` is exactly what forced
+  `health_snapshot.json` to be gitignored ("conflict on every sync, stall
+  deploys"). The side branch is invisible to the relay and the `claude/*`-only
+  pruner → zero deploy risk, zero `main` churn. Orphan/force-push ⇒ no history
+  bloat.
+- **Safety:** built entirely with git plumbing against a TEMP index (hash-object
+  → write-tree → commit-tree → push by SHA) so it NEVER touches HEAD / the working
+  tree / the app's index — safe in the live checkout. Reuses the relay's
+  `GH_PUSH_TOKEN`/`GITHUB_TOKEN` (in-memory URL, masked logs, no .git/config
+  writes). Refuses to target `main`/`master`/`HEAD`. Online-backup ⇒ never writes
+  the live DB / no torn copy.
+- **Consume (review side):** `git fetch origin learning-snapshots` then read
+  `learning_snapshot.json` or `git show origin/learning-snapshots:dbs/<db>.gz |
+  gunzip > /tmp/...`. The `updated-review` skill Step 1 now does this first.
+- **Config (all default-sane, `.env.example`):** `LEARNING_EXPORT_BRANCH`
+  (default `learning-snapshots`), `LEARNING_EXPORT_INTERVAL` (3600s),
+  `LEARNING_EXPORT_DATA_DIR` (`data`), `LEARNING_EXPORT_REPO`.
+- **Deploy:** after this reaches the Repl, **Stop ▸ Run** so the new workflow
+  starts; first push creates the branch within ~1h (or sooner if INTERVAL lowered).
+- **Files:** `tools/learning_export.py` (new), `tests/test_learning_export.py`
+  (new), `.replit`, `.env.example`, `CLAUDE.md`,
+  `.claude/skills/updated-review/SKILL.md`.
+
 ## ✅ Shipped THIS session — Polymarket Up/Down shadow (read-only, default-OFF)
 **Suite 1024 passed / 4 skipped** in a complete env (+23 tests). New package
 `q15_upgrade/polymarket/` — a SECOND read-only shadow, sibling to the challenger.

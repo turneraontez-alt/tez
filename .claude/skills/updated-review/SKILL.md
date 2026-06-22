@@ -56,8 +56,30 @@ explicitly asks for implementation. The deliverable is the written review.
   `/10`, `/100`) and note its recommendation list — you will check each off.
 
 ### Step 1 — Pull the REAL records (read-only)
-The live data runs on Replit; the `data/*.sqlite3` in the container may be a
-**seed/empty copy**. Inspect what is actually present and label accordingly.
+The live data runs on Replit; the `data/*.sqlite3` in a fresh container is
+**absent or a seed/empty copy** (`data/` is gitignored). The Repl publishes the
+real ledgers hourly to the dedicated **`learning-snapshots`** branch
+(`tools/learning_export.py`). **Pull that FIRST** — it is the only real data a
+container has:
+
+```bash
+git fetch origin learning-snapshots
+# at-a-glance: curated scoreboards + row counts + when/which commit
+git show origin/learning-snapshots:learning_snapshot.json | python3 -m json.tool | less
+# raw ledgers for matched-row / arbitrary SQL (gitignored locally, so restore to /tmp):
+mkdir -p /tmp/ledgers
+for db in q15_v95_ledger_v1 q15_challenger_shadow_v1; do
+  git show "origin/learning-snapshots:dbs/$db.sqlite3.gz" | gunzip > "/tmp/ledgers/$db.sqlite3"
+done
+```
+
+Check `learning_snapshot.json`'s `generated_at` / `git_commit` for freshness and
+to confirm the snapshot matches the code under review. If the branch is missing
+or stale (export not deployed yet, or a thin live record), say so and grade the
+affected dimensions **INSUFFICIENT DATA** — never fabricate. With the gunzipped
+DBs in `/tmp/ledgers`, point the constructors at them via
+`Q15_V95_LEDGER_DB=/tmp/ledgers/q15_v95_ledger_v1.sqlite3` (and
+`Q15_CHALLENGER_DB=...`) for the dumps below.
 
 - DBs: `data/q15_v95_ledger_v1.sqlite3` (Your System), and the challenger DB
   `data/q15_challenger_shadow_v1.sqlite3` (env `Q15_CHALLENGER_DB`; table
