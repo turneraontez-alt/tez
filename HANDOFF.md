@@ -9,8 +9,45 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **970 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **986 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## ✅ Shipped THIS session (branch `claude/trusting-bardeen-yufks0`) — flip-decision engine, net-edge gate, rank-by-skill
+**Suite 986 passed, 4 skipped (+16).** Read-only wrt real exchanges; frozen-champion
+live behaviour unchanged unless an explicit default-OFF flag is set. Deploy-pending on `main`.
+- **Strict flip-decision engine** (`q15_upgrade/flip_decision.py` NEW + ledger `flip_decisions`
+  table): per interval, for the #1 pick, decides YES/NO whether the predicted side genuinely
+  FLIPS (settles the opposite way) by close. `flip_probability()` is a bounded, oriented blend
+  (primary basis = manipulation score, but manipulation that SUPPORTS the pick lowers it — a
+  high score never forces YES) of strike distance/crossings, wick/momentum/flow-against,
+  book fragility, prediction stability, entropy, regime transition, spot-vs-contract
+  disagreement and time. Thresholds are LEARNED per interval from completed post-reset history
+  via chronological OOS (`select_threshold`), targeting >=80% YES-precision; Decision=YES only
+  when the interval threshold is VALIDATED on the unseen test fold AND the probability clears
+  it — else NO (background). Every decision is stored before settlement (one per
+  contract+interval) and graded against the official result only (`resolve_ticker` sets
+  `flipped = predicted_side != official_result`). Metrics (`flip_decision_report`): YES-precision,
+  recall, FPR/FNR, coverage, n, by-interval + by-asset.
+- **Full flip reset** (`reset_flip_data` / `flip_reset_at` / `flip_reset_status`): archives every
+  current decision to `flip_decisions_archive`, clears the active table, stamps `flip_reset_at`;
+  all thresholds/metrics read post-reset rows only. `Q15_V95_FLIP_SHOW_POST_RESET_ONLY`.
+- **Visible output**: only the 3-line block inside each interval panel —
+  `<CP> FLIP CHECK / Decision / Flip Probability / Required Threshold` (panels_v95). The old
+  loose "Flip risk:"/"Manipulation:" lines and all manipulation math are now HIDDEN. No
+  separate flip/manip report.
+- **Net-edge-after-cost entry gate** (`_is_actionable_entry`, `Q15_V95_NET_EDGE_GATE_ENABLED`,
+  default OFF): an ENTRY is actionable only if net edge >= min cents — attacks the -4.18c/pick
+  P&L bleed. Default OFF (frozen champion).
+- **Rank-by-skill** (`Q15_V95_RANK_BY_SKILL`, default OFF): orders #1/#2/#3 by decision
+  priority -> confidence grade -> decisiveness -> net edge (grade tracks accuracy on the record;
+  net-edge rank did not). Default OFF.
+- **Leakage guards (tested):** thresholds chosen on TRAIN, validated on a later TEST fold, never
+  tuned on the rows they grade; each decision freezes the threshold in force; temporary moves
+  never count (graded on settlement only); one decision per interval; precision is YES-precision
+  (not overall) so a NO-always model cannot look good; unvalidated intervals stay background.
+- **Files:** `q15_upgrade/flip_decision.py` (new), `q15_upgrade/ledger_v95.py`,
+  `q15_upgrade/checkpoint_v95.py`, `notifications/panels_v95.py`, `.env.example`,
+  `tests/test_flip_decision.py` (new), `tests/test_q15_ranked_panel.py`.
 
 ## ✅ Shipped THIS session (branch `claude/trusting-bardeen-yufks0`) — updated-review fixes from LIVE data
 **Ran `updated-review` against the LIVE Replit ledgers** (a dump script pulled the real

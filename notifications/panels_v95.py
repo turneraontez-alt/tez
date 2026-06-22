@@ -165,6 +165,24 @@ def _num100(value: Any) -> str:
         return "—"
 
 
+def _prob01(value: Any) -> str:
+    """Format a 0..1 probability as a whole-percent string, or em-dash. A
+    threshold >=1.0 means 'not yet validated' and renders as a dash."""
+    try:
+        if value is None:
+            return "—"
+        f = float(value)
+        if f > 1.0:                      # sentinel un-validated threshold (1.01)
+            return "—"
+        return f"{f * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _flip_decision(value: Any) -> str:
+    return "YES" if str(value or "").upper() == "YES" else "NO"
+
+
 def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[str, Any] | None],
                                   top_k: int = 3) -> str:
     """Render the official interval report: the three ranked FINAL-OUTCOME picks
@@ -212,26 +230,15 @@ def build_ranked_checkpoint_panel(*, checkpoint: str, picks: Sequence[Mapping[st
     head = next((p for p in picks if p), None)
     if head:
         body.append("")
-        flip = head.get("flip_prob")
-        flip_line = f"Flip risk: {_num100(flip)}"
-        flip_side = _side(head.get("flip_side"))
-        if flip is not None and flip_side != "—":
-            try:
-                if float(flip) >= _FLIP_ARROW_MIN:
-                    flip_line += f" → {flip_side}"
-            except (TypeError, ValueError):
-                pass
-        body.append(flip_line)
-
-        manip = head.get("manip_prob")
-        manip_line = f"Manipulation: {_num100(manip)}"
-        try:
-            if manip is not None and float(manip) >= _MANIP_WAIT_MIN:
-                manip_line += " — WAIT"
-        except (TypeError, ValueError):
-            pass
-        body.append(manip_line)
-
+        # Strict FLIP CHECK — the ONLY flip/manipulation output shown. A YES/NO
+        # call on whether the predicted side genuinely flips by settlement, vs a
+        # learned, validated per-interval threshold. All manipulation math,
+        # evidence and validation stay in the background (never shown here).
+        body.append(f"{_esc(cp)} FLIP CHECK")
+        body.append(f"Decision: {_flip_decision(head.get('flip_decision'))}")
+        body.append(f"Flip Probability: {_prob01(head.get('flip_decision_probability'))}")
+        body.append(f"Required Threshold: {_prob01(head.get('flip_decision_threshold'))}")
+        body.append("")
         body.append(f"Entry: {_esc(head.get('entry_label') or '—')}")
         be = head.get("best_entry_max")
         body.append(f"Best entry: {('≤' + _cents(be)) if be is not None else '—'}")
