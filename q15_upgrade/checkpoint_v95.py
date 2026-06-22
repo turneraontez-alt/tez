@@ -828,6 +828,44 @@ def _manipulation_divergence_threshold_bps(asset: str | None) -> float:
     return global_default
 
 
+def _manipulation_pin_max_distance_sigma() -> float | None:
+    """Optional stricter distance-sigma band for the observational PIN *tell*.
+
+    The ``THRESHOLD_PIN`` *regime* (``_regime``) fires at ``distance_sigma <= 0.25``
+    and feeds the FROZEN champion's uncertainty/probability — it is deliberately
+    left untouched. This knob narrows only the read-only manipulation PIN *tell*:
+    the live record shows PIN over-fires (it triggers on ~70% of markets at
+    baseline accuracy, i.e. no edge), so an operator can require the price to sit
+    even closer to the strike before the tell flags, without changing any
+    prediction. Unset/<=0 (the default) => byte-identical legacy behaviour: the
+    tell fires for every ``THRESHOLD_PIN`` regime. Recommended starting point for
+    validation: ``0.15``.
+    """
+    raw = os.environ.get("Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
+
+
+def _pin_tell_passes(
+    distance_sigma: float | None, pin_max_distance_sigma: float | None
+) -> bool:
+    """Whether the PIN tell may fire given an optional stricter distance band.
+
+    Default (no knob configured) => always True (legacy: fire on every
+    ``THRESHOLD_PIN`` regime). When a band is set but the measurement is missing,
+    keep the tell rather than silently drop it — tightening only suppresses PIN
+    when we can positively confirm the price is outside the stricter band.
+    """
+    if pin_max_distance_sigma is None or distance_sigma is None:
+        return True
+    return distance_sigma <= pin_max_distance_sigma
+
+
 def _absorption_lean(absorption: Mapping[str, Any]) -> str | None:
     """Side an absorbed order flow is likely to flip toward, or ``None``.
 
@@ -848,12 +886,18 @@ def _collect_manipulation_tells(
     absorption: Mapping[str, Any],
     exchange: Mapping[str, Any],
     divergence_threshold_bps: float,
+    *,
+    distance_sigma: float | None = None,
+    pin_max_distance_sigma: float | None = None,
 ) -> tuple[list[str], str | None]:
     """Return ``(tells, lean)`` for the manipulation tells firing this cycle.
 
     ``tells`` is built in a fixed order (ABSORPTION, PIN, DIVERGENCE) so the
     downstream phrasing reads consistently; ``lean`` is set only by the
     directional ABSORPTION tell. ``divergence_threshold_bps`` is in basis points.
+    ``pin_max_distance_sigma`` (with the cycle's ``distance_sigma``) optionally
+    narrows the PIN tell below the regime's own band; both default to ``None`` so
+    the tell fires for every ``THRESHOLD_PIN`` regime exactly as before.
     """
     tells: list[str] = []
     lean: str | None = None
@@ -862,7 +906,9 @@ def _collect_manipulation_tells(
         tells.append(MANIPULATION_TELL_ABSORPTION)
         lean = _absorption_lean(absorption)
 
-    if regime_name == _REGIME_THRESHOLD_PIN:
+    if regime_name == _REGIME_THRESHOLD_PIN and _pin_tell_passes(
+        distance_sigma, pin_max_distance_sigma
+    ):
         tells.append(MANIPULATION_TELL_PIN)
 
     divergence_bps = max(0.0, _num(exchange.get("divergence_bps"), 0.0) or 0.0)
@@ -902,6 +948,8 @@ def _manipulation_signal(regime: Mapping[str, Any], absorption: Mapping[str, Any
         must agree before the signal is flagged as suspected.
       * ``Q15_V95_MANIPULATION_DIVERGENCE_BPS`` (default 35) and the per-asset
         ``..._<ASSET>`` override — the DIVERGENCE band in basis points.
+      * ``Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA`` (default unset) — optional
+        stricter distance-sigma band for the PIN tell only; unset => unchanged.
     """
     if not _env_bool("Q15_V95_MANIPULATION_TRACKING", True):
         return _no_manipulation()
@@ -909,7 +957,9 @@ def _manipulation_signal(regime: Mapping[str, Any], absorption: Mapping[str, Any
     regime_name = str((regime or {}).get("name") or "")
     threshold_bps = _manipulation_divergence_threshold_bps(asset)
     tells, lean = _collect_manipulation_tells(
-        regime_name, absorption or {}, exchange or {}, threshold_bps)
+        regime_name, absorption or {}, exchange or {}, threshold_bps,
+        distance_sigma=_num((regime or {}).get("distance_sigma")),
+        pin_max_distance_sigma=_manipulation_pin_max_distance_sigma())
 
     min_tells = int(_env_float("Q15_V95_MANIPULATION_MIN_SIGNALS", 1.0, 1.0, 3.0))
     if len(tells) < min_tells:
