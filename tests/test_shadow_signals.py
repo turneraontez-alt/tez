@@ -2,7 +2,7 @@
 + the ledger persistence and A/B grading).
 
 Deterministic, no network/clock. Verifies:
-  * the five signals compute from existing analysis/canonical data
+  * the six signals compute from existing analysis/canonical data
   * record_prediction persists them in their isolated column (idempotent, fresh
     insert only) and resolved_shadow_signal_rows reads them back ordered
   * the out-of-sample A/B detects a genuinely predictive signal and does NOT
@@ -40,15 +40,38 @@ class ComputeSignalsTests(unittest.TestCase):
         from q15_upgrade.checkpoint_v95 import analyse_v95
         return analyse_v95(row, canonical, self.ledger), canonical
 
-    def test_all_five_signals_present_and_bounded(self):
+    def test_all_signals_present_and_bounded(self):
         analysis, canonical = self._analysis_and_canonical()
         cfg = shadow_signals.SignalConfig.from_env()
         signals = shadow_signals.compute_signals(analysis, canonical, cfg)
         self.assertEqual(set(signals), set(shadow_signals.SIGNAL_NAMES))
+        self.assertIn("coinflip_fade", signals)
         for name, value in signals.items():
             self.assertIsInstance(value, float)
             self.assertGreaterEqual(value, -1.0, name)
             self.assertLessEqual(value, 1.0, name)
+
+    def test_coinflip_fade_de_confidences_only_in_the_band(self):
+        # YES-oriented de-confidence localised to the near-coin-flip band: a YES
+        # lean inside the band yields a NEGATIVE signal (pull back toward 0.5), a NO
+        # lean yields POSITIVE, a perfect coin flip yields 0 (no lean to fade), and
+        # confident calls outside the band yield EXACTLY 0 (left alone), so the
+        # 17/17 high-conviction record can never be touched.
+        class _Bare:
+            yes_is_higher = True
+            candles = ()
+
+        def fade(p):
+            return shadow_signals.compute_signals({"yes_probability": p}, _Bare())["coinflip_fade"]
+
+        self.assertAlmostEqual(fade(0.5), 0.0, places=6)           # exact coin flip: no lean
+        self.assertLess(fade(0.55), 0.0)                           # YES lean -> fade down
+        self.assertGreater(fade(0.45), 0.0)                        # NO lean  -> fade up
+        self.assertAlmostEqual(fade(0.55), -fade(0.45), places=6)  # symmetric about 0.5
+        self.assertGreater(abs(fade(0.55)), abs(fade(0.59)))       # stronger nearer the flip
+        # Outside the band (|p-0.5| >= _COINFLIP_FADE_BAND) the correction is zero.
+        for p in (0.61, 0.75, 0.90, 0.39, 0.10):
+            self.assertAlmostEqual(fade(p), 0.0, places=6, msg=f"p={p} must be untouched")
 
     def test_compute_degrades_without_exception(self):
         # Missing analysis fields -> zeros, never raises.
