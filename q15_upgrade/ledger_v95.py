@@ -704,6 +704,38 @@ class V95Ledger:
                 "CREATE INDEX IF NOT EXISTS idx_v95_timing_experiment "
                 "ON timing_experiment(model_version, mark_seconds, official_result)"
             )
+            # Strict flip-decision engine (OBSERVATIONAL). One immutable decision
+            # per (contract, checkpoint) — UNIQUE prevents repeated predictions
+            # for the same interval. Stored BEFORE the outcome with the threshold
+            # in force at decision time, graded on settlement (flipped =
+            # predicted_side != official_result). Archived + cleared by a reset;
+            # active rows are post-reset only. Never delivered as its own report.
+            for _tbl in ("flip_decisions", "flip_decisions_archive"):
+                connection.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_tbl}(
+                        model_version TEXT NOT NULL,
+                        contract TEXT NOT NULL,
+                        checkpoint TEXT NOT NULL,
+                        asset TEXT,
+                        created_at REAL NOT NULL,
+                        predicted_side TEXT,
+                        flip_probability REAL,
+                        threshold REAL,
+                        decision TEXT,
+                        validated INTEGER NOT NULL DEFAULT 0,
+                        close_time REAL,
+                        snapshot_id TEXT,
+                        official_result TEXT,
+                        flipped INTEGER,
+                        correct INTEGER,
+                        resolved_at REAL,
+                        PRIMARY KEY(model_version, contract, checkpoint)
+                    )"""
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_flip_decisions "
+                "ON flip_decisions(model_version, checkpoint, official_result)"
+            )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
                 for name, base in CHAMPION_WEIGHTS.items():
@@ -1122,6 +1154,158 @@ class V95Ledger:
             }
         empty["by_mark"] = by_mark
         return empty
+
+    # -- strict flip-decision engine (OBSERVATIONAL) ----------------------------
+    def flip_reset_at(self) -> float:
+        """Timestamp of the last flip-data reset (0.0 if never). Active flip
+        decisions are those created at/after this; pre-reset rows are archived."""
+        if not self._available:
+            return 0.0
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key='flip_reset_at'"
+            ).fetchone()
+        try:
+            return float(row["value"]) if row else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def reset_flip_data(self, archive: bool = True, now: float | None = None) -> dict[str, Any]:
+        """Full reset of the flip dataset: archive every current decision, clear
+        the active table, and stamp the reset time so thresholds/metrics are
+        recalculated ONLY from post-reset data. Pre-reset rows are excluded from
+        active scoring (kept in ``flip_decisions_archive`` when ``archive``)."""
+        if not self._available:
+            return {"reset": False, "archived": 0}
+        now = now if now is not None else time.time()
+        with self._lock, closing(self._connect()) as connection:
+            archived = 0
+            if archive:
+                cur = connection.execute(
+                    "INSERT OR IGNORE INTO flip_decisions_archive SELECT * FROM flip_decisions "
+                    "WHERE model_version=?", (MODEL_VERSION,))
+                archived = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            connection.execute("DELETE FROM flip_decisions WHERE model_version=?", (MODEL_VERSION,))
+            connection.execute(
+                "INSERT INTO metadata(key,value) VALUES('flip_reset_at',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(now),))
+            connection.commit()
+        return {"reset": True, "archived": archived, "reset_at": now}
+
+    def flip_reset_status(self) -> dict[str, Any]:
+        """Reset-status: how many active (post-reset) vs archived (pre-reset)
+        flip decisions exist, and whether normal output is post-reset-only."""
+        if not self._available:
+            return {"available": False}
+        with self._lock, closing(self._connect()) as connection:
+            active = connection.execute(
+                "SELECT COUNT(*) FROM flip_decisions WHERE model_version=?", (MODEL_VERSION,)).fetchone()[0]
+            archived = connection.execute(
+                "SELECT COUNT(*) FROM flip_decisions_archive WHERE model_version=?", (MODEL_VERSION,)).fetchone()[0]
+        return {
+            "available": True, "reset_at": self.flip_reset_at(),
+            "active_decisions": int(active), "archived_decisions": int(archived),
+            # The active table holds post-reset rows only, so normal output is
+            # inherently post-reset; the flag governs whether diagnostics may also
+            # surface the archived (pre-reset) totals.
+            "show_post_reset_only": _env_bool("Q15_V95_FLIP_SHOW_POST_RESET_ONLY", True),
+        }
+
+    def record_flip_decision(self, *, contract: str, checkpoint: str, asset: str | None,
+                             predicted_side: str | None, flip_probability: float | None,
+                             threshold: float | None, decision: str, validated: bool,
+                             created_at: float, close_time: float | None,
+                             snapshot_id: str | None = None) -> bool:
+        """Record (insert-only) one flip decision before the outcome is known.
+
+        One row per (contract, checkpoint) — the first write wins, so an interval
+        is never re-decided for the same contract. Stores the threshold actually
+        in force, so later threshold drift can't retroactively change this graded
+        decision."""
+        if not self._available or not contract:
+            return False
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO flip_decisions(model_version,contract,checkpoint,asset,"
+                "created_at,predicted_side,flip_probability,threshold,decision,validated,close_time,"
+                "snapshot_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (MODEL_VERSION, str(contract), self._checkpoint(checkpoint),
+                 (str(asset) if asset else None), float(created_at),
+                 (str(predicted_side).upper() if predicted_side else None),
+                 (float(flip_probability) if flip_probability is not None else None),
+                 (float(threshold) if threshold is not None else None),
+                 str(decision).upper(), 1 if validated else 0,
+                 (float(close_time) if close_time is not None else None),
+                 (str(snapshot_id) if snapshot_id else None)),
+            )
+            connection.commit()
+        return True
+
+    def flip_decision_rows(self, checkpoint: str | None = None, resolved_only: bool = True,
+                           post_reset_only: bool = True) -> list[dict[str, Any]]:
+        """Active flip decisions for threshold selection / metrics. Post-reset
+        rows only by default; chronological (oldest first) for OOS splitting."""
+        if not self._available:
+            return []
+        clauses = ["model_version=?"]
+        params: list[Any] = [MODEL_VERSION]
+        if checkpoint is not None:
+            clauses.append("checkpoint=?")
+            params.append(self._checkpoint(checkpoint))
+        if resolved_only:
+            clauses.append("official_result IS NOT NULL")
+        if post_reset_only:
+            clauses.append("created_at >= ?")
+            params.append(self.flip_reset_at())
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT created_at, checkpoint, asset, predicted_side, flip_probability, "
+                "threshold, decision, official_result, flipped, correct "
+                f"FROM flip_decisions WHERE {' AND '.join(clauses)} ORDER BY created_at ASC",
+                params,
+            ))
+        return [{
+            "created_at": r["created_at"], "checkpoint": r["checkpoint"], "asset": r["asset"],
+            "predicted_side": r["predicted_side"], "flip_probability": r["flip_probability"],
+            "threshold": r["threshold"], "decision": r["decision"],
+            "official_result": r["official_result"],
+            "flipped": bool(r["flipped"]) if r["flipped"] is not None else None,
+            "correct": bool(r["correct"]) if r["correct"] is not None else None,
+        } for r in rows]
+
+    def flip_decision_report(self) -> dict[str, Any]:
+        """Per-interval flip-decision summary: the learned threshold, whether it
+        is validated to the target precision out of sample, and the served-decision
+        metrics (YES-precision / recall / FPR / FNR / coverage / n) by interval and
+        asset. Read-only; post-reset data only."""
+        from q15_upgrade import flip_decision as fd
+        out: dict[str, Any] = {"available": bool(self._available),
+                               "reset_at": self.flip_reset_at(), "by_interval": {}}
+        if not self._available:
+            return {"available": False, "by_interval": {}}
+        for cp in fd.INTERVALS:
+            rows = self.flip_decision_rows(cp, resolved_only=True, post_reset_only=True)
+            cfg = fd.FlipConfig.from_env(cp)
+            block = fd.evaluate(rows, cfg)
+            # by-asset served precision (diagnostic; hidden from the owner panel)
+            by_asset: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                a = str(r.get("asset") or "?")
+                d = by_asset.setdefault(a, {"yes": 0, "yes_correct": 0, "n": 0})
+                d["n"] += 1
+                if str(r.get("decision") or "").upper() == "YES":
+                    d["yes"] += 1
+                    if r.get("flipped"):
+                        d["yes_correct"] += 1
+            for a, d in by_asset.items():
+                d["yes_precision"] = round(d["yes_correct"] / d["yes"], 4) if d["yes"] else None
+            block["by_asset"] = by_asset
+            out["by_interval"][cp] = block
+        out["all_intervals_validated"] = all(
+            (out["by_interval"].get(cp, {}).get("selection", {}) or {}).get("validated")
+            for cp in fd.INTERVALS
+        )
+        return out
 
     # -- ONE official report per interval per window (report-frequency lock) -----
     @staticmethod
@@ -1637,6 +1821,18 @@ class V95Ledger:
                 "UPDATE timing_experiment SET official_result=?, resolved_at=? "
                 "WHERE contract=? AND official_result IS NULL",
                 (official, resolved_at, ticker),
+            )
+            # Grade the flip decisions for this contract: a TRUE flip is the
+            # predicted side NOT matching the final settled side; a decision is
+            # correct when its YES/NO call matches whether the flip happened.
+            connection.execute(
+                "UPDATE flip_decisions SET official_result=?, resolved_at=?, "
+                "flipped=(CASE WHEN predicted_side IS NULL THEN NULL "
+                "WHEN predicted_side<>? THEN 1 ELSE 0 END), "
+                "correct=(CASE WHEN predicted_side IS NULL THEN NULL "
+                "WHEN (decision='YES')=(predicted_side<>?) THEN 1 ELSE 0 END) "
+                "WHERE contract=? AND official_result IS NULL",
+                (official, resolved_at, official, official, ticker),
             )
             rows = list(connection.execute(
                 "SELECT * FROM predictions WHERE ticker=? AND official_result IS NULL ORDER BY created_at",

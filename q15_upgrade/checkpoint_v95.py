@@ -50,6 +50,7 @@ from .checkpoint_v94_unified import (
     _yes_is_higher,
     format_telegram_message as _format_v94_message,
 )
+from . import flip_decision
 from . import flip_risk
 from . import shadow_factors as cross_asset
 from . import shadow_economics
@@ -1283,14 +1284,31 @@ def rank_analyses(analyses: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
         "WATCH_DATA_QUALITY": 5, "WATCH_LIQUIDITY": 4, "WATCH_TIME": 3,
         "PREDICTION_ONLY": 2, "AVOID_INVALID_DATA": 0,
     }
+    # Rank by SKILL (default OFF): on the live record the confidence GRADE tracks
+    # accuracy strongly (7M A 94% / B 80% / C 76% / D 54%) while net-edge order
+    # does not — so when enabled, order by decision priority, then grade, then the
+    # model's decisiveness (selected probability), then net edge. Default OFF keeps
+    # the existing net-edge-first ordering (frozen-champion behaviour).
+    rank_by_skill = _env_bool("Q15_V95_RANK_BY_SKILL", False)
+    _grade_rank = {"A": 4, "B": 3, "C": 2, "D": 1}
     rows = []
     for asset, analysis in analyses.items():
-        score = (
-            priority.get(str(analysis.get("trade_decision")), 1),
-            float(analysis.get("net_edge_cents") if analysis.get("net_edge_cents") is not None else -999.0),
-            float(analysis.get("conservative_probability") or 0.0),
-            float(analysis.get("data_quality") or 0.0),
-        )
+        net_edge = float(analysis.get("net_edge_cents") if analysis.get("net_edge_cents") is not None else -999.0)
+        if rank_by_skill:
+            score = (
+                priority.get(str(analysis.get("trade_decision")), 1),
+                _grade_rank.get(str(analysis.get("confidence_grade") or "").upper(), 0),
+                float(analysis.get("selected_probability") or 0.0),
+                net_edge,
+                float(analysis.get("data_quality") or 0.0),
+            )
+        else:
+            score = (
+                priority.get(str(analysis.get("trade_decision")), 1),
+                net_edge,
+                float(analysis.get("conservative_probability") or 0.0),
+                float(analysis.get("data_quality") or 0.0),
+            )
         rows.append((score, asset, analysis))
     rows.sort(key=lambda row: row[0], reverse=True)
     return [
@@ -1918,6 +1936,11 @@ def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[st
         "flip_prob": _num(flip.get("score")),
         "flip_side": _flip_target_side(analysis, side),
         "manip_prob": manip_display,
+        # strict FLIP CHECK (the only flip output shown to the owner): a YES/NO
+        # decision against a learned, validated per-interval threshold.
+        "flip_decision": str((analysis.get("flip_decision") or {}).get("decision") or "NO"),
+        "flip_decision_probability": _num((analysis.get("flip_decision") or {}).get("flip_probability")),
+        "flip_decision_threshold": _num((analysis.get("flip_decision") or {}).get("threshold")),
         "entry_label": _ENTRY_LABEL_BY_DECISION.get(decision, "SKIP"),
         "best_entry_max": _num(analysis.get("ideal_entry_cents")),
         "main_reason": _main_reason(analysis, side),
@@ -1934,7 +1957,7 @@ def _extract_pick(rank: int, asset: str, analysis: Mapping[str, Any]) -> dict[st
                         f"mom {(_num(fv.get('momentum')) or 0.0):+.2f}"),
         "edge_cents": _num(analysis.get("net_edge_cents")),
         "decision": decision,
-        "is_entry": decision == "ENTRY_RECOMMENDED",
+        "is_entry": _is_actionable_entry(analysis),
     }
 
 
@@ -2119,6 +2142,25 @@ def _timing_experiment_band() -> float:
     enough that a slow refresh cycle can't skip a mark, narrow enough not to
     overlap a neighbour."""
     return _env_float("Q15_V95_TIMING_EXPERIMENT_BAND_SECONDS", 6.0, 1.0, 60.0)
+
+
+def _net_edge_gate_ok(analysis: Mapping[str, Any]) -> bool:
+    """Net-edge-after-cost entry gate. DEFAULT OFF (Q15_V95_NET_EDGE_GATE_ENABLED).
+    On the live record the system is accuracy-positive but P&L-negative (paying
+    too much for favourites), so when enabled an entry must clear a minimum
+    net edge (cents, after costs) to remain actionable — otherwise the pick is
+    treated as NO-ENTRY. Default OFF keeps the frozen champion's behaviour."""
+    if not _env_bool("Q15_V95_NET_EDGE_GATE_ENABLED", False):
+        return True
+    min_edge = _env_float("Q15_V95_NET_EDGE_GATE_MIN_CENTS", 0.0, -100.0, 100.0)
+    edge = _num(analysis.get("net_edge_cents"))
+    return edge is not None and edge >= min_edge
+
+
+def _is_actionable_entry(analysis: Mapping[str, Any]) -> bool:
+    """An entry is actionable only if the champion recommends it AND it clears
+    the (default-OFF) net-edge gate."""
+    return str(analysis.get("trade_decision") or "") == "ENTRY_RECOMMENDED" and _net_edge_gate_ok(analysis)
 
 
 def _bridge_parent_inputs(policy: Any, snapshots: Mapping[str, Mapping[str, Any]], now: float) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -2364,6 +2406,16 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             )
             # Experimental shadow-signal config, resolved once per batch (default-OFF).
             _signals_cfg = shadow_signals.SignalConfig.from_env()
+            # Strict flip-decision threshold for THIS interval, selected once per
+            # cycle from completed post-reset history (chronological OOS). The
+            # decision per pick uses it below; never tuned on the rows it grades.
+            _flip_cfg = flip_decision.FlipConfig.from_env(checkpoint)
+            _flip_sel = (
+                flip_decision.select_threshold(
+                    self.ledger.flip_decision_rows(checkpoint, resolved_only=True, post_reset_only=True),
+                    _flip_cfg)
+                if _flip_cfg.enabled else {"validated": False, "threshold": 1.01}
+            )
             # ONE shared frozen-snapshot id for this interval's batch. Every asset
             # in this cycle is scored from the same `now` freeze and the same data,
             # and BOTH systems (champion + shadow) are recorded from this single
@@ -2501,6 +2553,32 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                                     snapshot_id=snapshot_id,
                                 )
                                 break
+                    # STRICT FLIP DECISION (observational): compute the flip
+                    # probability for this pick, decide YES only when the interval
+                    # threshold is VALIDATED and the probability clears it, store
+                    # the decision BEFORE the outcome (one per contract+interval),
+                    # and stash it for the panel's FLIP CHECK block.
+                    if _flip_cfg.enabled:
+                        _fp = flip_decision.flip_probability(analysis, checkpoint, _flip_cfg)
+                        _prob = _fp["probability"]
+                        _validated = bool(_flip_sel.get("validated"))
+                        _operative_thr = float(_flip_sel.get("threshold", 1.01))
+                        _shown_thr = _flip_sel.get("candidate_threshold")
+                        if _shown_thr is None:
+                            _shown_thr = _operative_thr
+                        _decision = "YES" if (_validated and _prob > _operative_thr) else "NO"
+                        analysis["flip_decision"] = {
+                            "decision": _decision, "flip_probability": _prob,
+                            "threshold": _shown_thr, "validated": _validated,
+                        }
+                        self.ledger.record_flip_decision(
+                            contract=canonical.ticker, checkpoint=checkpoint, asset=asset,
+                            predicted_side=str(analysis.get("prediction_side") or "") or None,
+                            flip_probability=_prob, threshold=_operative_thr,
+                            decision=_decision, validated=_validated,
+                            created_at=now, close_time=canonical.settlement_time,
+                            snapshot_id=snapshot_id,
+                        )
 
             _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
@@ -3069,7 +3147,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 manipulation_probability=manip_prob, entry_decision=decision,
                 sent_at=now, close_time=close_time, message_id=mid,
             )
-            if decision == "ENTRY_RECOMMENDED":
+            if _is_actionable_entry(analysis):
                 self.ledger.record_sent_prediction(
                     contract_id=str(ticker), asset=asset, interval=checkpoint, record_type="entry",
                     predicted_side=analysis.get("prediction_side"), probability=analysis.get("yes_probability"),

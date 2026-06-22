@@ -126,36 +126,39 @@ class RankedPanelFormatTest(unittest.TestCase):
             self.assertIn(medal, msg)
         self.assertIn("🥇 SOL NO — 72%", msg)   # confidence is on the predicted (NO) side
         self.assertIn("🥈 BTC YES — 66%", msg)
-        # one decision block keyed to the headline (#1 = SOL)
-        for label in ("Flip risk:", "Manipulation:", "Entry:", "Best entry:",
+        # one decision block keyed to the headline (#1 = SOL): the STRICT FLIP
+        # CHECK is the only flip/manipulation output; loose flip/manip lines and
+        # all manipulation math are now hidden.
+        for label in ("10M FLIP CHECK", "Decision:", "Flip Probability:",
+                      "Required Threshold:", "Entry:", "Best entry:",
                       "Main reason:", "Sample:"):
             self.assertIn(label, msg)
         self.assertIn("Entry: WAIT", msg)        # SOL decision WATCH_PRICE -> WAIT
-        self.assertIn("Manipulation: 43%", msg)
+        self.assertNotIn("Manipulation:", msg)   # manipulation math hidden
+        self.assertNotIn("Flip risk:", msg)
         self.assertIn("Best entry: ≤44¢", msg)
         self.assertIn("Sample: 42", msg)
         # the verbose per-pick dump is gone
-        for gone in ("P(Yes)", "Entry score:", "Wick/PA:", "Flow/Mom:", "Decision:"):
+        for gone in ("P(Yes)", "Entry score:", "Wick/PA:", "Flow/Mom:"):
             self.assertNotIn(gone, msg)
 
-    def test_flip_arrow_only_when_high_and_opposite(self):
-        # low flip risk -> bare percent, no arrow
-        low = [_extract_pick(1, "BTC", _analysis(side="YES", decision="PREDICTION_ONLY",
-                                                 flip_score=20.0, flip_dir="YES → NO"))]
-        self.assertIn("Flip risk: 20%", panels_v95.build_ranked_checkpoint_panel(
-            checkpoint="15M", picks=low))
-        self.assertNotIn("→", panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=low))
-        # high flip risk toward the opposite side -> arrow shows the genuine target
-        high = [_extract_pick(1, "BTC", _analysis(side="YES", decision="PREDICTION_ONLY",
-                                                  flip_score=64.0, flip_dir="YES → NO"))]
-        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=high)
-        self.assertIn("Flip risk: 64% → NO", msg)
+    def test_flip_check_block_replaces_loose_flip_line(self):
+        # The strict FLIP CHECK block replaces the old "Flip risk: NN% → SIDE"
+        # line. With no flip decision wired, it defaults to NO and em-dashes.
+        picks = [_extract_pick(1, "BTC", _analysis(side="YES", decision="PREDICTION_ONLY",
+                                                   flip_score=64.0, flip_dir="YES → NO"))]
+        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=picks)
+        self.assertIn("15M FLIP CHECK", msg)
+        self.assertIn("Decision: NO", msg)
+        self.assertNotIn("Flip risk:", msg)
+        self.assertNotIn("→", msg)
 
-    def test_manipulation_wait_flag_when_high(self):
+    def test_manipulation_math_hidden(self):
         picks = [_extract_pick(1, "BTC", _analysis(side="YES", decision="WATCH_PRICE",
                                                    manip_score=0.71))]
         msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="7M", picks=picks)
-        self.assertIn("Manipulation: 71% — WAIT", msg)
+        self.assertNotIn("Manipulation:", msg)
+        self.assertIn("7M FLIP CHECK", msg)
 
     def test_missing_rank_renders_dash_not_invented(self):
         picks = [_extract_pick(1, "BTC", _analysis(decision="PREDICTION_ONLY"))]
