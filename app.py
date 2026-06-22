@@ -13,6 +13,7 @@ from q15_upgrade.kalshi_rest import KalshiClient
 from market_cache import MarketResultCache
 from spot_client import get_spot
 import cycle_watchdog
+import version as build_version
 from q15_upgrade.orderbook import parse_orderbook, OrderbookTracker
 from analysis import AssetEngine
 from notifications.alert_config import AlertConfig
@@ -43,6 +44,25 @@ from q15_upgrade.v5_hardening import (
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# Stamp the running build at boot so the Repl console shows exactly which code
+# this process loaded (Stop ▸ Run is required to pick up a synced update).
+_bi = build_version.build_info()
+logger.info("BUILD %s (%s) shipped=%s — %s · tests=%s",
+            _bi.get("commit"), _bi.get("branch"), _bi.get("committed_at"),
+            _bi.get("summary"), _bi.get("tests"))
+
+
+@app.route("/version")
+def version_text_ep():
+    # Human-readable in a browser: the build the RUNNING app is on.
+    return app.response_class(build_version.version_text(), mimetype="text/plain")
+
+
+@app.route("/api/version")
+@app.route("/data/version")
+def version_json_ep():
+    return jsonify(build_version.version_payload())
 
 # Asset -> series ticker mapping for 15-min markets
 SERIES_MAP = {

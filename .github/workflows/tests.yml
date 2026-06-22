@@ -1,0 +1,32 @@
+name: tests
+
+# Automatic proof the deployed code is sane: run the full suite on every push to
+# main and on every PR. A green check = main is safe to deploy.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest "websockets>=12.0" flask cffi cryptography
+
+      - name: Show build_info
+        run: cat build_info.json || echo "(no build_info.json)"
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q
