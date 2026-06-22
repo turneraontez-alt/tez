@@ -23,12 +23,14 @@ from q15_upgrade.checkpoint_v95 import (
 def _analysis(*, side="YES", yes=0.72, sel=0.72, edge=6.0, ideal=44.0, ask=43.0,
               wick=0.30, momentum=0.20, flow=0.10, decision="ENTRY_RECOMMENDED",
               available=True, flip_score=None, flip_dir=None, manip_score=0.0,
-              cal_rows=None):
+              cal_rows=None, grade="B"):
     return {
         "prediction_available": available,
         "prediction_side": side,
         "yes_probability": yes,
         "selected_probability": sel,
+        # analyse_v95 always stamps the A/B/C/D confidence grade; mirror that here.
+        "confidence_grade": grade,
         "net_edge_cents": edge,
         "ideal_entry_cents": ideal,
         "trade_decision": decision,
@@ -74,6 +76,9 @@ class ExtractPickTest(unittest.TestCase):
         self.assertAlmostEqual(p["confidence"], 0.72)
         self.assertAlmostEqual(p["yes_prob"], 0.72)
         self.assertAlmostEqual(p["no_prob"], 0.28)
+        # the champion's confidence grade is surfaced onto the pick (not recomputed)
+        self.assertEqual(p["confidence_grade"], "B")
+        self.assertEqual(_extract_pick(1, "BTC", _analysis(grade="A"))["confidence_grade"], "A")
         self.assertIsNotNone(p["entry_score"])
         self.assertEqual(p["price_cents"], 43.0)
         self.assertEqual(p["max_cents"], 44.0)
@@ -124,8 +129,9 @@ class RankedPanelFormatTest(unittest.TestCase):
         # three compact ranked lines: medal · asset · side · settle confidence
         for medal in ("🥇", "🥈", "🥉"):
             self.assertIn(medal, msg)
-        self.assertIn("🥇 SOL NO — 72%", msg)   # confidence is on the predicted (NO) side
-        self.assertIn("🥈 BTC YES — 66%", msg)
+        # medal · asset · side · settle confidence · A/B/C/D grade
+        self.assertIn("🥇 SOL NO — 72% · B", msg)  # confidence is on the predicted (NO) side
+        self.assertIn("🥈 BTC YES — 66% · B", msg)
         # one decision block keyed to the headline (#1 = SOL): the STRICT FLIP
         # CHECK is the only flip/manipulation output; loose flip/manip lines and
         # all manipulation math are now hidden.
@@ -141,6 +147,25 @@ class RankedPanelFormatTest(unittest.TestCase):
         # the verbose per-pick dump is gone
         for gone in ("P(Yes)", "Entry score:", "Wick/PA:", "Flow/Mom:"):
             self.assertNotIn(gone, msg)
+
+    def test_confidence_grade_shown_on_each_pick(self):
+        # Each ranked pick carries its champion A/B/C/D grade after the confidence.
+        picks = [
+            _extract_pick(1, "SOL", _analysis(side="NO", yes=0.28, grade="A")),
+            _extract_pick(2, "BTC", _analysis(side="YES", yes=0.66, grade="C")),
+            _extract_pick(3, "XRP", _analysis(side="NO", yes=0.39, grade="D")),
+        ]
+        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="10M", picks=picks)
+        self.assertIn("🥇 SOL NO — 72% · A", msg)
+        self.assertIn("🥈 BTC YES — 66% · C", msg)
+        self.assertIn("🥉 XRP NO — 61% · D", msg)
+
+    def test_missing_grade_renders_dash_not_blank(self):
+        # A present pick lacking a grade reads "· —" (never an invented letter),
+        # matching the panel's em-dash convention for absent values.
+        picks = [_extract_pick(1, "BTC", _analysis(side="YES", yes=0.72, grade=None))]
+        msg = panels_v95.build_ranked_checkpoint_panel(checkpoint="15M", picks=picks)
+        self.assertIn("🥇 BTC YES — 72% · —", msg)
 
     def test_flip_check_block_replaces_loose_flip_line(self):
         # The strict FLIP CHECK block replaces the old "Flip risk: NN% → SIDE"
