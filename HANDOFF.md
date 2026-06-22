@@ -34,8 +34,14 @@ complete env — skip count rises when `flask`/`websockets`/cffi/crypto aren't i
 discriminator is the **NO side**, not the reason type — the ABSORPTION edge was a side-mix confound.
 Also validated (read-only) that a PIN distance-tightening cut does NOT help: closer-to-strike PIN
 flags don't discriminate better (non-monotonic; tightest ~60% score 64.5% vs farthest ~40% at 70.9%),
-so `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA` should stay OFF. Next idea (not built): a manipulation
-PERSISTENCE dimension (tell fired at 1 vs all of 15M/10M/7M) — more promising than a fixed decision time.
+so `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA` should stay OFF.
+**Then built the PERSISTENCE cut** (`by_persistence`, point-in-time: does a flag fire at an EARLIER
+checkpoint of the same contract?). Pooled, persistent looked far better (72.6% vs 61.1%) — but that
+is an INTERVAL CONFOUND (15M flags are always "fresh" and 15M is the weak interval). Controlled per
+checkpoint the relationship REVERSES: 7M fresh 91.7% (+2.83¢) vs 7M persistent 75.8% (−4.37¢); 10M
+fresh 71.9% (+1.32¢) vs 10M persistent 69.2% (−2.9¢). So the real signal is **freshness near close,
+not persistence** — `by_persistence` ships BOTH the pooled and the `by_checkpoint` (honest) views so
+the confound stays visible. Best manipulation subset on record: **fresh-flag @ 7M (91.7%, +2.83¢, n=84)**.
 
 ## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
 **Suite 1066 passed / 13 skipped** in a complete env (+45 tests:

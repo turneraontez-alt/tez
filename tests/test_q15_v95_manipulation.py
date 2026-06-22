@@ -456,6 +456,23 @@ class TestManipulationScoreboardDimensions(unittest.TestCase):
         self.assertEqual(bm["pin_only"]["YES"]["right"], 0)
         self.assertEqual(bm["pin_only"]["NO"]["n"], 0)
 
+    def test_persistence_counts_only_earlier_checkpoints(self):
+        # Contract P flagged at 15M then 10M: the 10M flag persisted (prior 15M flag).
+        self._rec("P", "15M", "NO", "NO", True, "PIN")   # first checkpoint -> fresh
+        self._rec("P", "10M", "NO", "NO", True, "PIN")   # prior 15M flagged -> persistent
+        # Contract Q flagged only at 7M: no earlier flag -> fresh (no look-ahead to
+        # later checkpoints, and there are no earlier ones).
+        self._rec("Q", "7M", "YES", "NO", True, "PIN")
+        bp = self.led.scoreboard()["by_manipulation"]["by_persistence"]
+        self.assertEqual(bp["persistent_flag"]["n"], 1)  # only P@10M
+        self.assertEqual(bp["fresh_flag"]["n"], 2)       # P@15M and Q@7M
+        # Interval-controlled view (the honest one): P@10M is persistent within 10M;
+        # P@15M is fresh within 15M; Q@7M is fresh within 7M.
+        self.assertEqual(bp["by_checkpoint"]["10M"]["persistent"]["n"], 1)
+        self.assertEqual(bp["by_checkpoint"]["10M"]["fresh"]["n"], 0)
+        self.assertEqual(bp["by_checkpoint"]["15M"]["fresh"]["n"], 1)
+        self.assertEqual(bp["by_checkpoint"]["7M"]["fresh"]["n"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

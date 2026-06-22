@@ -2569,6 +2569,56 @@ class V95Ledger:
             "absorption": _side_split([r for r in rows if "ABSORPTION" in _reasons(r)]),
             "pin_only": _side_split([r for r in rows if _reasons(r) == {"PIN"}]),
         }
+
+        # Persistence (point-in-time, no look-ahead): for each FLAGGED row, did the
+        # manipulation flag also fire at an EARLIER checkpoint of the same contract?
+        # A tell that persists 15M->10M->7M is more likely to be real than a one-off
+        # blip, so this is the lever to test before a fixed "decision time". Only
+        # checkpoints with MORE time remaining (earlier in the contract's life) count
+        # toward "prior", mirroring what a live feature could actually know — the
+        # current row never sees its own later checkpoints.
+        _cp_order = {cp: i for i, cp in enumerate(TRACKED_CHECKPOINTS)}
+        by_ticker: dict[str, list[sqlite3.Row]] = {}
+        for r in rows:
+            tk = str(_row_get(r, "ticker") or "")
+            if tk:
+                by_ticker.setdefault(tk, []).append(r)
+        fresh_flag: list[sqlite3.Row] = []
+        persistent_flag: list[sqlite3.Row] = []
+        # Per-checkpoint split is the HONEST read: the pooled fresh-vs-persistent gap
+        # is confounded by interval (15M flags are ALWAYS fresh and 15M is the weak
+        # interval), so persistence must be judged WITHIN a checkpoint. On the live
+        # record the pooled view flatters persistence while the controlled view
+        # reverses it (fresh near close discriminates better) — keep both so the
+        # confound is visible, not hidden.
+        persist_by_cp: dict[str, dict[str, list[sqlite3.Row]]] = {
+            cp: {"fresh": [], "persistent": []} for cp in TRACKED_CHECKPOINTS
+        }
+        for trows in by_ticker.values():
+            for r in trows:
+                if _flag(r) != 1:
+                    continue
+                cp = str(r["checkpoint"])
+                order = _cp_order.get(cp)
+                if order is None:
+                    fresh_flag.append(r)
+                    continue
+                prior = sum(
+                    1 for o in trows
+                    if _flag(o) == 1
+                    and _cp_order.get(str(o["checkpoint"]), order) < order
+                )
+                tag = "persistent" if prior >= 1 else "fresh"
+                (persistent_flag if prior >= 1 else fresh_flag).append(r)
+                persist_by_cp[cp][tag].append(r)
+        by_persistence = {
+            "fresh_flag": self._win_loss(fresh_flag),
+            "persistent_flag": self._win_loss(persistent_flag),
+            "by_checkpoint": {
+                cp: {"fresh": self._win_loss(v["fresh"]), "persistent": self._win_loss(v["persistent"])}
+                for cp, v in persist_by_cp.items()
+            },
+        }
         return {
             "suspected": self._win_loss(suspected),
             "clean": self._win_loss(clean),
@@ -2577,6 +2627,7 @@ class V95Ledger:
             "by_checkpoint": by_checkpoint,
             "by_side": by_side,
             "by_reason_side": by_reason_side,
+            "by_persistence": by_persistence,
         }
 
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
@@ -2812,7 +2863,7 @@ class V95Ledger:
             rows = list(connection.execute(
                 "SELECT checkpoint, correct, rank, asset, realized_cents, "
                 "predicted_side, official_result, confidence_grade, changed_before_close, "
-                "manipulation_suspected, manipulation_reason, pushed "
+                "manipulation_suspected, manipulation_reason, pushed, ticker "
                 "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
                 (MODEL_VERSION,),
             ))
