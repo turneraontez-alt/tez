@@ -2410,12 +2410,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # cycle from completed post-reset history (chronological OOS). The
             # decision per pick uses it below; never tuned on the rows it grades.
             _flip_cfg = flip_decision.FlipConfig.from_env(checkpoint)
-            _flip_sel = (
-                flip_decision.select_threshold(
-                    self.ledger.flip_decision_rows(checkpoint, resolved_only=True, post_reset_only=True),
-                    _flip_cfg)
-                if _flip_cfg.enabled else {"validated": False, "threshold": 1.01}
-            )
+            _flip_sel = {"validated": False, "threshold": 1.01}
+            if _flip_cfg.enabled:
+                try:
+                    _flip_sel = flip_decision.select_threshold(
+                        self.ledger.flip_decision_rows(checkpoint, resolved_only=True, post_reset_only=True),
+                        _flip_cfg)
+                except Exception as exc:  # never let calibration abort the cycle
+                    logger.debug("flip threshold selection skipped for %s: %s", checkpoint, exc)
             # ONE shared frozen-snapshot id for this interval's batch. Every asset
             # in this cycle is scored from the same `now` freeze and the same data,
             # and BOTH systems (champion + shadow) are recorded from this single
@@ -2559,26 +2561,31 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     # the decision BEFORE the outcome (one per contract+interval),
                     # and stash it for the panel's FLIP CHECK block.
                     if _flip_cfg.enabled:
-                        _fp = flip_decision.flip_probability(analysis, checkpoint, _flip_cfg)
-                        _prob = _fp["probability"]
-                        _validated = bool(_flip_sel.get("validated"))
-                        _operative_thr = float(_flip_sel.get("threshold", 1.01))
-                        _shown_thr = _flip_sel.get("candidate_threshold")
-                        if _shown_thr is None:
-                            _shown_thr = _operative_thr
-                        _decision = "YES" if (_validated and _prob > _operative_thr) else "NO"
-                        analysis["flip_decision"] = {
-                            "decision": _decision, "flip_probability": _prob,
-                            "threshold": _shown_thr, "validated": _validated,
-                        }
-                        self.ledger.record_flip_decision(
-                            contract=canonical.ticker, checkpoint=checkpoint, asset=asset,
-                            predicted_side=str(analysis.get("prediction_side") or "") or None,
-                            flip_probability=_prob, threshold=_operative_thr,
-                            decision=_decision, validated=_validated,
-                            created_at=now, close_time=canonical.settlement_time,
-                            snapshot_id=snapshot_id,
-                        )
+                        # A flip-computation failure must never break the cycle or
+                        # the recording path (mirrors the shadow-signal guard).
+                        try:
+                            _fp = flip_decision.flip_probability(analysis, checkpoint, _flip_cfg)
+                            _prob = _fp["probability"]
+                            _validated = bool(_flip_sel.get("validated"))
+                            _operative_thr = float(_flip_sel.get("threshold", 1.01))
+                            _shown_thr = _flip_sel.get("candidate_threshold")
+                            if _shown_thr is None:
+                                _shown_thr = _operative_thr
+                            _decision = "YES" if (_validated and _prob > _operative_thr) else "NO"
+                            analysis["flip_decision"] = {
+                                "decision": _decision, "flip_probability": _prob,
+                                "threshold": _shown_thr, "validated": _validated,
+                            }
+                            self.ledger.record_flip_decision(
+                                contract=canonical.ticker, checkpoint=checkpoint, asset=asset,
+                                predicted_side=str(analysis.get("prediction_side") or "") or None,
+                                flip_probability=_prob, threshold=_operative_thr,
+                                decision=_decision, validated=_validated,
+                                created_at=now, close_time=canonical.settlement_time,
+                                snapshot_id=snapshot_id,
+                            )
+                        except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+                            logger.debug("flip decision skipped for %s %s: %s", asset, checkpoint, exc)
 
             _sub["record"] = time.monotonic() - _s_record
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
