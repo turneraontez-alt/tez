@@ -18,3 +18,9 @@ id = "DnpMRA17kx-BtnP5pGZJz"
 uri = "file://tez_review_dump.json"
 type = "unspecified"
 title = "tez_review_dump.json — full ledger + challenger review dump"
+
+[[outputs]]
+id = "o1bDKieiml_QivFeQf-gV"
+uri = "file://latest_snapshot.json"
+type = "unspecified"
+title = "latest_snapshot.json"
