@@ -1,0 +1,7 @@
+{
+  "commit": "63671f9",
+  "branch": "claude/trusting-bardeen-yufks0",
+  "committed_at": "2026-06-22T03:51:28Z",
+  "summary": "deploy/verify tooling: ship script, /version endpoint, CI",
+  "tests": "994 passed, 4 skipped"
+}

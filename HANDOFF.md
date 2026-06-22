@@ -9,8 +9,21 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **994 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## 🚀 Deploy / verify workflow (NEW)
+- **Ship to main with one command:** `scripts/ship.sh "summary"` — fetches origin/main,
+  merges it INTO the work branch first (structural data-safety guard: can only add main's
+  content, never drop it; a conflict aborts), runs the full suite (aborts if red), stamps
+  `build_info.json`, merges `--no-ff` to main, pushes main + the branch. Replaces the manual
+  merge dance (and the stale-local-main trap).
+- **Verify the RUNNING Repl app:** open `<repl-url>/version` (human text) or `/api/version`
+  (JSON). `build_info.json` is read at app startup, so it reflects the code the process
+  actually loaded — if it shows the old build you haven't Stop ▸ Run onto the new code yet
+  (the Relay syncs files but the app doesn't hot-reload). `running_commit`/`matches_checkout`
+  cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
+- **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
 ## ✅ Shipped THIS session (branch `claude/trusting-bardeen-yufks0`) — champion-review fixes (calibration + edge levers)
 **Suite 994 passed, 4 skipped (+8).** Frozen champion WEIGHTS untouched; these act on
