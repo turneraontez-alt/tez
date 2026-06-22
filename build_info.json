@@ -1,7 +1,7 @@
 {
-  "commit": "8d174cb",
-  "branch": "claude/challenger-shadow-comparison-zo7fhq",
-  "committed_at": "2026-06-22T05:04:18Z",
-  "summary": "read-only Polymarket Up/Down shadow (default-OFF, separate from Kalshi)",
-  "tests": "1024 passed, 4 skipped in 25.03s"
+  "commit": "d041530",
+  "branch": "claude/optimistic-cray-fnnu3d",
+  "committed_at": "2026-06-22T18:04:08Z",
+  "summary": "Challenger v6 research + Entry Economics v1 (two read-only workstreams)",
+  "tests": "1075 passed, 13 skipped in 35.50s"
 }
