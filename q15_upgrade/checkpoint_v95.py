@@ -1620,7 +1620,12 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             body.append("")
             body.append("⚠ Manipulation watch")
             for asset, manip in flagged:
-                body.append(f"{asset}: {_manipulation_phrase(manip)}")
+                line = f"{asset}: {_manipulation_phrase(manip)}"
+                # Highest-accuracy manipulation subset on record: a fresh tell that
+                # first appears at the 7M close on a NO pick (97.7% NO-side, OOS).
+                if (analyses.get(asset, {}) or {}).get("fresh_manip_near_close"):
+                    line += " · 🎯 FRESH 7M·NO — high-confidence"
+                body.append(line)
 
     # Thin-evidence watch (default OFF): flag any top pick whose prediction rests
     # on too few data-backed features, so a confident-looking number is read with
@@ -2622,6 +2627,20 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     analysis["snapshot_id"] = snapshot_id
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
+                    # Fresh-near-close manipulation tag (default-ON, observability
+                    # only). A manipulation tell that FIRST appears at the closing 7M
+                    # check (not seen at this contract's 15M/10M) on a NO-side pick is
+                    # the highest-accuracy manipulation subset on the live record
+                    # (97.7% on the NO side, validated out-of-sample). Surfaced as an
+                    # alert marker so the owner can read it; it NEVER alters the frozen
+                    # probability, edge, or entry decision. Point-in-time: the earlier
+                    # checkpoints are already recorded, so the lookup has no look-ahead.
+                    if (checkpoint == "7M"
+                            and _env_bool("Q15_V95_FRESH_MANIP_TAG", True)
+                            and (analysis.get("manipulation") or {}).get("suspected")
+                            and str(analysis.get("prediction_side") or "").upper() == "NO"
+                            and not self.ledger.manipulation_flagged_before(canonical.ticker, checkpoint)):
+                        analysis["fresh_manip_near_close"] = True
                     # Flag (without mutating the graded prediction) when the live
                     # side drifts from the locked one before close — the stability
                     # / change-rate metric per interval.

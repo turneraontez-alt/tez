@@ -46,10 +46,14 @@ the confound stays visible. Best manipulation subset on record: **fresh-flag @ 7
 accuracy holds out-of-sample (older half 92.9% → newer half 90.5%), NOT a recent-regime artifact
 (spread over 2 days, 4/84 recent), and concentrates on the **NO side: fresh-near-close·NO = 97.7%,
 +8.92¢, n=43, Wilson CI [0.879, 0.996]** — the strongest manipulation subset found. Caveat: P&L noisier
-than accuracy (test half −1¢), so it's a confidence signal first. NOT wired into the champion (frozen);
-`fresh_near_close` is the tracked artifact to earn a future default-OFF activation after a LIVE
-validation window. Activation path (next): a default-OFF Q15-gated confidence/quality boost for a
-fresh 7M NO-side manipulation flag, computed point-in-time from the contract's prior-checkpoint state.
+than accuracy (test half −1¢), so it's a confidence signal first.
+**ACTIVATED (owner directive) as a default-ON alert TAG** (`Q15_V95_FRESH_MANIP_TAG`, default true):
+at the 7M checkpoint, when manipulation is suspected on a NO pick AND the contract was NOT flagged at
+15M/10M (`ledger.manipulation_flagged_before`, point-in-time), the checkpoint alert appends
+"🎯 FRESH 7M·NO — high-confidence" to that asset's Manipulation-watch line. Owner chose the SAFE form:
+it surfaces the signal only — it does NOT touch the frozen champion's probability/edge/entry decision,
+and preserves the ENTRY/V9.5 CHECK markers. Toggle off with `Q15_V95_FRESH_MANIP_TAG=false`. If the
+live tagged sample proves the P&L edge durable, the next step is an opt-in confidence/quality boost.
 
 ## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
 **Suite 1066 passed / 13 skipped** in a complete env (+45 tests:

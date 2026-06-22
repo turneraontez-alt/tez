@@ -978,6 +978,33 @@ class V95Ledger:
             )
         return prediction_id, inserted
 
+    def manipulation_flagged_before(self, ticker: str, checkpoint: str) -> bool:
+        """Was manipulation suspected for this contract at an EARLIER checkpoint
+        (one with MORE time remaining than ``checkpoint``)?
+
+        Point-in-time and read-only: it only inspects checkpoints that precede the
+        given one (e.g. 15M/10M when asked about 7M), so it mirrors exactly what the
+        live path can know when the later checkpoint fires — no look-ahead. Used to
+        identify a FRESH manipulation tell (one that first appears near close).
+        """
+        if not self._available or not ticker:
+            return False
+        checkpoint = self._checkpoint(checkpoint)
+        try:
+            earlier = TRACKED_CHECKPOINTS[:TRACKED_CHECKPOINTS.index(checkpoint)]
+        except ValueError:
+            return False
+        if not earlier:
+            return False
+        placeholders = ",".join("?" for _ in earlier)
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM predictions WHERE model_version=? AND ticker=? "
+                f"AND checkpoint IN ({placeholders}) AND manipulation_suspected=1 LIMIT 1",
+                (MODEL_VERSION, ticker, *earlier),
+            ).fetchone()
+        return row is not None
+
     # -- read-only challenger shadow (default-OFF; never affects production) --
     def _shadow_observe(self, **kw) -> None:
         try:

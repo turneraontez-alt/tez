@@ -139,6 +139,19 @@ class TestAlertTag(unittest.TestCase):
         msg = build_v95_message("10M", self._analyses(manip), [{"asset": "BTC", "ticker": "T"}], {})
         self.assertNotIn("Manipulation watch", msg)
 
+    def test_fresh_near_close_marker_rendered_when_flagged(self):
+        manip = {"suspected": True, "reasons": ["PIN"], "lean": None, "score": 0.33}
+        an = self._analyses(manip)
+        an["BTC"]["fresh_manip_near_close"] = True
+        msg = build_v95_message("7M", an, [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertIn("FRESH 7M", msg)
+        # Markers still intact.
+        self.assertIn("V9.5 CHECK", msg)
+        self.assertIn("Manipulation watch", msg)
+        # Without the stamped flag the marker is absent.
+        msg2 = build_v95_message("7M", self._analyses(manip), [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertNotIn("FRESH 7M", msg2)
+
 
 class TestScoreboardBreakdown(unittest.TestCase):
     def setUp(self):
@@ -484,6 +497,17 @@ class TestManipulationScoreboardDimensions(unittest.TestCase):
         self.assertEqual(fnc["all"]["n"], 2)              # F1, F2 only (not G@7M)
         self.assertEqual((fnc["NO"]["n"], fnc["NO"]["right"]), (1, 1))
         self.assertEqual((fnc["YES"]["n"], fnc["YES"]["right"]), (1, 0))
+
+    def test_manipulation_flagged_before_is_point_in_time(self):
+        self._rec("P", "15M", "NO", "NO", True, "PIN")   # flagged at 15M
+        self._rec("P", "10M", "NO", "NO", False, None)   # clean at 10M
+        # At 7M an earlier (15M) flag exists -> True.
+        self.assertTrue(self.led.manipulation_flagged_before("P", "7M"))
+        # At 15M (first checkpoint) nothing precedes it -> False (no look-ahead).
+        self.assertFalse(self.led.manipulation_flagged_before("P", "15M"))
+        # A contract flagged only at 7M has no earlier flag -> fresh.
+        self._rec("Q", "7M", "NO", "NO", True, "PIN")
+        self.assertFalse(self.led.manipulation_flagged_before("Q", "7M"))
 
 
 if __name__ == "__main__":
