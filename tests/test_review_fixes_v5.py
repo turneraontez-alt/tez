@@ -111,6 +111,29 @@ class TimingExperimentLedgerTests(unittest.TestCase):
         self.assertEqual(official["10M"]["total"]["n"], 0)
         self.assertEqual(official["15M"]["total"]["n"], 0)
 
+    def test_null_predicted_side_row_excluded_not_counted_wrong(self):
+        # A timing observation can be recorded with no predicted side. Once the
+        # contract settles, an ungradeable (NULL-side) row must be EXCLUDED from
+        # the denominator, not silently banked as a loss.
+        led = self._ledger()
+        led.record_timing_observation(
+            contract="KXBTC-G", mark_seconds=660, asset="BTC", predicted_side="YES",
+            yes_probability=0.7, selected_probability=0.7, confidence_grade="B",
+            created_at=NOW, close_time=NOW + 660,
+        )
+        led.record_timing_observation(
+            contract="KXBTC-N", mark_seconds=660, asset="BTC", predicted_side=None,
+            yes_probability=None, selected_probability=None, confidence_grade=None,
+            created_at=NOW, close_time=NOW + 660,
+        )
+        led.resolve_ticker("KXBTC-G", "YES", NOW + 800)  # gradeable, correct
+        led.resolve_ticker("KXBTC-N", "NO", NOW + 800)   # NULL side -> ungradeable
+        row = led.timing_experiment_scoreboard()["by_mark"]["660"]
+        self.assertEqual(row["n"], 1)        # only the gradeable row counts
+        self.assertEqual(row["right"], 1)
+        self.assertEqual(row["wrong"], 0)    # the NULL-side row is NOT a loss
+        self.assertEqual(row["accuracy"], 1.0)
+
 
 class PredictionStabilitySignalTests(unittest.TestCase):
     def _canonical(self):

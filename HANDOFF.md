@@ -26,9 +26,10 @@ Tests: `python3 -m pytest tests/ -q` → **1061 passed, 4 skipped** in a complet
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
 ## ✅ Shipped THIS session — Fix Shadow-vs-Your-System native grading (the "5:30 DOGE" bug)
-**Suite 1061 passed / 4 skipped** in a complete env (+9 tests:
-`tests/test_challenger_native_side_grading.py`). Deploy-pending on `main` + a Repl
-Stop ▸ Run; **then run the one-time backfill** (below) on the Repl.
+**Suite 1062 passed / 4 skipped** in a complete env (+10 tests:
+`tests/test_challenger_native_side_grading.py` ×9, timing NULL-side counter ×1).
+Deploy-pending on `main` + a Repl Stop ▸ Run; **then run the one-time backfill**
+(below) on the Repl.
 - **The bug (owner-reported):** the *Challenger Shadow vs Your System* report showed
   a settled prediction (the 5:30 DOGE) as a CORRECT guess when production had it
   WRONG. Root cause: the report re-derived the native "Your System" side from the
@@ -60,6 +61,12 @@ Stop ▸ Run; **then run the one-time backfill** (below) on the Repl.
   `python3 -m tools.backfill_shadow_native_side` (add `--dry-run` first). It stamps
   production's decision onto the 1171 pre-fix shadow rows so the all-time records
   re-grade correctly. Read-only wrt production; idempotent.
+- **Also (counter hardening):** `timing_experiment_scoreboard` no longer banks a
+  resolved NULL-predicted-side row as a loss — it is excluded from the denominator
+  (`ledger_v95.py:~1192`). 0 rows affected on today's data; correctness guard. The
+  other latent item (model_version filter on the timing/flip settlement UPDATEs) was
+  reviewed and intentionally left: every READ already filters by model_version, so
+  there is no cross-version leak to fix and the settlement SQL stays untouched.
 
 ## ✅ Shipped (prior session) — Ultoim Build: separate read-only research reporting system
 **Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package

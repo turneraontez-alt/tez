@@ -1189,7 +1189,11 @@ class V95Ledger:
             rows = list(connection.execute(
                 "SELECT mark_seconds, "
                 "SUM(CASE WHEN predicted_side=official_result THEN 1 ELSE 0 END) AS right, "
-                "SUM(CASE WHEN official_result IS NOT NULL THEN 1 ELSE 0 END) AS n, "
+                # A resolved row with NO predicted side is ungradeable: exclude it from
+                # the denominator instead of silently banking it as a loss (it would
+                # otherwise count in n but never in right -> graded wrong).
+                "SUM(CASE WHEN official_result IS NOT NULL AND predicted_side IS NOT NULL "
+                "THEN 1 ELSE 0 END) AS n, "
                 "SUM(CASE WHEN official_result IS NULL THEN 1 ELSE 0 END) AS pending "
                 "FROM timing_experiment WHERE model_version=? "
                 "GROUP BY mark_seconds ORDER BY mark_seconds DESC",
