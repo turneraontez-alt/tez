@@ -4,7 +4,8 @@ Owns a single daemon worker thread. The live ~1s loop only calls ``observe()``
 (synchronously extracts compact per-asset fields and enqueues) and
 ``reconcile()`` (throttled enqueue). All ranking, grading, flip research, SQLite
 writes, and Telegram delivery happen on the worker, so the live loop never
-blocks. Default-OFF: ``get_runner()`` returns None unless ``Q15_ULTOIM_ENABLED``.
+blocks. Default-ON (read-only collector); ``get_runner()`` returns None only when
+``Q15_ULTOIM_ENABLED=false``.
 """
 from __future__ import annotations
 

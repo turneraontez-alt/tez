@@ -29,9 +29,12 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
 **Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
 `q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,
 default-OFF hooks (`checkpoint_v95.run_cycle` observe + `app.py` reconcile).
-Read-only; never trades; production byte-identical when `Q15_ULTOIM_ENABLED`
-unset. In-process (own worker thread, like the polymarket shadow) — no `.replit`
-change. Deploy-pending on `main` + a Repl Stop ▸ Run to load it.
+Read-only; never trades. **Default ON** as a read-only collector but stays MUTED
+(records, never delivers) until `Q15_ULTOIM_TELEGRAM_CHAT_ID` is set, so default-on
+is safe and silent; `Q15_ULTOIM_ENABLED=false` makes the app byte-identical. Tests
+stay deterministic via `tests/conftest.py` (autouse: Ultoim off in the suite).
+In-process (own worker thread, like the polymarket shadow) — no `.replit` change.
+Deploy-pending on `main` + a Repl Stop ▸ Run to load it.
 - **What it is:** a SEPARATE research system (own DB `data/q15_ultoim_v1.sqlite3`,
   own model_version `ultoim-build-v1`, own counters/reset marker, own Telegram
   channel via `Q15_ULTOIM_TELEGRAM_CHAT_ID` reusing `TELEGRAM_BOT_TOKEN`). Reuses
@@ -58,8 +61,9 @@ change. Deploy-pending on `main` + a Repl Stop ▸ Run to load it.
   panel,telegram,runner}.py` (new), `tests/test_ultoim_build.py` (new),
   `q15_upgrade/checkpoint_v95.py` (+observe hook), `app.py` (+reconcile hook),
   `.env.example`.
-- **Deploy:** set `Q15_ULTOIM_ENABLED=true` + `Q15_ULTOIM_TELEGRAM_CHAT_ID=<chat>`
-  in the Repl, then **Stop ▸ Run**. (Also recommend `Q15_V95_SHADOW_SIGNALS_ENABLED=true`.)
+- **Deploy:** already ON by default (records silently). To DELIVER, set
+  `Q15_ULTOIM_TELEGRAM_CHAT_ID=<chat>` in the Repl, then **Stop ▸ Run**.
+  `Q15_V95_SHADOW_SIGNALS_ENABLED` is already default ON (feeds grade + flip).
 
 ## ✅ Shipped THIS session — Hourly learning-snapshot export to a dedicated branch
 **Suite 1036 passed / 4 skipped** in a complete env (+12 tests). New worker

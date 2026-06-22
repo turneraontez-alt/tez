@@ -82,10 +82,19 @@ def _runner(tmp_path, telegram=None):
 
 
 # --------------------------------------------------------------------------- #
-# default-OFF
+# enable gating
 # --------------------------------------------------------------------------- #
-def test_disabled_by_default(monkeypatch):
+def test_enabled_by_default(monkeypatch):
+    # The conftest autouse fixture forces it off for the suite; clear that to see
+    # the real production default.
     monkeypatch.delenv("Q15_ULTOIM_ENABLED", raising=False)
+    cfg_mod.reset_enabled_cache()
+    assert UltoimConfig.from_env().enabled is True
+    cfg_mod.reset_enabled_cache()
+
+
+def test_explicit_disable_returns_no_runner(monkeypatch):
+    monkeypatch.setenv("Q15_ULTOIM_ENABLED", "false")
     cfg_mod.reset_enabled_cache()
     assert UltoimConfig.from_env().enabled is False
     assert get_runner() is None

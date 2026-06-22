@@ -1,9 +1,11 @@
 """Ultoim Build — configuration.
 
 Ultoim Build is a SEPARATE, read-only research reporting system that runs beside
-the live champion. It never trades, never touches the live system's predictions,
-records, or Telegram channel, and is byte-identical-to-production OFF by default
-(``Q15_ULTOIM_ENABLED`` unset/false). It reuses the champion's frozen per-asset
+the live champion. It never trades and never touches the live system's
+predictions, records, or Telegram channel. It is ON by default (a read-only
+collector) but stays MUTED until its own Telegram channel is configured, so it
+silently accrues research data without delivering; set ``Q15_ULTOIM_ENABLED=false``
+for a fully inert, byte-identical app. It reuses the champion's frozen per-asset
 analysis (read-only) to publish three value-ranked final-outcome picks at the
 12M / 10M / 7M marks into its OWN database + Telegram channel.
 """
@@ -39,7 +41,11 @@ INTERVAL_MARKS: dict[str, int] = {"12M": 720, "10M": 600, "7M": 420}
 
 @dataclass(frozen=True)
 class UltoimConfig:
-    enabled: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_ENABLED", False))
+    # Default ON: Ultoim is a read-only research collector and the whole point is
+    # to accrue data. It stays MUTED (records, never delivers) until a separate
+    # Telegram channel is configured, so default-on cannot spam or touch the live
+    # system. Set Q15_ULTOIM_ENABLED=false for a fully inert, byte-identical app.
+    enabled: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_ENABLED", True))
     model_version: str = field(
         default_factory=lambda: _str("Q15_ULTOIM_MODEL_VERSION", "ultoim-build-v1")
     )
