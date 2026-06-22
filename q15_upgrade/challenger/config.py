@@ -55,6 +55,17 @@ class ChallengerConfig:
     enabled: bool = field(default_factory=lambda: _bool("Q15_CHALLENGER_ENABLED", False))
     as_primary: bool = field(default_factory=lambda: _bool("Q15_CHALLENGER_AS_PRIMARY", False))
 
+    # -- feature set (research lineage; default "v5" = byte-identical live shadow) --
+    # "v5" is the frozen production challenger feature vector. "v6" is the RESEARCH
+    # superset (v5 + appended leakage-safe microstructure features) evaluated by
+    # challenger/research.py. Promotion to "v6" is deliberate: set this to "v6" AND
+    # bump Q15_CHALLENGER_MODEL_VERSION to "challenger-v6" so the new lineage's
+    # comparison starts empty and never mixes with the v5 record. Default OFF.
+    feature_set: str = field(default_factory=lambda: _str("Q15_CHALLENGER_FEATURE_SET", "v5"))
+    # Prediction-stability EMA half-life in cycles (research option; 0 = passthrough,
+    # so the live shadow is unchanged unless opted into). Reduces flip-flop.
+    stability_half_life: float = field(default_factory=lambda: _float("Q15_CHALLENGER_STABILITY_HALFLIFE", 0.0))
+
     # -- model --
     # "logistic" (pure-python, no deps), "xgboost", "lightgbm",
     # "market_only" / "volatility_only" (baselines).

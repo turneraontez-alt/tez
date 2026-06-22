@@ -1314,6 +1314,42 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
             snapshot["q15_v9_5_shadow_econ_reason"] = _sd.reason
     except Exception:
         pass
+    # Entry Economics (entry-econ-v1): a SEPARATE, read-only trade-quality system
+    # answering "is this contract worth buying at an executable price?" with a
+    # single ENTER / WAIT / SKIP and the executable economics behind it. It never
+    # changes the prediction or the frozen live entry gate; the compact panel and
+    # the decision are surfaced additively. The optional entry-performance ledger
+    # only writes when Q15_ENTRY_ECON_LEDGER is enabled (off by default), so this
+    # pure computation creates no files. Fully guarded — never raises into the loop.
+    try:
+        from .entry_economics.runner import get_runner as _ee_runner
+        _ee = None
+        _runner = _ee_runner()
+        if _runner is not None:
+            # The runner evaluates AND (only when Q15_ENTRY_ECON_LEDGER is enabled)
+            # persists the evaluation to its own ledger — never the production tables.
+            _ee = _runner.evaluate(analysis, contract=analysis.get("ticker"))
+            _panel = _runner.panel(_ee)
+        else:
+            _ee = None
+            _panel = None
+        if _ee is not None:
+            snapshot["q15_entry_econ_version"] = _ee.version
+            snapshot["q15_entry_econ_decision"] = _ee.decision
+            snapshot["q15_entry_econ_side"] = _ee.side
+            snapshot["q15_entry_econ_main_blocker"] = _ee.main_blocker
+            snapshot["q15_entry_econ_main_blocker_text"] = _ee.main_blocker_text
+            if _ee.conservative is not None:
+                snapshot["q15_entry_econ_conservative_probability"] = _ee.conservative.conservative_side_prob
+            if _ee.economics is not None:
+                snapshot["q15_entry_econ_net_edge_cents"] = _ee.economics.net_edge_cents
+                snapshot["q15_entry_econ_max_entry_cents"] = _ee.economics.maximum_entry_price_cents
+                snapshot["q15_entry_econ_recommended_low_cents"] = _ee.economics.recommended_entry_low_cents
+                snapshot["q15_entry_econ_recommended_high_cents"] = _ee.economics.recommended_entry_high_cents
+                snapshot["q15_entry_econ_break_even_prob"] = _ee.economics.break_even_prob
+            snapshot["q15_entry_econ_panel"] = _panel
+    except Exception:
+        pass
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
     snapshot["q15_v9_5_entry_allowed"] = bool(analysis.get("entry_allowed"))
     # Suspected price-manipulation tracking (read-only; does not affect the call).

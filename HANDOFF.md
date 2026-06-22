@@ -9,8 +9,8 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete env
-(skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+Tests: `python3 -m pytest tests/ -q` → **1066 passed** (13 skipped this env; ~4 in a
+complete env — skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
 - **Ship to main with one command:** `scripts/ship.sh "summary"` — fetches origin/main,
@@ -24,6 +24,54 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   (the Relay syncs files but the app doesn't hot-reload). `running_commit`/`matches_checkout`
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
+
+## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
+**Suite 1066 passed / 13 skipped** in a complete env (+45 tests:
+`tests/test_entry_economics.py` 32, `tests/test_challenger_v6_research.py` 13).
+Both workstreams are READ-ONLY and ADDITIVE — with default env the live app and the
+live challenger shadow are byte-identical (no active prediction or entry gate
+changed). Deploy-pending on the branch + a Repl Stop ▸ Run; nothing auto-promoted.
+
+- **Workstream 1 — Challenger review (identity preserved).** Documented the
+  challenger's distinguishing logic (learned L2-logistic on its OWN ledger +
+  independent Platt/isotonic calibration + decisiveness ranking + own OOD + own
+  cost/decision model — vs Your System's market-baseline-plus-residual +
+  net-edge ranking). Added a NEW research version **`challenger-v6`** WITHOUT
+  touching the live v5 path:
+  - `q15_upgrade/challenger/features_v6.py` — leakage-safe, APPEND-ONLY superset of
+    the frozen v5 feature vector (+12 microstructure features: strike pressure,
+    time above/below strike, strike-cross rate, failed continuation, flow
+    persistence, book resiliency, return entropy, regime transition, spot-vs-
+    contract disagreement, cross-asset confirmation, manipulation score).
+  - `q15_upgrade/challenger/research.py` — purged walk-forward OOS harness that
+    grades v6 vs v5 PAIRED, with a strict promotion gate (significant log-loss win,
+    no Brier/calibration regression) — proven to promote a real signal and keep
+    noise in research. Plus a prediction-stability EMA (default OFF).
+  - Config switches `Q15_CHALLENGER_FEATURE_SET` (default `v5`) /
+    `Q15_CHALLENGER_STABILITY_HALFLIFE` (default 0). v6 stays in RESEARCH MODE —
+    promotion is a deliberate config switch after a win on real settled data.
+- **Workstream 2 — Entry Economics repair (`entry-econ-v1`).** NEW separate,
+  read-only package `q15_upgrade/entry_economics/` answering "is this contract
+  worth buying at an executable price?" with **ENTER / WAIT / SKIP**. Fixes the
+  real economics: the **Kalshi fee is now ceil-rounded** (was under-charged),
+  depth-walk slippage + partial-fill, latency + stale surcharge, a rich
+  **conservative probability** (calibration/sample/coverage/disagreement/
+  instability/regime/flip/manip/interval/asset — combined by geometric mean so a
+  genuine edge can still ENTER), break-even prob, max/recommended entry, EV +
+  EV-after-uncertainty, R:R, liquidity capacity. Compact Telegram panel + an
+  independent entry-performance ledger (only ENTER-sent-before-settlement counts;
+  WAIT/SKIP studied in background; restart-safe + dedup). Surfaced live in the
+  snapshot (`q15_entry_econ_*` + panel); ledger writes are default-OFF
+  (`Q15_ENTRY_ECON_LEDGER`). Wired read-only into `apply_v95_policy` (evaluate +
+  surface) and `ledger_v95._shadow_resolve` (settlement grading), both guarded.
+- **Operator tool** `tools/entry_research_report.py {challenger|entry}` — run the
+  v6 OOS comparison on the production ledger / print the entry scoreboard.
+- **Incomplete (honest):** crediting OFFICIAL entries (`mark_enter_sent`) requires
+  the entry-econ ENTER panel to actually be delivered before close; that delivery
+  hook is exposed on the runner but not wired into the send path this session (it
+  must couple to real Telegram delivery — no fabricated fills). Until wired,
+  `official_entries` stays 0 by design; direction grading + WAIT/SKIP studies do
+  populate once `Q15_ENTRY_ECON_LEDGER=true`.
 
 ## ✅ Shipped THIS session — Challenger (shadow) orientation fix: calibrated control + cold-start mirror
 **Suite 1030 passed / 13 skipped** (+2 tests). Branch `claude/ultracode-mode-question-5aj8un` (PR #20).

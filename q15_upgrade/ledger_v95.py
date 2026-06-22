@@ -1052,6 +1052,19 @@ class V95Ledger:
                                str(ev.get("official_result")))
         except Exception as exc:
             self._note_shadow_error("resolve", exc)
+        # Entry-economics settlement (independent, read-only, default-OFF ledger).
+        # Grades the entry-performance ledger at settlement so direction accuracy and
+        # the WAIT/SKIP background studies populate. Guarded separately so a failure
+        # here never affects the challenger resolve above or the production path.
+        try:
+            from q15_upgrade.entry_economics.runner import get_runner as _ee_get_runner
+            _ee_runner = _ee_get_runner()
+            if _ee_runner is not None:
+                for ev in events:
+                    _ee_runner.resolve(str(ev.get("ticker")), str(ev.get("checkpoint")),
+                                       str(ev.get("official_result")))
+        except Exception as exc:
+            self._note_shadow_error("entry_econ_resolve", exc)
 
     def _note_shadow_error(self, op: str, exc: BaseException) -> None:
         """Record a swallowed shadow-challenger failure so it is observable.
