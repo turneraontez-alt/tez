@@ -1,7 +1,7 @@
 {
-  "commit": "b7502ea",
+  "commit": "7daeb7e",
   "branch": "claude/trusting-bardeen-yufks0",
-  "committed_at": "2026-06-22T03:55:19Z",
-  "summary": "deploy/verify tooling: ship script, /version endpoint, CI",
-  "tests": "999 passed, 4 skipped in 23.95s"
+  "committed_at": "2026-06-22T04:02:16Z",
+  "summary": "branch hygiene: prune script + single-branch policy",
+  "tests": "999 passed, 4 skipped in 27.78s"
 }
