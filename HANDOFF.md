@@ -25,9 +25,9 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session (branch `claude/challenger-shadow-comparison-zo7fhq`) — A/B/C/D grade on the V9.5 CHECK
-**Suite 1001 passed / 4 skipped** in a complete env (+2 tests). Pushed to the feature branch as
-a draft PR (#16); not merged to main.
+## 🟡 Done THIS session — NOT merged to main (branch `claude/challenger-shadow-comparison-zo7fhq`, draft PR #16) — A/B/C/D grade on the V9.5 CHECK
+**Suite 1001 passed / 4 skipped** in a complete env (+2 tests). Lives only on the feature branch
+as draft PR #16 — `main` is untouched. Awaiting review/approval before any merge.
 - **Grade restored on the official check** — `build_ranked_checkpoint_panel` now renders each
   ranked pick as `medal asset side — confidence% · GRADE` (e.g. `🥇 SOL NO — 72% · B`). The
   grade is the champion's existing A/B/C/D `confidence_grade` (computed once in `analyse_v95`
