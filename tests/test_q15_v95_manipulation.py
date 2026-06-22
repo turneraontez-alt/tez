@@ -139,18 +139,35 @@ class TestAlertTag(unittest.TestCase):
         msg = build_v95_message("10M", self._analyses(manip), [{"asset": "BTC", "ticker": "T"}], {})
         self.assertNotIn("Manipulation watch", msg)
 
-    def test_fresh_near_close_marker_rendered_when_flagged(self):
+    def test_fresh_near_close_marker_prints_side_and_rate(self):
         manip = {"suspected": True, "reasons": ["PIN"], "lean": None, "score": 0.33}
         an = self._analyses(manip)
-        an["BTC"]["fresh_manip_near_close"] = True
+        an["BTC"]["fresh_manip_near_close"] = {"side": "NO", "n": 43, "right": 42, "accuracy": 0.9767}
         msg = build_v95_message("7M", an, [{"asset": "BTC", "ticker": "T"}], {})
-        self.assertIn("FRESH 7M", msg)
-        # Markers still intact.
+        self.assertIn("FRESH 7M·NO", msg)
+        self.assertIn("predicted NO 97.7% right", msg)  # 42/43
+        self.assertIn("(42/43)", msg)
+        # Invariants intact.
         self.assertIn("V9.5 CHECK", msg)
         self.assertIn("Manipulation watch", msg)
-        # Without the stamped flag the marker is absent.
+        # Without the stamped value the marker is absent.
         msg2 = build_v95_message("7M", self._analyses(manip), [{"asset": "BTC", "ticker": "T"}], {})
         self.assertNotIn("FRESH 7M", msg2)
+
+    def test_fresh_near_close_marker_yes_and_building(self):
+        manip = {"suspected": True, "reasons": ["PIN"], "lean": None, "score": 0.33}
+        # YES side prints its own (weaker) rate.
+        an = self._analyses(manip)
+        an["BTC"]["fresh_manip_near_close"] = {"side": "YES", "n": 41, "right": 35, "accuracy": 0.8537}
+        msg = build_v95_message("7M", an, [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertIn("FRESH 7M·YES", msg)
+        self.assertIn("85.4% right (35/41)", msg)
+        # Thin sample -> "building", no misleading percentage.
+        an2 = self._analyses(manip)
+        an2["BTC"]["fresh_manip_near_close"] = {"side": "NO", "n": 4, "right": 4, "accuracy": 1.0}
+        msg2 = build_v95_message("7M", an2, [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertIn("building, n=4", msg2)
+        self.assertNotIn("100% right", msg2)
 
 
 class TestScoreboardBreakdown(unittest.TestCase):
@@ -508,6 +525,20 @@ class TestManipulationScoreboardDimensions(unittest.TestCase):
         # A contract flagged only at 7M has no earlier flag -> fresh.
         self._rec("Q", "7M", "NO", "NO", True, "PIN")
         self.assertFalse(self.led.manipulation_flagged_before("Q", "7M"))
+
+    def test_fresh_near_close_rate_matches_bucket(self):
+        # Two fresh-7M-NO contracts (right + wrong) -> 1/2; one fresh-7M-YES (right);
+        # and a 7M-NO whose 15M was flagged (persistent) must NOT count.
+        self._rec("R1", "7M", "NO", "NO", True, "PIN")    # fresh NO, right
+        self._rec("R2", "7M", "NO", "YES", True, "PIN")   # fresh NO, wrong
+        self._rec("R3", "7M", "YES", "YES", True, "PIN")  # fresh YES, right
+        self._rec("R4", "15M", "NO", "NO", True, "PIN")   # earlier flag for R4
+        self._rec("R4", "7M", "NO", "NO", True, "PIN")    # persistent -> excluded
+        no = self.led.fresh_near_close_rate("NO")
+        self.assertEqual((no["n"], no["right"]), (2, 1))  # R1, R2 only
+        self.assertEqual(no["accuracy"], 0.5)
+        yes = self.led.fresh_near_close_rate("YES")
+        self.assertEqual((yes["n"], yes["right"]), (1, 1))
 
 
 if __name__ == "__main__":

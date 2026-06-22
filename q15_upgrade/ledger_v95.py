@@ -1005,6 +1005,40 @@ class V95Ledger:
             ).fetchone()
         return row is not None
 
+    def fresh_near_close_rate(self, side: str) -> dict[str, Any]:
+        """Historical settle-rate of the fresh-near-close bucket for ``side``.
+
+        Counts RESOLVED closing-checkpoint (7M) predictions on ``side`` where
+        manipulation was suspected at 7M but NOT at any earlier checkpoint of the
+        same contract (a tell that first appears near close). Read-only; the live
+        prediction being tagged is unresolved and so never counts itself. Used to
+        print the live hit-rate on the alert tag.
+        """
+        side = str(side or "").upper()
+        out: dict[str, Any] = {"side": side, "n": 0, "right": 0, "accuracy": None}
+        if not self._available or side not in ("YES", "NO"):
+            return out
+        last = TRACKED_CHECKPOINTS[-1]
+        earlier = TRACKED_CHECKPOINTS[:-1]
+        if not earlier:
+            return out
+        placeholders = ",".join("?" for _ in earlier)
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT p.correct FROM predictions p "
+                "WHERE p.model_version=? AND p.checkpoint=? AND p.predicted_side=? "
+                "AND p.manipulation_suspected=1 AND p.official_result IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM predictions e WHERE e.model_version=p.model_version "
+                f"AND e.ticker=p.ticker AND e.checkpoint IN ({placeholders}) AND e.manipulation_suspected=1)",
+                (MODEL_VERSION, last, side, *earlier),
+            ).fetchall()
+        n = len(rows)
+        right = sum(1 for r in rows if int(r[0] or 0) == 1)
+        out["n"] = n
+        out["right"] = right
+        out["accuracy"] = round(right / n, 4) if n else None
+        return out
+
     # -- read-only challenger shadow (default-OFF; never affects production) --
     def _shadow_observe(self, **kw) -> None:
         try:

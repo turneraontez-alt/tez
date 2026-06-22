@@ -1622,9 +1622,20 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             for asset, manip in flagged:
                 line = f"{asset}: {_manipulation_phrase(manip)}"
                 # Highest-accuracy manipulation subset on record: a fresh tell that
-                # first appears at the 7M close on a NO pick (97.7% NO-side, OOS).
-                if (analyses.get(asset, {}) or {}).get("fresh_manip_near_close"):
-                    line += " · 🎯 FRESH 7M·NO — high-confidence"
+                # first appears at the 7M close. Print the predicted side and the
+                # LIVE historical hit-rate (+ sample) so NO (~97%) and YES (~85%)
+                # are weighted differently; below the min sample, say "building".
+                fnc = (analyses.get(asset, {}) or {}).get("fresh_manip_near_close")
+                if isinstance(fnc, Mapping):
+                    side = str(fnc.get("side") or "")
+                    n = int(fnc.get("n") or 0)
+                    right = int(fnc.get("right") or 0)
+                    acc = fnc.get("accuracy")
+                    min_n = int(_env_float("Q15_V95_SCOREBOARD_MIN_N", 10, 1, 1000))
+                    if n >= min_n and acc is not None:
+                        line += f" · 🎯 FRESH 7M·{side} — predicted {side} {float(acc) * 100:.1f}% right ({right}/{n})"
+                    else:
+                        line += f" · 🎯 FRESH 7M·{side} — high-confidence (building, n={n})"
                 body.append(line)
 
     # Thin-evidence watch (default OFF): flag any top pick whose prediction rests
@@ -2629,18 +2640,20 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     analysis["new_unique_prediction_recorded"] = inserted
                     # Fresh-near-close manipulation tag (default-ON, observability
                     # only). A manipulation tell that FIRST appears at the closing 7M
-                    # check (not seen at this contract's 15M/10M) on a NO-side pick is
-                    # the highest-accuracy manipulation subset on the live record
-                    # (97.7% on the NO side, validated out-of-sample). Surfaced as an
-                    # alert marker so the owner can read it; it NEVER alters the frozen
-                    # probability, edge, or entry decision. Point-in-time: the earlier
-                    # checkpoints are already recorded, so the lookup has no look-ahead.
+                    # check (not seen at this contract's 15M/10M) is the highest-
+                    # accuracy manipulation subset on the live record — strongest on
+                    # the NO side (97.7%), present but weaker on YES (~85%). Surfaced
+                    # as an alert marker WITH the live per-side hit-rate so the owner
+                    # can weight NO vs YES; it NEVER alters the frozen probability,
+                    # edge, or entry decision. Point-in-time: the earlier checkpoints
+                    # are already recorded, so the lookup has no look-ahead.
+                    _fresh_side = str(analysis.get("prediction_side") or "").upper()
                     if (checkpoint == "7M"
                             and _env_bool("Q15_V95_FRESH_MANIP_TAG", True)
                             and (analysis.get("manipulation") or {}).get("suspected")
-                            and str(analysis.get("prediction_side") or "").upper() == "NO"
+                            and _fresh_side in ("YES", "NO")
                             and not self.ledger.manipulation_flagged_before(canonical.ticker, checkpoint)):
-                        analysis["fresh_manip_near_close"] = True
+                        analysis["fresh_manip_near_close"] = self.ledger.fresh_near_close_rate(_fresh_side)
                     # Flag (without mutating the graded prediction) when the live
                     # side drifts from the locked one before close — the stability
                     # / change-rate metric per interval.

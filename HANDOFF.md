@@ -48,12 +48,17 @@ accuracy holds out-of-sample (older half 92.9% → newer half 90.5%), NOT a rece
 +8.92¢, n=43, Wilson CI [0.879, 0.996]** — the strongest manipulation subset found. Caveat: P&L noisier
 than accuracy (test half −1¢), so it's a confidence signal first.
 **ACTIVATED (owner directive) as a default-ON alert TAG** (`Q15_V95_FRESH_MANIP_TAG`, default true):
-at the 7M checkpoint, when manipulation is suspected on a NO pick AND the contract was NOT flagged at
-15M/10M (`ledger.manipulation_flagged_before`, point-in-time), the checkpoint alert appends
-"🎯 FRESH 7M·NO — high-confidence" to that asset's Manipulation-watch line. Owner chose the SAFE form:
-it surfaces the signal only — it does NOT touch the frozen champion's probability/edge/entry decision,
-and preserves the ENTRY/V9.5 CHECK markers. Toggle off with `Q15_V95_FRESH_MANIP_TAG=false`. If the
-live tagged sample proves the P&L edge durable, the next step is an opt-in confidence/quality boost.
+at the 7M checkpoint, when manipulation is suspected AND the contract was NOT flagged at 15M/10M
+(`ledger.manipulation_flagged_before`, point-in-time), the checkpoint alert appends, to that asset's
+Manipulation-watch line, "🎯 FRESH 7M·<SIDE> — predicted <SIDE> NN.N% right (k/n)" where the rate is
+the LIVE historical hit-rate of that fresh-7M-<side> bucket (`ledger.fresh_near_close_rate(side)`,
+auto-updates; below `Q15_V95_SCOREBOARD_MIN_N` it says "building, n=k"). Fires on BOTH sides so the
+owner can weight them: live record is **NO 97.7% (42/43)** vs **YES 85.4% (35/41)** — NO is the real
+edge, YES is weaker and P&L-negative. Owner chose the SAFE form: it surfaces the signal only — it does
+NOT touch the frozen champion's probability/edge/entry decision, and preserves ENTRY/V9.5 CHECK markers.
+Toggle off with `Q15_V95_FRESH_MANIP_TAG=false`. ACCURACY ≠ profit: read the tag together with the
+entry/edge line (a 97%-accurate NO at a rich price is still thin). Next step if P&L proves durable: an
+opt-in confidence/quality boost.
 
 ## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
 **Suite 1066 passed / 13 skipped** in a complete env (+45 tests:
