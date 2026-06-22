@@ -70,6 +70,37 @@ class TestReconcileBudget(unittest.TestCase):
         self.assertEqual(out["budget_seconds"], 4.0)  # default
         self.assertIn("elapsed_seconds", out)
 
+    def test_undetermined_closed_markets_are_captured_for_diagnosis(self):
+        # A closed market whose `result` is empty but which exposes Kalshi's instant
+        # determination fields must be CAPTURED (raw fields + key list), so we can see
+        # which field carries the determined outcome — not silently skipped.
+        os.environ["Q15_V95_RECONCILE_BUDGET_SECONDS"] = "30"
+
+        def determined_but_unsettled(ticker):
+            return {"result": "", "status": "closed", "settlement_value": 64250.0,
+                    "floor_strike": 64000.0, "strike_type": "greater_or_equal",
+                    "close_time": time.time() - 20}
+
+        out = self.led.reconcile_pending_from_market(determined_but_unsettled)
+        # Nothing graded (we don't act on a guessed field yet) but everything captured.
+        self.assertEqual(out["new_predictions_resolved"], 0)
+        self.assertEqual(out["undetermined_closed_count"], 6)
+        sample = out["undetermined_market_samples"][0]
+        self.assertEqual(sample["status"], "closed")
+        self.assertEqual(sample["settlement_value"], 64250.0)
+        self.assertEqual(sample["floor_strike"], 64000.0)
+        self.assertIn("settlement_value", sample["all_keys"])  # full key list present
+
+    def test_undetermined_sample_limit_is_bounded(self):
+        os.environ["Q15_V95_RECONCILE_BUDGET_SECONDS"] = "30"
+        os.environ["Q15_V95_UNDETERMINED_SAMPLE_LIMIT"] = "2"
+        try:
+            out = self.led.reconcile_pending_from_market(lambda t: {"result": "", "status": "closed"})
+            self.assertEqual(len(out["undetermined_market_samples"]), 2)  # bounded
+            self.assertEqual(out["undetermined_closed_count"], 2)
+        finally:
+            os.environ.pop("Q15_V95_UNDETERMINED_SAMPLE_LIMIT", None)
+
 
 if __name__ == "__main__":
     unittest.main()
