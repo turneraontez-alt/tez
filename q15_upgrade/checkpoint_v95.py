@@ -2763,6 +2763,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     _ur.observe(analyses=analyses, canonicals=canonicals, now=now)
             except Exception:
                 logger.debug("ultoim observe skipped", exc_info=True)
+            # Interval-timing research capture (read-only; default-OFF). Records the
+            # frozen analysis at eight marks (15M..7M) into its own ledger for entry/
+            # confirmation/defensive-timing study. Never trades, sends, or changes the
+            # champion; a failure must not disturb the cycle.
+            try:
+                from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                _irr = _ir_runner()
+                if _irr is not None:
+                    _irr.observe(analyses=analyses, canonicals=canonicals, now=now)
+            except Exception:
+                logger.debug("interval-research observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
@@ -2782,6 +2793,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 # Score fired flip warnings against whether the prediction flipped.
                 if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
                     self.ledger.reconcile_flip_warnings()
+                # Interval-timing research: attach settled outcomes to any captured
+                # intervals (read-only; default-OFF; never affects production).
+                try:
+                    from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                    _irr = _ir_runner()
+                    if _irr is not None:
+                        _irr.resolve_settled(result_events, now)
+                except Exception:
+                    logger.debug("interval-research resolve skipped", exc_info=True)
             ledger_status = self.ledger.status()
             # The recommended BEST ENTRY is rank #1 of the qualifying entries — the
             # single source of truth shared by the alert's top summary and detail.

@@ -25,6 +25,29 @@ complete env — skip count rises when `flask`/`websockets`/cffi/crypto aren't i
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Interval-timing research collector (default-OFF, prospective)
+**Suite 1096 passed / 13 skipped** (+14 tests). New package `q15_upgrade/interval_research/`
+(`config/ledger/capture/runner/economics` + `tests/test_interval_research.py`). A SEPARATE,
+read-only research system (Ultoim pattern) that — when `Q15_INTERVAL_RESEARCH_ENABLED=true` —
+captures the frozen champion's per-asset analysis at EIGHT marks (15M/13M/12M/11M/10M/9M/8M/7M)
+into its own SQLite table `interval_captures` (DB `data/q15_interval_research_v1.sqlite3`).
+Motivation (from the timing analysis): EV peaks at **10M** (acc 70%, ask ~69¢, best/only-positive
+EV) and erodes by **7M** (acc 78% but ask ~79–97¢ → edge priced out); the fresh-7M-NO 97.7% is
+largely a **late-only coverage artifact**. 13M/12M/11M/9M/8M have NO history, so this collects them
+PROSPECTIVELY — no fabricated rows. Invariants: never trades/sends/alters the champion; wired as a
+read-only observer + settlement-resolver in `run_cycle` alongside Ultoim; default-OFF.
+- Captures per (ticker,interval): side, raw/calibrated/conservative prob, flip prob, manip score,
+  yes bid/ask, spread, depth, slippage/fees, distance-from-strike, stability, data-quality, executable
+  ask, net edge, trade_decision, entry_recommended, + one of 10 REASON_CODES when a capture is missing.
+- `economics.py` (read-only): per-interval executable economics (acc/ask/edge/entry-rate/EV/ROI/drawdown),
+  PREDICTION-quality vs TRADE-value kept SEPARATE (`classify`: 97%@97¢ => HIGH prediction / LOW trade),
+  cohort split (full / partial / late-only), matched-cohort comparison (only contracts at all compared
+  marks), defensive-exit grading (true/false/late warnings, lead time, value recoverable).
+- Restart-safe (UNIQUE(model_version,ticker,interval) + INSERT OR IGNORE), no look-ahead (point-in-time
+  band capture). Roles are PROVISIONAL: 10M=OFFENSIVE_ENTRY, 7M=CONFIRMATION_DEFENSIVE, others research.
+- NOT YET USEFUL: results require prospective resolved data; module reports n=0 honestly until then.
+  Enable + redeploy to start collecting; champion live behaviour unchanged.
+
 ## ✅ Shipped THIS session — Manipulation reason×side scoreboard cut (validation tool)
 **Suite 1076 passed / 13 skipped** (+1 test). Read-only/additive. Adds `by_reason_side` to
 `ledger_v95._by_manipulation`: crosses tell-type (`absorption` = any ABSORPTION row; `pin_only`
