@@ -1,7 +1,7 @@
 {
-  "commit": "7daeb7e",
-  "branch": "claude/trusting-bardeen-yufks0",
-  "committed_at": "2026-06-22T04:02:16Z",
-  "summary": "branch hygiene: prune script + single-branch policy",
-  "tests": "999 passed, 4 skipped in 27.78s"
+  "commit": "096fca6",
+  "branch": "claude/challenger-shadow-comparison-zo7fhq",
+  "committed_at": "2026-06-22T04:34:08Z",
+  "summary": "A/B/C/D confidence grade on V9.5 CHECK picks + CI installs requirements.txt",
+  "tests": "1001 passed, 4 skipped in 23.37s"
 }
