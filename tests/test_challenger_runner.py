@@ -83,6 +83,57 @@ class RunnerTest(unittest.TestCase):
                   close_time=None, control_prob_yes=None, features=None, quote=None)
 
 
+class ColdStartMirrorTest(unittest.TestCase):
+    """An untrained shadow mirrors the champion's calibrated P(Yes) at parity,
+    even when a market quote is present — it must not parrot the raw quote."""
+
+    def test_untrained_mirrors_champion_even_with_quote(self):
+        import sqlite3
+        tmp = tempfile.mkdtemp()
+        r = ShadowRunner(_cfg(tmp))
+        self.assertFalse(getattr(r.predictor.model, "fitted", False))  # cold start
+        # Quote implies market YES ~0.29 (29c); champion's calibrated control is 0.82.
+        r.observe(ticker="C1", asset="BTC", checkpoint="10M", created_at=1_700_000_000,
+                  close_time=1_700_000_900, control_prob_yes=0.82,
+                  features={"momentum": 0.1}, quote={"yes_ask_cents": 30, "yes_bid_cents": 28})
+        con = sqlite3.connect(os.path.join(tmp, "shadow.sqlite3"))
+        row = con.execute(
+            "SELECT challenger_prob_yes, control_prob_yes FROM shadow_predictions WHERE contract='C1'"
+        ).fetchone()
+        con.close()
+        # Mirrors the champion (0.82), NOT the ~0.29 market quote.
+        self.assertAlmostEqual(row[0], 0.82, places=4)
+        self.assertAlmostEqual(row[1], 0.82, places=4)
+
+
+class ControlProbIsCalibratedTest(unittest.TestCase):
+    """record_prediction must feed the challenger the CALIBRATED champion prob,
+    not the pre-calibration raw_yes_probability."""
+
+    def test_shadow_observe_receives_calibrated_control(self):
+        from q15_upgrade.ledger_v95 import V95Ledger
+        tmp = tempfile.mkdtemp()
+        led = V95Ledger(os.path.join(tmp, "l.sqlite3"))
+        captured: dict = {}
+
+        class _FakeRunner:
+            def observe(self, **kw):
+                captured.update(kw)
+
+        with unittest.mock.patch(
+            "q15_upgrade.challenger.runner.get_runner", return_value=_FakeRunner()
+        ):
+            led.record_prediction(
+                ticker="T", asset="BTC", checkpoint="10M", created_at=1.0, close_time=2.0,
+                predicted_side="YES", raw_yes_probability=0.20, calibrated_yes_probability=0.80,
+                challenger_yes_probability=0.5, baseline_yes_probability=0.5, selected_probability=0.8,
+                conservative_probability=0.7, data_quality=0.7, evidence_quality=0.7, trade_quality=0.6,
+                trade_decision="WATCH_PRICE", regime="NORMAL", features={}, contributions={},
+                quote={"ask_cents": 50}, rank=1, costs={"total_cents": 2}, confidence_grade="B")
+        # The control handed to the shadow is the calibrated 0.80, not the raw 0.20.
+        self.assertAlmostEqual(captured.get("control_prob_yes"), 0.80, places=6)
+
+
 class NotifierBypassTest(unittest.TestCase):
     def test_challenger_report_not_suppressed(self):
         # Even under balanced level, the challenger report header is delivered.

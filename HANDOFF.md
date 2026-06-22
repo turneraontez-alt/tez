@@ -25,6 +25,39 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Challenger (shadow) orientation fix: calibrated control + cold-start mirror
+**Suite 1030 passed / 13 skipped** (+2 tests). Branch `claude/ultracode-mode-question-5aj8un` (PR #20).
+Shadow-only, zero live impact (`primary_probability` returns champion unless promoted AND trained — never).
+Root-caused from real data: the challenger looked anti-predictive (challenger_prob_yes 43.7%, control
+anti-calibrated) because of two orientation bugs, NOT a bad model:
+- **`ledger_v95.py` `_shadow_observe`** — fed the challenger `control_prob_yes=raw_yes_probability` (the
+  pre-calibration value, **50.8% directional acc, flat**) instead of `calibrated_yes_probability` (the
+  champion's REAL prob, **67.9% acc, monotonic**). The whole Shadow-vs-Yours comparison was against the
+  champion's throwaway raw number. Fixed to pass the calibrated prob.
+- **`challenger/runner.py observe`** — the cold-start mirror only triggered when `market_yes_prob is None`,
+  so with a quote present the untrained shadow parroted the raw market quote (~42% acc here). Now it mirrors
+  the champion whenever untrained (its own documented "start at parity" intent), regardless of the quote.
+- Verified: champion `calibrated_yes_probability` calibrates cleanly (0.0-0.3→11% YES, 0.7-1.0→84% YES);
+  `raw_yes_probability` does not (50.8%). Fix is forward-looking; historical shadow rows stay as recorded.
+- Tests: cold-start mirrors champion even with a quote; record_prediction hands the shadow the calibrated control.
+
+## ✅ Shipped THIS session — Manipulation detection: tunable PIN tell + scoreboard discrimination
+**Suite 1028 passed / 13 skipped** (+7 tests) on this container's env. Branch
+`claude/ultracode-mode-question-5aj8un` (PR #20, draft). Read-only, **defaults byte-identical**.
+Motivated by the live record: the manipulation flag fires on ~76% of markets at baseline
+accuracy (no edge), driven by an over-firing PIN tell.
+- **`checkpoint_v95.py`** — new default-OFF knob `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA`
+  narrows the observational PIN *tell* below the regime's 0.25 band (recommended 0.15 to
+  validate). The FROZEN `THRESHOLD_PIN` *regime* (feeds champion uncertainty) is untouched;
+  `_pin_tell_passes` keeps the tell when the knob is unset or the measurement is missing.
+- **`ledger_v95.py`** — `_by_manipulation` scoreboard now adds `by_reason_isolated`
+  (single-tell-only buckets), `by_checkpoint`, and `by_side` (all purely additive; old keys
+  unchanged). On the live ledger this immediately separates **ABSORPTION-only 74.3% / −0.17¢**
+  (the edge) from **PIN-only 67.0% / −4.82¢** (the noise), and shows manip-flagged **NO side
+  is +0.74¢ vs YES −10.21¢** — structure the blended view hid.
+- Next: with `by_reason_isolated` now measurable, validate the PIN tightening out-of-sample,
+  then consider promoting a stricter default (significance-tested, per invariants).
+
 ## ✅ Shipped THIS session — Ultoim Build: separate read-only research reporting system
 **Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
 `q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,

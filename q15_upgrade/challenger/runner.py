@@ -89,10 +89,14 @@ class ShadowRunner:
         try:
             snap = _build_snapshot(features, quote)
             pred = self.predictor.predict(snap)
-            # Cold start (untrained, no market quote): mirror the champion so the
-            # comparison starts at parity and then diverges as the shadow learns.
+            # Cold start (model not yet trained): mirror the champion's calibrated
+            # probability so the comparison starts at parity and then diverges as the
+            # shadow learns. Until it has trained the shadow has no independent edge,
+            # so it must NOT parrot the raw market quote (the stored quote is not a
+            # YES-calibrated probability) — doing so made the untrained shadow look
+            # anti-predictive. Mirror whenever untrained, regardless of the quote.
             if (not getattr(self.predictor.model, "fitted", False)
-                    and pred.market_yes_prob is None and control_prob_yes is not None):
+                    and control_prob_yes is not None):
                 pred.prob_yes = round(float(control_prob_yes), 6)
                 pred.prob_no = round(1.0 - float(control_prob_yes), 6)
             calib = getattr(self.predictor.calibrator, "name", "identity")
