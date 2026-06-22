@@ -967,8 +967,13 @@ class V95Ledger:
             connection.commit()
         if inserted:
             self._shadow_observe(
+                # The challenger compares against the champion's REAL prediction, so
+                # the control must be the CALIBRATED P(Yes) (the 0..1 the champion
+                # actually acts on), not the pre-calibration raw_yes_probability —
+                # which is ~uncalibrated/flat and made the shadow-vs-champion
+                # comparison meaningless (control looked near-random).
                 ticker=ticker, asset=asset, checkpoint=checkpoint, created_at=created_at,
-                close_time=close_time, control_prob_yes=raw_yes_probability,
+                close_time=close_time, control_prob_yes=calibrated_yes_probability,
                 features=features, quote=quote, snapshot_id=snapshot_id,
             )
         return prediction_id, inserted
