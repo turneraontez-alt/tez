@@ -25,6 +25,44 @@ Tests: `python3 -m pytest tests/ -q` → **999 passed, 4 skipped** in a complete
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Hourly learning-snapshot export to a dedicated branch
+**Suite 1036 passed / 4 skipped** in a complete env (+12 tests). New worker
+`tools/learning_export.py` + `tests/test_learning_export.py`; wired into `.replit`
+as a third parallel workflow ("Learning Export"). Read-only wrt the ledgers and
+the real exchanges; frozen champion untouched. Deploy-pending on `main` AND needs
+a Repl Stop ▸ Run to start the new worker.
+- **Why:** a fresh review container has no `data/*.sqlite3` (gitignored), so
+  `updated-review` could only grade code, not real records. The Repl now publishes
+  the live learning ledgers hourly so any session can pull real data.
+- **What it does:** hourly, takes a *consistent* read-only SQLite online-backup of
+  every `data/*.sqlite3`, builds `learning_snapshot.json` (v95 + challenger
+  scoreboards, official W/L, the 5-feature shadow A/B, timing experiment, flip
+  perf, per-table row counts) + gzipped raw DBs, and **force-pushes one orphan
+  commit** to the dedicated **`learning-snapshots`** branch.
+- **Why a side branch, not `main`:** the GitHub Relay two-way-syncs only `main`
+  every ~20s; a Repl-regenerated file on `main` is exactly what forced
+  `health_snapshot.json` to be gitignored ("conflict on every sync, stall
+  deploys"). The side branch is invisible to the relay and the `claude/*`-only
+  pruner → zero deploy risk, zero `main` churn. Orphan/force-push ⇒ no history
+  bloat.
+- **Safety:** built entirely with git plumbing against a TEMP index (hash-object
+  → write-tree → commit-tree → push by SHA) so it NEVER touches HEAD / the working
+  tree / the app's index — safe in the live checkout. Reuses the relay's
+  `GH_PUSH_TOKEN`/`GITHUB_TOKEN` (in-memory URL, masked logs, no .git/config
+  writes). Refuses to target `main`/`master`/`HEAD`. Online-backup ⇒ never writes
+  the live DB / no torn copy.
+- **Consume (review side):** `git fetch origin learning-snapshots` then read
+  `learning_snapshot.json` or `git show origin/learning-snapshots:dbs/<db>.gz |
+  gunzip > /tmp/...`. The `updated-review` skill Step 1 now does this first.
+- **Config (all default-sane, `.env.example`):** `LEARNING_EXPORT_BRANCH`
+  (default `learning-snapshots`), `LEARNING_EXPORT_INTERVAL` (3600s),
+  `LEARNING_EXPORT_DATA_DIR` (`data`), `LEARNING_EXPORT_REPO`.
+- **Deploy:** after this reaches the Repl, **Stop ▸ Run** so the new workflow
+  starts; first push creates the branch within ~1h (or sooner if INTERVAL lowered).
+- **Files:** `tools/learning_export.py` (new), `tests/test_learning_export.py`
+  (new), `.replit`, `.env.example`, `CLAUDE.md`,
+  `.claude/skills/updated-review/SKILL.md`.
+
 ## ✅ Shipped THIS session — Polymarket Up/Down shadow (read-only, default-OFF)
 **Suite 1024 passed / 4 skipped** in a complete env (+23 tests). New package
 `q15_upgrade/polymarket/` — a SECOND read-only shadow, sibling to the challenger.

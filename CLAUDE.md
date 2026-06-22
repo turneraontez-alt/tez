@@ -55,6 +55,14 @@ layers (~7k lines). v95 subclasses the chain:
 - The per-session branch *name* is assigned by the Claude Code web environment,
   not the repo, so true "always use main" is set in the claude.ai/code
   environment config (development branch → `main`), not here.
+- **Exception — `learning-snapshots` is a machine-managed data branch, not a
+  session branch.** The Repl force-pushes the live learning ledgers there hourly
+  (`tools/learning_export.py`) so reviews can pull real data. It is orphan/
+  single-commit (no history bloat), invisible to the GitHub Relay (relay syncs
+  only `main`), and the pruner ignores it (it only deletes `origin/claude/*`).
+  Leave it alone. To audit against real data: `git fetch origin learning-snapshots`
+  then read `learning_snapshot.json` / gunzip `dbs/*.sqlite3.gz` (see the
+  `updated-review` skill, Step 1).
 
 ## Merge policy (standing authorization — every session)
 The owner has authorized auto-merging finished work to `main` in **all** sessions:
