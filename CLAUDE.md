@@ -43,6 +43,19 @@ checkpoints, sends Telegram alerts, and learns from officially settled results.
 layers (~7k lines). v95 subclasses the chain:
 `v95 → v94_unified → v94 → v93 → v92 → v91`. They work; skip them otherwise.
 
+## Single-branch policy (owner directive)
+**The owner wants exactly ONE long-lived branch: `main`.** Do not accumulate
+`claude/*` session branches. Concretely, every session:
+- Ship work to `main` with `scripts/ship.sh "summary"` (it merges + pushes), then
+  treat `main` as the source of truth. If the platform assigned this session its
+  own `claude/*` branch, that branch should be pruned once the work is on `main`.
+- Prune stale branches with `scripts/prune_branches.sh --all` (run on the Repl /
+  anywhere the GitHub token can delete refs — the web sandbox's relay proxy
+  returns 403 on ref deletion, so it can't prune from there).
+- The per-session branch *name* is assigned by the Claude Code web environment,
+  not the repo, so true "always use main" is set in the claude.ai/code
+  environment config (development branch → `main`), not here.
+
 ## Merge policy (standing authorization — every session)
 The owner has authorized auto-merging finished work to `main` in **all** sessions:
 once the task is done and the full suite passes (`python3 -m pytest tests/ -q`),
