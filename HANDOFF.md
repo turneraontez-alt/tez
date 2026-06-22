@@ -25,6 +25,18 @@ complete env — skip count rises when `flask`/`websockets`/cffi/crypto aren't i
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Manipulation reason×side scoreboard cut (validation tool)
+**Suite 1076 passed / 13 skipped** (+1 test). Read-only/additive. Adds `by_reason_side` to
+`ledger_v95._by_manipulation`: crosses tell-type (`absorption` = any ABSORPTION row; `pin_only`
+= rows whose only tell is PIN) with side (YES/NO). On the live ledger this REFUTED the earlier
+"ABSORPTION is the signal" read: controlling for side, pin_only·NO (71.5%, −0.75¢) ≈ absorption·NO
+(70.4%, −1.6¢), while both YES buckets bleed (~62-65%, −9¢). So the manipulation flag's only real
+discriminator is the **NO side**, not the reason type — the ABSORPTION edge was a side-mix confound.
+Also validated (read-only) that a PIN distance-tightening cut does NOT help: closer-to-strike PIN
+flags don't discriminate better (non-monotonic; tightest ~60% score 64.5% vs farthest ~40% at 70.9%),
+so `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA` should stay OFF. Next idea (not built): a manipulation
+PERSISTENCE dimension (tell fired at 1 vs all of 15M/10M/7M) — more promising than a fixed decision time.
+
 ## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
 **Suite 1066 passed / 13 skipped** in a complete env (+45 tests:
 `tests/test_entry_economics.py` 32, `tests/test_challenger_v6_research.py` 13).

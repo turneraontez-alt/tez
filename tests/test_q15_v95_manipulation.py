@@ -441,6 +441,21 @@ class TestManipulationScoreboardDimensions(unittest.TestCase):
         self.assertEqual(bm["by_side"]["YES"]["suspected"]["n"], 1)
         self.assertEqual(bm["by_side"]["NO"]["clean"]["n"], 1)
 
+    def test_by_reason_side_crosses_tell_and_side(self):
+        # ABSORPTION-confirmed NO (the hypothesised signal) vs bare-PIN YES (noise).
+        self._rec("B1", "10M", "NO", "NO", True, "ABSORPTION")        # absorption, NO, right
+        self._rec("B2", "10M", "NO", "NO", True, "ABSORPTION,PIN")    # absorption, NO, right
+        self._rec("B3", "10M", "YES", "NO", True, "PIN")             # pin_only, YES, wrong
+        bm = self.led.scoreboard()["by_manipulation"]["by_reason_side"]
+        # absorption bucket = any row carrying ABSORPTION (B1, B2), both NO + right
+        self.assertEqual(bm["absorption"]["NO"]["n"], 2)
+        self.assertEqual(bm["absorption"]["NO"]["right"], 2)
+        self.assertEqual(bm["absorption"]["YES"]["n"], 0)
+        # pin_only bucket = rows whose ONLY tell is PIN (B3); the PIN in B2 is excluded
+        self.assertEqual(bm["pin_only"]["YES"]["n"], 1)
+        self.assertEqual(bm["pin_only"]["YES"]["right"], 0)
+        self.assertEqual(bm["pin_only"]["NO"]["n"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

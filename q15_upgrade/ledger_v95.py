@@ -2550,6 +2550,25 @@ class V95Ledger:
             side: _split([r for r in rows if str(_row_get(r, "predicted_side") or "").upper() == side])
             for side in ("YES", "NO")
         }
+        # Reason-type x side. The record's two real discriminators are the
+        # ABSORPTION tell (directional/structural — more reliable) and the NO side;
+        # bare PIN over-fires and barely separates. Crossing them lets the
+        # "ABSORPTION-confirmed NO-side" subset (the hypothesised genuine signal) be
+        # read against "bare PIN" noise before any reason/side gate is considered.
+        # ``absorption`` = any firing row carrying the ABSORPTION tell; ``pin_only``
+        # = rows whose ONLY tell is PIN.
+        def _side_split(subset: Sequence[sqlite3.Row]) -> dict[str, Any]:
+            return {
+                side: self._win_loss(
+                    [r for r in subset if str(_row_get(r, "predicted_side") or "").upper() == side]
+                )
+                for side in ("YES", "NO")
+            }
+
+        by_reason_side = {
+            "absorption": _side_split([r for r in rows if "ABSORPTION" in _reasons(r)]),
+            "pin_only": _side_split([r for r in rows if _reasons(r) == {"PIN"}]),
+        }
         return {
             "suspected": self._win_loss(suspected),
             "clean": self._win_loss(clean),
@@ -2557,6 +2576,7 @@ class V95Ledger:
             "by_reason_isolated": by_reason_isolated,
             "by_checkpoint": by_checkpoint,
             "by_side": by_side,
+            "by_reason_side": by_reason_side,
         }
 
     def _scoreboard_rows(self, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
