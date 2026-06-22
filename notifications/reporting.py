@@ -196,6 +196,33 @@ class HourlyReporter:
             logger.warning(f"shadow signal A/B skipped: {e}")
             return []
 
+    def _timing_experiment_lines(self):
+        """Per-mark accuracy of the OBSERVATIONAL entry-timing experiment so the
+        owner can SEE where (e.g. 13 vs 12 vs 11 min left vs the live 10M)
+        accuracy crosses into an edge. Read-only; silent until rows resolve."""
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "timing_experiment_scoreboard"):
+            return []
+        try:
+            sb = ledger.timing_experiment_scoreboard()
+        except Exception as e:
+            logger.warning(f"timing experiment scoreboard skipped: {e}")
+            return []
+        by_mark = (sb or {}).get("by_mark") or {}
+        rows = [(int(m), d) for m, d in by_mark.items() if (d.get("n") or 0) or (d.get("pending") or 0)]
+        if not rows:
+            return []
+        out = ["", "Entry-timing experiment (observational — never traded)"]
+        for mark, d in sorted(rows, key=lambda kv: kv[0], reverse=True):
+            n = d.get("n") or 0
+            acc = _pct(d.get("accuracy")) if n else "—"
+            star = "*" if d.get("low_n") else ("✓" if d.get("ci_excludes_half") else "")
+            pend = d.get("pending") or 0
+            tail = f" (+{pend} pending)" if pend else ""
+            out.append(f"{d.get('minutes', round(mark/60.0,1))}m left: {acc} ({n}){star}{tail}")
+        out.append("* under 10 settled — not yet reliable")
+        return out
+
     @staticmethod
     def _pushed_vs_background_lines(sb):
         """Two separate records: predictions actually PUSHED to the user vs every
@@ -400,6 +427,10 @@ class HourlyReporter:
         # book resiliency, stability, low-noise, regime stability) improve the
         # probability out of sample? Read-only; default-OFF; promotion stays manual.
         body.extend(self._shadow_signal_lines())
+
+        # Entry-timing experiment: observational accuracy by time-to-close mark
+        # (13/12/11 min …), so the optimal entry time is measured, not guessed.
+        body.extend(self._timing_experiment_lines())
 
         # Actually-sent alerts (real-money proxy), kept distinct and one line.
         try:

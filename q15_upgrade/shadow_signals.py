@@ -228,7 +228,11 @@ def compute_signals(analysis: Mapping[str, Any], canonical: Any, config: SignalC
         # amplify the lean to full strength). Treat absence as neutral.
         stability = 0.5
     else:
-        flip = _num(flip_raw, 0.0) or 0.0
+        # flip_risk score is on a 0..100 scale (see flip_risk.py). Normalise to a
+        # 0..1 flip fraction first — otherwise 1.0 - flip is negative for any real
+        # score and clamps to 0, which zeroed this signal on the live record
+        # (mean_abs_signal=0.0). stability = how UN-likely a flip is.
+        flip = _clamp((_num(flip_raw, 0.0) or 0.0) / 100.0, 0.0, 1.0)
         stability = _clamp(1.0 - flip, 0.0, 1.0)
     prediction_stability = _clamp(lean * stability, -1.0, 1.0)
 

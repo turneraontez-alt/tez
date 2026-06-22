@@ -376,6 +376,14 @@ class V95Ledger:
         # Isotonic regression can. It is wired in but gated so it can be measured
         # against Platt in shadow first and only activated once it proves out.
         self._calibration_isotonic = _env_bool("Q15_V95_CALIBRATION_ISOTONIC", False)
+        # Isotonic ONLY as the unconverged-Platt fallback. DEFAULT OFF. On the live
+        # record Platt fails to converge at every checkpoint, so calibration ships
+        # as identity (raw passes through — effectively NO calibration despite
+        # 350-420 resolved rows/checkpoint). With this ON, an unconverged fit uses
+        # the isotonic curve (which needs no convergence) instead of identity,
+        # while a converged Platt fit is left byte-for-byte unchanged. Kept gated
+        # so it can be validated OOS before it touches a live (real-money) alert.
+        self._calibration_isotonic_fallback = _env_bool("Q15_V95_CALIBRATION_ISOTONIC_FALLBACK", False)
         self.minimum_promotion_rows = _env_int("Q15_V95_PROMOTION_MIN_ROWS", 50, 20, 5000)
         # Regime-aware challenger: a per-(checkpoint, regime) weight set that
         # specializes once a regime has enough of its own resolved results,
@@ -666,6 +674,35 @@ class V95Ledger:
                     message_id INTEGER,
                     PRIMARY KEY(model_version, interval, window_key)
                 )"""
+            )
+            connection.execute(
+                # OBSERVATIONAL ONLY — the entry-timing experiment. Records what the
+                # model would have predicted at extra time-marks (e.g. 13/12/11 min
+                # remaining, in seconds) so we can MEASURE where accuracy crosses
+                # into an edge instead of guessing. Never delivered, never an
+                # official record, isolated from the 15M/10M/7M interval semantics
+                # (free-form mark_seconds, no CHECK constraint). Graded on
+                # settlement alongside the real predictions.
+                """CREATE TABLE IF NOT EXISTS timing_experiment(
+                    model_version TEXT NOT NULL,
+                    contract TEXT NOT NULL,
+                    mark_seconds INTEGER NOT NULL,
+                    asset TEXT,
+                    created_at REAL NOT NULL,
+                    predicted_side TEXT,
+                    yes_probability REAL,
+                    selected_probability REAL,
+                    confidence_grade TEXT,
+                    close_time REAL,
+                    snapshot_id TEXT,
+                    official_result TEXT,
+                    resolved_at REAL,
+                    PRIMARY KEY(model_version, contract, mark_seconds)
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_timing_experiment "
+                "ON timing_experiment(model_version, mark_seconds, official_result)"
             )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
@@ -1014,6 +1051,77 @@ class V95Ledger:
             )
             connection.commit()
         return True
+
+    # -- entry-timing experiment (OBSERVATIONAL ONLY) ---------------------------
+    def record_timing_observation(self, *, contract: str, mark_seconds: int, asset: str | None,
+                                  predicted_side: str | None, yes_probability: float | None,
+                                  selected_probability: float | None, confidence_grade: str | None,
+                                  created_at: float, close_time: float | None,
+                                  snapshot_id: str | None = None) -> bool:
+        """Record (insert-only) what the model predicted at an extra time-mark.
+
+        Read-only/observational: never delivered, never an official record. One
+        row per (contract, mark_seconds) — the first write wins; later cycles in
+        the same band are ignored so the mark captures the model's call at that
+        time-to-close. Graded later by :meth:`resolve_ticker`."""
+        if not self._available or not contract:
+            return False
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO timing_experiment(model_version,contract,mark_seconds,asset,"
+                "created_at,predicted_side,yes_probability,selected_probability,confidence_grade,"
+                "close_time,snapshot_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (MODEL_VERSION, str(contract), int(mark_seconds),
+                 (str(asset) if asset else None), float(created_at),
+                 (str(predicted_side).upper() if predicted_side else None),
+                 (float(yes_probability) if yes_probability is not None else None),
+                 (float(selected_probability) if selected_probability is not None else None),
+                 (str(confidence_grade) if confidence_grade else None),
+                 (float(close_time) if close_time is not None else None),
+                 (str(snapshot_id) if snapshot_id else None)),
+            )
+            connection.commit()
+        return True
+
+    def timing_experiment_scoreboard(self) -> dict[str, Any]:
+        """Per-mark accuracy of the observational timing experiment.
+
+        Lets us SEE where (e.g. 13 vs 12 vs 11 vs the live 10M) accuracy crosses
+        into a usable edge, with Wilson CIs so a thin mark reads ``low_n`` rather
+        than as proven. Read-only."""
+        empty = {"available": bool(self._available), "by_mark": {}}
+        if not self._available:
+            return {"available": False, "by_mark": {}}
+        threshold = _env_int("Q15_V95_SCOREBOARD_MIN_N", 10, 1, 1000)
+        with self._lock, closing(self._connect()) as connection:
+            rows = list(connection.execute(
+                "SELECT mark_seconds, "
+                "SUM(CASE WHEN predicted_side=official_result THEN 1 ELSE 0 END) AS right, "
+                "SUM(CASE WHEN official_result IS NOT NULL THEN 1 ELSE 0 END) AS n, "
+                "SUM(CASE WHEN official_result IS NULL THEN 1 ELSE 0 END) AS pending "
+                "FROM timing_experiment WHERE model_version=? "
+                "GROUP BY mark_seconds ORDER BY mark_seconds DESC",
+                (MODEL_VERSION,),
+            ))
+        by_mark: dict[str, Any] = {}
+        for r in rows:
+            mark = int(r["mark_seconds"])
+            right = int(r["right"] or 0)
+            n = int(r["n"] or 0)
+            low, high = _wilson_interval(right, n)
+            by_mark[str(mark)] = {
+                "minutes": round(mark / 60.0, 1),
+                "right": right, "wrong": n - right, "n": n,
+                "pending": int(r["pending"] or 0),
+                "accuracy": round(right / n, 4) if n else None,
+                "ci_low": low, "ci_high": high,
+                "low_n": bool(n and n < threshold),
+                "ci_excludes_half": bool(
+                    n and ((low is not None and low > 0.5) or (high is not None and high < 0.5))
+                ),
+            }
+        empty["by_mark"] = by_mark
+        return empty
 
     # -- ONE official report per interval per window (report-frequency lock) -----
     @staticmethod
@@ -1523,6 +1631,13 @@ class V95Ledger:
         rows: list[sqlite3.Row] = []
         events: list[dict[str, Any]] = []
         with self._lock, closing(self._connect()) as connection:
+            # Grade the observational timing experiment for this contract too
+            # (read-only; same settlement result, never affects the live record).
+            connection.execute(
+                "UPDATE timing_experiment SET official_result=?, resolved_at=? "
+                "WHERE contract=? AND official_result IS NULL",
+                (official, resolved_at, ticker),
+            )
             rows = list(connection.execute(
                 "SELECT * FROM predictions WHERE ticker=? AND official_result IS NULL ORDER BY created_at",
                 (ticker,),
@@ -1843,13 +1958,22 @@ class V95Ledger:
         fit = self._calibration_fit(checkpoint, asset)
         if not fit["active"]:
             return {"probability": raw, "active": False, "reason": fit["reason"], "rows": fit["rows"]}
-        if self._calibration_isotonic and fit.get("isotonic"):
+        # Apply isotonic when explicitly selected, OR (default-OFF fallback) only
+        # when Platt fell back to identity for non-convergence — turning the
+        # current live no-op into a real, monotonic calibration.
+        unconverged = fit.get("fallback") == "identity_unconverged"
+        use_isotonic = bool(fit.get("isotonic")) and (
+            self._calibration_isotonic
+            or (self._calibration_isotonic_fallback and unconverged)
+        )
+        if use_isotonic:
             iso = _isotonic_predict(fit["isotonic"], raw)
             if iso is not None:
                 return {
                     "probability": _clamp(iso, 0.01, 0.99), "active": True,
-                    "reason": "isotonic_current_version", "rows": fit["rows"],
-                    "scope": fit["scope"], "method": "isotonic",
+                    "reason": "isotonic_unconverged_fallback" if (unconverged and not self._calibration_isotonic)
+                    else "isotonic_current_version",
+                    "rows": fit["rows"], "scope": fit["scope"], "method": "isotonic",
                 }
         calibrated = _clamp(_sigmoid(fit["intercept"] + fit["slope"] * _logit(raw)), 0.01, 0.99)
         result = {
@@ -1951,7 +2075,7 @@ class V95Ledger:
             # option is on; robust even where Platt fell back to identity. Stored
             # on the (in-memory cached) fit and applied by calibrate() — gated so
             # the default live path is byte-for-byte the Platt transform.
-            if self._calibration_isotonic:
+            if self._calibration_isotonic or self._calibration_isotonic_fallback:
                 fit["isotonic"] = _isotonic_fit([
                     (_clamp(float(r["raw_yes_probability"]), 0.01, 0.99),
                      1.0 if r["official_result"] == "YES" else 0.0)

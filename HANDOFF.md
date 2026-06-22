@@ -9,8 +9,43 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **957 passed, 4 skipped** in a complete env
+Tests: `python3 -m pytest tests/ -q` → **970 passed, 4 skipped** in a complete env
 (skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+
+## ✅ Shipped THIS session (branch `claude/trusting-bardeen-yufks0`) — updated-review fixes from LIVE data
+**Ran `updated-review` against the LIVE Replit ledgers** (a dump script pulled the real
+scoreboards: v95 1,106 resolved @ 68.6%, 15M 53%/10M 69%/7M 81%, NEGATIVE P&L −4.18¢/pick;
+official manip alert 23.7% correct n=59; Platt calibration unconverged→identity at every
+checkpoint; challenger behind champion). Implemented the data-grounded fixes. Suite **970
+passed, 4 skipped** (+13). Read-only wrt real exchanges; frozen champion's live probabilities
+unchanged unless an explicit default-OFF flag is set. Deploy-pending on `main`.
+- **15M alert delivery OFF by default** (`checkpoint_v95._interval_alerts_enabled`,
+  flag `Q15_V95_15M_ALERTS_ENABLED=false`): 15M is a coin flip that loses money, so its
+  panel/entry/manip/follow-up DELIVERY is suppressed; the 15M prediction is still recorded
+  observationally (learning + timing experiment). 10M/7M always deliver. Recaps still fire.
+- **Manipulation standalone alert OFF by default** (`Q15_V95_MANIPULATION_ALERTS_ENABLED`
+  default flipped True→False): the delivered manip alert was an anti-signal (23.7% correct).
+  Detection/tracking still runs for the learning record.
+- **Entry-timing experiment (observational)** — answers "is 13/12/11 min better than 15?"
+  with data, not guesses. New isolated `timing_experiment` table; `record_timing_observation`
+  in `run_cycle` captures the model's call at extra marks (`Q15_V95_TIMING_EXPERIMENT_SECONDS`
+  default `780,720,660`), `resolve_ticker` grades them on settlement, `timing_experiment_scoreboard()`
+  + an hourly-report block surface per-mark accuracy with Wilson CIs. Never delivered, never
+  official, isolated from the 15M/10M/7M interval semantics (free-form `mark_seconds`).
+- **Repaired the dead `prediction_stability` shadow signal** (`shadow_signals.compute_signals`):
+  the 0..100 flip score was used as a 0..1 prob (`1.0 - flip` → clamped to 0), zeroing the
+  signal on the live record (mean_abs_signal=0.0). Now normalised `/100.0` first.
+- **Isotonic calibration as the unconverged-Platt fallback** (`ledger_v95`, flag
+  `Q15_V95_CALIBRATION_ISOTONIC_FALLBACK=false`, DEFAULT OFF → no live change): when Platt
+  fails to converge (the live situation at every checkpoint), use the isotonic curve instead
+  of shipping identity (no calibration). Validate OOS before enabling on the money path.
+- **Deferred (need significance testing per the FROZEN-champion invariant):** the net-edge
+  entry gate and the #1/#2/#3 rank-ordering rework — both change live money behaviour, so
+  they were NOT auto-shipped. Reconciling the challenger "control" proxy (45–50%) to mirror
+  the live predicted side (68.6%) is also pending.
+- **Files:** `q15_upgrade/checkpoint_v95.py`, `q15_upgrade/ledger_v95.py`,
+  `q15_upgrade/shadow_signals.py`, `notifications/reporting.py`, `.env.example`,
+  `tests/test_review_fixes_v5.py` (new), `tests/test_q15_manipulation_alert.py`.
 
 ## ✅ Shipped THIS session (branch `claude/modest-curie-9eex8c`) — default effort level → xhigh
 **Harness config only — no app/test change; suite unchanged at 957 passed, 4 skipped.**
