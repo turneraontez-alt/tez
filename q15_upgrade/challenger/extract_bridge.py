@@ -157,7 +157,15 @@ def rows_to_samples(rows: Iterable[Mapping], *, checkpoint: str | None = None):
         ts.append(created)
         feats.append(fv.details)
         y.append(1 if res == "YES" else 0)
-        cp = r.get("raw_yes_probability")
+        # Champion control probability for the paired comparison = the champion's
+        # FINAL (calibrated) probability — the value the system actually produces and
+        # that determines its sent side — so champion accuracy/Brier reflect reality.
+        # Raw and calibrated disagree on the side in ~34% of rows, which understated
+        # the champion's accuracy (~50% vs the true ~68%). Fall back to the raw prob,
+        # then a generic control field, for older dumps that lack the calibrated one.
+        cp = r.get("calibrated_yes_probability")
+        if cp is None:
+            cp = r.get("raw_yes_probability")
         if cp is None:
             cp = r.get("control_probability")
         try:
