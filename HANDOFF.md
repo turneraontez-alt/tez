@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1188 passed / 13 skipped here** (PRs #25+#26 integrated; 4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1224 passed / 4 skipped here** (PRs #25+#26 integrated; 4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -25,6 +25,13 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — enable 15M skip on the V2 NO book (config flip) (branch `claude/keen-fermat-ce81uv`)
+**Suite 1224 passed / 4 skipped here** (config-only; no new tests — `skip_15m` already covered by 2 tests). Deploy-pending — branch + PR.
+
+Set `Q15_ULTOIM_V2_SKIP_15M="true"` in `.replit` `[userenv.shared]` — V2 now fires only at 10M/7M, dropping the structurally money-losing 15M bin (10M/7M behaviour byte-identical). This was the standing NEXT item and the single highest **total-P&L** lever: on the powered v95 NO sample the 15M bin is the only negative bucket (−795¢ at ~59%), so removing it lifts the book +1058¢→+1853¢ while keeping full 10M/7M volume; on v2's own (small) fired book the 15M bin is −79¢. The per-asset / conf≥0.65 / wait-for-7M quality filters were evaluated and **deliberately NOT applied** — they push per-entry quality toward ~100% but cut volume ~89%, *lowering* total P&L at flat stake (only worth it paired with conviction-based sizing).
+- **Files:** `.replit` (one env line + comment). No code change — the flag (`config.py:81`) and skip logic (`runner.py:215`, `continue` past the 15M interval) shipped earlier; tests `test_skip_15m_default_off_fires_at_15m` / `test_skip_15m_suppresses_15m_but_keeps_10m` stay green.
+- **Takes effect:** after the Relay syncs `.replit` to the Repl and the app is Stop ▸ Run (env is read at process start). **Rollback:** set the line back to `"false"`.
+
 ## ✅ Shipped THIS session — Ultoim V2 pin-break SHADOW signals (record-only) (branch `claude/keen-fermat-ce81uv`)
 **Suite 1224 passed / 4 skipped here** (+4 ultoim_v2 tests, 75 total in the file). Deploy-pending — branch + PR #25. Read-only/paper; **record-only — changes NO decision**. Still DEFAULT-OFF.
 
@@ -34,7 +41,7 @@ The one new build: record two **pin-break** features, shadow-only, derived from 
 - **`pin_break_drift`** = `analysis["structural"]["z_score"]` (checkpoint_v95.py:473) — vol-normalised drift THROUGH the strike; the only signal that keeps directional content when `distance_sigma`→0. Mechanistic best bet, but UNTESTABLE on stored data (structural isn't persisted in feature_json).
 - **`threshold_interaction`** = `analysis["feature_values"]["threshold_interaction"]` (the scalar; feature_json == feature_values). Backtested on the v95 136-row 10M-NO ledger: **AUC 0.698** (best discriminator found) and the **first signal to admit a winner-sparing OOS cut** (skip ti>0.5 → +38¢, 0 winners touched, holds out-of-sample). Small (1 loser, +6%) — promising, not proven.
 - **Files:** `q15_upgrade/ultoim_v2/{ledger,runner}.py`, `.env.example`, `tests/test_ultoim_v2.py` (+4: null-when-absent, persist, record-only-doesn't-change-fire, migrate+roundtrip). Two nullable columns via the idempotent ALTER migration (verified non-destructive on the real snapshot DB). No env knob (always recorded when overlay enabled, like conf_gap; pure dict reads).
-- **NEXT:** deploy main to the Repl (it's ahead — live runs 08221c4, main is past PR #25) so these + conf_gap/blowup_risk/x_market_flow actually accrue data; flip `Q15_ULTOIM_V2_SKIP_15M=true`; then validate threshold_interaction's winner-sparing cut prospectively before it could ever gate. Sizing: only fractional-bankroll (risk control) is defensible — edge-tilt was unproven (n=13, one-entry-driven).
+- **NEXT:** deploy main to the Repl (it's ahead — live runs 08221c4, main is past PR #25) so these + conf_gap/blowup_risk/x_market_flow actually accrue data; ~~flip `Q15_ULTOIM_V2_SKIP_15M=true`~~ (DONE — see top entry); then validate threshold_interaction's winner-sparing cut prospectively before it could ever gate. Sizing: only fractional-bankroll (risk control) is defensible — edge-tilt was unproven (n=13, one-entry-driven).
 
 ## ✅ Shipped THIS session — Ultoim V2 blowup-risk SHADOW screen (record-only) + four-agent stress test (branch `claude/keen-fermat-ce81uv`)
 **Suite 1215 passed / 4 skipped here** (+11 ultoim_v2 tests, 66 total in the file). Deploy-pending — branch + PR #25. Read-only/paper; **record-only — changes NO decision** (no fire/size/alert/delivery effect). Still DEFAULT-OFF (`Q15_ULTOIM_V2_ENABLED`).
