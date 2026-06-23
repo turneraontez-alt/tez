@@ -344,6 +344,19 @@ class FocusSettings:
         return asdict(self)
 
 
+# Bounded retention for graded per-15m-window state. A cycle is one 15-minute
+# market; ~672 close every day. Once a cycle is graded (settled against the real
+# Kalshi result) its prediction rows are already persisted in Postgres and can be
+# re-hydrated on demand via `_hydrate_cycle`, so keeping it in memory past the
+# point where any active/recent window could reference it only grows `_cycles`,
+# `_top_by_close`, and `_rankings` unboundedly and slows the O(n) reconcile/status
+# scans. Evict graded cycles (and their close-keyed ranking state) once their
+# close_time is older than this cutoff. Ungraded, current, or recently-closed
+# cycles are never evicted. 2h comfortably covers settlement latency and the
+# active two-window (15m/10m/7m) horizon.
+_CYCLE_RETENTION_SECONDS = 7200.0
+
+
 class TwoWindowFocusManager:
     """Freeze two predictions, rank top three, and gate deep evaluation."""
 
@@ -531,6 +544,52 @@ class TwoWindowFocusManager:
                 continue
             if result in {"YES", "NO"}:
                 self._grade_cycle(cycle, result, now)
+        self._prune_settled_cycles(now)
+
+    def _prune_settled_cycles(self, now: float) -> None:
+        """Evict graded cycles (and their close-keyed ranking state) whose market
+        closed more than `_CYCLE_RETENTION_SECONDS` ago.
+
+        Read-only and behaviour-neutral for any active/recent window: only cycles
+        that are BOTH graded (settled against the real result, so their grade and
+        predictions are already persisted) AND old (close_time below the cutoff)
+        are removed. Ungraded cycles, current cycles, and cycles whose close_time
+        is missing/unparseable are always retained. An evicted cycle re-hydrates
+        from Postgres on demand via `_cycle`/`_hydrate_cycle` if it is ever
+        referenced again, so no learning or prediction output is lost.
+        `_top_by_close`/`_rankings` are keyed by ``str(close_time)`` (the
+        close_key); a window's ranking entries are dropped only once EVERY
+        in-memory cycle for that close window has been evicted, keeping those maps
+        consistent with `_cycles`."""
+        cutoff = now - _CYCLE_RETENTION_SECONDS
+        with self._lock:
+            stale_tickers: List[str] = []
+            stale_close_keys: set = set()
+            for ticker, cycle in self._cycles.items():
+                if not cycle.get("graded"):
+                    continue
+                close_ts = _parse_time(cycle.get("close_time"))
+                if close_ts is None or close_ts >= cutoff:
+                    continue
+                stale_tickers.append(ticker)
+                # Use the same close_key the ranking maps were written under
+                # (str(close_time)) rather than re-parsing it — a stringified epoch
+                # is not ISO-parseable, so deriving the key from the live cycle is
+                # both correct and avoids a parse round-trip.
+                stale_close_keys.add(str(cycle.get("close_time") or ""))
+            if not stale_tickers:
+                return
+            for ticker in stale_tickers:
+                self._cycles.pop(ticker, None)
+            # Drop close-keyed ranking state only for windows whose every in-memory
+            # cycle was just evicted — keeps _top_by_close/_rankings consistent with
+            # _cycles (e.g. an ungraded sibling for the same close window keeps it).
+            live_close_keys = {str(c.get("close_time") or "") for c in self._cycles.values()}
+            for close_key in stale_close_keys:
+                if not close_key or close_key in live_close_keys:
+                    continue
+                self._rankings.pop(close_key, None)
+                self._top_by_close.pop(close_key, None)
 
     def focus_status(self) -> dict:
         with self._lock:

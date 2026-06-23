@@ -30,6 +30,13 @@ class HybridMarketData:
             for ticker, ts in self._last_seen_trade_ts.items()
             if ticker in wanted
         }
+        # Diagnostic metadata only — restrict to the wanted set so it cannot
+        # grow unbounded as 15m markets roll over (behavior-neutral).
+        self._ticker_sources = {
+            ticker: source
+            for ticker, source in self._ticker_sources.items()
+            if ticker in wanted
+        }
         if self.ws:
             self.ws.subscribe(wanted)
 
