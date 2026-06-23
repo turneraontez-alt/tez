@@ -79,6 +79,65 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
 
 
+def build_exit_warning(warning: Mapping[str, Any], scoreboard: Mapping[str, Any],
+                       cfg: Any) -> str:
+    """Render a defensive-exit / flip warning: the model has reversed on a pick it
+    suggested earlier, with the evidence behind the reversal and the live historical
+    reliability of such warnings (how it learns). Marker-safe: contains none of the
+    live suppression/routing strings."""
+    asset = _esc(warning.get("asset"))
+    ticker = _esc(warning.get("ticker"))
+    entry_side = _esc(str(warning.get("entry_side") or "").upper())
+    flipped_to = _esc(str(warning.get("flipped_to_side") or "").upper())
+    entry_ask = _num(warning.get("entry_ask_cents"))
+    entry_interval = _esc(warning.get("entry_interval"))
+    secs = _num(warning.get("warn_seconds_remaining"))
+    flip_yes = warning.get("flip_calibrated_yes")
+    flip_sel = warning.get("flip_selected_probability")
+    exit_val = _num(warning.get("exit_value_cents"))
+    cycles = int(warning.get("confirm_cycles") or 0)
+    span = _num(warning.get("confirm_span_seconds"))
+    sb = scoreboard or {}
+
+    mins_txt = "—" if secs is None else f"{secs / 60:.1f}m left"
+    entry_ask_txt = "—" if entry_ask is None else f"{entry_ask:.0f}¢"
+    exit_txt = "—" if exit_val is None else f"{exit_val:.0f}¢"
+    span_txt = "—" if span is None else f"{span:.0f}s"
+    # flip_probability is stored on a 0..100 scale; show as a fraction.
+    fp = _num(warning.get("flip_probability"))
+    flip_txt = "—" if fp is None else f"{fp / 100.0 * 100:.0f}%"
+
+    header = "⚠️ <b>ULTOIM V2 · EXIT WARNING</b>"
+    body = [
+        "RESEARCH SIGNAL — paper only. The model REVERSED on a pick it suggested.",
+        "",
+        f"📉 RECONSIDER — {asset} {entry_side}",
+        f"Ticker: {ticker}",
+        f"Suggested earlier: {entry_side} @ {entry_ask_txt} ({entry_interval})",
+        f"Now ({mins_txt}): model flipped to {flipped_to} · P(YES) {_pct1(flip_yes)}"
+        f" · conviction {_pct1(flip_sel)}",
+        f"Why (not a spike): held {cycles}× over {span_txt} · flip-risk {flip_txt}",
+        f"Sell-to-close ≈ {exit_txt} (recover this vs 0 if it settles against you)",
+        _exit_reliability_line(sb, cfg),
+        "Ultoim V2 · research/paper · not advice · no orders placed",
+    ]
+    return header + "\n<pre>" + "\n".join(body) + "</pre>"
+
+
+def _exit_reliability_line(sb: Mapping[str, Any], cfg: Any) -> str:
+    """The learned reliability of these warnings — how it learns from its mistakes."""
+    n = int((sb or {}).get("resolved") or 0)
+    correct = int((sb or {}).get("correct") or 0)
+    min_n = int(getattr(cfg, "min_scoreboard_n", 30) or 30)
+    if n < min_n:
+        return f"Track record: building, {correct}/{n} warnings correct so far"
+    prec = (sb or {}).get("precision")
+    avg = (sb or {}).get("avg_recovered_per_correct")
+    prec_txt = "—" if prec is None else f"{prec * 100:.0f}%"
+    avg_txt = "" if avg is None else f" · avg recover {avg:.0f}¢"
+    return f"Track record: {prec_txt} of these flips lost ({correct}/{n}){avg_txt}"
+
+
 def _accuracy_line(agg: Mapping[str, Any], min_n: int) -> str:
     n = int(agg.get("n") or 0)
     right = int(agg.get("right") or 0)
@@ -196,6 +255,24 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
             )
     else:
         body.append("  (none)")
+
+    # Exit warnings — the defensive-flip learning record.
+    ew = (scoreboard or {}).get("exit_warnings") or {}
+    if int(ew.get("total") or 0) > 0:
+        n = int(ew.get("resolved") or 0)
+        correct = int(ew.get("correct") or 0)
+        fa = int(ew.get("false_alarms") or 0)
+        body.append("")
+        body.append("Exit warnings (defensive flips):")
+        if n < min_n:
+            body.append(f"  {correct}/{n} correct · {fa} false alarms · building (N<{min_n})")
+        else:
+            prec = ew.get("precision")
+            prec_txt = "—" if prec is None else f"{prec * 100:.0f}%"
+            body.append(f"  precision {prec_txt} ({correct}/{n}) · {fa} false alarms")
+        body.append(f"  recovered {_signed_cents(ew.get('recovered_cents'))} · "
+                    f"forfeited {_signed_cents(ew.get('forfeited_cents'))} · "
+                    f"net {_signed_cents(ew.get('net_cents'))}")
 
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")

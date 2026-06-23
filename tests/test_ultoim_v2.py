@@ -763,6 +763,143 @@ def test_recap_shows_side_and_regime_sections():
     assert "By regime:" in text and "YES-prone:" in text
 
 
+# --------------------------------------------------------------------------- #
+# defensive-exit / flip warning
+# --------------------------------------------------------------------------- #
+def _ew_cfg_over():
+    # small, deterministic anti-spike thresholds for tests
+    return dict(exit_confirm_cycles=2, exit_confirm_seconds=10.0,
+                exit_min_flip_conf=0.55, exit_watch_from_seconds=420.0)
+
+
+def test_exit_warning_fires_only_on_sustained_flip(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, **_ew_cfg_over())
+    # 1) entry: BTC NO fires at 10M (the suggested pick).
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert len(tg.sent) == 1                      # entry alert sent
+
+    # 2) at 7M the model has flipped to YES, decisively. One observation = no fire
+    #    (anti-spike: needs >= confirm_cycles spanning >= confirm_seconds).
+    af = {"BTC": _analysis(side="YES", sel=0.66, ask=55.0, mkt_yes=0.66)}
+    r._observe_sync(candidates=_extract(r, af, {"BTC": _canon("T-BTC", 410.0, 9000.0)},
+                                        now=1200.0), now=1200.0)
+    assert len(tg.sent) == 1                      # spike not confirmed yet
+
+    # 3) sustained: a second confirming obs >= 10s later -> warning fires.
+    r._observe_sync(candidates=_extract(r, af, {"BTC": _canon("T-BTC", 398.0, 9000.0)},
+                                        now=1215.0), now=1215.0)
+    assert len(tg.sent) == 2 and "EXIT WARNING" in tg.sent[1]
+    assert r.ledger.exit_warning_recorded("ultoim-v2", "T-BTC", _window_key(9000.0, 1000.0))
+
+    # 4) dedup: further obs do not re-warn.
+    r._observe_sync(candidates=_extract(r, af, {"BTC": _canon("T-BTC", 360.0, 9000.0)},
+                                        now=1230.0), now=1230.0)
+    assert len(tg.sent) == 2
+
+
+def test_exit_warning_requires_a_prior_suggested_entry(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, **_ew_cfg_over())
+    # No entry ever fired for this contract — a 7M flip must NOT warn.
+    af = {"BTC": _analysis(side="YES", sel=0.66, ask=55.0, mkt_yes=0.66)}
+    for t in (1200.0, 1215.0, 1230.0):
+        r._observe_sync(candidates=_extract(r, af, {"BTC": _canon("T-BTC", 410.0, 9000.0)},
+                                            now=t), now=t)
+    assert all("EXIT WARNING" not in s for s in tg.sent)
+    assert not r.ledger.exit_warning_recorded("ultoim-v2", "T-BTC", _window_key(9000.0, 1200.0))
+
+
+def test_exit_warning_ignores_marginal_and_reset_on_agree(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, **_ew_cfg_over())
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    r._observe_sync(candidates=_extract(r, a, {"BTC": _canon("T-BTC", 600.0, 9000.0)},
+                                        now=1000.0), now=1000.0)
+    # marginal YES (sel 0.52 < 0.55) — never accumulates, even if sustained.
+    marg = {"BTC": _analysis(side="YES", sel=0.52, ask=55.0, mkt_yes=0.52)}
+    for t in (1200.0, 1215.0, 1230.0):
+        r._observe_sync(candidates=_extract(r, marg, {"BTC": _canon("T-BTC", 410.0, 9000.0)},
+                                            now=t), now=t)
+    assert all("EXIT WARNING" not in s for s in tg.sent)
+
+    # decisive flip that then AGREES again resets the debounce (no warning).
+    flip = {"BTC": _analysis(side="YES", sel=0.66, ask=55.0, mkt_yes=0.66)}
+    agree = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    r._observe_sync(candidates=_extract(r, flip, {"BTC": _canon("T-BTC", 410.0, 9000.0)},
+                                        now=1300.0), now=1300.0)
+    r._observe_sync(candidates=_extract(r, agree, {"BTC": _canon("T-BTC", 405.0, 9000.0)},
+                                        now=1305.0), now=1305.0)   # back to NO -> reset
+    r._observe_sync(candidates=_extract(r, flip, {"BTC": _canon("T-BTC", 400.0, 9000.0)},
+                                        now=1310.0), now=1310.0)   # count restarts at 1
+    assert all("EXIT WARNING" not in s for s in tg.sent)
+
+
+def test_exit_warning_grading_and_scoreboard(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    base = {"created_at": 1.0, "model_version": "ultoim-v2", "window_key": 1,
+            "entry_side": "NO", "close_time": 900.0, "delivery_status": "SENT"}
+    # correct: entry NO settles YES (entry lost) -> exiting was right, recover exit value.
+    led.record_exit_warning({**base, "ticker": "W1", "entry_ask_cents": 60.0,
+                             "exit_value_cents": 30.0})
+    led.resolve_exit_warning("ultoim-v2", "W1", "YES", 1000.0)
+    # false alarm: entry NO settles NO (entry won) -> exiting forfeited 100-ask.
+    led.record_exit_warning({**base, "ticker": "W2", "entry_ask_cents": 55.0,
+                             "exit_value_cents": 40.0})
+    led.resolve_exit_warning("ultoim-v2", "W2", "NO", 1000.0)
+
+    sb = led.exit_warning_scoreboard("ultoim-v2", min_n=1)
+    assert sb["resolved"] == 2 and sb["correct"] == 1 and sb["false_alarms"] == 1
+    assert sb["precision"] == pytest.approx(0.5)
+    assert sb["recovered_cents"] == pytest.approx(30.0)     # W1 recovered
+    assert sb["forfeited_cents"] == pytest.approx(45.0)     # W2: 100-55
+    assert sb["net_cents"] == pytest.approx(-15.0)
+    # idempotent re-grade
+    assert led.resolve_exit_warning("ultoim-v2", "W1", "YES", 1100.0) == 0
+    # dedup record
+    assert led.record_exit_warning({**base, "ticker": "W1", "entry_ask_cents": 60.0}) is None
+    led.close()
+
+
+def test_find_fired_entry(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    assert led.find_fired_entry("ultoim-v2", "T-BTC", 5) is None
+    led.record_decision(_row(ticker="T-BTC", window_key=5, interval="10M",
+                             mark_seconds=600.0, fired=1, predicted_side="NO"))
+    e = led.find_fired_entry("ultoim-v2", "T-BTC", 5)
+    assert e is not None and e["predicted_side"] == "NO" and e["fired"] == 1
+    led.close()
+
+
+def test_build_exit_warning_grammar_and_markers():
+    cfg = UltoimV2Config(enabled=True)
+    w = {"asset": "BTC", "ticker": "T-BTC", "entry_side": "NO", "flipped_to_side": "YES",
+         "entry_ask_cents": 60.0, "entry_interval": "10M", "warn_seconds_remaining": 410.0,
+         "flip_calibrated_yes": 0.66, "flip_selected_probability": 0.66,
+         "exit_value_cents": 34.0, "confirm_cycles": 3, "confirm_span_seconds": 25.0,
+         "flip_probability": 40.0}
+    text = panel.build_exit_warning(w, {"resolved": 0, "correct": 0}, cfg)
+    assert "EXIT WARNING" in text and "BTC" in text and "flipped to YES" in text
+    assert "Sell-to-close" in text and "building" in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text
+
+
+def test_recap_shows_exit_warning_section():
+    cfg = UltoimV2Config(enabled=True, min_promote_n=50, min_scoreboard_n=30)
+    sb = _recap_sb(n=5, right=3, ci_low=0.4, base_rate=0.5)
+    sb["exit_warnings"] = {"total": 4, "resolved": 4, "correct": 3, "false_alarms": 1,
+                           "precision": 0.75, "recovered_cents": 180.0,
+                           "forfeited_cents": 40.0, "net_cents": 140.0}
+    text = panel.build_recap(sb, [], [], cfg)
+    assert "Exit warnings (defensive flips):" in text
+    assert "recovered" in text and "net" in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text
+
+
 def test_entry_card_caveat_is_derived_not_hardcoded():
     cfg = UltoimV2Config(enabled=True)
     pick = {"asset": "BTC", "predicted_side": "NO", "ticker": "T-BTC", "interval": "10M",

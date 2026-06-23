@@ -12,6 +12,7 @@ exception-isolated, and the worker logs+continues on any job error.
 """
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
@@ -69,6 +70,9 @@ class UltoimV2Runner:
         self._worker_lock = threading.Lock()
         self._last_reconcile_at = 0.0
         self._last_recap_at = 0.0
+        # Debounce state for the defensive-exit warning, keyed by (ticker, window).
+        # Mutated ONLY on the worker thread (in _observe_sync), so no lock needed.
+        self._exit_state: dict[tuple[str, int], dict[str, float]] = {}
 
     # -- worker plumbing ------------------------------------------------------
     def _ensure_worker(self) -> None:
@@ -195,6 +199,13 @@ class UltoimV2Runner:
                 if not self.ledger.lock_report(mv, interval, window_key, now):
                     continue
                 self._decide_interval(interval, mark, window_key, in_band, now)
+
+        # -- DEFENSIVE-EXIT pass: independent of the entry report-lock, runs every
+        # cycle for contracts near close so the anti-spike debounce can accumulate.
+        if cfg.exit_warnings_enabled:
+            self._prune_exit_state(now)
+            for cand in candidates:
+                self._maybe_exit_warning(cand, _window_key(cand.get("close_time"), now), now)
 
     def _decide_interval(self, interval: str, mark: int, window_key: int,
                          cands: list[dict[str, Any]], now: float) -> None:
@@ -361,6 +372,114 @@ class UltoimV2Runner:
             "yes_prone_n": yes_prone_n,
         }
 
+    # -- defensive-exit / flip warning ----------------------------------------
+    def _prune_exit_state(self, now: float) -> None:
+        """Drop debounce keys older than two windows so the dict can't leak."""
+        cutoff = now - 1800.0
+        stale = [k for k, st in self._exit_state.items() if st["first_seen"] < cutoff]
+        for k in stale:
+            self._exit_state.pop(k, None)
+
+    def _maybe_exit_warning(self, cand: dict[str, Any], window_key: int, now: float) -> None:
+        """Fire a defensive-exit warning iff (A) a paper entry was SUGGESTED earlier
+        in this window for this contract, AND (B) at/after the 7M mark the champion
+        has FLIPPED to the opposite side, decisively (new-side prob >= min) AND
+        sustained (>= confirm_cycles observations spanning >= confirm_seconds) — so a
+        short-lived spike never triggers. One warning per (ticker, window)."""
+        cfg = self.config
+        secs = _num(cand.get("seconds_remaining"))
+        if secs is None or secs > cfg.exit_watch_from_seconds:
+            return  # only watch from the 7M mark (default 420s) onward to close
+        ticker = str(cand.get("ticker") or "")
+        if not ticker:
+            return
+        key = (ticker, window_key)
+        if self.ledger.exit_warning_recorded(cfg.model_version, ticker, window_key):
+            self._exit_state.pop(key, None)
+            return
+        entry = self.ledger.find_fired_entry(cfg.model_version, ticker, window_key)
+        if entry is None:
+            return  # only warn on a contract it actually suggested
+        entry_side = str(entry.get("predicted_side") or "").upper()
+        cur_side = str(cand.get("predicted_side") or "").upper()
+        new_sel = _num(cand.get("selected_probability"))
+        opposite = bool(cur_side) and bool(entry_side) and cur_side != entry_side
+        decisive = new_sel is not None and new_sel >= cfg.exit_min_flip_conf
+        if not (opposite and decisive):
+            self._exit_state.pop(key, None)  # flip not real (yet) -> reset debounce
+            return
+        st = self._exit_state.get(key)
+        if st is None:
+            st = {"count": 0.0, "first_seen": now}
+            self._exit_state[key] = st
+        st["count"] += 1.0
+        if st["count"] < cfg.exit_confirm_cycles or (now - st["first_seen"]) < cfg.exit_confirm_seconds:
+            return  # anti-spike: not sustained long enough yet
+        self._fire_exit_warning(cand, entry, window_key, now, st)
+        self._exit_state.pop(key, None)
+
+    def _fire_exit_warning(self, cand: dict[str, Any], entry: Mapping[str, Any],
+                           window_key: int, now: float, st: Mapping[str, float]) -> None:
+        cfg = self.config
+        entry_side = str(entry.get("predicted_side") or "").upper()
+        mkt_yes = _num(cand.get("market_implied_yes_probability"))
+        # Sell-to-close value of the ENTRY side, estimated from the current
+        # market-implied probability of that side (approximate — the real fill is
+        # the live bid; this is the honest best estimate from available fields).
+        exit_value = None
+        if mkt_yes is not None:
+            p_entry = (1.0 - mkt_yes) if entry_side == "NO" else mkt_yes
+            exit_value = round(max(0.0, min(100.0, p_entry * 100.0)), 1)
+        span = round(now - float(st["first_seen"]), 1)
+        cycles = int(st["count"])
+        evidence = {
+            "entry_side": entry_side,
+            "entry_ask_cents": entry.get("entry_ask_cents"),
+            "entry_interval": entry.get("interval"),
+            "flip_calibrated_yes": cand.get("calibrated_yes_probability"),
+            "flip_selected_probability": cand.get("selected_probability"),
+            "market_implied_yes": mkt_yes,
+            "confirm_cycles": cycles,
+            "confirm_span_seconds": span,
+            "distance_sigma": cand.get("distance_sigma"),
+            "manipulation_suspected": bool(cand.get("manipulation_suspected")),
+            "flip_probability": cand.get("flip_probability"),
+        }
+        row = {
+            "created_at": now, "model_version": cfg.model_version,
+            "asset": cand.get("asset"), "ticker": cand.get("ticker"),
+            "window_key": window_key,
+            "entry_side": entry_side,
+            "entry_ask_cents": entry.get("entry_ask_cents"),
+            "entry_interval": entry.get("interval"),
+            "entry_created_at": entry.get("created_at"),
+            "warn_seconds_remaining": _num(cand.get("seconds_remaining")),
+            "flipped_to_side": str(cand.get("predicted_side") or "").upper(),
+            "flip_calibrated_yes": cand.get("calibrated_yes_probability"),
+            "flip_selected_probability": cand.get("selected_probability"),
+            "flip_market_implied_yes": mkt_yes,
+            "confirm_cycles": cycles,
+            "confirm_span_seconds": span,
+            "exit_value_cents": exit_value,
+            "evidence_json": json.dumps(evidence, default=str),
+            "close_time": cand.get("close_time"),
+            "session_id": self.session_id,
+            "delivery_status": "PENDING",
+        }
+        warning_id = self.ledger.record_exit_warning(row)
+        if warning_id is None:
+            return  # already recorded (dedup / concurrent)
+        sb = self.ledger.exit_warning_scoreboard(cfg.model_version, min_n=cfg.min_scoreboard_n)
+        text = panel.build_exit_warning(row, sb, cfg)
+        result = self.telegram.send(text)
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        self.ledger.mark_exit_delivery(warning_id, status, mid, result.get("error"))
+
     # -- reconcile (settlement grading) --------------------------------------
     def reconcile(self, now: float, resolver: Any) -> None:
         """Enqueue a settlement reconcile, throttled. ``resolver`` is the shared
@@ -380,7 +499,10 @@ class UltoimV2Runner:
         get_market = getattr(resolver, "get_market", None)
         if not callable(get_market):
             return
-        for ticker in self.ledger.unresolved_closed(self.config.model_version, now):
+        mv = self.config.model_version
+        tickers = set(self.ledger.unresolved_closed(mv, now))
+        tickers.update(self.ledger.unresolved_exit_warnings(mv, now))
+        for ticker in tickers:
             try:
                 market = get_market(ticker)
             except Exception:  # noqa: BLE001 - one bad fetch must not stop the pass
@@ -388,7 +510,10 @@ class UltoimV2Runner:
                 continue
             result = _resolved_result(market)
             if result is not None:
-                self.ledger.resolve(self.config.model_version, ticker, result, now)
+                self.ledger.resolve(mv, ticker, result, now)
+                # Grade the exit warning too: was bailing the right call (entry lost)
+                # or a false alarm (entry would have won)? This is how it learns.
+                self.ledger.resolve_exit_warning(mv, ticker, result, now)
 
     # -- periodic research recap ----------------------------------------------
     def maybe_send_recap(self, now: float) -> None:
@@ -409,6 +534,8 @@ class UltoimV2Runner:
         try:
             mv = self.config.model_version
             sb = self.ledger.scoreboard(mv, min_n=self.config.min_scoreboard_n)
+            sb["exit_warnings"] = self.ledger.exit_warning_scoreboard(
+                mv, min_n=self.config.min_scoreboard_n)
             recent = self.ledger.recent_rows(mv, limit=10)
             losses = self.ledger.loss_rows(mv, limit=10)
             text = panel.build_recap(sb, recent, losses, self.config)

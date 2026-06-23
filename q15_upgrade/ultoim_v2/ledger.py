@@ -105,6 +105,42 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ultoim_v2_exit_warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    model_version TEXT NOT NULL,
+    asset TEXT,
+    ticker TEXT NOT NULL,
+    window_key INTEGER NOT NULL,
+    entry_side TEXT,
+    entry_ask_cents REAL,
+    entry_interval TEXT,
+    entry_created_at REAL,
+    warn_seconds_remaining REAL,
+    flipped_to_side TEXT,
+    flip_calibrated_yes REAL,
+    flip_selected_probability REAL,
+    flip_market_implied_yes REAL,
+    confirm_cycles INTEGER,
+    confirm_span_seconds REAL,
+    exit_value_cents REAL,
+    evidence_json TEXT,
+    close_time REAL,
+    session_id TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'PENDING',
+    message_id INTEGER,
+    delivery_error TEXT,
+    official_result TEXT,
+    resolved_at REAL,
+    warning_correct INTEGER,
+    false_alarm INTEGER,
+    recovered_cents REAL,
+    forfeited_cents REAL,
+    UNIQUE(model_version, ticker, window_key)
+);
+CREATE INDEX IF NOT EXISTS idx_ultoim_v2_exit_resolve
+    ON ultoim_v2_exit_warnings(model_version, official_result, close_time);
 """
 
 
@@ -487,6 +523,152 @@ class UltoimV2Ledger:
                 (model_version, int(limit)),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- defensive-exit / flip warnings ---------------------------------------
+    def find_fired_entry(self, model_version: str, ticker: str,
+                         window_key: int) -> dict[str, Any] | None:
+        """The paper entry that was SUGGESTED earlier in this window for this
+        contract (fired=1), if any — the precondition for an exit warning. Earliest
+        fired checkpoint wins (that's when the owner would have entered)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND ticker=? AND window_key=? AND fired=1 "
+                "ORDER BY mark_seconds DESC, created_at ASC LIMIT 1",
+                (model_version, ticker, window_key),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def exit_warning_recorded(self, model_version: str, ticker: str,
+                              window_key: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM ultoim_v2_exit_warnings "
+                "WHERE model_version=? AND ticker=? AND window_key=?",
+                (model_version, ticker, window_key),
+            ).fetchone()
+        return row is not None
+
+    _EXIT_COLS = (
+        "created_at", "model_version", "asset", "ticker", "window_key",
+        "entry_side", "entry_ask_cents", "entry_interval", "entry_created_at",
+        "warn_seconds_remaining", "flipped_to_side", "flip_calibrated_yes",
+        "flip_selected_probability", "flip_market_implied_yes", "confirm_cycles",
+        "confirm_span_seconds", "exit_value_cents", "evidence_json", "close_time",
+        "session_id", "delivery_status",
+    )
+
+    def record_exit_warning(self, row: Mapping[str, Any]) -> int | None:
+        """Insert one exit warning. One per (model_version, ticker, window) — a
+        duplicate (restart / concurrent) returns None rather than re-warning."""
+        placeholders = ",".join("?" for _ in self._EXIT_COLS)
+        values = [row.get(c) for c in self._EXIT_COLS]
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    f"INSERT INTO ultoim_v2_exit_warnings({','.join(self._EXIT_COLS)}) "
+                    f"VALUES({placeholders})",
+                    values,
+                )
+                self._conn.commit()
+                return int(cur.lastrowid)
+            except sqlite3.IntegrityError:
+                return None
+
+    def mark_exit_delivery(self, warning_id: int, status: str,
+                           message_id: int | None, error: str | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE ultoim_v2_exit_warnings "
+                "SET delivery_status=?, message_id=?, delivery_error=? WHERE id=?",
+                (status, message_id, error, warning_id),
+            )
+            self._conn.commit()
+
+    def unresolved_exit_warnings(self, model_version: str, now: float) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT ticker FROM ultoim_v2_exit_warnings "
+                "WHERE model_version=? AND official_result IS NULL "
+                "AND close_time IS NOT NULL AND close_time <= ? LIMIT 500",
+                (model_version, now),
+            ).fetchall()
+        return [str(r["ticker"]) for r in rows]
+
+    def resolve_exit_warning(self, model_version: str, ticker: str,
+                             official_result: str, now: float | None = None) -> int:
+        """Grade every ungraded exit warning for a settled ticker. The warning was
+        CORRECT iff the suggested ENTRY side lost (official_result != entry_side) —
+        i.e. exiting saved you. A FALSE ALARM iff the entry side actually won (the
+        flip scared you out of a winner). Idempotent. Returns rows graded."""
+        official = str(official_result).upper()
+        if official not in ("YES", "NO"):
+            return 0
+        ts = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, entry_side, entry_ask_cents, exit_value_cents "
+                "FROM ultoim_v2_exit_warnings "
+                "WHERE model_version=? AND ticker=? AND official_result IS NULL",
+                (model_version, ticker),
+            ).fetchall()
+            graded = 0
+            for r in rows:
+                entry_side = str(r["entry_side"] or "").upper()
+                entry_lost = entry_side != official
+                correct = 1 if entry_lost else 0
+                false_alarm = 0 if entry_lost else 1
+                exit_val = r["exit_value_cents"]
+                ask = r["entry_ask_cents"]
+                # Recovered: if the entry would have lost (settles 0), exiting at the
+                # exit value recovers that many cents. Forfeited: if the entry would
+                # have won (settles 100), exiting forfeits the (100-ask) profit minus
+                # whatever the exit value returned over the ask is moot — the cost is
+                # the win you walked away from.
+                recovered = float(exit_val) if (entry_lost and exit_val is not None) else 0.0
+                forfeited = 0.0
+                if (not entry_lost) and ask is not None:
+                    forfeited = max(0.0, 100.0 - float(ask))
+                self._conn.execute(
+                    "UPDATE ultoim_v2_exit_warnings SET official_result=?, resolved_at=?, "
+                    "warning_correct=?, false_alarm=?, recovered_cents=?, forfeited_cents=? "
+                    "WHERE id=?",
+                    (official, ts, correct, false_alarm, round(recovered, 2),
+                     round(forfeited, 2), r["id"]),
+                )
+                graded += 1
+            self._conn.commit()
+        return graded
+
+    def exit_warning_scoreboard(self, model_version: str, *, min_n: int = 10) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ultoim_v2_exit_warnings WHERE model_version=?",
+                (model_version,),
+            ).fetchall()
+        total = len(rows)
+        resolved = [r for r in rows if r["official_result"] is not None]
+        n = len(resolved)
+        correct = sum(1 for r in resolved if r["warning_correct"] == 1)
+        false_alarms = sum(1 for r in resolved if r["false_alarm"] == 1)
+        recovered = sum(float(r["recovered_cents"] or 0.0) for r in resolved)
+        forfeited = sum(float(r["forfeited_cents"] or 0.0) for r in resolved)
+        p, lo, hi = _wilson(correct, n)
+        return {
+            "total": total,
+            "resolved": n,
+            "pending": total - n,
+            "correct": correct,
+            "false_alarms": false_alarms,
+            "precision": (correct / n) if n else None,
+            "ci_low": lo,
+            "ci_high": hi,
+            "low_n": n < min_n,
+            "recovered_cents": round(recovered, 2),
+            "forfeited_cents": round(forfeited, 2),
+            "net_cents": round(recovered - forfeited, 2),
+            "avg_recovered_per_correct": round(recovered / correct, 2) if correct else None,
+        }
 
     def close(self) -> None:
         with self._lock:

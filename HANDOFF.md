@@ -25,6 +25,15 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Ultoim V2 defensive-exit / flip warning (branch `claude/keen-fermat-ce81uv`)
+**Suite 1204 passed / 4 skipped here** (+7 tests). Deploy-pending — branch + PR #25. Read-only/paper; default-ON when the overlay is enabled (`Q15_ULTOIM_V2_EXIT_WARNINGS`).
+
+A new alert that warns you to bail when the model reverses on a pick it already suggested. Grounded in the live-data finding (multi-bot analysis) that the ONLY reliable "the bot made a mistake" signal is a **persistent cross-checkpoint side flip** (78% of such flips lose), not flip_probability (≤36%), flip_risk, or distance-to-strike.
+- **Fires in chat ONLY when BOTH:** (A) a paper entry was SUGGESTED earlier in this window (`fired=1` row exists for the contract), AND (B) at/after the 7M mark the champion has FLIPPED to the opposite side. Anti-spike: the flip must be **decisive** (new-side prob ≥ `EXIT_MIN_FLIP_CONF`=0.55) AND **sustained** (held ≥ `EXIT_CONFIRM_CYCLES`=3 consecutive observations spanning ≥ `EXIT_CONFIRM_SECONDS`=20s) — a momentary wobble never triggers. One warning per (ticker, window); debounce state is worker-thread-local + a DB dedup lock (restart-safe).
+- **Data behind it:** the card shows the original pick (side @ ask), the flip (new side, P(YES), conviction), why-it's-not-a-spike (cycles × span, flip-risk), an estimated **sell-to-close value** (recover this vs 0 if it settles against you), and a **live track record** ("N% of these flips lost, k/n") — marker-safe (no `V9.5 CHECK`/`ENTRY RECOMMENDED`/`NO ENTRY YET`/`Hourly Report —`/`TOP 3 PICKS`).
+- **Learns from mistakes:** every warning is recorded and graded at settlement — CORRECT if the entry side lost (bailing saved you, records recovered¢), FALSE ALARM if the entry would have won (records forfeited¢). New `ultoim_v2_exit_warnings` table; `exit_warning_scoreboard` (precision, recovered/forfeited/net, Wilson CI) surfaces in the recap and feeds the card's track-record line (auto-updates).
+- **Files:** `q15_upgrade/ultoim_v2/{config,ledger,runner,panel}.py`, `.env.example`, `tests/test_ultoim_v2.py` (+7). Live-loop-safe (the exit pass runs on the worker; observe still only enqueues). Honest limit (from the data): ~7–15% of losses are un-warnable (confidently-wrong A-grade that gets *more* sure late) — size positions so a full loss is survivable.
+
 ## ✅ Shipped THIS session — Ultoim V2 → PROVABLE: gate fix + YES research recording + significance/validation module (branch `claude/keen-fermat-ce81uv`)
 **Suite 1197 passed / 4 skipped here** (+25 ultoim_v2 tests, 48 total in the file). Deploy-pending — branch + draft PR.
 **Still DEFAULT-OFF** (`Q15_ULTOIM_V2_ENABLED`) and read-only; delivery stays NO-only; frozen champion untouched. App byte-identical when the overlay is unset.
