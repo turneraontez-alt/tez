@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     s15_codes TEXT,
     s15_cal_drift REAL,
     s15_version TEXT,
+    pin_break_drift REAL,
+    threshold_interaction REAL,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -210,6 +212,11 @@ class UltoimV2Ledger:
             ("s15_codes", "TEXT"),
             ("s15_cal_drift", "REAL"),
             ("s15_version", "TEXT"),
+            # Record-only pin-break shadow features (see runner). Nullable, never gate.
+            # pin_break_drift = structural z_score (drift through the strike);
+            # threshold_interaction = champion's scalar threshold feature (failed-break family).
+            ("pin_break_drift", "REAL"),
+            ("threshold_interaction", "REAL"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -335,6 +342,7 @@ class UltoimV2Ledger:
         "close_time", "snapshot_id", "session_id", "delivery_status",
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
         "s15_pass", "s15_codes", "s15_cal_drift", "s15_version",
+        "pin_break_drift", "threshold_interaction",
     )
 
     # Sensible defaults for columns added after the first release, so any caller
