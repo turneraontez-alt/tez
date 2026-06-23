@@ -123,6 +123,55 @@ def test_distance_scoreboard_only_settled_no_rows(tmp_path):
     led.close()
 
 
+def test_distance_research_scoreboard_splits_by_interval(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    # 15M near (toxic loss), 15M far (win), 10M near (win), 7M far (win). No 10M-far/7M-near
+    # so those buckets must report n=0 cleanly, and 7M has no near rows at all.
+    led.record_decision(_drow(ticker="A", interval="15M", distance_sigma=0.05, entry_ask_cents=52.0))
+    led.record_decision(_drow(ticker="B", interval="15M", distance_sigma=1.20, entry_ask_cents=55.0))
+    led.record_decision(_drow(ticker="C", interval="10M", distance_sigma=-0.08, entry_ask_cents=60.0))
+    led.record_decision(_drow(ticker="D", interval="7M", distance_sigma=0.90, entry_ask_cents=58.0))
+    led.resolve("ultoim-v2", "A", "YES", 9500.0)  # 15M near loss -52
+    led.resolve("ultoim-v2", "B", "NO", 9500.0)   # 15M far  win  +45
+    led.resolve("ultoim-v2", "C", "NO", 9500.0)   # 10M near win  +40
+    led.resolve("ultoim-v2", "D", "NO", 9500.0)   # 7M  far  win  +42
+
+    sb = led.distance_research_scoreboard("ultoim-v2", pin_sigma=0.15)
+    # back-compat: top-level keys unchanged and aggregate correctly across intervals.
+    assert sb["available"] and sb["pin_sigma"] == 0.15
+    assert sb["book"]["n"] == 4
+    assert sb["near_pin"]["n"] == 2 and sb["near_pin"]["right"] == 1   # A(loss)+C(win)
+    assert sb["far"]["n"] == 2 and sb["far"]["right"] == 2             # B+D both win
+
+    bi = sb["by_interval"]
+    assert set(bi) == {"15M", "10M", "7M"}
+    # 15M: one near (loss), one far (win) — the masked-toxic near bucket is now visible.
+    assert bi["15M"]["book"]["n"] == 2
+    assert bi["15M"]["near_pin"]["n"] == 1 and bi["15M"]["near_pin"]["right"] == 0
+    assert bi["15M"]["near_pin"]["pnl_total_cents"] == pytest.approx(-52.0)
+    assert bi["15M"]["far"]["n"] == 1 and bi["15M"]["far"]["right"] == 1
+    # 10M: only a near row; its far bucket is empty (n=0, not a KeyError).
+    assert bi["10M"]["near_pin"]["n"] == 1 and bi["10M"]["near_pin"]["right"] == 1
+    assert bi["10M"]["far"]["n"] == 0
+    # 7M: only a far row; its near bucket is empty.
+    assert bi["7M"]["far"]["n"] == 1 and bi["7M"]["far"]["right"] == 1
+    assert bi["7M"]["near_pin"]["n"] == 0
+    led.close()
+
+
+def test_distance_by_interval_empty_interval_yields_zero_buckets(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    # Only 15M rows: 10M and 7M must exist as all-zero bucket dicts, never KeyError.
+    led.record_decision(_drow(ticker="A", interval="15M", distance_sigma=0.05))
+    led.resolve("ultoim-v2", "A", "NO", 9500.0)
+    sb = led.distance_research_scoreboard("ultoim-v2")
+    assert sb["by_interval"]["15M"]["near_pin"]["n"] == 1
+    for empty in ("10M", "7M"):
+        for bucket in ("book", "near_pin", "far"):
+            assert sb["by_interval"][empty][bucket]["n"] == 0   # present, not missing
+    led.close()
+
+
 # --------------------------------------------------------------------------- #
 # recap surfaces the research screens (marker-safe)
 # --------------------------------------------------------------------------- #
@@ -157,12 +206,24 @@ def test_recap_shows_research_screens():
                       "gated_with_cal_drift": bucket(7, 1.0, 50.0), "gated_with_fresh": {"n": 0}},
         distance_research={"available": True, "pin_sigma": 0.15,
                            "book": bucket(68, 0.71, 5.0), "near_pin": bucket(40, 0.60, -2.0),
-                           "far": bucket(28, 0.86, 12.0)},
+                           "far": bucket(28, 0.86, 12.0),
+                           "by_interval": {
+                               "15M": {"book": bucket(20, 0.50, -31.0),
+                                       "near_pin": bucket(12, 0.40, -31.0),
+                                       "far": bucket(8, 0.88, 10.0)},
+                               "10M": {"book": bucket(30, 0.80, 9.0),
+                                       "near_pin": bucket(18, 0.75, 7.8),
+                                       "far": bucket(12, 0.90, 11.0)},
+                               "7M": {"book": {"n": 0}, "near_pin": {"n": 0}, "far": {"n": 0}}}},
     )
     text = panel.build_recap(sb, [], [], cfg)
     assert "15M screen — s15" in text and "would-fire" in text and "cal-drift" in text
     assert "Distance-to-strike" in text and "near (pin)" in text and "far  (keep)" in text
     assert "+50.0¢/pick" in text and "-2.0¢/pick" in text       # per-pick P&L rendered
+    # per-interval block: 15M + 10M render (book n>0); empty 7M is omitted.
+    assert "by interval" in text and "15M near:" in text and "10M near:" in text
+    assert "7M near:" not in text and "7M far :" not in text
+    assert "-31.0¢/pick" in text                               # the masked toxic 15M bucket
     assert "RESEARCH RECAP" in text
     for m in _FORBIDDEN:
         assert m not in text
