@@ -472,13 +472,24 @@ class UltoimV2Ledger:
         # The research population: every row that PASSED the gate (conf+ask+edge),
         # regardless of side. For NO rows this equals ``entries`` (side passes too);
         # YES rows are research-only (never delivered) and appear here so YES-prone
-        # windows are finally measurable. ``research_fired`` may be absent on rows
-        # written before the column existed — treat NULL as fired==1 only.
+        # windows are finally measurable.
+        #
+        # ``gate_b_pass AND gate_c_pass`` is the PRIMARY, authoritative source: those
+        # two columns are in the ORIGINAL table schema (they predate ``research_fired``)
+        # so they are present on EVERY row, and by construction ``research_fired==1`` is
+        # exactly ``gate_b_pass==1 AND gate_c_pass==1``. Deriving from them recovers YES
+        # research rows whose ``research_fired`` was absent and got backfilled to 0 by the
+        # schema migration (the delivered ``fired`` flag is structurally 0 for every YES
+        # row, so falling back to it would silently undercount the YES side). The older
+        # fallbacks remain for rows / test-fixtures that lack the gate columns.
         def _research_fired(r: sqlite3.Row) -> bool:
+            gb, gc = r["gate_b_pass"], r["gate_c_pass"]
+            if gb is not None and gc is not None:
+                return int(gb) == 1 and int(gc) == 1
             rf = r["research_fired"]
-            if rf is None:
-                return r["fired"] == 1
-            return rf == 1
+            if rf is not None:
+                return int(rf) == 1
+            return int(r["fired"] or 0) == 1
 
         research = [r for r in all_rows
                     if _research_fired(r) and r["official_result"] is not None]
@@ -588,23 +599,40 @@ class UltoimV2Ledger:
         wins). This measures the candidate abstention prospectively over the settled NO
         rows: NEAR-strike (``|distance_sigma| < pin_sigma`` — the would-abstain pin) vs
         FAR (the would-keep). NEVER gates delivery; pure measurement so the rule can
-        prove (or disprove) itself on accruing data."""
+        prove (or disprove) itself on accruing data.
+
+        ``by_interval`` (keyed "15M"/"10M"/"7M") repeats the same near/far split per
+        checkpoint because the top-level aggregate is interval-blind and MISLEADING: on
+        real data the aggregate near-pin looks benign only because profitable 10M/7M
+        near-strike entries mask the toxic 15M near-strike bucket — which is the bucket
+        the 15M-scoped distance gate keys on, and whose N gates the record-first go/no-go.
+        Surfacing it per-interval makes that 15M signal visible. Still record-only."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT correct, hypothetical_pnl_cents, distance_sigma "
+                "SELECT correct, hypothetical_pnl_cents, distance_sigma, interval "
                 "FROM ultoim_v2_predictions "
                 "WHERE model_version=? AND predicted_side='NO' "
                 "AND official_result IS NOT NULL AND distance_sigma IS NOT NULL",
                 (model_version,),
             ).fetchall()
-        near = [r for r in rows if abs(float(r["distance_sigma"])) < pin_sigma]
-        far = [r for r in rows if abs(float(r["distance_sigma"])) >= pin_sigma]
+
+        def _split(subset: "Sequence[sqlite3.Row]") -> dict[str, Any]:
+            near = [r for r in subset if abs(float(r["distance_sigma"])) < pin_sigma]
+            far = [r for r in subset if abs(float(r["distance_sigma"])) >= pin_sigma]
+            return {
+                "book": _research_agg(subset),
+                "near_pin": _research_agg(near),   # would-abstain (near strike / pin)
+                "far": _research_agg(far),         # would-keep (far from strike)
+            }
+
         return {
             "available": True,
             "pin_sigma": pin_sigma,
-            "book": _research_agg(rows),
-            "near_pin": _research_agg(near),   # would-abstain (near strike / pin)
-            "far": _research_agg(far),         # would-keep (far from strike)
+            **_split(rows),
+            "by_interval": {
+                iv: _split([r for r in rows if r["interval"] == iv])
+                for iv in ("15M", "10M", "7M")
+            },
         }
 
     def resolved_rows(self, model_version: str) -> list[dict[str, Any]]:

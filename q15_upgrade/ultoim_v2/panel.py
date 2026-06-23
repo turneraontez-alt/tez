@@ -307,6 +307,17 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
         body.append(f"Distance-to-strike (SHADOW · record-only · pin |sigma|<{pin_txt}):")
         body.append(f"  far  (keep): {_screen_line(dist.get('far'))}")
         body.append(f"  near (pin) : {_screen_line(dist.get('near_pin'))}")
+        # Per-interval: the aggregate near-pin is interval-blind and masks the toxic 15M
+        # near-strike bucket (the one the 15M-only gate keys on). Render only when data.
+        by_iv = dist.get("by_interval") or {}
+        if any(int(((by_iv.get(iv) or {}).get("book") or {}).get("n") or 0) > 0
+               for iv in ("15M", "10M", "7M")):
+            body.append("  by interval (near-pin = the would-abstain bucket; gate is 15M-only):")
+            for iv in ("15M", "10M", "7M"):
+                split = by_iv.get(iv) or {}
+                if int((split.get("book") or {}).get("n") or 0) > 0:
+                    body.append(f"    {iv} near: {_screen_line(split.get('near_pin'))}")
+                    body.append(f"    {iv} far : {_screen_line(split.get('far'))}")
 
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")
