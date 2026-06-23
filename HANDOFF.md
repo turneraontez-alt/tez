@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1213 passed / 13 skipped here** (4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1226 passed / 13 skipped here** (4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -25,7 +25,15 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Ultoim V2 review-consensus additions (record-only + robustness) (branch `claude/elegant-mayer-js11yk`)
+## ✅ Shipped THIS session — Ultoim V2 DEFAULT-OFF distance gate + research-population honesty (branch `claude/brave-noether-2u4l5p`)
+**Suite 1226 passed / 13 skipped here** (+13 tests: 7 `tests/test_ultoim_v2_distance_gate.py`, 6 `tests/test_ultoim_v2_research_fired.py`). Deploy-pending — branch + draft PR. Built by two parallel agents on disjoint files. **DEFAULT-OFF → byte-identical until explicitly enabled.**
+
+Prior sessions surfaced `distance_sigma` (near-strike NO loses, far NO wins) as a record-only recap screen but never let it act. Verified on v2's settled book the toxicity is **15M-specific**: 15M near-strike NO 1/5 −157¢, while 10M near +12.5¢ / 7M near +40¢ are *profitable* — so a blunt all-interval gate would cut winners. This session adds the narrowly-scoped lever + a counting-honesty fix, nothing else:
+- **DEFAULT-OFF distance gate** (`Q15_ULTOIM_V2_DISTANCE_GATE`, default false; reuses `Q15_ULTOIM_V2_DISTANCE_PIN_SIGMA=0.15`). When enabled it ABSTAINS (suppresses paper DELIVERY only — `fired`; `research_fired` is UNCHANGED so the recap's distance scoreboard keeps measuring) on **15M NO** candidates with `|distance_sigma| < pin`. **10M/7M and YES untouched.** `gate.evaluate` gained a keyword-only `interval`; `runner._decide_interval` passes it; new `NEAR_STRIKE_PIN` reason. Fail-open on missing distance; `==pin` is FAR (strict `<`).
+- **`research_fired` undercount fix** (record-only) — the research-population predicate (`ledger._research_fired`, `validate._is_gated`) fell back to delivered `fired`, which is structurally 0 for YES rows, so YES research rows whose `research_fired` was backfilled to 0 by the migration were silently dropped from the YES-side / regime N that QUALIFY the promotion verdict. Now derives "passed the gate" from the authoritative `gate_b_pass AND gate_c_pass` (original-schema columns, present on every row; `research_fired==1` ⇔ both pass), keeping the old `research_fired`/`fired` fallbacks for fixtures lacking those columns.
+- **Composition:** a gated 15M near-strike NO row (`fired=0`, `gate_b_pass=gate_c_pass=1`) drops from the delivered book but STAYS in the research population — measurement continues while delivery stops. **NEXT:** deploy so the would-abstain set and the recovered YES-N accrue; keep the gate OFF until v2's own 15M near-strike bucket clears `min_promote_n` (n≥50) and `validate.py`'s bar on cross-session data.
+
+## ✅ Shipped (prior session) — Ultoim V2 review-consensus additions (record-only + robustness) (branch `claude/elegant-mayer-js11yk`)
 **Suite 1213 passed / 13 skipped here** (+7 tests, new file `tests/test_ultoim_v2_research.py`; −1 dead test). Deploy-pending — branch + draft PR. All record-only / robustness; **changes NO decision**; DEFAULT-OFF.
 
 A four-agent review of v2 (perf C−, code A−/B+, shadow features: 1 of 6 works) found the gate adds ~0 selection lift over "bet NO" (calibration works, but fire/skip doesn't select), and the research machinery wasn't surfaced. The agents' consensus "add list" — implemented here, none of it a new gate:

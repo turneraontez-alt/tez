@@ -472,13 +472,24 @@ class UltoimV2Ledger:
         # The research population: every row that PASSED the gate (conf+ask+edge),
         # regardless of side. For NO rows this equals ``entries`` (side passes too);
         # YES rows are research-only (never delivered) and appear here so YES-prone
-        # windows are finally measurable. ``research_fired`` may be absent on rows
-        # written before the column existed — treat NULL as fired==1 only.
+        # windows are finally measurable.
+        #
+        # ``gate_b_pass AND gate_c_pass`` is the PRIMARY, authoritative source: those
+        # two columns are in the ORIGINAL table schema (they predate ``research_fired``)
+        # so they are present on EVERY row, and by construction ``research_fired==1`` is
+        # exactly ``gate_b_pass==1 AND gate_c_pass==1``. Deriving from them recovers YES
+        # research rows whose ``research_fired`` was absent and got backfilled to 0 by the
+        # schema migration (the delivered ``fired`` flag is structurally 0 for every YES
+        # row, so falling back to it would silently undercount the YES side). The older
+        # fallbacks remain for rows / test-fixtures that lack the gate columns.
         def _research_fired(r: sqlite3.Row) -> bool:
+            gb, gc = r["gate_b_pass"], r["gate_c_pass"]
+            if gb is not None and gc is not None:
+                return int(gb) == 1 and int(gc) == 1
             rf = r["research_fired"]
-            if rf is None:
-                return r["fired"] == 1
-            return rf == 1
+            if rf is not None:
+                return int(rf) == 1
+            return int(r["fired"] or 0) == 1
 
         research = [r for r in all_rows
                     if _research_fired(r) and r["official_result"] is not None]
