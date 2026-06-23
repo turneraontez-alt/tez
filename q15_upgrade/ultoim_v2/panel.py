@@ -11,6 +11,8 @@ from __future__ import annotations
 import html
 from typing import Any, Mapping, Sequence
 
+from . import validate
+
 
 def _num(value: Any) -> float | None:
     try:
@@ -48,7 +50,13 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     ask = _num(pick.get("entry_ask_cents"))
     display = pick.get("best_entry_cents")
     net_edge = pick.get("net_edge_cents")
-    resolved = int((scoreboard_summary or {}).get("resolved") or 0)
+    summary = scoreboard_summary or {}
+    resolved = int(summary.get("resolved") or 0)
+    # DERIVED, never hardcoded: the caveat must stop claiming "0 YES-prone" the
+    # moment YES-prone data exists (the old literal would silently lie).
+    n_regimes = int(summary.get("n_regimes") or 0)
+    yes_prone_n = int(summary.get("yes_prone_n") or 0)
+    regimes_txt = f"{n_regimes} regime{'' if n_regimes == 1 else 's'}" if n_regimes else "0 regimes"
 
     ask_txt = "—" if ask is None else f"{ask:.0f}¢"
     display_txt = "—" if display is None else f"{int(display)}¢"
@@ -64,10 +72,70 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
         f"Best entry: {display_txt} or lower",
         f"Current ask: {ask_txt}",
         f"Net edge: {_signed_cents(net_edge)}",
-        f"Unvalidated · N={resolved} settled · 1 regime · 0 YES-prone · CI wide",
+        f"Unvalidated · N={resolved} settled · {regimes_txt} · "
+        f"{yes_prone_n} YES-prone · CI wide",
         "Ultoim V2 · research/paper · not advice · no orders placed",
     ]
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
+
+
+def build_exit_warning(warning: Mapping[str, Any], scoreboard: Mapping[str, Any],
+                       cfg: Any) -> str:
+    """Render a defensive-exit / flip warning: the model has reversed on a pick it
+    suggested earlier, with the evidence behind the reversal and the live historical
+    reliability of such warnings (how it learns). Marker-safe: contains none of the
+    live suppression/routing strings."""
+    asset = _esc(warning.get("asset"))
+    ticker = _esc(warning.get("ticker"))
+    entry_side = _esc(str(warning.get("entry_side") or "").upper())
+    flipped_to = _esc(str(warning.get("flipped_to_side") or "").upper())
+    entry_ask = _num(warning.get("entry_ask_cents"))
+    entry_interval = _esc(warning.get("entry_interval"))
+    secs = _num(warning.get("warn_seconds_remaining"))
+    flip_yes = warning.get("flip_calibrated_yes")
+    flip_sel = warning.get("flip_selected_probability")
+    exit_val = _num(warning.get("exit_value_cents"))
+    cycles = int(warning.get("confirm_cycles") or 0)
+    span = _num(warning.get("confirm_span_seconds"))
+    sb = scoreboard or {}
+
+    mins_txt = "—" if secs is None else f"{secs / 60:.1f}m left"
+    entry_ask_txt = "—" if entry_ask is None else f"{entry_ask:.0f}¢"
+    exit_txt = "—" if exit_val is None else f"{exit_val:.0f}¢"
+    span_txt = "—" if span is None else f"{span:.0f}s"
+    # flip_probability is stored on a 0..100 scale; show as a fraction.
+    fp = _num(warning.get("flip_probability"))
+    flip_txt = "—" if fp is None else f"{fp / 100.0 * 100:.0f}%"
+
+    header = "⚠️ <b>ULTOIM V2 · EXIT WARNING</b>"
+    body = [
+        "RESEARCH SIGNAL — paper only. The model REVERSED on a pick it suggested.",
+        "",
+        f"📉 RECONSIDER — {asset} {entry_side}",
+        f"Ticker: {ticker}",
+        f"Suggested earlier: {entry_side} @ {entry_ask_txt} ({entry_interval})",
+        f"Now ({mins_txt}): model flipped to {flipped_to} · P(YES) {_pct1(flip_yes)}"
+        f" · conviction {_pct1(flip_sel)}",
+        f"Why (not a spike): held {cycles}× over {span_txt} · flip-risk {flip_txt}",
+        f"Sell-to-close ≈ {exit_txt} (recover this vs 0 if it settles against you)",
+        _exit_reliability_line(sb, cfg),
+        "Ultoim V2 · research/paper · not advice · no orders placed",
+    ]
+    return header + "\n<pre>" + "\n".join(body) + "</pre>"
+
+
+def _exit_reliability_line(sb: Mapping[str, Any], cfg: Any) -> str:
+    """The learned reliability of these warnings — how it learns from its mistakes."""
+    n = int((sb or {}).get("resolved") or 0)
+    correct = int((sb or {}).get("correct") or 0)
+    min_n = int(getattr(cfg, "min_scoreboard_n", 30) or 30)
+    if n < min_n:
+        return f"Track record: building, {correct}/{n} warnings correct so far"
+    prec = (sb or {}).get("precision")
+    avg = (sb or {}).get("avg_recovered_per_correct")
+    prec_txt = "—" if prec is None else f"{prec * 100:.0f}%"
+    avg_txt = "" if avg is None else f" · avg recover {avg:.0f}¢"
+    return f"Track record: {prec_txt} of these flips lost ({correct}/{n}){avg_txt}"
 
 
 def _accuracy_line(agg: Mapping[str, Any], min_n: int) -> str:
@@ -82,6 +150,33 @@ def _accuracy_line(agg: Mapping[str, Any], min_n: int) -> str:
     acc_txt = "—" if acc is None else f"{acc * 100:.1f}%"
     ci_txt = "" if lo is None or hi is None else f" [{lo * 100:.0f}–{hi * 100:.0f}%]"
     return f"W-L {right}-{wrong} · acc {acc_txt}{ci_txt}"
+
+
+def _promotion_line(scoreboard: Mapping[str, Any], min_promote_n: int) -> str:
+    """One honest, significance-gated verdict line. Reads INSUFFICIENT below the
+    promotion-N, NOT SEPARABLE when the Wilson lower bound doesn't clear the base
+    rate, and BEATS only when it does (one-sided exact binomial p<0.05). A BEATS
+    overall is qualified whenever the YES side or a YES-prone regime is still
+    unproven, so the recap can never over-claim full promotion-readiness. Contains
+    none of the live suppression/routing markers."""
+    overall = (scoreboard or {}).get("overall") or {}
+    verdict = validate.verdict_from_agg(overall, min_promote_n=min_promote_n)
+    state = verdict["state"]
+    if state == validate.BEATS:
+        edge = overall.get("edge_over_base")
+        edge_txt = "" if edge is None else f", +{edge * 100:.1f}pp"
+        line = f"PROMOTION: BEATS BASE RATE (sig-tested{edge_txt}, N={verdict['n']})"
+        by_side = (scoreboard or {}).get("by_side") or {}
+        yes = by_side.get("YES") or {}
+        by_regime = (scoreboard or {}).get("by_regime_directional") or {}
+        yes_prone = by_regime.get("YES_PRONE") or {}
+        if (int(yes.get("n") or 0) < min_promote_n
+                or int(yes_prone.get("n") or 0) < min_promote_n):
+            line += " · overall only — YES-side / YES-prone unproven"
+        return line
+    if state == validate.NOT_SEPARABLE:
+        return "PROMOTION: NOT SEPARABLE FROM BASE RATE"
+    return f"PROMOTION: INSUFFICIENT DATA (N<{min_promote_n})"
 
 
 def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[str, Any]],
@@ -103,12 +198,15 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
     base_txt = "—" if base is None else f"{base * 100:.1f}%"
     edge_txt = "—" if edge is None else f"{edge * 100:+.1f}pp"
 
+    min_promote_n = int(getattr(cfg, "min_promote_n", 0) or max(min_n, 50))
+
     header = "🧪 <b>ULTOIM V2 — RESEARCH RECAP</b>"
     body: list[str] = [
         "Paper-only research overlay · no orders placed.",
         "",
         f"Settled: {resolved} · recorded: {total} · pending: {pending}",
         _accuracy_line(overall, min_n),
+        _promotion_line(scoreboard or {}, min_promote_n),
         f"ROI: {roi_txt} · total P&L {_signed_cents(pnl_total)}",
         f"Base rate: {base_txt} ({_esc(overall.get('base_rate_side') or '—')}) · "
         f"edge over base: {edge_txt}",
@@ -119,6 +217,21 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
     for iv in ("15M", "10M", "7M"):
         agg = by_interval.get(iv) or {}
         body.append(f"  {iv:>3}: {_accuracy_line(agg, min_n)}")
+
+    # By side — NO is the delivered population; YES is research-only (never sent).
+    by_side = (scoreboard or {}).get("by_side") or {}
+    body.append("")
+    body.append("By side:")
+    body.append(f"  NO : {_accuracy_line(by_side.get('NO') or {}, min_n)}")
+    body.append(f"  YES: {_accuracy_line(by_side.get('YES') or {}, min_n)} (research-only)")
+
+    # By regime — the decision-time market-lean split (BALANCED shown as 'mixed').
+    by_regime = (scoreboard or {}).get("by_regime_directional") or {}
+    body.append("")
+    body.append("By regime:")
+    body.append(f"  NO-prone : {_accuracy_line(by_regime.get('NO_PRONE') or {}, min_n)}")
+    body.append(f"  YES-prone: {_accuracy_line(by_regime.get('YES_PRONE') or {}, min_n)}")
+    body.append(f"  mixed    : {_accuracy_line(by_regime.get('BALANCED') or {}, min_n)}")
 
     body.append("")
     body.append("Recent picks:")
@@ -142,6 +255,37 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
             )
     else:
         body.append("  (none)")
+
+    # Exit warnings — the defensive-flip learning record.
+    ew = (scoreboard or {}).get("exit_warnings") or {}
+    if int(ew.get("total") or 0) > 0:
+        n = int(ew.get("resolved") or 0)
+        correct = int(ew.get("correct") or 0)
+        fa = int(ew.get("false_alarms") or 0)
+        body.append("")
+        body.append("Exit warnings (defensive flips):")
+        if n < min_n:
+            body.append(f"  {correct}/{n} correct · {fa} false alarms · building (N<{min_n})")
+        else:
+            prec = ew.get("precision")
+            prec_txt = "—" if prec is None else f"{prec * 100:.0f}%"
+            body.append(f"  precision {prec_txt} ({correct}/{n}) · {fa} false alarms")
+        body.append(f"  recovered {_signed_cents(ew.get('recovered_cents'))} · "
+                    f"forfeited {_signed_cents(ew.get('forfeited_cents'))} · "
+                    f"net {_signed_cents(ew.get('net_cents'))}")
+
+    # Blowup SHADOW screen — record-only diagnostics; emphatically NOT a live gate.
+    shadow = (scoreboard or {}).get("blowup_shadow") or {}
+    if shadow.get("available"):
+        body.append("")
+        body.append("Blowup screen (SHADOW · record-only · no effect on entries):")
+        n_scored = int(shadow.get("n_scored") or 0)
+        auc_v = shadow.get("blowup_auc")
+        dist_auc = shadow.get("distance_auc")
+        auc_txt = "—" if auc_v is None else f"{auc_v:.2f}"
+        dist_txt = "—" if dist_auc is None else f"{dist_auc:.2f}"
+        body.append(f"  N={n_scored} scored · blowup AUC {auc_txt} · "
+                    f"distance AUC {dist_txt} · UNPROVEN")
 
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")

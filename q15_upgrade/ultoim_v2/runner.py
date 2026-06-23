@@ -12,13 +12,14 @@ exception-isolated, and the worker logs+continues on any job error.
 """
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
 import time
 from typing import Any, Mapping
 
-from . import gate, panel
+from . import gate, panel, screen, validate
 from .config import INTERVAL_MARKS, UltoimV2Config, is_enabled
 from .ledger import UltoimV2Ledger, _window_key
 from .telegram import UltoimV2Telegram
@@ -69,6 +70,9 @@ class UltoimV2Runner:
         self._worker_lock = threading.Lock()
         self._last_reconcile_at = 0.0
         self._last_recap_at = 0.0
+        # Debounce state for the defensive-exit warning, keyed by (ticker, window).
+        # Mutated ONLY on the worker thread (in _observe_sync), so no lock needed.
+        self._exit_state: dict[tuple[str, int], dict[str, float]] = {}
 
     # -- worker plumbing ------------------------------------------------------
     def _ensure_worker(self) -> None:
@@ -196,6 +200,13 @@ class UltoimV2Runner:
                     continue
                 self._decide_interval(interval, mark, window_key, in_band, now)
 
+        # -- DEFENSIVE-EXIT pass: independent of the entry report-lock, runs every
+        # cycle for contracts near close so the anti-spike debounce can accumulate.
+        if cfg.exit_warnings_enabled:
+            self._prune_exit_state(now)
+            for cand in candidates:
+                self._maybe_exit_warning(cand, _window_key(cand.get("close_time"), now), now)
+
     def _decide_interval(self, interval: str, mark: int, window_key: int,
                          cands: list[dict[str, Any]], now: float) -> None:
         cfg = self.config
@@ -216,17 +227,34 @@ class UltoimV2Runner:
                 abstained_stale = True
             evaluated.append({"cand": cand, "verdict": verdict, "stale": abstained_stale})
 
+        # -- DELIVERED path (unchanged): the chosen candidate, NO-only alert.
         fired = [e for e in evaluated if e["verdict"]["fired"]]
         chosen = None
         if fired:
             chosen = max(fired, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
         elif evaluated:
             chosen = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
-        if chosen is None:
-            return
+        delivered_ticker = None
+        if chosen is not None:
+            delivered_ticker = str(chosen["cand"].get("ticker") or "")
+            self._record_and_maybe_alert(chosen, interval, mark, window_key, now)
 
-        cand = chosen["cand"]
-        verdict = chosen["verdict"]
+        # -- RESEARCH-YES path: record the best YES candidate so YES-prone windows
+        # finally produce gradeable data. Never alerted; never claims the alert
+        # lock; skipped when it's the same contract already recorded above (the
+        # UNIQUE(model_version,ticker,interval) constraint would reject it anyway).
+        if cfg.record_research_yes:
+            yes = [e for e in evaluated
+                   if str(e["cand"].get("predicted_side") or "").upper() == "YES"]
+            if yes:
+                best_yes = max(yes, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
+                if str(best_yes["cand"].get("ticker") or "") != delivered_ticker:
+                    self._record_research_yes(best_yes, interval, mark, window_key, now)
+
+    def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
+                   mark: int, window_key: int, now: float, *, record_kind: str,
+                   delivery_status: str) -> dict[str, Any]:
+        cfg = self.config
         sel = _num(cand.get("selected_probability"))
         ask = _num(cand.get("entry_ask_cents"))
         cost = _num(cand.get("total_cost_cents")) or 0.0
@@ -234,8 +262,11 @@ class UltoimV2Runner:
         if sel is not None and ask is not None:
             display = gate.display_entry(sel, cost, ask, cfg)
         regime_dir = _regime_directional(_num(cand.get("market_implied_yes_probability")))
-
-        row = {
+        # Record-only blowup SHADOW score, derived from decision-time fields already
+        # on this candidate. Stamped on every recorded row; NEVER gates fire/size/alert
+        # (record-only — see screen.py). Inputs come from ``cand`` so it stays pure.
+        shadow = screen.shadow_features(cand)
+        return {
             "created_at": now, "model_version": cfg.model_version,
             "asset": cand.get("asset"), "ticker": cand.get("ticker"),
             "interval": interval, "window_key": window_key, "mark_seconds": float(mark),
@@ -276,8 +307,23 @@ class UltoimV2Runner:
             "close_time": cand.get("close_time"),
             "snapshot_id": cand.get("snapshot_id"),
             "session_id": self.session_id,
-            "delivery_status": "PENDING",
+            "delivery_status": delivery_status,
+            "record_kind": record_kind,
+            "research_fired": 1 if verdict.get("research_fired") else 0,
+            "conf_gap": shadow["conf_gap"],
+            "blowup_risk": shadow["blowup_risk"],
+            "screen_version": shadow["screen_version"],
+            "_best_entry_cents": display,
         }
+
+    def _record_and_maybe_alert(self, chosen: dict[str, Any], interval: str, mark: int,
+                                window_key: int, now: float) -> None:
+        cfg = self.config
+        cand = chosen["cand"]
+        verdict = chosen["verdict"]
+        row = self._build_row(cand, verdict, interval, mark, window_key, now,
+                              record_kind="DELIVERED_CANDIDATE", delivery_status="PENDING")
+        display = row.pop("_best_entry_cents", None)
         row_id = self.ledger.record_decision(row)
         if row_id is None:
             return
@@ -293,8 +339,7 @@ class UltoimV2Runner:
             return
         alert_row = dict(row)
         alert_row["best_entry_cents"] = display
-        summary = {"resolved": self.ledger.scoreboard(
-            cfg.model_version, min_n=cfg.min_scoreboard_n).get("resolved")}
+        summary = self._alert_summary()
         text = panel.build_entry_alert(alert_row, summary, cfg)
         result = self.telegram.send(text)
         if result.get("delivered"):
@@ -305,6 +350,142 @@ class UltoimV2Runner:
             status, mid = "DELIVERY_FAILED", None
         self.ledger.set_report_message(cfg.model_version, interval, window_key, mid)
         self.ledger.mark_delivery(row_id, status, mid, result.get("error"))
+
+    def _record_research_yes(self, entry: dict[str, Any], interval: str, mark: int,
+                             window_key: int, now: float) -> None:
+        """Record a YES-side candidate as RESEARCH-ONLY: never delivered, never
+        claims the alert lock, fired forced to 0 (delivery is NO-only). It exists
+        solely so YES-prone windows accrue gradeable data for the validation
+        module. ``research_fired`` carries the side-agnostic gate result."""
+        cand = entry["cand"]
+        verdict = dict(entry["verdict"])
+        verdict["fired"] = False  # YES never delivers, regardless of gate_a
+        row = self._build_row(cand, verdict, interval, mark, window_key, now,
+                              record_kind="RESEARCH_YES", delivery_status="RESEARCH")
+        row.pop("_best_entry_cents", None)
+        self.ledger.record_decision(row)
+
+    def _alert_summary(self) -> dict[str, Any]:
+        """Compact scoreboard facts for the entry card's caveat — derived, never
+        hardcoded, so the card stops claiming '0 YES-prone' once data exists."""
+        cfg = self.config
+        sb = self.ledger.scoreboard(cfg.model_version, min_n=cfg.min_scoreboard_n)
+        regimes = sb.get("by_regime_directional") or {}
+        n_regimes = sum(1 for r in regimes.values() if int((r or {}).get("n") or 0) > 0)
+        yes_prone_n = int((regimes.get("YES_PRONE") or {}).get("n") or 0)
+        return {
+            "resolved": sb.get("resolved"),
+            "n_regimes": n_regimes,
+            "yes_prone_n": yes_prone_n,
+        }
+
+    # -- defensive-exit / flip warning ----------------------------------------
+    def _prune_exit_state(self, now: float) -> None:
+        """Drop debounce keys older than two windows so the dict can't leak."""
+        cutoff = now - 1800.0
+        stale = [k for k, st in self._exit_state.items() if st["first_seen"] < cutoff]
+        for k in stale:
+            self._exit_state.pop(k, None)
+
+    def _maybe_exit_warning(self, cand: dict[str, Any], window_key: int, now: float) -> None:
+        """Fire a defensive-exit warning iff (A) a paper entry was SUGGESTED earlier
+        in this window for this contract, AND (B) at/after the 7M mark the champion
+        has FLIPPED to the opposite side, decisively (new-side prob >= min) AND
+        sustained (>= confirm_cycles observations spanning >= confirm_seconds) — so a
+        short-lived spike never triggers. One warning per (ticker, window)."""
+        cfg = self.config
+        secs = _num(cand.get("seconds_remaining"))
+        if secs is None or secs > cfg.exit_watch_from_seconds:
+            return  # only watch from the 7M mark (default 420s) onward to close
+        ticker = str(cand.get("ticker") or "")
+        if not ticker:
+            return
+        key = (ticker, window_key)
+        if self.ledger.exit_warning_recorded(cfg.model_version, ticker, window_key):
+            self._exit_state.pop(key, None)
+            return
+        entry = self.ledger.find_fired_entry(cfg.model_version, ticker, window_key)
+        if entry is None:
+            return  # only warn on a contract it actually suggested
+        entry_side = str(entry.get("predicted_side") or "").upper()
+        cur_side = str(cand.get("predicted_side") or "").upper()
+        new_sel = _num(cand.get("selected_probability"))
+        opposite = bool(cur_side) and bool(entry_side) and cur_side != entry_side
+        decisive = new_sel is not None and new_sel >= cfg.exit_min_flip_conf
+        if not (opposite and decisive):
+            self._exit_state.pop(key, None)  # flip not real (yet) -> reset debounce
+            return
+        st = self._exit_state.get(key)
+        if st is None:
+            st = {"count": 0.0, "first_seen": now}
+            self._exit_state[key] = st
+        st["count"] += 1.0
+        if st["count"] < cfg.exit_confirm_cycles or (now - st["first_seen"]) < cfg.exit_confirm_seconds:
+            return  # anti-spike: not sustained long enough yet
+        self._fire_exit_warning(cand, entry, window_key, now, st)
+        self._exit_state.pop(key, None)
+
+    def _fire_exit_warning(self, cand: dict[str, Any], entry: Mapping[str, Any],
+                           window_key: int, now: float, st: Mapping[str, float]) -> None:
+        cfg = self.config
+        entry_side = str(entry.get("predicted_side") or "").upper()
+        mkt_yes = _num(cand.get("market_implied_yes_probability"))
+        # Sell-to-close value of the ENTRY side, estimated from the current
+        # market-implied probability of that side (approximate — the real fill is
+        # the live bid; this is the honest best estimate from available fields).
+        exit_value = None
+        if mkt_yes is not None:
+            p_entry = (1.0 - mkt_yes) if entry_side == "NO" else mkt_yes
+            exit_value = round(max(0.0, min(100.0, p_entry * 100.0)), 1)
+        span = round(now - float(st["first_seen"]), 1)
+        cycles = int(st["count"])
+        evidence = {
+            "entry_side": entry_side,
+            "entry_ask_cents": entry.get("entry_ask_cents"),
+            "entry_interval": entry.get("interval"),
+            "flip_calibrated_yes": cand.get("calibrated_yes_probability"),
+            "flip_selected_probability": cand.get("selected_probability"),
+            "market_implied_yes": mkt_yes,
+            "confirm_cycles": cycles,
+            "confirm_span_seconds": span,
+            "distance_sigma": cand.get("distance_sigma"),
+            "manipulation_suspected": bool(cand.get("manipulation_suspected")),
+            "flip_probability": cand.get("flip_probability"),
+        }
+        row = {
+            "created_at": now, "model_version": cfg.model_version,
+            "asset": cand.get("asset"), "ticker": cand.get("ticker"),
+            "window_key": window_key,
+            "entry_side": entry_side,
+            "entry_ask_cents": entry.get("entry_ask_cents"),
+            "entry_interval": entry.get("interval"),
+            "entry_created_at": entry.get("created_at"),
+            "warn_seconds_remaining": _num(cand.get("seconds_remaining")),
+            "flipped_to_side": str(cand.get("predicted_side") or "").upper(),
+            "flip_calibrated_yes": cand.get("calibrated_yes_probability"),
+            "flip_selected_probability": cand.get("selected_probability"),
+            "flip_market_implied_yes": mkt_yes,
+            "confirm_cycles": cycles,
+            "confirm_span_seconds": span,
+            "exit_value_cents": exit_value,
+            "evidence_json": json.dumps(evidence, default=str),
+            "close_time": cand.get("close_time"),
+            "session_id": self.session_id,
+            "delivery_status": "PENDING",
+        }
+        warning_id = self.ledger.record_exit_warning(row)
+        if warning_id is None:
+            return  # already recorded (dedup / concurrent)
+        sb = self.ledger.exit_warning_scoreboard(cfg.model_version, min_n=cfg.min_scoreboard_n)
+        text = panel.build_exit_warning(row, sb, cfg)
+        result = self.telegram.send(text)
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        self.ledger.mark_exit_delivery(warning_id, status, mid, result.get("error"))
 
     # -- reconcile (settlement grading) --------------------------------------
     def reconcile(self, now: float, resolver: Any) -> None:
@@ -319,13 +500,16 @@ class UltoimV2Runner:
         except queue.Full:
             logger.debug("ultoim_v2 reconcile queue full; skipped")
         except Exception:  # noqa: BLE001 - never break the loop
-            logger.debug("ultoim_v2 reconcile enqueue failed", exc_info=True)
+            logger.warning("ultoim_v2 reconcile enqueue failed", exc_info=True)
 
     def _reconcile_sync(self, *, resolver: Any, now: float) -> None:
         get_market = getattr(resolver, "get_market", None)
         if not callable(get_market):
             return
-        for ticker in self.ledger.unresolved_closed(self.config.model_version, now):
+        mv = self.config.model_version
+        tickers = set(self.ledger.unresolved_closed(mv, now))
+        tickers.update(self.ledger.unresolved_exit_warnings(mv, now))
+        for ticker in tickers:
             try:
                 market = get_market(ticker)
             except Exception:  # noqa: BLE001 - one bad fetch must not stop the pass
@@ -333,7 +517,10 @@ class UltoimV2Runner:
                 continue
             result = _resolved_result(market)
             if result is not None:
-                self.ledger.resolve(self.config.model_version, ticker, result, now)
+                self.ledger.resolve(mv, ticker, result, now)
+                # Grade the exit warning too: was bailing the right call (entry lost)
+                # or a false alarm (entry would have won)? This is how it learns.
+                self.ledger.resolve_exit_warning(mv, ticker, result, now)
 
     # -- periodic research recap ----------------------------------------------
     def maybe_send_recap(self, now: float) -> None:
@@ -348,18 +535,23 @@ class UltoimV2Runner:
         except queue.Full:
             logger.debug("ultoim_v2 recap queue full; skipped")
         except Exception:  # noqa: BLE001 - never break the loop
-            logger.debug("ultoim_v2 recap enqueue failed", exc_info=True)
+            logger.warning("ultoim_v2 recap enqueue failed", exc_info=True)
 
     def _recap_sync(self, *, now: float) -> None:
         try:
             mv = self.config.model_version
             sb = self.ledger.scoreboard(mv, min_n=self.config.min_scoreboard_n)
+            sb["exit_warnings"] = self.ledger.exit_warning_scoreboard(
+                mv, min_n=self.config.min_scoreboard_n)
+            # Record-only blowup SHADOW diagnostics (never gates anything).
+            sb["blowup_shadow"] = validate.screen_shadow_report(
+                self.ledger.resolved_rows(mv), min_promote_n=self.config.min_promote_n)
             recent = self.ledger.recent_rows(mv, limit=10)
             losses = self.ledger.loss_rows(mv, limit=10)
             text = panel.build_recap(sb, recent, losses, self.config)
             self.telegram.send(text)
         except Exception:  # noqa: BLE001 - a recap must never raise
-            logger.debug("ultoim_v2 recap build/send failed (ignored)", exc_info=True)
+            logger.warning("ultoim_v2 recap build/send failed (ignored)", exc_info=True)
 
     # -- read-only status -----------------------------------------------------
     def scoreboard(self) -> dict[str, Any]:

@@ -94,6 +94,48 @@ class UltoimV2Config:
     min_scoreboard_n: int = field(
         default_factory=lambda: int(_float("Q15_ULTOIM_V2_MIN_SCOREBOARD_N", 30))
     )
+    # Promotion bar — DISTINCT from the print-floor above. n=30 is enough to print
+    # a number, but at a realistic ~80-85% hit-rate it is far too few to separate
+    # the gate from the ~75% base NO rate (one-sided binomial). 50 is the minimum
+    # where a sustained ~85% clears p<0.05 vs 0.75 with margin; the verdict also
+    # requires the Wilson lower bound to exceed the empirical base rate.
+    min_promote_n: int = field(
+        default_factory=lambda: int(_float("Q15_ULTOIM_V2_MIN_PROMOTE_N", 50))
+    )
+    # Record the best YES-side candidate per (interval, window) as a RESEARCH-ONLY
+    # row (never delivered; delivery stays NO-only). This is the data that lets the
+    # system finally measure YES-prone windows — the precondition for promotion.
+    # Default ON when the overlay is enabled; the whole overlay is still default-OFF.
+    record_research_yes: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_RESEARCH_YES", True)
+    )
+    # Defensive-exit / flip warning. Fires (ONLY when a paper entry was suggested
+    # earlier in the same window) if, at/after the 7M mark, the champion's call has
+    # FLIPPED to the opposite side and the flip is BOTH decisive (new-side prob >=
+    # exit_min_flip_conf) AND sustained (held for >= exit_confirm_cycles consecutive
+    # observations spanning >= exit_confirm_seconds) — so a short-lived spike never
+    # triggers it. Records + grades every warning (learns whether the exit was right
+    # and how much it would have recovered). Default ON when the overlay is enabled.
+    exit_warnings_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARNINGS", True)
+    )
+    # Watch for the flip from this many seconds remaining onward (7M = 420s).
+    exit_watch_from_seconds: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", 420.0)
+    )
+    # Anti-spike: the opposite-side call must hold this many consecutive observations
+    # AND span at least this many seconds before a warning fires.
+    exit_confirm_cycles: int = field(
+        default_factory=lambda: int(_float("Q15_ULTOIM_V2_EXIT_CONFIRM_CYCLES", 3))
+    )
+    exit_confirm_seconds: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_CONFIRM_SECONDS", 20.0)
+    )
+    # The flipped side must be at least this confident (P of the new side) — a
+    # marginal ~0.51 flip is noise, not a mistake signal.
+    exit_min_flip_conf: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_MIN_FLIP_CONF", 0.55)
+    )
 
     @classmethod
     def from_env(cls) -> "UltoimV2Config":
