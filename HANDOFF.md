@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1246 passed / 13 skipped here** (4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1258 passed / 13 skipped here** (4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -24,6 +24,13 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   (the Relay syncs files but the app doesn't hot-reload). `running_commit`/`matches_checkout`
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
+
+## ✅ Shipped THIS session — Ultoim V2 expensive-NO admit band, ENABLED (branch `claude/brave-noether-2u4l5p` → PR + merge)
+**Suite 1258 passed / 13 skipped here** (+12 tests: 11 `tests/test_ultoim_v2_expensive_no.py` + 1 runner e2e; the lone ask>72 ceiling test was updated for the new NO ceiling). The one P&L-ADD lever that cleared the owner's "raise P&L without adding net losers" bar (found by the expensive-NO research fan-out; the parked item).
+
+On a **non-15M** interval, a NO candidate with ask in `(ask_hi=72, expensive_no_ask_hi=85]` is now ADMITTED even with sub-min stated edge: `gate.evaluate` lifts the ask ceiling AND waives the edge gate for that band only (`expensive_no` verdict flag, tagged `EXPENSIVE_NO_ADMIT`). The confidence floor and ask_lo still apply; 15M and the YES side are never touched; mutually exclusive with the 15M distance gate. The card shows the ask as the entry (not a never-fill 72). **DEFAULT ON** — `Q15_ULTOIM_V2_EXPENSIVE_NO=false` opts out (byte-identical plain band); `Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI` (default 85) caps it.
+- **Basis:** for NO the model's stated edge is INVERSE (the best NO entries carry negative edge). The (72,85] band wins **83.8% over n=893 (v1+v95+v2)**, net-positive after the expensive losses; on v2's own gate it took the delivered book 80%→85% win / +434→+564¢. Held at 85 — the (85,100] slice is net-negative (thin max-profit lets the rare loss dominate), so NOT raised to 100.
+- **Higher-variance than the distance-gate CUT** (it's an ADD — more bets; ~84% win ⇒ ~1 in 6 lose ~80¢), but +EV across the pooled ledgers and reversible via the flag.
 
 ## ✅ Shipped THIS session — cycle-timing perf fixes: 3 unbounded-growth leaks (branch `claude/brave-noether-2u4l5p` → PR + merge)
 **Suite 1246 passed / 13 skipped here** (+17 tests). **Behavior-NEUTRAL** — no probability/edge/side/alert/prediction change; champion weights frozen; read-only preserved. Diagnosed by a 3-agent fan-out, fixed by 3 more on disjoint files; all diffs reviewed + full suite green before merge.

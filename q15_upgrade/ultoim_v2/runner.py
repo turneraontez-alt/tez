@@ -303,7 +303,8 @@ class UltoimV2Runner:
         cost = _num(cand.get("total_cost_cents")) or 0.0
         display = None
         if sel is not None and ask is not None:
-            display = gate.display_entry(sel, cost, ask, cfg)
+            display = gate.display_entry(sel, cost, ask, cfg,
+                                         expensive_no=bool(verdict.get("expensive_no")))
         regime_dir = _regime_directional(_num(cand.get("market_implied_yes_probability")))
         # Record-only blowup SHADOW score, derived from decision-time fields already
         # on this candidate. Stamped on every recorded row; NEVER gates fire/size/alert

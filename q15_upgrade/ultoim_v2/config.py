@@ -118,6 +118,23 @@ class UltoimV2Config:
     distance_gate_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DISTANCE_GATE", True)
     )
+    # Expensive-NO ADMIT band. DEFAULT ON (owner-enabled). On non-15M intervals, admit a
+    # NO candidate whose ask is in (ask_hi, expensive_no_ask_hi] EVEN when its stated net
+    # edge is below min_edge: it extends the ask ceiling AND waives the edge gate for THIS
+    # band only. The confidence floor and ask_lo still apply; 15M and the YES side are never
+    # affected; and it NEVER places/modifies/cancels a real order. Basis: for NO the model's
+    # stated edge is INVERSE (the best NO entries carry negative edge), and the expensive-NO
+    # band wins ~84% across the pooled ledgers (n=893, v1+v95+v2), net-positive after the
+    # (large) expensive losses. Capped at expensive_no_ask_hi because above ~85¢ the thin
+    # max-profit (100−ask) lets the rare loss dominate (the (85,100] slice is net-negative),
+    # so the ceiling is held at 85 and NOT raised to 100. Set Q15_ULTOIM_V2_EXPENSIVE_NO=
+    # false to opt out (restores byte-identical plain-band behaviour).
+    expensive_no_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_EXPENSIVE_NO", True)
+    )
+    expensive_no_ask_hi: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI", 85.0)
+    )
     # Record the broad-market cross-asset flow factor (x_market_flow) on every
     # candidate row, for measure-first validation of a possible NO-side veto (high
     # market-wide YES pressure precedes NO losses, per an OOS time-split). DEFAULT

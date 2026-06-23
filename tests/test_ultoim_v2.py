@@ -135,9 +135,16 @@ def test_gate_blocks_ask_below_band():
 
 
 def test_gate_blocks_ask_above_band():
+    # With the expensive-NO admit ON (default), the NO ceiling is expensive_no_ask_hi=85,
+    # so an ask ABOVE that is still blocked (here 90 on a non-15M interval).
     cfg = UltoimV2Config(enabled=True)
-    v = gate.evaluate(_candidate(selected_probability=0.85, entry_ask_cents=80.0), cfg)
+    v = gate.evaluate(_candidate(selected_probability=0.95, entry_ask_cents=90.0),
+                      cfg, interval="10M")
     assert "ASK_ABOVE_BAND" in v["reason_codes"] and v["fired"] is False
+    # With the admit OFF, the plain ceiling (ask_hi=72) blocks ask 80 as before.
+    off = gate.evaluate(_candidate(selected_probability=0.85, entry_ask_cents=80.0),
+                        UltoimV2Config(enabled=True, expensive_no_enabled=False))
+    assert "ASK_ABOVE_BAND" in off["reason_codes"] and off["fired"] is False
 
 
 def test_gate_blocks_edge_below_min():
@@ -470,6 +477,24 @@ def test_display_entry_floors_and_reclamps_into_band():
     assert gate.display_entry(0.99, 0.0, 49.9, cfg) == 50
     # normal: best-entry below ask shows the best-entry.
     assert gate.display_entry(0.655, 1.0, 70.0, cfg) == 62
+
+
+def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
+    """Wiring: a 10M NO at ask 80 with negative edge is double-blocked off-band, but the
+    default-ON expensive-NO admit records a FIRED row whose displayed entry is the ask
+    (80, not a never-fill 72) and carries the EXPENSIVE_NO_ADMIT marker."""
+    r = _runner(tmp_path)
+    a = {"BTC": _analysis(side="NO", sel=0.78, ask=80.0, net_edge=-4.0, mkt_yes=0.30)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}       # 600s -> 10M mark
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "10M" and row["predicted_side"] == "NO"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fired"] == 1 and row["gate_b_pass"] == 1 and row["gate_c_pass"] == 1
+    assert row["entry_ask_cents"] == pytest.approx(80.0)
+    assert row["best_entry_cents"] == 80                         # the ask, not 72
+    assert "EXPENSIVE_NO_ADMIT" in (row["reason_codes"] or "")
 
 
 def test_gate_research_fired_yes_side_never_delivers():
