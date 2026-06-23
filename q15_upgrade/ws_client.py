@@ -103,6 +103,15 @@ class KalshiWebSocketFeed:
         with self._lock:
             changed = wanted != self._desired
             self._desired = wanted
+            # Evict cached per-ticker state for markets no longer desired so
+            # these dicts track the desired set instead of growing unbounded as
+            # 15m markets roll over.  Key the prune off the authoritative
+            # desired set (never age) so an active book is never dropped; these
+            # structures are read fresh-or-None, so dropping non-desired tickers
+            # loses nothing.
+            for cache in (self._books, self._trades, self._market_status):
+                for ticker in [t for t in cache if t not in wanted]:
+                    del cache[ticker]
         if changed:
             self._reconnect.set()
 
