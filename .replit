@@ -92,3 +92,7 @@ Q15_POLYMARKET_ENABLED = "true"
 LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
+# Drop the weak, money-losing 15M bin: V2 fires only at 10M/7M (10M/7M behaviour
+# unchanged). The live record shows 15M is ~coin-flip and negative-P&L for these
+# NO binaries, and the frozen champion already disables its own 15M delivery.
+Q15_ULTOIM_V2_SKIP_15M = "true"
