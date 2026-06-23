@@ -2776,6 +2776,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     _irr.observe(analyses=analyses, canonicals=canonicals, now=now)
             except Exception:
                 logger.debug("interval-research observe skipped", exc_info=True)
+            # Read-only Ultoim V2 paper entry-alert overlay (default-OFF; SEPARATE DB
+            # + Telegram channel; never affects production). Reuses the champion's
+            # frozen per-asset analyses; observe() only extracts compact fields and
+            # enqueues — all gating/recording/DB/Telegram run on V2's own worker
+            # thread. A V2 failure must never disturb the cycle.
+            try:
+                from q15_upgrade.ultoim_v2.runner import get_runner as _ultoim_v2_runner
+                _u2r = _ultoim_v2_runner()
+                if _u2r is not None:
+                    _u2r.observe(analyses=analyses, canonicals=canonicals, now=now)
+            except Exception:
+                logger.debug("ultoim_v2 observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now

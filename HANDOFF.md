@@ -25,6 +25,36 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Ultoim V2: paper entry-alert system (branch `claude/sleepy-cray-8ktugn`)
+**Suite 1125 passed / 13 skipped here** (+23 ultoim_v2 tests). Deploy-pending — branch + draft PR.
+**Default-OFF** (`Q15_ULTOIM_V2_ENABLED`, default false → app byte-identical when unset).
+
+A SEPARATE, read-only, paper entry-alert system in new package `q15_upgrade/ultoim_v2/` —
+own DB (`data/q15_ultoim_v2_v1.sqlite3`), own `model_version="ultoim-v2"`, own Telegram chat
+(`Q15_ULTOIM_V2_TELEGRAM_CHAT_ID`). Never places real orders; never touches the champion or the
+real Ultoim; reuses the frozen analysis read-only. Wired as two guarded try-blocks
+(`checkpoint_v95.py:2779` observe, `app.py:648` reconcile+recap), mirroring the ultoim pattern.
+
+- **Entry gate** (`gate.py`, pure): NO-only, `selected≥0.55`, ask∈[50,72]¢, `net_edge≥2¢`,
+  inclusive comparators, NULL-SKIP, reason codes. `best_entry = floor(sel·100 − cost − 2)` clamped
+  to band, never above market ask. Validated on live data: 12 trades / 92% / +52% ROI (in-sample 6
+  @100%, fresh OOS 6 @83%) — but ONE NO-leaning regime, 0 YES-prone windows → UNPROVEN; the gate's
+  one fitted knob is `edge≥2` and it is NOT yet statistically separable from the ~75% base NO rate.
+- **Alerts**: live "BEST ENTRY" card grammar, labeled `ULTOIM V2 · PAPER ENTRY` with a per-message
+  `N / 1-regime / 0 YES-prone` caveat; never emits `V9.5 CHECK`/`ENTRY RECOMMENDED`/`Hourly Report —`
+  /`TOP 3 PICKS` (suppression-marker safety; test-asserted). One alert per contract per window
+  (alert-lock), earliest qualifying checkpoint. Freshness gate abstains on a stale spot (STALE_FEED).
+- **Records everything** on entry AND no-entry: gate pass/fail + reason codes, cushion-to-strike
+  (`distance_sigma`), regime_directional, market-implied prob, depth/quote-age, base_rate_side,
+  session_id, full feature vector + settlement + realized P&L. `learning_export` auto-globs its DB.
+- **30-min research recap** (`build_recap`, header `ULTOIM V2 — RESEARCH RECAP`): resolved/total/
+  pending, W-L + Wilson CI, ROI, base-rate + edge-over-base, by-interval, recent picks, and a
+  "recent losses (for review)" section. Headline % suppressed below n=30 (`INSUFFICIENT DATA`).
+- Built + stress-tested by 4 read-only review agents first (architecture, rule/signal, UI/format,
+  safety) before implementation. Owner directive: research overlay but live-formatted real-time
+  signals so it can be paper-traded and visualized; promote to "live" only after it beats base rate
+  across a YES-prone window.
+
 ## ✅ Shipped THIS session — Track the full 15M→7M mark ladder (incl. 9M/8M) across the learning systems (branch `claude/sleepy-cray-8ktugn`)
 **Suite 1102 passed / 13 skipped here** (+1 net interval-research test; 1133 in a complete env).
 Deploy-pending — branch + draft PR, NOT merged to main.
