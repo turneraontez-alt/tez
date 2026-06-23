@@ -24,6 +24,8 @@ from __future__ import annotations
 import math
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import screen
+
 PRIOR_NO_RATE = 0.75  # the standing "always bet NO" base rate for these binaries.
 
 # Promotion-verdict states.
@@ -244,6 +246,122 @@ def edge_bucket_monotonicity(rows: Sequence[Mapping[str, Any]],
         for i in range(len(populated) - 1)
     ) if len(populated) >= 2 else None
     return {"buckets": buckets, "is_monotone": is_monotone, "n_populated": len(populated)}
+
+
+# --------------------------------------------------------------------------- #
+# blowup SHADOW screen — read-only diagnostics (NEVER gates a decision)
+# --------------------------------------------------------------------------- #
+SHADOW_ONLY = "SHADOW_ONLY"
+
+_SHADOW_THRESHOLDS = (0.50, 0.55, 0.60, 0.65, 0.70, 0.75)
+
+
+def auc(scored: Sequence[tuple[float, int]]) -> float | None:
+    """Rank-based AUC (Mann-Whitney) for a risk score predicting the positive label
+    (label 1 = loss). ``scored`` is (score, label) pairs. Handles ties via average
+    ranks. None when either class is empty. PURE — no numpy."""
+    pos = [s for s, lab in scored if lab == 1]
+    neg = [s for s, lab in scored if lab == 0]
+    n_pos, n_neg = len(pos), len(neg)
+    if n_pos == 0 or n_neg == 0:
+        return None
+    order = sorted(((s, lab) for s, lab in scored), key=lambda t: t[0])
+    ranks = [0.0] * len(order)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and order[j + 1][0] == order[i][0]:
+            j += 1
+        avg_rank = (i + j) / 2.0 + 1.0  # 1-based average rank over the tie block
+        for k in range(i, j + 1):
+            ranks[k] = avg_rank
+        i = j + 1
+    sum_ranks_pos = sum(ranks[k] for k in range(len(order)) if order[k][1] == 1)
+    u_pos = sum_ranks_pos - n_pos * (n_pos + 1) / 2.0
+    return u_pos / (n_pos * n_neg)
+
+
+def _risk_label_pairs(rows: Sequence[Mapping[str, Any]],
+                      score_fn) -> list[tuple[float, int]]:
+    out: list[tuple[float, int]] = []
+    for r in rows:
+        s = score_fn(r)
+        if s is None:
+            continue
+        out.append((float(s), 1 if int(r.get("correct") or 0) == 0 else 0))
+    return out
+
+
+def screen_shadow_report(rows: Sequence[Mapping[str, Any]], *,
+                         min_promote_n: int = 50) -> dict[str, Any]:
+    """Read-only diagnostics for the record-only blowup SHADOW screen over the gated +
+    settled population. Reports blowup_risk's discriminative power (AUC + loss-rate
+    terciles) ALONGSIDE the transportable ``distance_sigma`` signal, and a threshold
+    sweep showing how many WINNERS each cutoff would touch — the honest test the
+    in-sample ``T* = max(risk among winners)`` hides. The verdict is permanently
+    ``SHADOW_ONLY``: this function only measures; it never authorises gating.
+
+    A blowup score is derived from each row's stored decision-time fields (so it is
+    reproducible and leakage-free), independent of whatever ``screen_version`` was
+    stamped when the row was written."""
+    gated = gated_resolved(rows)
+    blow_pairs = _risk_label_pairs(
+        gated, lambda r: screen.blowup_risk(
+            r.get("selected_probability"), r.get("conservative_probability"),
+            r.get("evidence_quality")))
+    dist_pairs = _risk_label_pairs(
+        gated, lambda r: screen.distance_risk(r.get("distance_sigma")))
+    n_scored = len(blow_pairs)
+    n_losses = sum(1 for _, lab in blow_pairs if lab == 1)
+
+    # Loss-rate terciles by blowup_risk — the claimed monotone gradient, measured.
+    scored_sorted = sorted(blow_pairs, key=lambda t: t[0])
+    buckets: list[dict[str, Any]] = []
+    if n_scored >= 3:
+        cut = n_scored // 3
+        slices = [scored_sorted[:cut], scored_sorted[cut:2 * cut], scored_sorted[2 * cut:]]
+        for idx, sl in enumerate(slices):
+            losses = sum(1 for _, lab in sl if lab == 1)
+            buckets.append({
+                "tercile": ("low", "mid", "high")[idx],
+                "lo": round(sl[0][0], 4) if sl else None,
+                "hi": round(sl[-1][0], 4) if sl else None,
+                "n": len(sl),
+                "losses": losses,
+                "loss_rate": round(losses / len(sl), 4) if sl else None,
+            })
+
+    # The circular in-sample threshold and the honest sweep around it.
+    winner_risks = [s for s, lab in blow_pairs if lab == 0]
+    max_risk_winner = round(max(winner_risks), 4) if winner_risks else None
+    sweep: list[dict[str, Any]] = []
+    for thr in _SHADOW_THRESHOLDS:
+        winners_touched = sum(1 for s, lab in blow_pairs if lab == 0 and s > thr)
+        losers_caught = sum(1 for s, lab in blow_pairs if lab == 1 and s > thr)
+        sweep.append({
+            "threshold": thr,
+            "winners_touched": winners_touched,
+            "losers_caught": losers_caught,
+            "clean": winners_touched == 0 and losers_caught > 0,
+        })
+
+    return {
+        "available": n_scored > 0,
+        "verdict": SHADOW_ONLY,
+        "n_gated": len(gated),
+        "n_scored": n_scored,
+        "n_losses": n_losses,
+        "min_promote_n": int(min_promote_n),
+        "n_met": n_scored >= int(min_promote_n),
+        "blowup_auc": (round(a, 4) if (a := auc(blow_pairs)) is not None else None),
+        "distance_auc": (round(d, 4) if (d := auc(dist_pairs)) is not None else None),
+        "loss_terciles": buckets,
+        "max_risk_winner": max_risk_winner,
+        "threshold_sweep": sweep,
+        "note": ("record-only; unproven; was inert and below-chance (AUC~0.49) "
+                 "out-of-sample — see screen.py. distance_sigma is the transportable "
+                 "companion signal. NEVER gates a decision."),
+    }
 
 
 def verdict_from_agg(agg: Mapping[str, Any], *, min_promote_n: int,

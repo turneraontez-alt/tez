@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     base_rate_side TEXT,
     record_kind TEXT NOT NULL DEFAULT 'DELIVERED_CANDIDATE',
     research_fired INTEGER DEFAULT 0,
+    conf_gap REAL,
+    blowup_risk REAL,
+    screen_version TEXT,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -188,6 +191,10 @@ class UltoimV2Ledger:
         additions = (
             ("record_kind", "TEXT NOT NULL DEFAULT 'DELIVERED_CANDIDATE'"),
             ("research_fired", "INTEGER DEFAULT 0"),
+            # Record-only blowup SHADOW score (see screen.py). Nullable, never gates.
+            ("conf_gap", "REAL"),
+            ("blowup_risk", "REAL"),
+            ("screen_version", "TEXT"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -310,7 +317,7 @@ class UltoimV2Ledger:
         "gate_a_pass", "gate_b_pass", "gate_c_pass", "reason_codes",
         "gate_min_conf", "gate_ask_lo", "gate_ask_hi", "gate_min_edge",
         "close_time", "snapshot_id", "session_id", "delivery_status",
-        "record_kind", "research_fired",
+        "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
     )
 
     # Sensible defaults for columns added after the first release, so any caller

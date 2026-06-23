@@ -911,3 +911,157 @@ def test_entry_card_caveat_is_derived_not_hardcoded():
     assert "2 regimes" in text
     for m in _FORBIDDEN_FULL:
         assert m not in text
+
+
+# --------------------------------------------------------------------------- #
+# blowup SHADOW screen (record-only — must never gate a decision)
+# --------------------------------------------------------------------------- #
+from q15_upgrade.ultoim_v2 import screen, validate
+
+
+def test_screen_conf_gap_and_none_handling():
+    assert screen.conf_gap(0.80, 0.70) == pytest.approx(0.10)
+    assert screen.conf_gap(None, 0.70) is None
+    assert screen.conf_gap(0.80, None) is None
+    # bool/non-finite are rejected (they feed a numeric score), not coerced to 1.0/nan.
+    assert screen.conf_gap(True, 0.70) is None
+    assert screen.conf_gap(float("nan"), 0.70) is None
+
+
+def test_screen_blowup_risk_bounds_and_monotonicity():
+    # Bounded to [0,1].
+    for sel, con, ev in [(0.50, 0.50, 1.0), (0.99, 0.0, 0.0), (0.60, 0.55, 0.8)]:
+        r = screen.blowup_risk(sel, con, ev)
+        assert r is not None and 0.0 <= r <= 1.0
+    # Rises with conf_gap (more internal disagreement => more risk), holding evidence.
+    lo = screen.blowup_risk(0.60, 0.58, 0.85)   # cg 0.02 (below floor)
+    hi = screen.blowup_risk(0.60, 0.40, 0.85)   # cg 0.20 (above span)
+    assert hi > lo
+    # Falls as evidence improves, holding conf_gap.
+    weak = screen.blowup_risk(0.70, 0.55, 0.70)
+    strong = screen.blowup_risk(0.70, 0.55, 0.99)
+    assert weak > strong
+    # Uncomputable conf_gap => None (can't score the row at all).
+    assert screen.blowup_risk(None, 0.5, 0.8) is None
+    # Missing evidence still scores off the conf_gap term (worst-case evidence).
+    assert screen.blowup_risk(0.70, 0.55, None) is not None
+
+
+def test_screen_size_fraction_inert_and_safe():
+    assert screen.size_fraction(0.0) == pytest.approx(1.0)
+    assert screen.size_fraction(1.0) == pytest.approx(0.0)
+    assert screen.size_fraction(0.20) == pytest.approx(0.64)
+    # clamps out-of-range, and a missing risk never surprises with a zero size.
+    assert screen.size_fraction(1.5) == pytest.approx(0.0)
+    assert screen.size_fraction(None) == pytest.approx(1.0)
+
+
+def test_screen_distance_risk_rises_toward_strike():
+    # Risk is higher (less negative) as |distance_sigma| -> 0 (spot pinned on strike).
+    assert screen.distance_risk(0.05) > screen.distance_risk(1.50)
+    assert screen.distance_risk(None) is None
+
+
+def test_shadow_features_shape_and_stamp():
+    feats = screen.shadow_features(
+        {"selected_probability": 0.70, "conservative_probability": 0.55,
+         "evidence_quality": 0.80})
+    assert set(feats) == {"conf_gap", "blowup_risk", "screen_version"}
+    assert feats["screen_version"] == screen.SCREEN_VERSION
+    assert feats["conf_gap"] == pytest.approx(0.15)
+    assert 0.0 <= feats["blowup_risk"] <= 1.0
+    # A row missing the inputs yields None values but still the version stamp.
+    empty = screen.shadow_features({})
+    assert empty["conf_gap"] is None and empty["blowup_risk"] is None
+    assert empty["screen_version"] == screen.SCREEN_VERSION
+
+
+def test_validate_auc_known_and_ties():
+    # Perfect separation (all losses outrank all wins) -> AUC 1.0.
+    perfect = [(0.9, 1), (0.8, 1), (0.2, 0), (0.1, 0)]
+    assert validate.auc(perfect) == pytest.approx(1.0)
+    # Reversed -> 0.0.
+    assert validate.auc([(0.1, 1), (0.9, 0)]) == pytest.approx(0.0)
+    # All-tied scores -> 0.5 (chance), via average ranks.
+    assert validate.auc([(0.5, 1), (0.5, 0), (0.5, 1), (0.5, 0)]) == pytest.approx(0.5)
+    # Single class -> None.
+    assert validate.auc([(0.5, 1), (0.6, 1)]) is None
+
+
+def test_screen_shadow_report_is_record_only_and_honest():
+    # A mix of gated settled rows; high-conf_gap rows are the losers.
+    rows = []
+    for i in range(6):  # winners: small conf_gap, strong evidence
+        rows.append(_row(ticker=f"W{i}", interval="10M", research_fired=1,
+                         selected_probability=0.62, conservative_probability=0.60,
+                         evidence_quality=0.95, official_result="NO", correct=1,
+                         distance_sigma=1.5))
+    for i in range(3):  # losers: large conf_gap, weak evidence
+        rows.append(_row(ticker=f"L{i}", interval="10M", research_fired=1,
+                         selected_probability=0.62, conservative_probability=0.40,
+                         evidence_quality=0.70, official_result="YES", correct=0,
+                         distance_sigma=0.05))
+    rep = validate.screen_shadow_report(rows, min_promote_n=50)
+    assert rep["available"] is True
+    assert rep["verdict"] == validate.SHADOW_ONLY      # never anything else
+    assert rep["n_scored"] == 9 and rep["n_losses"] == 3
+    assert rep["n_met"] is False                       # 9 << 50 promote bar
+    # The score separates here, so AUC should be high — but it stays SHADOW_ONLY.
+    assert rep["blowup_auc"] is not None and rep["blowup_auc"] >= 0.9
+    assert rep["distance_auc"] is not None
+    # Threshold sweep reports winners that WOULD be touched (the honest test).
+    assert any("winners_touched" in s for s in rep["threshold_sweep"])
+    assert "record-only" in rep["note"] and "NEVER gates" in rep["note"]
+
+
+def test_screen_shadow_report_empty_population():
+    rep = validate.screen_shadow_report([], min_promote_n=50)
+    assert rep["available"] is False and rep["verdict"] == validate.SHADOW_ONLY
+    assert rep["n_scored"] == 0 and rep["blowup_auc"] is None
+
+
+def test_ledger_records_and_migrates_shadow_columns(tmp_path):
+    path = str(tmp_path / "u.sqlite3")
+    led = UltoimV2Ledger(path)
+    # A row carrying shadow features round-trips them.
+    led.record_decision(_row(ticker="S1", conf_gap=0.15, blowup_risk=0.42,
+                             screen_version="blowup-shadow-1"))
+    # A legacy-style row WITHOUT the shadow keys still inserts cleanly (nullable).
+    led.record_decision(_row(ticker="S2"))
+    rows = {r["ticker"]: r for r in led.recent_rows("ultoim-v2", limit=10)}
+    assert rows["S1"]["blowup_risk"] == pytest.approx(0.42)
+    assert rows["S1"]["conf_gap"] == pytest.approx(0.15)
+    assert rows["S1"]["screen_version"] == "blowup-shadow-1"
+    assert rows["S2"]["blowup_risk"] is None              # absent => NULL, no crash
+    led.close()
+
+
+def test_runner_stamps_shadow_score_without_affecting_fire(tmp_path):
+    # A candidate with a LARGE conf_gap (high blowup_risk) that still passes the gate
+    # MUST still fire — the shadow score is record-only and never vetoes a decision.
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    # Force a wide conf_gap on the analysis (selected well above conservative).
+    a["BTC"]["conservative_probability"] = 0.40
+    a["BTC"]["evidence_quality"] = 0.70
+    c = {"BTC": _canon("T-BTC", secs=900.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    row = r.ledger.recent_rows("ultoim-v2", limit=5)[0]
+    assert row["fired"] == 1                              # high risk did NOT block the fire
+    assert row["blowup_risk"] is not None and row["blowup_risk"] > 0.5
+    assert row["conf_gap"] == pytest.approx(0.25)
+    assert row["screen_version"] == screen.SCREEN_VERSION
+
+
+def test_recap_shows_shadow_line_and_is_marker_safe():
+    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    sb = _recap_sb(n=40, right=34, ci_low=0.7, base_rate=0.5)
+    sb["blowup_shadow"] = {
+        "available": True, "verdict": validate.SHADOW_ONLY, "n_scored": 40,
+        "blowup_auc": 0.67, "distance_auc": 0.61,
+    }
+    text = panel.build_recap(sb, [], [], cfg)
+    assert "Blowup screen (SHADOW" in text and "no effect on entries" in text
+    assert "UNPROVEN" in text and "blowup AUC 0.67" in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text

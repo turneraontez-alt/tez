@@ -274,6 +274,19 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
                     f"forfeited {_signed_cents(ew.get('forfeited_cents'))} · "
                     f"net {_signed_cents(ew.get('net_cents'))}")
 
+    # Blowup SHADOW screen — record-only diagnostics; emphatically NOT a live gate.
+    shadow = (scoreboard or {}).get("blowup_shadow") or {}
+    if shadow.get("available"):
+        body.append("")
+        body.append("Blowup screen (SHADOW · record-only · no effect on entries):")
+        n_scored = int(shadow.get("n_scored") or 0)
+        auc_v = shadow.get("blowup_auc")
+        dist_auc = shadow.get("distance_auc")
+        auc_txt = "—" if auc_v is None else f"{auc_v:.2f}"
+        dist_txt = "—" if dist_auc is None else f"{dist_auc:.2f}"
+        body.append(f"  N={n_scored} scored · blowup AUC {auc_txt} · "
+                    f"distance AUC {dist_txt} · UNPROVEN")
+
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")
     return header + "\n<pre>" + "\n".join(body) + "</pre>"

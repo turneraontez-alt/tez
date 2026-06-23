@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any, Mapping
 
-from . import gate, panel
+from . import gate, panel, screen, validate
 from .config import INTERVAL_MARKS, UltoimV2Config, is_enabled
 from .ledger import UltoimV2Ledger, _window_key
 from .telegram import UltoimV2Telegram
@@ -262,6 +262,10 @@ class UltoimV2Runner:
         if sel is not None and ask is not None:
             display = gate.display_entry(sel, cost, ask, cfg)
         regime_dir = _regime_directional(_num(cand.get("market_implied_yes_probability")))
+        # Record-only blowup SHADOW score, derived from decision-time fields already
+        # on this candidate. Stamped on every recorded row; NEVER gates fire/size/alert
+        # (record-only — see screen.py). Inputs come from ``cand`` so it stays pure.
+        shadow = screen.shadow_features(cand)
         return {
             "created_at": now, "model_version": cfg.model_version,
             "asset": cand.get("asset"), "ticker": cand.get("ticker"),
@@ -306,6 +310,9 @@ class UltoimV2Runner:
             "delivery_status": delivery_status,
             "record_kind": record_kind,
             "research_fired": 1 if verdict.get("research_fired") else 0,
+            "conf_gap": shadow["conf_gap"],
+            "blowup_risk": shadow["blowup_risk"],
+            "screen_version": shadow["screen_version"],
             "_best_entry_cents": display,
         }
 
@@ -536,6 +543,9 @@ class UltoimV2Runner:
             sb = self.ledger.scoreboard(mv, min_n=self.config.min_scoreboard_n)
             sb["exit_warnings"] = self.ledger.exit_warning_scoreboard(
                 mv, min_n=self.config.min_scoreboard_n)
+            # Record-only blowup SHADOW diagnostics (never gates anything).
+            sb["blowup_shadow"] = validate.screen_shadow_report(
+                self.ledger.resolved_rows(mv), min_promote_n=self.config.min_promote_n)
             recent = self.ledger.recent_rows(mv, limit=10)
             losses = self.ledger.loss_rows(mv, limit=10)
             text = panel.build_recap(sb, recent, losses, self.config)
