@@ -40,6 +40,7 @@ REASON_CODES = (
     "MISSING_DATA",
     "STALE_FEED",
     "NEAR_STRIKE_PIN",
+    "EXPENSIVE_NO_ADMIT",
 )
 
 # Tolerance for the inclusive edge comparator — absorbs float-repr slack only
@@ -62,13 +63,16 @@ def _clean_num(value: Any) -> float | None:
     return out
 
 
-def best_entry_cents(selected: float, cost_cents: float, cfg: Any) -> int:
+def best_entry_cents(selected: float, cost_cents: float, cfg: Any,
+                     *, ask_hi: float | None = None) -> int:
     """The most we'd pay and still clear the edge bar, floored to a whole cent and
     clamped into the configured ask band. ``selected`` is the chosen-side
-    probability (0..1); ``cost_cents`` is the round-trip cost estimate in cents."""
+    probability (0..1); ``cost_cents`` is the round-trip cost estimate in cents.
+    ``ask_hi`` overrides the band ceiling (the expensive-NO admit raises it to
+    ``cfg.expensive_no_ask_hi``); default ``None`` uses ``cfg.ask_hi`` unchanged."""
     raw = math.floor(selected * 100.0 - cost_cents - cfg.min_edge_cents)
     lo = int(math.floor(cfg.ask_lo))
-    hi = int(math.floor(cfg.ask_hi))
+    hi = int(math.floor(cfg.ask_hi if ask_hi is None else ask_hi))
     if raw < lo:
         raw = lo
     if raw > hi:
@@ -76,15 +80,26 @@ def best_entry_cents(selected: float, cost_cents: float, cfg: Any) -> int:
     return int(raw)
 
 
-def display_entry(selected: float, cost_cents: float, ask: float, cfg: Any) -> int:
+def display_entry(selected: float, cost_cents: float, ask: float, cfg: Any,
+                  *, expensive_no: bool = False) -> int:
     """The displayed "best entry … or lower" price. Never above the current market
     ask (you can always pay the ask on a marketable buy), and never below the band
     floor — ``int(ask)`` truncates toward zero, so a fractional ask like 49.9 must
     be floored and re-clamped into ``[ask_lo, ask_hi]`` lest the card advertise a
-    price outside the admitted band."""
-    capped = min(best_entry_cents(selected, cost_cents, cfg), int(math.floor(ask)))
+    price outside the admitted band.
+
+    ``expensive_no`` (the default-ON expensive-NO admit): the edge bar is
+    intentionally waived for this band, so the entry IS the market ask (you are a
+    price-taker at the elevated price), floored and clamped into
+    ``[ask_lo, expensive_no_ask_hi]`` — NOT the edge-based cap, which would advertise
+    a price below the ask that would never fill."""
     lo = int(math.floor(cfg.ask_lo))
-    hi = int(math.floor(cfg.ask_hi))
+    if expensive_no:
+        hi = int(math.floor(getattr(cfg, "expensive_no_ask_hi", cfg.ask_hi)))
+        capped = int(math.floor(ask))
+    else:
+        hi = int(math.floor(cfg.ask_hi))
+        capped = min(best_entry_cents(selected, cost_cents, cfg), int(math.floor(ask)))
     if capped < lo:
         capped = lo
     if capped > hi:
@@ -96,7 +111,7 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     """Evaluate one candidate against the three gates.
 
     Returns a dict with: fired(bool), research_fired(bool), reason_codes(list[str]),
-    gate_a/gate_b/gate_c(bool), net_edge_cents(float|None),
+    gate_a/gate_b/gate_c(bool), expensive_no(bool), net_edge_cents(float|None),
     best_entry_cents(int|None). NULL-SKIP: a missing/invalid side prob or ask
     returns a single MISSING_DATA reason with everything else False/None.
 
@@ -104,12 +119,22 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     ``research_fired`` is gate_b AND gate_c only (side-agnostic) — used to record
     YES-side research candidates without ever delivering them.
 
-    ``interval`` (keyword-only, default None) scopes the DEFAULT-OFF distance gate:
-    when ``cfg.distance_gate_enabled`` is true it ABSTAINS (suppresses delivery via
-    ``fired``, NEVER ``research_fired`` — measurement keeps accruing) on a 15M NO
-    candidate sitting too close to the strike (``|distance_sigma| < distance_pin_sigma``),
-    tagging ``NEAR_STRIKE_PIN``. 10M/7M and the YES side are unaffected. With the gate
-    disabled (default) behaviour is byte-identical to the three-gate verdict.
+    ``interval`` (keyword-only, default None) scopes two interval-aware rules:
+
+      * the distance gate (``cfg.distance_gate_enabled``, default ON) ABSTAINS
+        (suppresses delivery via ``fired``, NEVER ``research_fired`` — measurement
+        keeps accruing) on a 15M NO candidate too close to the strike
+        (``|distance_sigma| < distance_pin_sigma``), tagging ``NEAR_STRIKE_PIN``;
+
+      * the expensive-NO admit (``cfg.expensive_no_enabled``, default ON) ADMITS a
+        NON-15M NO candidate whose ask is in ``(ask_hi, expensive_no_ask_hi]`` even
+        with sub-min stated edge — lifting the ceiling and waiving gate_c for that
+        band only (``expensive_no`` true, tagged ``EXPENSIVE_NO_ADMIT``); the
+        confidence floor and ask_lo still apply.
+
+    The two are mutually exclusive (one is 15M-only, the other non-15M). The YES side
+    is never affected by either. With both flags off behaviour is byte-identical to
+    the plain three-gate verdict.
     """
     side = str(candidate.get("predicted_side") or "").upper()
     sel = _clean_num(candidate.get("selected_probability"))
@@ -125,6 +150,7 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
             "gate_a": False,
             "gate_b": False,
             "gate_c": False,
+            "expensive_no": False,
             "net_edge_cents": None,
             "best_entry_cents": None,
         }
@@ -138,22 +164,41 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     if not gate_a:
         reason_codes.append("WRONG_SIDE_YES")
 
+    # Expensive-NO ADMIT band (DEFAULT ON). For NO on a non-15M interval, an ask in
+    # (ask_hi, expensive_no_ask_hi] is admitted DESPITE a sub-min stated edge: for NO
+    # the model's edge is inverse and this band wins ~84% cross-ledger (n=893). It
+    # lifts the ask ceiling AND waives the edge gate for THIS band only — the confidence
+    # floor and ask_lo still apply, and 15M / the YES side are never touched. Mutually
+    # exclusive with the 15M distance gate below (that one is 15M-only). With the flag
+    # off, or any other side/interval/ask, behaviour is byte-identical.
+    exp_ask_hi = getattr(cfg, "expensive_no_ask_hi", cfg.ask_hi)
+    expensive_no = bool(
+        getattr(cfg, "expensive_no_enabled", False)
+        and side == "NO"
+        and interval != "15M"
+        and ask > cfg.ask_hi
+        and ask <= exp_ask_hi
+    )
+
     # gate_b — admit (confidence + ask band, inclusive). Collect each sub-failure.
     gate_b_conf = sel >= cfg.min_confidence
     if not gate_b_conf:
         reason_codes.append("CONF_BELOW_MIN")
     gate_b_ask_lo = ask >= cfg.ask_lo
-    gate_b_ask_hi = ask <= cfg.ask_hi
+    # The expensive-NO band lifts the ceiling to expensive_no_ask_hi for that band only.
+    gate_b_ask_hi = ask <= cfg.ask_hi or expensive_no
     if not gate_b_ask_lo:
         reason_codes.append("ASK_BELOW_BAND")
     if not gate_b_ask_hi:
         reason_codes.append("ASK_ABOVE_BAND")
     gate_b = gate_b_conf and gate_b_ask_lo and gate_b_ask_hi
 
-    # gate_c — edge (inclusive, float-repr tolerant).
-    gate_c = net_edge >= cfg.min_edge_cents - _EDGE_EPS
+    # gate_c — edge (inclusive, float-repr tolerant). WAIVED for the expensive-NO band.
+    gate_c = (net_edge >= cfg.min_edge_cents - _EDGE_EPS) or expensive_no
     if not gate_c:
         reason_codes.append("EDGE_BELOW_MIN")
+    if expensive_no:
+        reason_codes.append("EXPENSIVE_NO_ADMIT")
 
     research_fired = gate_b and gate_c
 
@@ -180,6 +225,8 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
         "gate_a": bool(gate_a),
         "gate_b": bool(gate_b),
         "gate_c": bool(gate_c),
+        "expensive_no": bool(expensive_no),
         "net_edge_cents": net_edge,
-        "best_entry_cents": best_entry_cents(sel, cost, cfg),
+        "best_entry_cents": best_entry_cents(sel, cost, cfg,
+                                             ask_hi=(exp_ask_hi if expensive_no else None)),
     }
