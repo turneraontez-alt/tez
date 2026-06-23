@@ -11,6 +11,8 @@ from __future__ import annotations
 import html
 from typing import Any, Mapping, Sequence
 
+from . import validate
+
 
 def _num(value: Any) -> float | None:
     try:
@@ -48,7 +50,13 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     ask = _num(pick.get("entry_ask_cents"))
     display = pick.get("best_entry_cents")
     net_edge = pick.get("net_edge_cents")
-    resolved = int((scoreboard_summary or {}).get("resolved") or 0)
+    summary = scoreboard_summary or {}
+    resolved = int(summary.get("resolved") or 0)
+    # DERIVED, never hardcoded: the caveat must stop claiming "0 YES-prone" the
+    # moment YES-prone data exists (the old literal would silently lie).
+    n_regimes = int(summary.get("n_regimes") or 0)
+    yes_prone_n = int(summary.get("yes_prone_n") or 0)
+    regimes_txt = f"{n_regimes} regime{'' if n_regimes == 1 else 's'}" if n_regimes else "0 regimes"
 
     ask_txt = "—" if ask is None else f"{ask:.0f}¢"
     display_txt = "—" if display is None else f"{int(display)}¢"
@@ -64,7 +72,8 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
         f"Best entry: {display_txt} or lower",
         f"Current ask: {ask_txt}",
         f"Net edge: {_signed_cents(net_edge)}",
-        f"Unvalidated · N={resolved} settled · 1 regime · 0 YES-prone · CI wide",
+        f"Unvalidated · N={resolved} settled · {regimes_txt} · "
+        f"{yes_prone_n} YES-prone · CI wide",
         "Ultoim V2 · research/paper · not advice · no orders placed",
     ]
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
@@ -82,6 +91,33 @@ def _accuracy_line(agg: Mapping[str, Any], min_n: int) -> str:
     acc_txt = "—" if acc is None else f"{acc * 100:.1f}%"
     ci_txt = "" if lo is None or hi is None else f" [{lo * 100:.0f}–{hi * 100:.0f}%]"
     return f"W-L {right}-{wrong} · acc {acc_txt}{ci_txt}"
+
+
+def _promotion_line(scoreboard: Mapping[str, Any], min_promote_n: int) -> str:
+    """One honest, significance-gated verdict line. Reads INSUFFICIENT below the
+    promotion-N, NOT SEPARABLE when the Wilson lower bound doesn't clear the base
+    rate, and BEATS only when it does (one-sided exact binomial p<0.05). A BEATS
+    overall is qualified whenever the YES side or a YES-prone regime is still
+    unproven, so the recap can never over-claim full promotion-readiness. Contains
+    none of the live suppression/routing markers."""
+    overall = (scoreboard or {}).get("overall") or {}
+    verdict = validate.verdict_from_agg(overall, min_promote_n=min_promote_n)
+    state = verdict["state"]
+    if state == validate.BEATS:
+        edge = overall.get("edge_over_base")
+        edge_txt = "" if edge is None else f", +{edge * 100:.1f}pp"
+        line = f"PROMOTION: BEATS BASE RATE (sig-tested{edge_txt}, N={verdict['n']})"
+        by_side = (scoreboard or {}).get("by_side") or {}
+        yes = by_side.get("YES") or {}
+        by_regime = (scoreboard or {}).get("by_regime_directional") or {}
+        yes_prone = by_regime.get("YES_PRONE") or {}
+        if (int(yes.get("n") or 0) < min_promote_n
+                or int(yes_prone.get("n") or 0) < min_promote_n):
+            line += " · overall only — YES-side / YES-prone unproven"
+        return line
+    if state == validate.NOT_SEPARABLE:
+        return "PROMOTION: NOT SEPARABLE FROM BASE RATE"
+    return f"PROMOTION: INSUFFICIENT DATA (N<{min_promote_n})"
 
 
 def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[str, Any]],
@@ -103,12 +139,15 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
     base_txt = "—" if base is None else f"{base * 100:.1f}%"
     edge_txt = "—" if edge is None else f"{edge * 100:+.1f}pp"
 
+    min_promote_n = int(getattr(cfg, "min_promote_n", 0) or max(min_n, 50))
+
     header = "🧪 <b>ULTOIM V2 — RESEARCH RECAP</b>"
     body: list[str] = [
         "Paper-only research overlay · no orders placed.",
         "",
         f"Settled: {resolved} · recorded: {total} · pending: {pending}",
         _accuracy_line(overall, min_n),
+        _promotion_line(scoreboard or {}, min_promote_n),
         f"ROI: {roi_txt} · total P&L {_signed_cents(pnl_total)}",
         f"Base rate: {base_txt} ({_esc(overall.get('base_rate_side') or '—')}) · "
         f"edge over base: {edge_txt}",
@@ -119,6 +158,21 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
     for iv in ("15M", "10M", "7M"):
         agg = by_interval.get(iv) or {}
         body.append(f"  {iv:>3}: {_accuracy_line(agg, min_n)}")
+
+    # By side — NO is the delivered population; YES is research-only (never sent).
+    by_side = (scoreboard or {}).get("by_side") or {}
+    body.append("")
+    body.append("By side:")
+    body.append(f"  NO : {_accuracy_line(by_side.get('NO') or {}, min_n)}")
+    body.append(f"  YES: {_accuracy_line(by_side.get('YES') or {}, min_n)} (research-only)")
+
+    # By regime — the decision-time market-lean split (BALANCED shown as 'mixed').
+    by_regime = (scoreboard or {}).get("by_regime_directional") or {}
+    body.append("")
+    body.append("By regime:")
+    body.append(f"  NO-prone : {_accuracy_line(by_regime.get('NO_PRONE') or {}, min_n)}")
+    body.append(f"  YES-prone: {_accuracy_line(by_regime.get('YES_PRONE') or {}, min_n)}")
+    body.append(f"  mixed    : {_accuracy_line(by_regime.get('BALANCED') or {}, min_n)}")
 
     body.append("")
     body.append("Recent picks:")

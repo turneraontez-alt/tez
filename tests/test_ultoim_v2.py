@@ -435,3 +435,342 @@ def _extract(runner, analyses, canonicals, now):
     finally:
         runner._jobs.put_nowait = orig  # type: ignore
     return captured.get("candidates", [])
+
+
+# --------------------------------------------------------------------------- #
+# gate: correctness fixes (float boundary, display clamp, bool reject, research)
+# --------------------------------------------------------------------------- #
+def test_gate_edge_float_boundary_admits_true_two_cent_edge():
+    """0.58*100 - 56 == 1.999999999999993 in binary float; the inclusive 2.0¢ bar
+    must still admit a mathematically-exact 2.0¢ edge (the one fitted knob)."""
+    cfg = UltoimV2Config(enabled=True)
+    assert 0.58 * 100.0 - 56.0 < 2.0  # the float underflow is real
+    v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.58,
+                                 entry_ask_cents=56.0, total_cost_cents=0.0), cfg)
+    assert v["gate_c"] is True and "EDGE_BELOW_MIN" not in v["reason_codes"]
+    assert v["fired"] is True
+    # a genuine sub-2¢ edge still fails (no over-admitting).
+    v2 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.575,
+                                  entry_ask_cents=56.0, total_cost_cents=0.0), cfg)
+    assert v2["gate_c"] is False and "EDGE_BELOW_MIN" in v2["reason_codes"]
+
+
+def test_gate_rejects_bool_as_missing_data():
+    cfg = UltoimV2Config(enabled=True)
+    for bad in ({"predicted_side": "NO", "selected_probability": True, "entry_ask_cents": 60.0},
+                {"predicted_side": "NO", "selected_probability": 0.6, "entry_ask_cents": False}):
+        v = gate.evaluate(bad, cfg)
+        assert v["reason_codes"] == ["MISSING_DATA"]
+        assert v["fired"] is False and v["net_edge_cents"] is None
+
+
+def test_display_entry_floors_and_reclamps_into_band():
+    cfg = UltoimV2Config(enabled=True)
+    # int(49.9)==49 would advertise a price BELOW the ask_lo=50 band floor.
+    assert gate.display_entry(0.99, 0.0, 49.9, cfg) == 50
+    # normal: best-entry below ask shows the best-entry.
+    assert gate.display_entry(0.655, 1.0, 70.0, cfg) == 62
+
+
+def test_gate_research_fired_yes_side_never_delivers():
+    cfg = UltoimV2Config(enabled=True)  # no_only=True
+    v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.65,
+                                 entry_ask_cents=60.0, total_cost_cents=2.0), cfg)
+    assert v["fired"] is False                       # NO-only delivery
+    assert "WRONG_SIDE_YES" in v["reason_codes"]
+    assert v["research_fired"] is True               # but it cleared conf+ask+edge
+
+
+def test_gate_collects_every_failing_reason():
+    cfg = UltoimV2Config(enabled=True)
+    v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.40,
+                                 entry_ask_cents=45.0, total_cost_cents=0.0), cfg)
+    assert set(v["reason_codes"]) == {
+        "WRONG_SIDE_YES", "CONF_BELOW_MIN", "ASK_BELOW_BAND", "EDGE_BELOW_MIN"}
+
+
+# --------------------------------------------------------------------------- #
+# validate: significance math + verdict
+# --------------------------------------------------------------------------- #
+from q15_upgrade.ultoim_v2 import validate  # noqa: E402
+
+
+def _vrow(side="NO", result="NO", interval="10M", net_edge=3.0, window_key=1,
+          regime="NO_PRONE", research_fired=1, pnl=None):
+    correct = 1 if side.upper() == result.upper() else 0
+    if pnl is None:
+        pnl = 40.0 if correct else -60.0
+    return {"predicted_side": side, "official_result": result, "interval": interval,
+            "net_edge_cents": net_edge, "window_key": window_key, "correct": correct,
+            "regime_directional": regime, "research_fired": research_fired,
+            "fired": 1 if side.upper() == "NO" else 0, "hypothetical_pnl_cents": pnl}
+
+
+def test_wilson_known_values():
+    assert validate.wilson(0, 0) == (None, None, None)
+    p, lo, hi = validate.wilson(2, 3)
+    assert (p, round(lo, 4), round(hi, 4)) == (pytest.approx(2 / 3), 0.2077, 0.9385)
+    _, lo, hi = validate.wilson(8, 10)
+    assert (round(lo, 4), round(hi, 4)) == (0.4902, 0.9433)
+    _, lo, _ = validate.wilson(0, 10)
+    assert lo >= 0.0                                  # never negative
+    _, _, hi = validate.wilson(10, 10)
+    assert hi == pytest.approx(1.0)
+
+
+def test_binom_test_greater_known_values():
+    assert validate.binom_test_greater(11, 12, 0.75) == pytest.approx(0.1584, abs=1e-3)
+    assert validate.binom_test_greater(5, 6, 0.75) == pytest.approx(0.5339, abs=1e-3)
+    assert validate.binom_test_greater(21, 23, 0.75) == pytest.approx(0.0492, abs=1e-3)
+    assert validate.binom_test_greater(0, 10, 0.5) == 1.0     # k<=0
+    assert validate.binom_test_greater(5, 0, 0.5) == 1.0      # n<=0
+
+
+def test_lift_vs_base_separability():
+    # 11/12 NO wins is NOT separable from base rate (p=0.158).
+    rows = [_vrow(result="NO") for _ in range(11)] + [_vrow(result="YES")]
+    lift = validate.lift_vs_base(rows)
+    assert lift["n"] == 12 and lift["hits"] == 11
+    assert lift["base_rate"] == pytest.approx(11 / 12)
+    assert lift["separable"] is False
+    # 700/1000 vs a 50/50 base IS separable.
+    big = ([_vrow(result="NO") for _ in range(700)]
+           + [_vrow(result="YES") for _ in range(300)])
+    lift2 = validate.lift_vs_base(big)
+    assert lift2["base_rate"] == pytest.approx(0.7)
+    # accuracy == base here (all NO bets, 70% settle NO) -> NOT separable
+    assert lift2["separable"] is False
+
+
+def test_edge_bucket_monotonicity():
+    # higher edge -> higher accuracy (monotone)
+    mono = ([_vrow(net_edge=2.5, result="YES") for _ in range(4)]    # low edge, 0% in [2,3)
+            + [_vrow(net_edge=2.5, result="NO")]
+            + [_vrow(net_edge=10.0, result="NO") for _ in range(5)])  # high edge, 100%
+    out = validate.edge_bucket_monotonicity(mono)
+    assert out["is_monotone"] is True and out["n_populated"] == 2
+    # inverted -> not monotone
+    inv = ([_vrow(net_edge=2.5, result="NO") for _ in range(5)]
+           + [_vrow(net_edge=10.0, result="YES") for _ in range(5)])
+    assert validate.edge_bucket_monotonicity(inv)["is_monotone"] is False
+
+
+def test_realized_window_regime_classification():
+    rows = ([_vrow(result="YES", window_key=1) for _ in range(3)]    # window 1: all YES
+            + [_vrow(result="NO", window_key=1)]                     # -> 3/4 YES = YES_PRONE
+            + [_vrow(result="NO", window_key=2) for _ in range(4)])  # window 2: all NO
+    regime = validate.realized_window_regime(rows)
+    assert regime[1] == "YES_PRONE" and regime[2] == "NO_PRONE"
+
+
+def test_verdict_from_agg_states():
+    cfg_n = 50
+    insufficient = {"n": 11, "right": 10, "ci_low": 0.6, "base_rate": 0.5}
+    assert validate.verdict_from_agg(insufficient, min_promote_n=cfg_n)["state"] == validate.INSUFFICIENT
+    not_sep = {"n": 60, "right": 33, "ci_low": 0.45, "base_rate": 0.5}
+    assert validate.verdict_from_agg(not_sep, min_promote_n=cfg_n)["state"] == validate.NOT_SEPARABLE
+    beats = {"n": 1000, "right": 700, "ci_low": 0.671, "base_rate": 0.5}
+    assert validate.verdict_from_agg(beats, min_promote_n=cfg_n)["state"] == validate.BEATS
+
+
+def test_validation_report_requires_yes_side_and_regime():
+    # Only NO-prone NO rows that beat a low base -> overall may beat, but never
+    # 'fully_proven' while YES side / YES-prone regime are empty.
+    rows = ([_vrow(result="NO", regime="NO_PRONE", window_key=i) for i in range(60)]
+            + [_vrow(result="YES", regime="NO_PRONE", window_key=i) for i in range(20)])
+    rep = validate.validation_report(rows, min_promote_n=50)
+    assert rep["available"] is True
+    assert rep["by_side"]["YES"]["n"] == 0           # no YES research rows here
+    assert rep["fully_proven"] is False
+
+
+# --------------------------------------------------------------------------- #
+# ledger: by_side split, research rows, resolved_rows, migration/restart
+# --------------------------------------------------------------------------- #
+def test_scoreboard_by_side_splits_no_and_yes_research(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    # delivered NO entry (win) and a YES research row (loss) — different contracts.
+    led.record_decision(_row(ticker="N1", predicted_side="NO", fired=1,
+                             research_fired=1, record_kind="DELIVERED_CANDIDATE"))
+    led.record_decision(_row(ticker="Y1", interval="7M", predicted_side="YES", fired=0,
+                             research_fired=1, record_kind="RESEARCH_YES"))
+    led.resolve("ultoim-v2", "N1", "NO", 9500.0)     # NO win
+    led.resolve("ultoim-v2", "Y1", "NO", 9500.0)     # YES predicted, settles NO -> loss
+    sb = led.scoreboard("ultoim-v2", min_n=1)
+    assert sb["by_side"]["NO"]["n"] == 1 and sb["by_side"]["NO"]["right"] == 1
+    assert sb["by_side"]["YES"]["n"] == 1 and sb["by_side"]["YES"]["right"] == 0
+    # the YES research row never inflates the delivered headline (fired==1 only).
+    assert sb["overall"]["n"] == 1 and sb["resolved"] == 1
+    assert sb["research_resolved"] == 2
+    led.close()
+
+
+def test_resolved_rows_oldest_first(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    led.record_decision(_row(ticker="A", created_at=2000.0))
+    led.record_decision(_row(ticker="B", interval="7M", created_at=1000.0))
+    led.resolve("ultoim-v2", "A", "NO", 9500.0)
+    led.resolve("ultoim-v2", "B", "NO", 9500.0)
+    rows = led.resolved_rows("ultoim-v2")
+    assert [r["ticker"] for r in rows] == ["B", "A"]      # oldest created_at first
+    led.close()
+
+
+def test_report_lock_idempotent(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    assert led.lock_report("ultoim-v2", "10M", 5, 1.0) is True
+    assert led.lock_report("ultoim-v2", "10M", 5, 2.0) is False
+    assert led.report_locked("ultoim-v2", "10M", 5) is True
+    assert led.lock_report("ultoim-v2", "10M", 6, 3.0) is True     # next window
+    led.close()
+
+
+def test_base_rate_ties_break_no(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    led.record_decision(_row(ticker="T1", predicted_side="NO"))
+    led.record_decision(_row(ticker="T2", interval="7M", predicted_side="NO"))
+    led.resolve("ultoim-v2", "T1", "NO", 9500.0)
+    led.resolve("ultoim-v2", "T2", "YES", 9500.0)
+    sb = led.scoreboard("ultoim-v2", min_n=1)
+    assert sb["overall"]["base_rate"] == pytest.approx(0.5)
+    assert sb["overall"]["base_rate_side"] == "NO"        # tie -> NO
+    led.close()
+
+
+def test_restart_preserves_marker_and_rows(tmp_path):
+    path = str(tmp_path / "u.sqlite3")
+    led = UltoimV2Ledger(path)
+    led.ensure_reset_marker("ultoim-v2", 1234.0)
+    reset_at, sess = led.reset_at(), led.session_id()
+    led.record_decision(_row(ticker="P1"))
+    led.close()
+    led2 = UltoimV2Ledger(path)                           # reopen (simulated restart)
+    assert led2.reset_at() == reset_at and led2.session_id() == sess
+    assert led2.record_decision(_row(ticker="P1")) is None   # dup still rejected
+    led2.close()
+
+
+# --------------------------------------------------------------------------- #
+# runner: YES-side research recording alongside the delivered NO
+# --------------------------------------------------------------------------- #
+def test_runner_records_research_yes_alongside_delivered_no(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg)
+    wk = _window_key(9000.0, 1000.0)
+    a = {
+        "BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35),   # fires + delivered
+        "ETH": _analysis(side="YES", sel=0.65, ask=60.0, mkt_yes=0.70),  # research-only
+    }
+    c = {"BTC": _canon("T-BTC", secs=900.0, close=9000.0),
+         "ETH": _canon("T-ETH", secs=900.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+
+    assert len(tg.sent) == 1 and "BTC NO" in tg.sent[0]   # only the NO is delivered
+    rows = {row["ticker"]: row for row in r.ledger.recent_rows("ultoim-v2", limit=10)}
+    assert rows["T-BTC"]["record_kind"] == "DELIVERED_CANDIDATE" and rows["T-BTC"]["fired"] == 1
+    eth = rows["T-ETH"]
+    assert eth["record_kind"] == "RESEARCH_YES" and eth["fired"] == 0
+    assert eth["delivery_status"] == "RESEARCH" and eth["research_fired"] == 1
+    assert not r.ledger.alert_locked("ultoim-v2", "T-ETH", wk)   # YES never claims the alert lock
+
+
+def test_runner_research_yes_can_be_disabled(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram(), record_research_yes=False)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35),
+         "ETH": _analysis(side="YES", sel=0.65, ask=60.0, mkt_yes=0.70)}
+    c = {"BTC": _canon("T-BTC", secs=900.0, close=9000.0),
+         "ETH": _canon("T-ETH", secs=900.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    tickers = {row["ticker"] for row in r.ledger.recent_rows("ultoim-v2", limit=10)}
+    assert tickers == {"T-BTC"}                            # no YES research row written
+
+
+def test_runner_stale_boundary_inclusive(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram())   # _config pins max_spot_stale=8.0
+    # exactly at the limit (8.0) still fires; just over (8.01) abstains STALE_FEED.
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35, stale=8.0)}
+    c = {"BTC": _canon("T-BTC", secs=900.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert r.scoreboard()["all_observations"]["fired"] == 1
+
+    r2 = _runner(tmp_path / "b", telegram=_StubTelegram())
+    a2 = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35, stale=8.01)}
+    r2._observe_sync(candidates=_extract(r2, a2, c, now=1000.0), now=1000.0)
+    row = r2.ledger.recent_rows("ultoim-v2", limit=5)[0]
+    assert row["fired"] == 0 and "STALE_FEED" in (row["reason_codes"] or "")
+
+
+# --------------------------------------------------------------------------- #
+# panel: promotion verdict + side/regime split + forbidden-marker completeness
+# --------------------------------------------------------------------------- #
+# Full set of live suppression/routing markers V2 must never emit (the test tuple
+# above omitted NO ENTRY YET; the recap upgrade adds 'NO-prone' wording, so guard it).
+_FORBIDDEN_FULL = ("V9.5 CHECK", "ENTRY RECOMMENDED", "NO ENTRY YET",
+                   "Hourly Report —", "TOP 3 PICKS")
+
+
+def _recap_sb(*, n, right, ci_low, base_rate, min_n=30, yes_n=0, yes_prone_n=0):
+    agg0 = {"n": 0, "right": 0, "wrong": 0}
+    overall = {"n": n, "right": right, "wrong": n - right,
+               "accuracy": (right / n) if n else None, "ci_low": ci_low, "ci_high": 1.0,
+               "low_n": n < min_n, "pnl_total_cents": 0.0, "pnl_avg_cents": 0.0,
+               "base_rate": base_rate, "base_rate_side": "NO", "edge_over_base": 0.1}
+    return {
+        "min_n": min_n, "resolved": n, "total_recorded": n, "delivery_counts": {},
+        "overall": overall,
+        "by_interval": {iv: dict(agg0) for iv in ("15M", "10M", "7M")},
+        "by_side": {"NO": dict(agg0, n=n), "YES": dict(agg0, n=yes_n)},
+        "by_regime_directional": {"NO_PRONE": dict(agg0, n=n),
+                                  "YES_PRONE": dict(agg0, n=yes_prone_n),
+                                  "BALANCED": dict(agg0)},
+    }
+
+
+def test_recap_promotion_insufficient():
+    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    text = panel.build_recap(_recap_sb(n=11, right=10, ci_low=0.6, base_rate=0.5), [], [], cfg)
+    assert "PROMOTION: INSUFFICIENT DATA (N<50)" in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text
+
+
+def test_recap_promotion_not_separable():
+    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    text = panel.build_recap(_recap_sb(n=60, right=33, ci_low=0.45, base_rate=0.5), [], [], cfg)
+    assert "PROMOTION: NOT SEPARABLE FROM BASE RATE" in text
+    assert "BEATS BASE RATE" not in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text
+
+
+def test_recap_promotion_beats_with_unproven_qualifier():
+    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    # overall beats, but YES side / YES-prone still empty -> qualifier appended.
+    text = panel.build_recap(
+        _recap_sb(n=1000, right=700, ci_low=0.671, base_rate=0.5, yes_n=0, yes_prone_n=0),
+        [], [], cfg)
+    assert "PROMOTION: BEATS BASE RATE (sig-tested" in text
+    assert "YES-side / YES-prone unproven" in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text
+
+
+def test_recap_shows_side_and_regime_sections():
+    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    text = panel.build_recap(_recap_sb(n=40, right=34, ci_low=0.7, base_rate=0.5,
+                                       yes_n=5, yes_prone_n=3), [], [], cfg)
+    assert "By side:" in text and "(research-only)" in text
+    assert "By regime:" in text and "YES-prone:" in text
+
+
+def test_entry_card_caveat_is_derived_not_hardcoded():
+    cfg = UltoimV2Config(enabled=True)
+    pick = {"asset": "BTC", "predicted_side": "NO", "ticker": "T-BTC", "interval": "10M",
+            "window_key": 5, "selected_probability": 0.62, "entry_ask_cents": 60.0,
+            "best_entry_cents": 58, "net_edge_cents": 2.5}
+    # a summary reflecting real YES-prone data must NOT print "0 YES-prone".
+    text = panel.build_entry_alert(pick, {"resolved": 40, "n_regimes": 2, "yes_prone_n": 7}, cfg)
+    assert "7 YES-prone" in text and "0 YES-prone" not in text
+    assert "2 regimes" in text
+    for m in _FORBIDDEN_FULL:
+        assert m not in text

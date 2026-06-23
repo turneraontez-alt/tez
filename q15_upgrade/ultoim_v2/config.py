@@ -94,6 +94,21 @@ class UltoimV2Config:
     min_scoreboard_n: int = field(
         default_factory=lambda: int(_float("Q15_ULTOIM_V2_MIN_SCOREBOARD_N", 30))
     )
+    # Promotion bar — DISTINCT from the print-floor above. n=30 is enough to print
+    # a number, but at a realistic ~80-85% hit-rate it is far too few to separate
+    # the gate from the ~75% base NO rate (one-sided binomial). 50 is the minimum
+    # where a sustained ~85% clears p<0.05 vs 0.75 with margin; the verdict also
+    # requires the Wilson lower bound to exceed the empirical base rate.
+    min_promote_n: int = field(
+        default_factory=lambda: int(_float("Q15_ULTOIM_V2_MIN_PROMOTE_N", 50))
+    )
+    # Record the best YES-side candidate per (interval, window) as a RESEARCH-ONLY
+    # row (never delivered; delivery stays NO-only). This is the data that lets the
+    # system finally measure YES-prone windows — the precondition for promotion.
+    # Default ON when the overlay is enabled; the whole overlay is still default-OFF.
+    record_research_yes: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_RESEARCH_YES", True)
+    )
 
     @classmethod
     def from_env(cls) -> "UltoimV2Config":

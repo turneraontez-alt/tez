@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     correct INTEGER,
     hypothetical_pnl_cents REAL,
     base_rate_side TEXT,
+    record_kind TEXT NOT NULL DEFAULT 'DELIVERED_CANDIDATE',
+    research_fired INTEGER DEFAULT 0,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -133,7 +135,29 @@ class UltoimV2Ledger:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotently add columns introduced after the first release so an
+        already-initialised DB (``CREATE TABLE IF NOT EXISTS`` skips schema changes)
+        gains them without a destructive rebuild. Each ALTER uses a constant
+        DEFAULT, which SQLite backfills onto existing rows."""
+        cols = {
+            r["name"]
+            for r in self._conn.execute(
+                "PRAGMA table_info(ultoim_v2_predictions)"
+            ).fetchall()
+        }
+        additions = (
+            ("record_kind", "TEXT NOT NULL DEFAULT 'DELIVERED_CANDIDATE'"),
+            ("research_fired", "INTEGER DEFAULT 0"),
+        )
+        for name, decl in additions:
+            if name not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE ultoim_v2_predictions ADD COLUMN {name} {decl}"
+                )
 
     # -- meta / reset marker + session id ------------------------------------
     def ensure_reset_marker(self, model_version: str, now: float) -> float:
@@ -250,11 +274,18 @@ class UltoimV2Ledger:
         "gate_a_pass", "gate_b_pass", "gate_c_pass", "reason_codes",
         "gate_min_conf", "gate_ask_lo", "gate_ask_hi", "gate_min_edge",
         "close_time", "snapshot_id", "session_id", "delivery_status",
+        "record_kind", "research_fired",
     )
+
+    # Sensible defaults for columns added after the first release, so any caller
+    # that builds a row without them (e.g. older tools/tests) still inserts cleanly
+    # rather than tripping the NOT NULL constraint.
+    _COL_DEFAULTS = {"record_kind": "DELIVERED_CANDIDATE", "research_fired": 0}
 
     def record_decision(self, row: Mapping[str, Any]) -> int | None:
         placeholders = ",".join("?" for _ in self._COLS)
-        values = [row.get(c) for c in self._COLS]
+        values = [row.get(c) if row.get(c) is not None else self._COL_DEFAULTS.get(c)
+                  for c in self._COLS]
         with self._lock:
             try:
                 cur = self._conn.execute(
@@ -353,6 +384,19 @@ class UltoimV2Ledger:
                 "fired": sum(1 for r in all_rows if r["fired"] == 1),
             },
         }
+        # The research population: every row that PASSED the gate (conf+ask+edge),
+        # regardless of side. For NO rows this equals ``entries`` (side passes too);
+        # YES rows are research-only (never delivered) and appear here so YES-prone
+        # windows are finally measurable. ``research_fired`` may be absent on rows
+        # written before the column existed — treat NULL as fired==1 only.
+        def _research_fired(r: sqlite3.Row) -> bool:
+            rf = r["research_fired"]
+            if rf is None:
+                return r["fired"] == 1
+            return rf == 1
+
+        research = [r for r in all_rows
+                    if _research_fired(r) and r["official_result"] is not None]
         out["overall"] = self._agg(entries, min_n)
         out["overall"].update(self._base_rate(entries))
         out["by_interval"] = {iv: self._agg([r for r in entries if r["interval"] == iv], min_n)
@@ -362,6 +406,17 @@ class UltoimV2Ledger:
                            if str(r["regime_directional"] or "") == rd], min_n)
             for rd in ("YES_PRONE", "NO_PRONE", "BALANCED")
         }
+        # Per-side split over the research population (NO = delivered entries,
+        # YES = research-only). Each carries its own base-rate/edge so the YES side
+        # can be judged against the same standard the NO side is held to.
+        out["by_side"] = {}
+        for sd in ("NO", "YES"):
+            side_rows = [r for r in research
+                         if str(r["predicted_side"] or "").upper() == sd]
+            agg = self._agg(side_rows, min_n)
+            agg.update(self._base_rate(side_rows))
+            out["by_side"][sd] = agg
+        out["research_resolved"] = len(research)
         return out
 
     @staticmethod
@@ -408,6 +463,19 @@ class UltoimV2Ledger:
                 "WHERE model_version=? AND fired=1 AND correct=0 "
                 "ORDER BY resolved_at DESC LIMIT ?",
                 (model_version, int(limit)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolved_rows(self, model_version: str) -> list[dict[str, Any]]:
+        """Every settled row (any side, any record_kind) as plain dicts — the input
+        to the read-only validation module. Ordered oldest-first so a time-based
+        train/test split is deterministic."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND official_result IS NOT NULL "
+                "ORDER BY created_at ASC, id ASC",
+                (model_version,),
             ).fetchall()
         return [dict(r) for r in rows]
 

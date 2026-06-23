@@ -216,17 +216,34 @@ class UltoimV2Runner:
                 abstained_stale = True
             evaluated.append({"cand": cand, "verdict": verdict, "stale": abstained_stale})
 
+        # -- DELIVERED path (unchanged): the chosen candidate, NO-only alert.
         fired = [e for e in evaluated if e["verdict"]["fired"]]
         chosen = None
         if fired:
             chosen = max(fired, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
         elif evaluated:
             chosen = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
-        if chosen is None:
-            return
+        delivered_ticker = None
+        if chosen is not None:
+            delivered_ticker = str(chosen["cand"].get("ticker") or "")
+            self._record_and_maybe_alert(chosen, interval, mark, window_key, now)
 
-        cand = chosen["cand"]
-        verdict = chosen["verdict"]
+        # -- RESEARCH-YES path: record the best YES candidate so YES-prone windows
+        # finally produce gradeable data. Never alerted; never claims the alert
+        # lock; skipped when it's the same contract already recorded above (the
+        # UNIQUE(model_version,ticker,interval) constraint would reject it anyway).
+        if cfg.record_research_yes:
+            yes = [e for e in evaluated
+                   if str(e["cand"].get("predicted_side") or "").upper() == "YES"]
+            if yes:
+                best_yes = max(yes, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
+                if str(best_yes["cand"].get("ticker") or "") != delivered_ticker:
+                    self._record_research_yes(best_yes, interval, mark, window_key, now)
+
+    def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
+                   mark: int, window_key: int, now: float, *, record_kind: str,
+                   delivery_status: str) -> dict[str, Any]:
+        cfg = self.config
         sel = _num(cand.get("selected_probability"))
         ask = _num(cand.get("entry_ask_cents"))
         cost = _num(cand.get("total_cost_cents")) or 0.0
@@ -234,8 +251,7 @@ class UltoimV2Runner:
         if sel is not None and ask is not None:
             display = gate.display_entry(sel, cost, ask, cfg)
         regime_dir = _regime_directional(_num(cand.get("market_implied_yes_probability")))
-
-        row = {
+        return {
             "created_at": now, "model_version": cfg.model_version,
             "asset": cand.get("asset"), "ticker": cand.get("ticker"),
             "interval": interval, "window_key": window_key, "mark_seconds": float(mark),
@@ -276,8 +292,20 @@ class UltoimV2Runner:
             "close_time": cand.get("close_time"),
             "snapshot_id": cand.get("snapshot_id"),
             "session_id": self.session_id,
-            "delivery_status": "PENDING",
+            "delivery_status": delivery_status,
+            "record_kind": record_kind,
+            "research_fired": 1 if verdict.get("research_fired") else 0,
+            "_best_entry_cents": display,
         }
+
+    def _record_and_maybe_alert(self, chosen: dict[str, Any], interval: str, mark: int,
+                                window_key: int, now: float) -> None:
+        cfg = self.config
+        cand = chosen["cand"]
+        verdict = chosen["verdict"]
+        row = self._build_row(cand, verdict, interval, mark, window_key, now,
+                              record_kind="DELIVERED_CANDIDATE", delivery_status="PENDING")
+        display = row.pop("_best_entry_cents", None)
         row_id = self.ledger.record_decision(row)
         if row_id is None:
             return
@@ -293,8 +321,7 @@ class UltoimV2Runner:
             return
         alert_row = dict(row)
         alert_row["best_entry_cents"] = display
-        summary = {"resolved": self.ledger.scoreboard(
-            cfg.model_version, min_n=cfg.min_scoreboard_n).get("resolved")}
+        summary = self._alert_summary()
         text = panel.build_entry_alert(alert_row, summary, cfg)
         result = self.telegram.send(text)
         if result.get("delivered"):
@@ -305,6 +332,34 @@ class UltoimV2Runner:
             status, mid = "DELIVERY_FAILED", None
         self.ledger.set_report_message(cfg.model_version, interval, window_key, mid)
         self.ledger.mark_delivery(row_id, status, mid, result.get("error"))
+
+    def _record_research_yes(self, entry: dict[str, Any], interval: str, mark: int,
+                             window_key: int, now: float) -> None:
+        """Record a YES-side candidate as RESEARCH-ONLY: never delivered, never
+        claims the alert lock, fired forced to 0 (delivery is NO-only). It exists
+        solely so YES-prone windows accrue gradeable data for the validation
+        module. ``research_fired`` carries the side-agnostic gate result."""
+        cand = entry["cand"]
+        verdict = dict(entry["verdict"])
+        verdict["fired"] = False  # YES never delivers, regardless of gate_a
+        row = self._build_row(cand, verdict, interval, mark, window_key, now,
+                              record_kind="RESEARCH_YES", delivery_status="RESEARCH")
+        row.pop("_best_entry_cents", None)
+        self.ledger.record_decision(row)
+
+    def _alert_summary(self) -> dict[str, Any]:
+        """Compact scoreboard facts for the entry card's caveat — derived, never
+        hardcoded, so the card stops claiming '0 YES-prone' once data exists."""
+        cfg = self.config
+        sb = self.ledger.scoreboard(cfg.model_version, min_n=cfg.min_scoreboard_n)
+        regimes = sb.get("by_regime_directional") or {}
+        n_regimes = sum(1 for r in regimes.values() if int((r or {}).get("n") or 0) > 0)
+        yes_prone_n = int((regimes.get("YES_PRONE") or {}).get("n") or 0)
+        return {
+            "resolved": sb.get("resolved"),
+            "n_regimes": n_regimes,
+            "yes_prone_n": yes_prone_n,
+        }
 
     # -- reconcile (settlement grading) --------------------------------------
     def reconcile(self, now: float, resolver: Any) -> None:
@@ -319,7 +374,7 @@ class UltoimV2Runner:
         except queue.Full:
             logger.debug("ultoim_v2 reconcile queue full; skipped")
         except Exception:  # noqa: BLE001 - never break the loop
-            logger.debug("ultoim_v2 reconcile enqueue failed", exc_info=True)
+            logger.warning("ultoim_v2 reconcile enqueue failed", exc_info=True)
 
     def _reconcile_sync(self, *, resolver: Any, now: float) -> None:
         get_market = getattr(resolver, "get_market", None)
@@ -348,7 +403,7 @@ class UltoimV2Runner:
         except queue.Full:
             logger.debug("ultoim_v2 recap queue full; skipped")
         except Exception:  # noqa: BLE001 - never break the loop
-            logger.debug("ultoim_v2 recap enqueue failed", exc_info=True)
+            logger.warning("ultoim_v2 recap enqueue failed", exc_info=True)
 
     def _recap_sync(self, *, now: float) -> None:
         try:
@@ -359,7 +414,7 @@ class UltoimV2Runner:
             text = panel.build_recap(sb, recent, losses, self.config)
             self.telegram.send(text)
         except Exception:  # noqa: BLE001 - a recap must never raise
-            logger.debug("ultoim_v2 recap build/send failed (ignored)", exc_info=True)
+            logger.warning("ultoim_v2 recap build/send failed (ignored)", exc_info=True)
 
     # -- read-only status -----------------------------------------------------
     def scoreboard(self) -> dict[str, Any]:
