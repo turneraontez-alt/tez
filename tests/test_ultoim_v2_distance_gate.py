@@ -30,11 +30,22 @@ def _cand(**over):
 
 
 # --------------------------------------------------------------------------- #
-# 1. DEFAULT-OFF: byte-identical — near-strike 15M NO still fires.
+# 1a. DEFAULT-ON (owner-enabled): a 15M near-strike NO abstains by default.
 # --------------------------------------------------------------------------- #
-def test_distance_gate_default_off_fires_near_strike():
-    cfg = UltoimV2Config(enabled=True)  # distance_gate_enabled defaults False
-    assert cfg.distance_gate_enabled is False
+def test_distance_gate_default_on_abstains_near_strike():
+    cfg = UltoimV2Config(enabled=True)  # distance_gate_enabled now defaults True
+    assert cfg.distance_gate_enabled is True
+    v = gate.evaluate(_cand(distance_sigma=0.05), cfg, interval="15M")
+    assert v["fired"] is False
+    assert v["research_fired"] is True               # measurement keeps accruing
+    assert "NEAR_STRIKE_PIN" in v["reason_codes"]
+
+
+# --------------------------------------------------------------------------- #
+# 1b. Opt-out escape hatch: explicitly disabled -> byte-identical no-gate.
+# --------------------------------------------------------------------------- #
+def test_distance_gate_explicit_off_is_byte_identical():
+    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=False)
     v = gate.evaluate(_cand(distance_sigma=0.05), cfg, interval="15M")
     assert v["fired"] is True
     assert v["research_fired"] is True

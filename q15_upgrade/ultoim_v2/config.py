@@ -107,13 +107,16 @@ class UltoimV2Config:
     distance_pin_sigma: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_DISTANCE_PIN_SIGMA", 0.15)
     )
-    # Distance GATE. DEFAULT OFF (byte-identical): record-only by default. When enabled,
-    # ABSTAINS (suppresses paper delivery; measurement is unchanged) on 15M near-strike NO
-    # candidates only — those with |distance_sigma| < distance_pin_sigma (REUSES that field
-    # as the threshold; no separate knob). 10M/7M and the YES side are unaffected, and the
-    # gate NEVER places, modifies, or cancels a real order.
+    # Distance GATE. DEFAULT ON (owner-enabled): ABSTAINS (suppresses paper delivery;
+    # measurement via research_fired is UNCHANGED) on 15M near-strike NO candidates only —
+    # those with |distance_sigma| < distance_pin_sigma (REUSES that field as the threshold;
+    # no separate knob). 10M/7M and the YES side are unaffected, and the gate NEVER places,
+    # modifies, or cancels a real order. Basis: the near-strike-NO loss replicates on the v95
+    # champion ledger (n=186, −6.8¢ near vs +5.7¢ far); it is a payoff-asymmetry edge and is
+    # NOT yet p<0.05 on the small delivered 15M sample (n=8). Set Q15_ULTOIM_V2_DISTANCE_GATE=
+    # false to opt out (restores byte-identical no-gate behaviour).
     distance_gate_enabled: bool = field(
-        default_factory=lambda: _bool("Q15_ULTOIM_V2_DISTANCE_GATE", False)
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_DISTANCE_GATE", True)
     )
     # Record the broad-market cross-asset flow factor (x_market_flow) on every
     # candidate row, for measure-first validation of a possible NO-side veto (high
