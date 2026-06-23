@@ -2,7 +2,7 @@
 *would this signal have improved the probability?* — without ever touching the
 frozen champion or placing an order.
 
-Five experimental signals are computed every cycle from data the system ALREADY
+Six experimental signals are computed every cycle from data the system ALREADY
 collects (no new external feeds), recorded next to each prediction, and graded at
 settlement:
 
@@ -16,6 +16,14 @@ settlement:
                                 look like directionless noise (high sign entropy).
   regime_transition       (#18b) confidence — de-confidence when the regime is
                                 near a boundary and likely to flip.
+  coinflip_fade           (#20) calibration — fade the champion's lean back toward
+                                0.5 ONLY inside the near-coin-flip band (zero
+                                outside it). The live record shows calibrated
+                                P(YES) in ~[0.50,0.60) realises YES only ~27% of
+                                the time (over-confident) while P(YES) >= 0.60 went
+                                17/17 (well calibrated). This signal is the settled
+                                A/B evidence for the band de-confidence applied by
+                                the champion guard _coinflip_confidence_shrink.
 
 Every signal is expressed as a YES-oriented real in ``[-1, 1]`` so all five are
 graded uniformly. The A/B fits a one-parameter logistic *adjustment* on top of
@@ -40,7 +48,13 @@ SIGNAL_NAMES: tuple[str, ...] = (
     "prediction_stability",
     "entropy_noise",
     "regime_transition",
+    "coinflip_fade",
 )
+
+# Half-width (in P(YES) space, around 0.5) of the near-coin-flip band that
+# coinflip_fade de-confidences. Matches the champion guard's default
+# Q15_V95_COINFLIP_SHRINK_BAND so the A/B measures exactly that guard's effect.
+_COINFLIP_FADE_BAND = 0.10
 
 # Human labels for the compact report.
 _SIGNAL_LABELS: dict[str, str] = {
@@ -49,6 +63,7 @@ _SIGNAL_LABELS: dict[str, str] = {
     "prediction_stability": "stability",
     "entropy_noise": "low-noise",
     "regime_transition": "regime-stab",
+    "coinflip_fade": "coin-fade",
 }
 
 
@@ -266,12 +281,28 @@ def compute_signals(analysis: Mapping[str, Any], canonical: Any, config: SignalC
         transition_prob = 0.5
     regime_transition = _clamp(lean * (1.0 - transition_prob), -1.0, 1.0)
 
+    # --- #20 coin-flip fade: de-confidence the lean in the near-coin-flip band ----
+    # The settled record shows the champion is over-confident in the near-coin-flip
+    # band (calibrated P(YES) ~[0.50,0.60) realises YES ~27% of the time), while it
+    # is well calibrated OUTSIDE the band (P(YES) >= 0.60 went 17/17). The
+    # YES-oriented correction therefore pulls the lean *back toward 0.5* ONLY inside
+    # a band of half-width ``_COINFLIP_FADE_BAND`` around 0.5, and is exactly zero
+    # for confident calls — so it mirrors the champion guard
+    # ``_coinflip_confidence_shrink`` (same band) and the A/B measures precisely
+    # that guard's de-confidence effect out of sample. The band weight tapers
+    # linearly from the band edge to 0.5; the SIGN (negative for a YES lean,
+    # positive for a NO lean) carries the de-confidence direction.
+    band_dist = abs(model_yes - 0.5)
+    band_weight = _clamp(1.0 - band_dist / _COINFLIP_FADE_BAND, 0.0, 1.0)
+    coinflip_fade = _clamp(-lean * band_weight, -1.0, 1.0)
+
     return {
         "order_flow_persistence": round(order_flow_persistence, 6),
         "book_resiliency": round(book_resiliency, 6),
         "prediction_stability": round(prediction_stability, 6),
         "entropy_noise": round(entropy_noise, 6),
         "regime_transition": round(regime_transition, 6),
+        "coinflip_fade": round(coinflip_fade, 6),
     }
 
 

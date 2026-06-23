@@ -763,6 +763,40 @@ def _market_anchored_probability(model_yes: float, market_yes: float | None,
     }
 
 
+def _coinflip_confidence_shrink(calibrated_yes: float) -> tuple[float, dict[str, Any]]:
+    """Near-coin-flip over-confidence guard (DEFAULT OFF — no live change).
+
+    The settled record shows the champion is over-confident in the near-coin-flip
+    band: calibrated P(YES) in ~[0.50,0.60) realises YES only ~27% of the time, so
+    those leans carry no real directional edge. Outside the band the model is well
+    calibrated — P(YES) >= 0.60 went 17/17 and the strong-NO calls went ~19/21 — so
+    a fix must touch ONLY the coin-flip zone.
+
+    When enabled (``Q15_V95_COINFLIP_SHRINK_STRENGTH`` > 0) this pulls the
+    probability toward 0.5, strongest at the coin flip and tapering to zero at the
+    edge of the band (``Q15_V95_COINFLIP_SHRINK_BAND``, default +/-0.10 around 0.5).
+    Because ``strength`` and ``weight`` are both in [0,1] the result can never cross
+    0.5, so the predicted SIDE never changes: every previously-correct pick keeps
+    its side and its win/loss. The effect is purely a calibration / Brier
+    improvement (less over-confident probabilities in the noise band).
+
+    This mirrors the ``coinflip_fade`` shadow A/B signal. It stays OFF until that
+    out-of-sample A/B confirms the lift, per the frozen-champion / manual-promotion
+    policy. Returns ``(maybe_shrunk_yes, info)``.
+    """
+    strength = _env_float("Q15_V95_COINFLIP_SHRINK_STRENGTH", 0.0, 0.0, 1.0)
+    if strength <= 0.0:
+        return calibrated_yes, {"active": False}
+    band = _env_float("Q15_V95_COINFLIP_SHRINK_BAND", 0.10, 0.01, 0.25)
+    distance = abs(calibrated_yes - 0.5)
+    weight = _clamp(1.0 - distance / band, 0.0, 1.0)  # 1 at the coin flip, 0 at/beyond the band edge
+    shrunk = _clamp(calibrated_yes - strength * weight * (calibrated_yes - 0.5), 0.01, 0.99)
+    return shrunk, {
+        "active": True, "strength": round(strength, 3), "band": round(band, 3),
+        "weight": round(weight, 3), "from": round(calibrated_yes, 4), "to": round(shrunk, 4),
+    }
+
+
 # --- Suspected price-manipulation tracking (read-only) -----------------------
 # A composite "are large players pushing the price around?" suspicion, built
 # ENTIRELY from tells the engine already computed this cycle. It never changes
@@ -1077,6 +1111,13 @@ def analyse_v95(
     if anchor_regime_factor != 1.0:
         market_anchor["regime_factor"] = round(anchor_regime_factor, 4)
         market_anchor["base_strength"] = base_anchor_strength
+    # Near-coin-flip over-confidence guard (DEFAULT OFF). Side-preserving by
+    # construction (never crosses 0.5), so it cannot change any predicted side; it
+    # only de-confidences the calibrated probability in the near-coin-flip noise
+    # band when explicitly enabled. See _coinflip_confidence_shrink.
+    calibrated_yes, coinflip_shrink = _coinflip_confidence_shrink(calibrated_yes)
+    if coinflip_shrink.get("active"):
+        market_anchor["coinflip_shrink"] = coinflip_shrink
     challenger_weights = _timed(prof, "challenger_weights", ledger.challenger_weights, canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _timed(prof, "model_challenger", _model_probability, structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
     provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"

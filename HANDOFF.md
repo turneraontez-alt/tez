@@ -25,6 +25,36 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Near-coin-flip de-confidence: shadow signal + default-OFF champion guard (branch `claude/laughing-bell-iwmob6`)
+**Suite 1107 passed / 13 skipped** (+6 tests). Deploy-pending (pushed to the feature branch; draft PR).
+Audited the live snapshot (`learning-snapshots`, commit 734b766): v95 `predictions` and challenger
+`shadow_predictions` both had **70 rows, 56 resolved, 43 correct, 13 wrong — and matched perfectly
+(both_right=43, both_wrong=13, zero one-sided)**. Root cause of the identical right/wrong:
+the shadow challenger is in permanent cold-start **mirror** mode (`challenger/runner.py:92-101`
+sets `prob_yes = control_prob_yes` while the model is unfitted), so `challenger_prob_yes ==`
+champion `calibrated_yes_probability` on **all 70 rows** — the "shadow" is the champion. The shared
+errors cluster in one place: **calibrated P(YES) ∈ [0.50,0.60) realises YES only 4/15 = 27%** (11 of
+13 errors), while **P(YES) ≥ 0.60 went 17/17** and strong-NO calls 19/21 — i.e. a near-coin-flip
+over-confidence band, worst at 15M (15M 50% / 10M 79% / 7M 89%).
+- **Honest negative result:** an order-flow-confirmed *directional* fade looked good in-sample
+  (fixes 4/13, breaks 0) but **fails out-of-sample** (Brier worsens; flow-direction signals score
+  −0.04 OOS). So flipping the band is overfitting (n=15) and is NOT shipped.
+- **The validated, constraint-respecting fix is side-preserving de-confidence** (only the
+  near-coin-flip shrink helps OOS direction). Shipped two mirrored pieces:
+  - **Shadow A/B signal `coinflip_fade`** (`q15_upgrade/shadow_signals.py`, 6th signal, collection
+    ON like the others, observational): pulls the lean toward 0.5 only inside ±0.10 of P(YES)=0.5,
+    zero outside. Current A/B: reduction −0.040, p=0.37, `improves=False` → **not yet significant**
+    (accumulating settled OOS evidence; this is the promotion gate).
+  - **Champion guard `_coinflip_confidence_shrink`** (`q15_upgrade/checkpoint_v95.py`, **DEFAULT OFF**
+    via `Q15_V95_COINFLIP_SHRINK_STRENGTH=0`; band `Q15_V95_COINFLIP_SHRINK_BAND=0.10`): when enabled,
+    de-confidences the band toward 0.5, **clamped so it never crosses 0.5 → 0 side flips, provably
+    preserves every one of the 43 correct picks** (only Brier/calibration moves). On the 28 band rows
+    Brier improves 0.2442→0.2420; untouched elsewhere. Off until the `coinflip_fade` A/B confirms it.
+- **Tests:** `test_shadow_signals.py` (signal present/bounded, band-localised de-confidence, zeros
+  outside band) + `test_q15_v95.py::CoinflipConfidenceShrinkTests` (default no-op, shrinks in band,
+  untouched outside, never-flips-side sweep, analyse_v95 integration preserves side). Champion
+  weights and live alerts unchanged (guard default-OFF); read-only invariant intact.
+
 ## ✅ Shipped THIS session — Ultoim grade fix: "always C" → real A/B/C spread (branch `claude/magical-cannon-6dkv8s`)
 **Suite 1133 passed / 4 skipped** (+5 ultoim tests). Diagnosed via the live snapshot
 (`learning-snapshots` + pre-reset `tez_review_dump.json`): the Ultoim multi-factor grade was

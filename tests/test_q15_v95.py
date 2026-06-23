@@ -21,6 +21,7 @@ from q15_upgrade.checkpoint_v95 import (
     build_v95_message,
     rank_analyses,
     _bridge_parent_inputs,
+    _coinflip_confidence_shrink,
     format_telegram_message,
 )
 from q15_upgrade.ledger_v95 import CHAMPION_WEIGHTS, V95Ledger
@@ -704,6 +705,66 @@ class V95Tests(unittest.TestCase):
         rendered = format_telegram_message(legacy)
         self.assertIn("V9.5 STARTUP", rendered)
         self.assertNotIn("Three requirements", rendered)
+
+
+class CoinflipConfidenceShrinkTests(unittest.TestCase):
+    """The near-coin-flip over-confidence guard (default OFF, side-preserving)."""
+
+    def test_disabled_by_default_is_a_no_op(self):
+        os.environ.pop("Q15_V95_COINFLIP_SHRINK_STRENGTH", None)
+        for p in (0.5, 0.55, 0.59, 0.62, 0.90, 0.41, 0.10):
+            out, info = _coinflip_confidence_shrink(p)
+            self.assertEqual(out, p)
+            self.assertFalse(info["active"])
+
+    def test_shrinks_toward_half_inside_the_band(self):
+        with patch.dict(os.environ, {"Q15_V95_COINFLIP_SHRINK_STRENGTH": "1.0",
+                                     "Q15_V95_COINFLIP_SHRINK_BAND": "0.10"}, clear=False):
+            out_yes, info = _coinflip_confidence_shrink(0.55)
+            self.assertTrue(info["active"])
+            self.assertLess(out_yes, 0.55)       # pulled toward 0.5
+            self.assertGreaterEqual(out_yes, 0.5)  # but never across it
+            out_no, _ = _coinflip_confidence_shrink(0.45)
+            self.assertGreater(out_no, 0.45)
+            self.assertLessEqual(out_no, 0.5)
+
+    def test_confident_calls_outside_band_are_untouched(self):
+        with patch.dict(os.environ, {"Q15_V95_COINFLIP_SHRINK_STRENGTH": "1.0",
+                                     "Q15_V95_COINFLIP_SHRINK_BAND": "0.10"}, clear=False):
+            for p in (0.61, 0.75, 0.95, 0.39, 0.20):  # |p-0.5| >= band -> weight 0
+                out, _ = _coinflip_confidence_shrink(p)
+                self.assertAlmostEqual(out, p, places=9)
+
+    def test_never_flips_the_predicted_side(self):
+        # For any strength/band and any probability, a YES (>=0.5) stays >=0.5 and a
+        # NO (<0.5) stays <0.5 — so a previously-correct pick can never be flipped.
+        with patch.dict(os.environ, {"Q15_V95_COINFLIP_SHRINK_STRENGTH": "1.0",
+                                     "Q15_V95_COINFLIP_SHRINK_BAND": "0.25"}, clear=False):
+            for i in range(1, 100):
+                p = i / 100.0
+                out, _ = _coinflip_confidence_shrink(p)
+                self.assertEqual(p >= 0.5, out >= 0.5, f"side flipped at p={p}")
+
+    def test_integration_analyse_v95_preserves_side_when_enabled(self):
+        # Driving the live path with the guard ON must not change the predicted
+        # side relative to the default (OFF) run on the identical snapshot.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        ledger = V95Ledger(Path(temp.name) / "shrink.sqlite3")
+        row = snapshot(checkpoint="10M")
+        canon = build_canonical_snapshot(
+            row, asset="BNB", checkpoint="10M", now=NOW,
+            cached_candles=candles(), context=context(), public=public(),
+        )
+        os.environ.pop("Q15_V95_COINFLIP_SHRINK_STRENGTH", None)
+        base_a = analyse_v95(row, canon, ledger)
+        with patch.dict(os.environ, {"Q15_V95_COINFLIP_SHRINK_STRENGTH": "1.0"}, clear=False):
+            shrunk_a = analyse_v95(row, canon, ledger)
+        self.assertEqual(base_a["prediction_side"], shrunk_a["prediction_side"])
+        # Probability moves no further from 0.5 than the baseline (de-confidence).
+        self.assertLessEqual(abs(shrunk_a["yes_probability"] - 0.5),
+                             abs(base_a["yes_probability"] - 0.5) + 1e-9)
+
 
 if __name__ == "__main__":
     unittest.main()
