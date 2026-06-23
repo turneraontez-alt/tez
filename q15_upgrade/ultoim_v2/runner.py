@@ -258,7 +258,7 @@ class UltoimV2Runner:
         cfg = self.config
         evaluated: list[dict[str, Any]] = []
         for cand in cands:
-            verdict = gate.evaluate(cand, cfg)
+            verdict = gate.evaluate(cand, cfg, interval=interval)
             stale = _num(cand.get("spot_stale_age_seconds"))
             abstained_stale = False
             if verdict["fired"] and stale is not None and stale > cfg.max_spot_stale_seconds:

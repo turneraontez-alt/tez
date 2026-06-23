@@ -39,6 +39,7 @@ REASON_CODES = (
     "EDGE_BELOW_MIN",
     "MISSING_DATA",
     "STALE_FEED",
+    "NEAR_STRIKE_PIN",
 )
 
 # Tolerance for the inclusive edge comparator — absorbs float-repr slack only
@@ -91,7 +92,7 @@ def display_entry(selected: float, cost_cents: float, ask: float, cfg: Any) -> i
     return int(capped)
 
 
-def evaluate(candidate: Mapping[str, Any], cfg: Any) -> dict[str, Any]:
+def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = None) -> dict[str, Any]:
     """Evaluate one candidate against the three gates.
 
     Returns a dict with: fired(bool), research_fired(bool), reason_codes(list[str]),
@@ -102,6 +103,13 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any) -> dict[str, Any]:
     ``fired`` is the DELIVERY verdict (NO-only when ``cfg.no_only``).
     ``research_fired`` is gate_b AND gate_c only (side-agnostic) — used to record
     YES-side research candidates without ever delivering them.
+
+    ``interval`` (keyword-only, default None) scopes the DEFAULT-OFF distance gate:
+    when ``cfg.distance_gate_enabled`` is true it ABSTAINS (suppresses delivery via
+    ``fired``, NEVER ``research_fired`` — measurement keeps accruing) on a 15M NO
+    candidate sitting too close to the strike (``|distance_sigma| < distance_pin_sigma``),
+    tagging ``NEAR_STRIKE_PIN``. 10M/7M and the YES side are unaffected. With the gate
+    disabled (default) behaviour is byte-identical to the three-gate verdict.
     """
     side = str(candidate.get("predicted_side") or "").upper()
     sel = _clean_num(candidate.get("selected_probability"))
@@ -148,7 +156,23 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any) -> dict[str, Any]:
         reason_codes.append("EDGE_BELOW_MIN")
 
     research_fired = gate_b and gate_c
-    fired = gate_a and research_fired
+
+    # Distance GATE (DEFAULT OFF). Scoped to 15M NO only: ABSTAIN on the near-strike
+    # "pin" where cross-ledger evidence shows the NO side loses. Suppresses DELIVERY
+    # (``fired``) only — ``research_fired`` is UNCHANGED so the recap's distance
+    # scoreboard keeps measuring these candidates. fail-open on a missing distance.
+    dist = _clean_num(candidate.get("distance_sigma"))
+    near_block = bool(
+        getattr(cfg, "distance_gate_enabled", False)
+        and interval == "15M"
+        and side == "NO"
+        and dist is not None
+        and abs(dist) < cfg.distance_pin_sigma
+    )
+    if near_block:
+        reason_codes.append("NEAR_STRIKE_PIN")
+
+    fired = gate_a and research_fired and not near_block
     return {
         "fired": bool(fired),
         "research_fired": bool(research_fired),

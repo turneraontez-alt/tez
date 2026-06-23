@@ -78,12 +78,23 @@ def binom_test_greater(k: int, n: int, p0: float) -> float:
 # row helpers
 # --------------------------------------------------------------------------- #
 def _is_gated(row: Mapping[str, Any]) -> bool:
-    """A row that passed the gate (conf+ask+edge), regardless of side. NULL
-    research_fired (pre-migration rows) falls back to the delivered ``fired``."""
+    """A row that passed the gate (conf+ask+edge), regardless of side.
+
+    ``gate_b_pass AND gate_c_pass`` is the PRIMARY, authoritative source: those two
+    columns are in the ORIGINAL ledger schema (they predate ``research_fired``) so they
+    are present on every persisted row, and by construction ``research_fired==1`` is
+    exactly ``gate_b_pass==1 AND gate_c_pass==1``. Deriving from them recovers YES
+    research rows whose ``research_fired`` was absent and got backfilled to 0 by the
+    schema migration — the delivered ``fired`` flag is structurally 0 for every YES row,
+    so falling back to it would silently undercount the YES side. The older fallbacks
+    remain for rows / test-fixtures that lack the gate columns."""
+    gb, gc = row.get("gate_b_pass"), row.get("gate_c_pass")
+    if gb is not None and gc is not None:
+        return int(gb) == 1 and int(gc) == 1
     rf = row.get("research_fired")
-    if rf is None:
-        return int(row.get("fired") or 0) == 1
-    return int(rf or 0) == 1
+    if rf is not None:
+        return int(rf) == 1
+    return int(row.get("fired") or 0) == 1
 
 
 def gated_resolved(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
