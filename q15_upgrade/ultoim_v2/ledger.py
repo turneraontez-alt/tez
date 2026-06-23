@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .fifteen_min import S15_VERSION
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +85,10 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     conf_gap REAL,
     blowup_risk REAL,
     screen_version TEXT,
+    s15_pass INTEGER,
+    s15_codes TEXT,
+    s15_cal_drift REAL,
+    s15_version TEXT,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -198,6 +204,12 @@ class UltoimV2Ledger:
             ("screen_version", "TEXT"),
             # Record-only cross-asset market flow (measure-first; see runner). Nullable, never gates.
             ("x_market_flow", "REAL"),
+            # Record-only 15M selective-entry research SCREEN (see fifteen_min.py). All
+            # nullable; populated for 15M-NO rows only; NEVER read by the gate.
+            ("s15_pass", "INTEGER"),
+            ("s15_codes", "TEXT"),
+            ("s15_cal_drift", "REAL"),
+            ("s15_version", "TEXT"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -322,6 +334,7 @@ class UltoimV2Ledger:
         "gate_min_conf", "gate_ask_lo", "gate_ask_hi", "gate_min_edge",
         "close_time", "snapshot_id", "session_id", "delivery_status",
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
+        "s15_pass", "s15_codes", "s15_cal_drift", "s15_version",
     )
 
     # Sensible defaults for columns added after the first release, so any caller
@@ -512,6 +525,49 @@ class UltoimV2Ledger:
                 (model_version, int(limit)),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def s15_research_scoreboard(self, model_version: str) -> dict[str, Any]:
+        """Read-only: how the 15M selective-entry research SCREEN (record-only; see
+        ``fifteen_min.py``) WOULD have performed, vs the full settled 15M-NO book.
+        NEVER affects delivery — it purely measures the recorded ``s15_pass`` verdict
+        so the rule can prove (or disprove) itself on prospective, cross-session data.
+        ``book`` is the unfiltered 15M-NO baseline; ``gated`` is the s15_pass=1 subset
+        the screen would have taken; the two ``gated_with_*`` cuts add a tilt."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT correct, hypothetical_pnl_cents, s15_pass, s15_codes "
+                "FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND interval='15M' AND predicted_side='NO' "
+                "AND official_result IS NOT NULL",
+                (model_version,),
+            ).fetchall()
+
+        def _agg(rs: Sequence[sqlite3.Row]) -> dict[str, Any]:
+            n = len(rs)
+            right = sum(1 for r in rs if r["correct"] == 1)
+            pnls = [float(r["hypothetical_pnl_cents"]) for r in rs
+                    if r["hypothetical_pnl_cents"] is not None]
+            p, lo, hi = _wilson(right, n)
+            return {
+                "n": n, "right": right, "wrong": n - right,
+                "accuracy": p, "ci_low": lo, "ci_high": hi,
+                "pnl_total_cents": round(sum(pnls), 2) if pnls else 0.0,
+                "pnl_avg_cents": round(sum(pnls) / len(pnls), 3) if pnls else None,
+            }
+
+        gated = [r for r in rows if r["s15_pass"] == 1]
+
+        def _with(code: str) -> list[sqlite3.Row]:
+            return [r for r in gated if code in (r["s15_codes"] or "").split(",")]
+
+        return {
+            "available": True,
+            "version": S15_VERSION,
+            "book": _agg(rows),
+            "gated": _agg(gated),
+            "gated_with_cal_drift": _agg(_with("CAL_DRIFT")),
+            "gated_with_fresh": _agg(_with("FRESH")),
+        }
 
     def resolved_rows(self, model_version: str) -> list[dict[str, Any]]:
         """Every settled row (any side, any record_kind) as plain dicts — the input
