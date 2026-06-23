@@ -2237,12 +2237,14 @@ def _interval_alerts_enabled(checkpoint: str) -> bool:
 
 def _timing_experiment_marks() -> list[int]:
     """Extra time-to-close marks (seconds) at which to capture an OBSERVATIONAL
-    timing-experiment prediction. Default 13/12/11 min (780/720/660s) so we can
-    MEASURE where, between the 15M and 10M checkpoints, accuracy crosses into a
-    usable edge — instead of guessing. An empty value disables collection."""
+    timing-experiment prediction. Default is the full 15M→7M ladder —
+    900/780/720/660/600/540/480/420s (15/13/12/11/10/9/8/7 min) — so the hourly
+    report shows the WHOLE per-mark accuracy curve and we can MEASURE where it
+    crosses into a usable edge, including the 10M→7M "knee" (9M/8M, previously
+    untracked). An empty value disables collection."""
     raw = os.environ.get("Q15_V95_TIMING_EXPERIMENT_SECONDS")
     if raw is None:
-        raw = "780,720,660"
+        raw = "900,780,720,660,600,540,480,420"
     marks: list[int] = []
     for part in str(raw).replace(";", ",").split(","):
         part = part.strip()

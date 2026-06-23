@@ -25,6 +25,35 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Track the full 15M→7M mark ladder (incl. 9M/8M) across the learning systems (branch `claude/sleepy-cray-8ktugn`)
+**Suite 1102 passed / 13 skipped here** (+1 net interval-research test; 1133 in a complete env).
+Deploy-pending — branch + draft PR, NOT merged to main.
+
+Motivation: a multi-agent entry-economics review (read-only, on the live `learning-snapshots`
+ledgers — one ~2h session, 7 assets) found 9M/8M were **NOT TRACKED CORRECTLY**: the live
+timing writer enumerated only 780/720/660 (13/12/11M) and the dedicated 8-mark `interval_research`
+module was default-OFF, so the 10M→7M "knee" (where executable EV flips positive) was
+unmeasurable. Everything else in the review was INSUFFICIENT (single regime, 0 live entries).
+
+Changes (all OBSERVATIONAL — no trading, no Telegram, frozen champion untouched):
+- `checkpoint_v95._timing_experiment_marks()` default `780,720,660` → full ladder
+  `900,780,720,660,600,540,480,420` (15/13/12/11/10/9/8/7M). The hourly report's
+  "Entry-timing experiment" section (`notifications/reporting.py:_timing_experiment_lines`)
+  renders marks generically, so the whole 15→7M accuracy curve now shows up as rows resolve.
+- `interval_research` flipped to **default-ON (capture-only)** (`Q15_INTERVAL_RESEARCH_ENABLED`
+  default True) — the purpose-built 8-mark collector that also records per-mark **executable
+  economics** (ask/edge/P&L). It is already wired into `run_cycle` as a guarded observer +
+  settlement resolver; `learning_export.py` auto-globs `data/*.sqlite3`, so its new DB exports
+  to `learning-snapshots` for review with no plumbing change. `=false` for a fully inert app.
+- Tests updated: timing default-marks assertion (full ladder); interval-research `test_default_off`
+  → `test_default_on_capture_only` + `test_explicit_disable_still_works`.
+
+Reviews of the OTHER learning systems (read-only, same single-regime data): shadow challenger
+INSUFFICIENT (pinned to control by cold-start mirror, 0 trades); 5 shadow signals + flip predictor
+INSUFFICIENT/non-predictive (A/B "significance" is a pure-NO-fold artifact; flip AUC ≈0.51) but
+correctly dormant; weight learners LEARNING within caps, champion provably frozen, promotion
+correctly withheld (<50 rows). No BROKEN code paths found.
+
 ## ✅ Shipped THIS session — Ultoim grade fix: "always C" → real A/B/C spread (branch `claude/magical-cannon-6dkv8s`)
 **Suite 1133 passed / 4 skipped** (+5 ultoim tests). Diagnosed via the live snapshot
 (`learning-snapshots` + pre-reset `tez_review_dump.json`): the Ultoim multi-factor grade was

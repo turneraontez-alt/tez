@@ -49,6 +49,7 @@ def _cfg(tmp, **kw):
 class ConfigTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("Q15_INTERVAL_RESEARCH_ENABLED", None)
+        os.environ.pop("Q15_INTERVAL_RESEARCH_DB", None)
         cfg_mod.reset_enabled_cache()
         reset_runner()
 
@@ -58,8 +59,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(INTERVAL_ROLES["10M"], "OFFENSIVE_ENTRY")
         self.assertEqual(INTERVAL_ROLES["7M"], "CONFIRMATION_DEFENSIVE")
 
-    def test_default_off(self):
+    def test_default_on_capture_only(self):
         os.environ.pop("Q15_INTERVAL_RESEARCH_ENABLED", None)
+        os.environ["Q15_INTERVAL_RESEARCH_DB"] = os.path.join(tempfile.mkdtemp(), "on.sqlite3")
+        cfg_mod.reset_enabled_cache()
+        reset_runner()
+        self.assertTrue(IntervalResearchConfig.from_env().enabled)
+        self.assertIsNotNone(get_runner())
+
+    def test_explicit_disable_still_works(self):
+        os.environ["Q15_INTERVAL_RESEARCH_ENABLED"] = "false"
         cfg_mod.reset_enabled_cache()
         reset_runner()
         self.assertFalse(IntervalResearchConfig.from_env().enabled)
