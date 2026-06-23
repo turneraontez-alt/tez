@@ -200,6 +200,9 @@ class UltoimV2Runner:
             "x_market_flow": market_flow,
             "pin_break_drift": structural.get("z_score"),
             "threshold_interaction": feature_values.get("threshold_interaction"),
+            # Champion per-asset directional flow factor — the flow-against-NO abstain
+            # candidate (record-only; see ledger.flow_research_scoreboard). Never gates.
+            "champion_flow": feature_values.get("flow"),
             "snapshot_id": analysis.get("snapshot_id"),
         }
 
@@ -346,6 +349,7 @@ class UltoimV2Runner:
             "x_market_flow": cand.get("x_market_flow"),
             "pin_break_drift": cand.get("pin_break_drift"),
             "threshold_interaction": cand.get("threshold_interaction"),
+            "champion_flow": cand.get("champion_flow"),
             "gate_a_pass": 1 if verdict.get("gate_a") else 0,
             "gate_b_pass": 1 if verdict.get("gate_b") else 0,
             "gate_c_pass": 1 if verdict.get("gate_c") else 0,
@@ -606,6 +610,8 @@ class UltoimV2Runner:
             sb["s15_research"] = self.ledger.s15_research_scoreboard(mv)
             sb["distance_research"] = self.ledger.distance_research_scoreboard(
                 mv, pin_sigma=self.config.distance_pin_sigma)
+            sb["flow_research"] = self.ledger.flow_research_scoreboard(
+                mv, flow_threshold=self.config.flow_against_no_threshold)
             recent = self.ledger.recent_rows(mv, limit=10)
             losses = self.ledger.loss_rows(mv, limit=10)
             text = panel.build_recap(sb, recent, losses, self.config)
