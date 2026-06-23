@@ -25,35 +25,64 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Near-coin-flip de-confidence: shadow signal + default-OFF champion guard (branch `claude/laughing-bell-iwmob6`)
-**Suite 1107 passed / 13 skipped** (+6 tests). Deploy-pending (pushed to the feature branch; draft PR).
-Audited the live snapshot (`learning-snapshots`, commit 734b766): v95 `predictions` and challenger
-`shadow_predictions` both had **70 rows, 56 resolved, 43 correct, 13 wrong — and matched perfectly
-(both_right=43, both_wrong=13, zero one-sided)**. Root cause of the identical right/wrong:
-the shadow challenger is in permanent cold-start **mirror** mode (`challenger/runner.py:92-101`
-sets `prob_yes = control_prob_yes` while the model is unfitted), so `challenger_prob_yes ==`
-champion `calibrated_yes_probability` on **all 70 rows** — the "shadow" is the champion. The shared
-errors cluster in one place: **calibrated P(YES) ∈ [0.50,0.60) realises YES only 4/15 = 27%** (11 of
-13 errors), while **P(YES) ≥ 0.60 went 17/17** and strong-NO calls 19/21 — i.e. a near-coin-flip
-over-confidence band, worst at 15M (15M 50% / 10M 79% / 7M 89%).
-- **Honest negative result:** an order-flow-confirmed *directional* fade looked good in-sample
-  (fixes 4/13, breaks 0) but **fails out-of-sample** (Brier worsens; flow-direction signals score
-  −0.04 OOS). So flipping the band is overfitting (n=15) and is NOT shipped.
-- **The validated, constraint-respecting fix is side-preserving de-confidence** (only the
-  near-coin-flip shrink helps OOS direction). Shipped two mirrored pieces:
-  - **Shadow A/B signal `coinflip_fade`** (`q15_upgrade/shadow_signals.py`, 6th signal, collection
-    ON like the others, observational): pulls the lean toward 0.5 only inside ±0.10 of P(YES)=0.5,
-    zero outside. Current A/B: reduction −0.040, p=0.37, `improves=False` → **not yet significant**
-    (accumulating settled OOS evidence; this is the promotion gate).
-  - **Champion guard `_coinflip_confidence_shrink`** (`q15_upgrade/checkpoint_v95.py`, **DEFAULT OFF**
-    via `Q15_V95_COINFLIP_SHRINK_STRENGTH=0`; band `Q15_V95_COINFLIP_SHRINK_BAND=0.10`): when enabled,
-    de-confidences the band toward 0.5, **clamped so it never crosses 0.5 → 0 side flips, provably
-    preserves every one of the 43 correct picks** (only Brier/calibration moves). On the 28 band rows
-    Brier improves 0.2442→0.2420; untouched elsewhere. Off until the `coinflip_fade` A/B confirms it.
-- **Tests:** `test_shadow_signals.py` (signal present/bounded, band-localised de-confidence, zeros
-  outside band) + `test_q15_v95.py::CoinflipConfidenceShrinkTests` (default no-op, shrinks in band,
-  untouched outside, never-flips-side sweep, analyse_v95 integration preserves side). Champion
-  weights and live alerts unchanged (guard default-OFF); read-only invariant intact.
+## ✅ Shipped THIS session — Ultoim V2: paper entry-alert system (branch `claude/sleepy-cray-8ktugn`)
+**Suite 1125 passed / 13 skipped here** (+23 ultoim_v2 tests). Deploy-pending — branch + draft PR.
+**Default-OFF** (`Q15_ULTOIM_V2_ENABLED`, default false → app byte-identical when unset).
+
+A SEPARATE, read-only, paper entry-alert system in new package `q15_upgrade/ultoim_v2/` —
+own DB (`data/q15_ultoim_v2_v1.sqlite3`), own `model_version="ultoim-v2"`, own Telegram chat
+(`Q15_ULTOIM_V2_TELEGRAM_CHAT_ID`). Never places real orders; never touches the champion or the
+real Ultoim; reuses the frozen analysis read-only. Wired as two guarded try-blocks
+(`checkpoint_v95.py:2779` observe, `app.py:648` reconcile+recap), mirroring the ultoim pattern.
+
+- **Entry gate** (`gate.py`, pure): NO-only, `selected≥0.55`, ask∈[50,72]¢, `net_edge≥2¢`,
+  inclusive comparators, NULL-SKIP, reason codes. `best_entry = floor(sel·100 − cost − 2)` clamped
+  to band, never above market ask. Validated on live data: 12 trades / 92% / +52% ROI (in-sample 6
+  @100%, fresh OOS 6 @83%) — but ONE NO-leaning regime, 0 YES-prone windows → UNPROVEN; the gate's
+  one fitted knob is `edge≥2` and it is NOT yet statistically separable from the ~75% base NO rate.
+- **Alerts**: live "BEST ENTRY" card grammar, labeled `ULTOIM V2 · PAPER ENTRY` with a per-message
+  `N / 1-regime / 0 YES-prone` caveat; never emits `V9.5 CHECK`/`ENTRY RECOMMENDED`/`Hourly Report —`
+  /`TOP 3 PICKS` (suppression-marker safety; test-asserted). One alert per contract per window
+  (alert-lock), earliest qualifying checkpoint. Freshness gate abstains on a stale spot (STALE_FEED).
+- **Records everything** on entry AND no-entry: gate pass/fail + reason codes, cushion-to-strike
+  (`distance_sigma`), regime_directional, market-implied prob, depth/quote-age, base_rate_side,
+  session_id, full feature vector + settlement + realized P&L. `learning_export` auto-globs its DB.
+- **30-min research recap** (`build_recap`, header `ULTOIM V2 — RESEARCH RECAP`): resolved/total/
+  pending, W-L + Wilson CI, ROI, base-rate + edge-over-base, by-interval, recent picks, and a
+  "recent losses (for review)" section. Headline % suppressed below n=30 (`INSUFFICIENT DATA`).
+- Built + stress-tested by 4 read-only review agents first (architecture, rule/signal, UI/format,
+  safety) before implementation. Owner directive: research overlay but live-formatted real-time
+  signals so it can be paper-traded and visualized; promote to "live" only after it beats base rate
+  across a YES-prone window.
+
+## ✅ Shipped THIS session — Track the full 15M→7M mark ladder (incl. 9M/8M) across the learning systems (branch `claude/sleepy-cray-8ktugn`)
+**Suite 1102 passed / 13 skipped here** (+1 net interval-research test; 1133 in a complete env).
+Deploy-pending — branch + draft PR, NOT merged to main.
+
+Motivation: a multi-agent entry-economics review (read-only, on the live `learning-snapshots`
+ledgers — one ~2h session, 7 assets) found 9M/8M were **NOT TRACKED CORRECTLY**: the live
+timing writer enumerated only 780/720/660 (13/12/11M) and the dedicated 8-mark `interval_research`
+module was default-OFF, so the 10M→7M "knee" (where executable EV flips positive) was
+unmeasurable. Everything else in the review was INSUFFICIENT (single regime, 0 live entries).
+
+Changes (all OBSERVATIONAL — no trading, no Telegram, frozen champion untouched):
+- `checkpoint_v95._timing_experiment_marks()` default `780,720,660` → full ladder
+  `900,780,720,660,600,540,480,420` (15/13/12/11/10/9/8/7M). The hourly report's
+  "Entry-timing experiment" section (`notifications/reporting.py:_timing_experiment_lines`)
+  renders marks generically, so the whole 15→7M accuracy curve now shows up as rows resolve.
+- `interval_research` flipped to **default-ON (capture-only)** (`Q15_INTERVAL_RESEARCH_ENABLED`
+  default True) — the purpose-built 8-mark collector that also records per-mark **executable
+  economics** (ask/edge/P&L). It is already wired into `run_cycle` as a guarded observer +
+  settlement resolver; `learning_export.py` auto-globs `data/*.sqlite3`, so its new DB exports
+  to `learning-snapshots` for review with no plumbing change. `=false` for a fully inert app.
+- Tests updated: timing default-marks assertion (full ladder); interval-research `test_default_off`
+  → `test_default_on_capture_only` + `test_explicit_disable_still_works`.
+
+Reviews of the OTHER learning systems (read-only, same single-regime data): shadow challenger
+INSUFFICIENT (pinned to control by cold-start mirror, 0 trades); 5 shadow signals + flip predictor
+INSUFFICIENT/non-predictive (A/B "significance" is a pure-NO-fold artifact; flip AUC ≈0.51) but
+correctly dormant; weight learners LEARNING within caps, champion provably frozen, promotion
+correctly withheld (<50 rows). No BROKEN code paths found.
 
 ## ✅ Shipped THIS session — Ultoim grade fix: "always C" → real A/B/C spread (branch `claude/magical-cannon-6dkv8s`)
 **Suite 1133 passed / 4 skipped** (+5 ultoim tests). Diagnosed via the live snapshot

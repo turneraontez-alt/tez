@@ -645,6 +645,18 @@ def refresh_loop(max_cycles=None):
                     _ur.reconcile(now, market_cache)
             except Exception:
                 logger.debug("ultoim reconcile skipped", exc_info=True)
+            # Read-only Ultoim V2 paper entry-alert overlay: enqueue a settlement
+            # reconcile (throttled) against the shared Kalshi result cache and emit
+            # the throttled research recap. No-op when disabled (default); all
+            # grading/DB/Telegram run on V2's own worker, never this loop.
+            try:
+                from q15_upgrade.ultoim_v2.runner import get_runner as _ultoim_v2_runner
+                _u2r = _ultoim_v2_runner()
+                if _u2r is not None:
+                    _u2r.reconcile(now, market_cache)
+                    _u2r.maybe_send_recap(now)
+            except Exception:
+                logger.debug("ultoim_v2 reconcile skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)

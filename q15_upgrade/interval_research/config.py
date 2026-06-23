@@ -6,10 +6,12 @@ champion's frozen per-asset analysis at EIGHT time-marks before settlement
 on real, matched data. It NEVER trades, never sends Telegram, and never touches
 the live champion's probability, edge, or entry decision — it only records.
 
-It is OFF by default (``Q15_INTERVAL_RESEARCH_ENABLED=false``): the new
-intervals (13M/12M/11M/9M/8M) have NO historical data, so this module exists to
-collect them PROSPECTIVELY from the deploy timestamp. Nothing about it is
-"useful" until out-of-sample results prove it — until then it is pure capture.
+It is ON by default (capture-only): the new intervals (13M/12M/11M/9M/8M) have
+NO historical data, so this module collects them PROSPECTIVELY from the deploy
+timestamp. It never trades and never sends Telegram — it only records to its own
+DB. Nothing about it is "useful" until out-of-sample results prove it — until
+then it is pure capture. Set ``Q15_INTERVAL_RESEARCH_ENABLED=false`` for a fully
+inert, byte-identical app.
 """
 from __future__ import annotations
 
@@ -80,9 +82,11 @@ REASON_CODES = (
 
 @dataclass(frozen=True)
 class IntervalResearchConfig:
-    # Default OFF: the research intervals have no history; collection is
-    # prospective only. Set Q15_INTERVAL_RESEARCH_ENABLED=true to begin capturing.
-    enabled: bool = field(default_factory=lambda: _bool("Q15_INTERVAL_RESEARCH_ENABLED", False))
+    # Default ON (capture-only): the owner asked to START collecting the full
+    # 8-mark ladder so the 9M/8M "knee" and per-mark executable economics accrue
+    # prospectively. It NEVER trades and NEVER sends Telegram — it only records to
+    # its own DB. Set Q15_INTERVAL_RESEARCH_ENABLED=false for a fully inert app.
+    enabled: bool = field(default_factory=lambda: _bool("Q15_INTERVAL_RESEARCH_ENABLED", True))
     model_version: str = field(
         default_factory=lambda: _str("Q15_INTERVAL_RESEARCH_MODEL_VERSION", "interval-research-v1")
     )

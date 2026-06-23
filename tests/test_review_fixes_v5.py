@@ -41,10 +41,13 @@ class IntervalAlertGateTests(unittest.TestCase):
 
 
 class TimingExperimentMarkTests(unittest.TestCase):
-    def test_default_marks_are_13_12_11_minutes(self):
+    def test_default_marks_are_full_15m_to_7m_ladder(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("Q15_V95_TIMING_EXPERIMENT_SECONDS", None)
-            self.assertEqual(checkpoint_v95._timing_experiment_marks(), [780, 720, 660])
+            self.assertEqual(
+                checkpoint_v95._timing_experiment_marks(),
+                [900, 780, 720, 660, 600, 540, 480, 420],
+            )
 
     def test_marks_parse_and_dedupe_and_bound(self):
         with mock.patch.dict(os.environ, {"Q15_V95_TIMING_EXPERIMENT_SECONDS": "780, 780; 99999, abc, 540"}):
