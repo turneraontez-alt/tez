@@ -828,6 +828,44 @@ def _manipulation_divergence_threshold_bps(asset: str | None) -> float:
     return global_default
 
 
+def _manipulation_pin_max_distance_sigma() -> float | None:
+    """Optional stricter distance-sigma band for the observational PIN *tell*.
+
+    The ``THRESHOLD_PIN`` *regime* (``_regime``) fires at ``distance_sigma <= 0.25``
+    and feeds the FROZEN champion's uncertainty/probability — it is deliberately
+    left untouched. This knob narrows only the read-only manipulation PIN *tell*:
+    the live record shows PIN over-fires (it triggers on ~70% of markets at
+    baseline accuracy, i.e. no edge), so an operator can require the price to sit
+    even closer to the strike before the tell flags, without changing any
+    prediction. Unset/<=0 (the default) => byte-identical legacy behaviour: the
+    tell fires for every ``THRESHOLD_PIN`` regime. Recommended starting point for
+    validation: ``0.15``.
+    """
+    raw = os.environ.get("Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
+
+
+def _pin_tell_passes(
+    distance_sigma: float | None, pin_max_distance_sigma: float | None
+) -> bool:
+    """Whether the PIN tell may fire given an optional stricter distance band.
+
+    Default (no knob configured) => always True (legacy: fire on every
+    ``THRESHOLD_PIN`` regime). When a band is set but the measurement is missing,
+    keep the tell rather than silently drop it — tightening only suppresses PIN
+    when we can positively confirm the price is outside the stricter band.
+    """
+    if pin_max_distance_sigma is None or distance_sigma is None:
+        return True
+    return distance_sigma <= pin_max_distance_sigma
+
+
 def _absorption_lean(absorption: Mapping[str, Any]) -> str | None:
     """Side an absorbed order flow is likely to flip toward, or ``None``.
 
@@ -848,12 +886,18 @@ def _collect_manipulation_tells(
     absorption: Mapping[str, Any],
     exchange: Mapping[str, Any],
     divergence_threshold_bps: float,
+    *,
+    distance_sigma: float | None = None,
+    pin_max_distance_sigma: float | None = None,
 ) -> tuple[list[str], str | None]:
     """Return ``(tells, lean)`` for the manipulation tells firing this cycle.
 
     ``tells`` is built in a fixed order (ABSORPTION, PIN, DIVERGENCE) so the
     downstream phrasing reads consistently; ``lean`` is set only by the
     directional ABSORPTION tell. ``divergence_threshold_bps`` is in basis points.
+    ``pin_max_distance_sigma`` (with the cycle's ``distance_sigma``) optionally
+    narrows the PIN tell below the regime's own band; both default to ``None`` so
+    the tell fires for every ``THRESHOLD_PIN`` regime exactly as before.
     """
     tells: list[str] = []
     lean: str | None = None
@@ -862,7 +906,9 @@ def _collect_manipulation_tells(
         tells.append(MANIPULATION_TELL_ABSORPTION)
         lean = _absorption_lean(absorption)
 
-    if regime_name == _REGIME_THRESHOLD_PIN:
+    if regime_name == _REGIME_THRESHOLD_PIN and _pin_tell_passes(
+        distance_sigma, pin_max_distance_sigma
+    ):
         tells.append(MANIPULATION_TELL_PIN)
 
     divergence_bps = max(0.0, _num(exchange.get("divergence_bps"), 0.0) or 0.0)
@@ -902,6 +948,8 @@ def _manipulation_signal(regime: Mapping[str, Any], absorption: Mapping[str, Any
         must agree before the signal is flagged as suspected.
       * ``Q15_V95_MANIPULATION_DIVERGENCE_BPS`` (default 35) and the per-asset
         ``..._<ASSET>`` override — the DIVERGENCE band in basis points.
+      * ``Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA`` (default unset) — optional
+        stricter distance-sigma band for the PIN tell only; unset => unchanged.
     """
     if not _env_bool("Q15_V95_MANIPULATION_TRACKING", True):
         return _no_manipulation()
@@ -909,7 +957,9 @@ def _manipulation_signal(regime: Mapping[str, Any], absorption: Mapping[str, Any
     regime_name = str((regime or {}).get("name") or "")
     threshold_bps = _manipulation_divergence_threshold_bps(asset)
     tells, lean = _collect_manipulation_tells(
-        regime_name, absorption or {}, exchange or {}, threshold_bps)
+        regime_name, absorption or {}, exchange or {}, threshold_bps,
+        distance_sigma=_num((regime or {}).get("distance_sigma")),
+        pin_max_distance_sigma=_manipulation_pin_max_distance_sigma())
 
     min_tells = int(_env_float("Q15_V95_MANIPULATION_MIN_SIGNALS", 1.0, 1.0, 3.0))
     if len(tells) < min_tells:
@@ -1264,6 +1314,42 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
             snapshot["q15_v9_5_shadow_econ_reason"] = _sd.reason
     except Exception:
         pass
+    # Entry Economics (entry-econ-v1): a SEPARATE, read-only trade-quality system
+    # answering "is this contract worth buying at an executable price?" with a
+    # single ENTER / WAIT / SKIP and the executable economics behind it. It never
+    # changes the prediction or the frozen live entry gate; the compact panel and
+    # the decision are surfaced additively. The optional entry-performance ledger
+    # only writes when Q15_ENTRY_ECON_LEDGER is enabled (off by default), so this
+    # pure computation creates no files. Fully guarded — never raises into the loop.
+    try:
+        from .entry_economics.runner import get_runner as _ee_runner
+        _ee = None
+        _runner = _ee_runner()
+        if _runner is not None:
+            # The runner evaluates AND (only when Q15_ENTRY_ECON_LEDGER is enabled)
+            # persists the evaluation to its own ledger — never the production tables.
+            _ee = _runner.evaluate(analysis, contract=analysis.get("ticker"))
+            _panel = _runner.panel(_ee)
+        else:
+            _ee = None
+            _panel = None
+        if _ee is not None:
+            snapshot["q15_entry_econ_version"] = _ee.version
+            snapshot["q15_entry_econ_decision"] = _ee.decision
+            snapshot["q15_entry_econ_side"] = _ee.side
+            snapshot["q15_entry_econ_main_blocker"] = _ee.main_blocker
+            snapshot["q15_entry_econ_main_blocker_text"] = _ee.main_blocker_text
+            if _ee.conservative is not None:
+                snapshot["q15_entry_econ_conservative_probability"] = _ee.conservative.conservative_side_prob
+            if _ee.economics is not None:
+                snapshot["q15_entry_econ_net_edge_cents"] = _ee.economics.net_edge_cents
+                snapshot["q15_entry_econ_max_entry_cents"] = _ee.economics.maximum_entry_price_cents
+                snapshot["q15_entry_econ_recommended_low_cents"] = _ee.economics.recommended_entry_low_cents
+                snapshot["q15_entry_econ_recommended_high_cents"] = _ee.economics.recommended_entry_high_cents
+                snapshot["q15_entry_econ_break_even_prob"] = _ee.economics.break_even_prob
+            snapshot["q15_entry_econ_panel"] = _panel
+    except Exception:
+        pass
     snapshot["q15_v9_5_regime"] = (analysis.get("regime") or {}).get("name")
     snapshot["q15_v9_5_entry_allowed"] = bool(analysis.get("entry_allowed"))
     # Suspected price-manipulation tracking (read-only; does not affect the call).
@@ -1534,7 +1620,23 @@ def build_v95_message(checkpoint: str, analyses: Mapping[str, Mapping[str, Any]]
             body.append("")
             body.append("⚠ Manipulation watch")
             for asset, manip in flagged:
-                body.append(f"{asset}: {_manipulation_phrase(manip)}")
+                line = f"{asset}: {_manipulation_phrase(manip)}"
+                # Highest-accuracy manipulation subset on record: a fresh tell that
+                # first appears at the 7M close. Print the predicted side and the
+                # LIVE historical hit-rate (+ sample) so NO (~97%) and YES (~85%)
+                # are weighted differently; below the min sample, say "building".
+                fnc = (analyses.get(asset, {}) or {}).get("fresh_manip_near_close")
+                if isinstance(fnc, Mapping):
+                    side = str(fnc.get("side") or "")
+                    n = int(fnc.get("n") or 0)
+                    right = int(fnc.get("right") or 0)
+                    acc = fnc.get("accuracy")
+                    min_n = int(_env_float("Q15_V95_SCOREBOARD_MIN_N", 10, 1, 1000))
+                    if n >= min_n and acc is not None:
+                        line += f" · 🎯 FRESH 7M·{side} — predicted {side} {float(acc) * 100:.1f}% right ({right}/{n})"
+                    else:
+                        line += f" · 🎯 FRESH 7M·{side} — high-confidence (building, n={n})"
+                body.append(line)
 
     # Thin-evidence watch (default OFF): flag any top pick whose prediction rests
     # on too few data-backed features, so a confident-looking number is read with
@@ -2536,6 +2638,22 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     analysis["snapshot_id"] = snapshot_id
                     analysis["prediction_id"] = prediction_id
                     analysis["new_unique_prediction_recorded"] = inserted
+                    # Fresh-near-close manipulation tag (default-ON, observability
+                    # only). A manipulation tell that FIRST appears at the closing 7M
+                    # check (not seen at this contract's 15M/10M) is the highest-
+                    # accuracy manipulation subset on the live record — strongest on
+                    # the NO side (97.7%), present but weaker on YES (~85%). Surfaced
+                    # as an alert marker WITH the live per-side hit-rate so the owner
+                    # can weight NO vs YES; it NEVER alters the frozen probability,
+                    # edge, or entry decision. Point-in-time: the earlier checkpoints
+                    # are already recorded, so the lookup has no look-ahead.
+                    _fresh_side = str(analysis.get("prediction_side") or "").upper()
+                    if (checkpoint == "7M"
+                            and _env_bool("Q15_V95_FRESH_MANIP_TAG", True)
+                            and (analysis.get("manipulation") or {}).get("suspected")
+                            and _fresh_side in ("YES", "NO")
+                            and not self.ledger.manipulation_flagged_before(canonical.ticker, checkpoint)):
+                        analysis["fresh_manip_near_close"] = self.ledger.fresh_near_close_rate(_fresh_side)
                     # Flag (without mutating the graded prediction) when the live
                     # side drifts from the locked one before close — the stability
                     # / change-rate metric per interval.
@@ -2645,6 +2763,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     _ur.observe(analyses=analyses, canonicals=canonicals, now=now)
             except Exception:
                 logger.debug("ultoim observe skipped", exc_info=True)
+            # Interval-timing research capture (read-only; default-OFF). Records the
+            # frozen analysis at eight marks (15M..7M) into its own ledger for entry/
+            # confirmation/defensive-timing study. Never trades, sends, or changes the
+            # champion; a failure must not disturb the cycle.
+            try:
+                from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                _irr = _ir_runner()
+                if _irr is not None:
+                    _irr.observe(analyses=analyses, canonicals=canonicals, now=now)
+            except Exception:
+                logger.debug("interval-research observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
@@ -2664,6 +2793,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 # Score fired flip warnings against whether the prediction flipped.
                 if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
                     self.ledger.reconcile_flip_warnings()
+                # Interval-timing research: attach settled outcomes to any captured
+                # intervals (read-only; default-OFF; never affects production).
+                try:
+                    from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                    _irr = _ir_runner()
+                    if _irr is not None:
+                        _irr.resolve_settled(result_events, now)
+                except Exception:
+                    logger.debug("interval-research resolve skipped", exc_info=True)
             ledger_status = self.ledger.status()
             # The recommended BEST ENTRY is rank #1 of the qualifying entries — the
             # single source of truth shared by the alert's top summary and detail.

@@ -139,6 +139,36 @@ class TestAlertTag(unittest.TestCase):
         msg = build_v95_message("10M", self._analyses(manip), [{"asset": "BTC", "ticker": "T"}], {})
         self.assertNotIn("Manipulation watch", msg)
 
+    def test_fresh_near_close_marker_prints_side_and_rate(self):
+        manip = {"suspected": True, "reasons": ["PIN"], "lean": None, "score": 0.33}
+        an = self._analyses(manip)
+        an["BTC"]["fresh_manip_near_close"] = {"side": "NO", "n": 43, "right": 42, "accuracy": 0.9767}
+        msg = build_v95_message("7M", an, [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertIn("FRESH 7M·NO", msg)
+        self.assertIn("predicted NO 97.7% right", msg)  # 42/43
+        self.assertIn("(42/43)", msg)
+        # Invariants intact.
+        self.assertIn("V9.5 CHECK", msg)
+        self.assertIn("Manipulation watch", msg)
+        # Without the stamped value the marker is absent.
+        msg2 = build_v95_message("7M", self._analyses(manip), [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertNotIn("FRESH 7M", msg2)
+
+    def test_fresh_near_close_marker_yes_and_building(self):
+        manip = {"suspected": True, "reasons": ["PIN"], "lean": None, "score": 0.33}
+        # YES side prints its own (weaker) rate.
+        an = self._analyses(manip)
+        an["BTC"]["fresh_manip_near_close"] = {"side": "YES", "n": 41, "right": 35, "accuracy": 0.8537}
+        msg = build_v95_message("7M", an, [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertIn("FRESH 7M·YES", msg)
+        self.assertIn("85.4% right (35/41)", msg)
+        # Thin sample -> "building", no misleading percentage.
+        an2 = self._analyses(manip)
+        an2["BTC"]["fresh_manip_near_close"] = {"side": "NO", "n": 4, "right": 4, "accuracy": 1.0}
+        msg2 = build_v95_message("7M", an2, [{"asset": "BTC", "ticker": "T"}], {})
+        self.assertIn("building, n=4", msg2)
+        self.assertNotIn("100% right", msg2)
+
 
 class TestScoreboardBreakdown(unittest.TestCase):
     def setUp(self):
@@ -350,6 +380,165 @@ class TestTrackingDisabledScore(unittest.TestCase):
         os.environ["Q15_V95_MANIPULATION_TRACKING"] = "0"
         sig = _manipulation_signal({"name": "THRESHOLD_PIN"}, _absorbed(0.6), {"divergence_bps": 99})
         self.assertEqual(sig, {"suspected": False, "reasons": [], "lean": None, "score": 0.0})
+
+
+class TestPinTellTightening(unittest.TestCase):
+    """The optional, default-OFF stricter distance band for the PIN tell.
+
+    The THRESHOLD_PIN regime (frozen champion) is untouched; only the read-only
+    PIN tell may be narrowed, and only when the operator opts in.
+    """
+
+    def tearDown(self):
+        os.environ.pop("Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA", None)
+
+    def test_default_is_byte_identical(self):
+        # No knob set: PIN fires for THRESHOLD_PIN regardless of distance_sigma.
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.24}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])
+
+    def test_knob_suppresses_pin_outside_band(self):
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "0.15"
+        # distance_sigma above the stricter band -> PIN tell suppressed (regime
+        # still THRESHOLD_PIN, but the observational flag does not fire).
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.22}, {"available": False}, {})
+        self.assertNotIn("PIN", sig["reasons"])
+        self.assertFalse(sig["suspected"])
+
+    def test_knob_keeps_pin_inside_band(self):
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "0.15"
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.05}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])
+
+    def test_missing_measurement_keeps_pin(self):
+        # Knob set but no distance_sigma available: never silently drop the tell.
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "0.15"
+        sig = _manipulation_signal({"name": "THRESHOLD_PIN"}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])
+
+    def test_invalid_knob_is_ignored(self):
+        os.environ["Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA"] = "not-a-number"
+        sig = _manipulation_signal(
+            {"name": "THRESHOLD_PIN", "distance_sigma": 0.9}, {"available": False}, {})
+        self.assertIn("PIN", sig["reasons"])  # unparseable -> no tightening
+
+
+class TestManipulationScoreboardDimensions(unittest.TestCase):
+    """The added by_checkpoint / by_side / by_reason_isolated breakdowns."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.led = V95Ledger(os.path.join(self.tmp.name, "l.sqlite3"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _rec(self, tkr, checkpoint, side, result, manip, reason):
+        self.led.record_prediction(
+            ticker=tkr, asset="BTC", checkpoint=checkpoint, created_at=1000.0, close_time=2000.0,
+            predicted_side=side, raw_yes_probability=0.6, calibrated_yes_probability=0.6,
+            challenger_yes_probability=0.6, baseline_yes_probability=0.6, selected_probability=0.65,
+            conservative_probability=0.6, data_quality=0.7, evidence_quality=0.7, trade_quality=0.6,
+            trade_decision="WATCH_PRICE", regime="NORMAL", features={}, contributions={},
+            quote={"ask_cents": 50}, rank=1, costs={"total_cents": 2}, confidence_grade="B",
+            manipulation_suspected=manip, manipulation_reason=reason)
+        self.led.resolve_ticker(tkr, result, 2100.0)
+
+    def test_isolated_reason_excludes_combined_rows(self):
+        # ABSORPTION-only (right) vs ABSORPTION+PIN combined (wrong): the isolated
+        # bucket must hold only the single-tell row, while by_reason holds both.
+        self._rec("AA", "10M", "YES", "YES", True, "ABSORPTION")
+        self._rec("BB", "10M", "YES", "NO", True, "PIN,ABSORPTION")
+        bm = self.led.scoreboard()["by_manipulation"]
+        self.assertEqual(bm["by_reason"]["ABSORPTION"]["n"], 2)        # both rows
+        self.assertEqual(bm["by_reason_isolated"]["ABSORPTION"]["n"], 1)  # only AA
+        self.assertEqual(bm["by_reason_isolated"]["ABSORPTION"]["right"], 1)
+        # The combined row is not isolated under PIN either.
+        self.assertNotIn("PIN", bm["by_reason_isolated"])
+
+    def test_by_checkpoint_and_by_side_split(self):
+        self._rec("A1", "7M", "NO", "NO", True, "PIN")    # 7M, NO, suspected, right
+        self._rec("A2", "7M", "NO", "YES", False, None)   # 7M, NO, clean, wrong
+        self._rec("A3", "15M", "YES", "YES", True, "PIN") # 15M, YES, suspected, right
+        bm = self.led.scoreboard()["by_manipulation"]
+        self.assertEqual(bm["by_checkpoint"]["7M"]["suspected"]["n"], 1)
+        self.assertEqual(bm["by_checkpoint"]["7M"]["clean"]["n"], 1)
+        self.assertEqual(bm["by_checkpoint"]["15M"]["suspected"]["right"], 1)
+        self.assertEqual(bm["by_side"]["NO"]["suspected"]["n"], 1)
+        self.assertEqual(bm["by_side"]["YES"]["suspected"]["n"], 1)
+        self.assertEqual(bm["by_side"]["NO"]["clean"]["n"], 1)
+
+    def test_by_reason_side_crosses_tell_and_side(self):
+        # ABSORPTION-confirmed NO (the hypothesised signal) vs bare-PIN YES (noise).
+        self._rec("B1", "10M", "NO", "NO", True, "ABSORPTION")        # absorption, NO, right
+        self._rec("B2", "10M", "NO", "NO", True, "ABSORPTION,PIN")    # absorption, NO, right
+        self._rec("B3", "10M", "YES", "NO", True, "PIN")             # pin_only, YES, wrong
+        bm = self.led.scoreboard()["by_manipulation"]["by_reason_side"]
+        # absorption bucket = any row carrying ABSORPTION (B1, B2), both NO + right
+        self.assertEqual(bm["absorption"]["NO"]["n"], 2)
+        self.assertEqual(bm["absorption"]["NO"]["right"], 2)
+        self.assertEqual(bm["absorption"]["YES"]["n"], 0)
+        # pin_only bucket = rows whose ONLY tell is PIN (B3); the PIN in B2 is excluded
+        self.assertEqual(bm["pin_only"]["YES"]["n"], 1)
+        self.assertEqual(bm["pin_only"]["YES"]["right"], 0)
+        self.assertEqual(bm["pin_only"]["NO"]["n"], 0)
+
+    def test_persistence_counts_only_earlier_checkpoints(self):
+        # Contract P flagged at 15M then 10M: the 10M flag persisted (prior 15M flag).
+        self._rec("P", "15M", "NO", "NO", True, "PIN")   # first checkpoint -> fresh
+        self._rec("P", "10M", "NO", "NO", True, "PIN")   # prior 15M flagged -> persistent
+        # Contract Q flagged only at 7M: no earlier flag -> fresh (no look-ahead to
+        # later checkpoints, and there are no earlier ones).
+        self._rec("Q", "7M", "YES", "NO", True, "PIN")
+        bp = self.led.scoreboard()["by_manipulation"]["by_persistence"]
+        self.assertEqual(bp["persistent_flag"]["n"], 1)  # only P@10M
+        self.assertEqual(bp["fresh_flag"]["n"], 2)       # P@15M and Q@7M
+        # Interval-controlled view (the honest one): P@10M is persistent within 10M;
+        # P@15M is fresh within 15M; Q@7M is fresh within 7M.
+        self.assertEqual(bp["by_checkpoint"]["10M"]["persistent"]["n"], 1)
+        self.assertEqual(bp["by_checkpoint"]["10M"]["fresh"]["n"], 0)
+        self.assertEqual(bp["by_checkpoint"]["15M"]["fresh"]["n"], 1)
+        self.assertEqual(bp["by_checkpoint"]["7M"]["fresh"]["n"], 1)
+
+    def test_fresh_near_close_isolates_fresh_7m_by_side(self):
+        # Fresh-7M NO (right) and YES (wrong); plus a PERSISTENT 7M flag (prior 15M)
+        # that must be EXCLUDED from fresh_near_close.
+        self._rec("F1", "7M", "NO", "NO", True, "PIN")    # fresh-7M, NO, right
+        self._rec("F2", "7M", "YES", "NO", True, "PIN")   # fresh-7M, YES, wrong
+        self._rec("G", "15M", "NO", "NO", True, "PIN")    # earlier flag for G
+        self._rec("G", "7M", "NO", "NO", True, "PIN")     # G@7M is persistent -> excluded
+        fnc = self.led.scoreboard()["by_manipulation"]["by_persistence"]["fresh_near_close"]
+        self.assertEqual(fnc["all"]["n"], 2)              # F1, F2 only (not G@7M)
+        self.assertEqual((fnc["NO"]["n"], fnc["NO"]["right"]), (1, 1))
+        self.assertEqual((fnc["YES"]["n"], fnc["YES"]["right"]), (1, 0))
+
+    def test_manipulation_flagged_before_is_point_in_time(self):
+        self._rec("P", "15M", "NO", "NO", True, "PIN")   # flagged at 15M
+        self._rec("P", "10M", "NO", "NO", False, None)   # clean at 10M
+        # At 7M an earlier (15M) flag exists -> True.
+        self.assertTrue(self.led.manipulation_flagged_before("P", "7M"))
+        # At 15M (first checkpoint) nothing precedes it -> False (no look-ahead).
+        self.assertFalse(self.led.manipulation_flagged_before("P", "15M"))
+        # A contract flagged only at 7M has no earlier flag -> fresh.
+        self._rec("Q", "7M", "NO", "NO", True, "PIN")
+        self.assertFalse(self.led.manipulation_flagged_before("Q", "7M"))
+
+    def test_fresh_near_close_rate_matches_bucket(self):
+        # Two fresh-7M-NO contracts (right + wrong) -> 1/2; one fresh-7M-YES (right);
+        # and a 7M-NO whose 15M was flagged (persistent) must NOT count.
+        self._rec("R1", "7M", "NO", "NO", True, "PIN")    # fresh NO, right
+        self._rec("R2", "7M", "NO", "YES", True, "PIN")   # fresh NO, wrong
+        self._rec("R3", "7M", "YES", "YES", True, "PIN")  # fresh YES, right
+        self._rec("R4", "15M", "NO", "NO", True, "PIN")   # earlier flag for R4
+        self._rec("R4", "7M", "NO", "NO", True, "PIN")    # persistent -> excluded
+        no = self.led.fresh_near_close_rate("NO")
+        self.assertEqual((no["n"], no["right"]), (2, 1))  # R1, R2 only
+        self.assertEqual(no["accuracy"], 0.5)
+        yes = self.led.fresh_near_close_rate("YES")
+        self.assertEqual((yes["n"], yes["right"]), (1, 1))
 
 
 if __name__ == "__main__":

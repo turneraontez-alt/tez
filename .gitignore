@@ -3,6 +3,7 @@
 *.sqlite
 *.db
 data/
+old_data/
 
 # Logs & diagnostic journals
 *.log

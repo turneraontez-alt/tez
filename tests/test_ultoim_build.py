@@ -145,6 +145,65 @@ def test_value_rank_orders_and_caps(tmp_path):
     assert all(p.get("confidence_grade") in ("A", "B", "C") for p in top)
 
 
+def test_grade_b_default_recalibrated(monkeypatch):
+    # Recalibrated default cutoffs that match the weighted-average scorer's range.
+    for k in ("Q15_ULTOIM_GRADE_A_MIN", "Q15_ULTOIM_GRADE_B_MIN"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = UltoimConfig()
+    assert cfg.grade_a_min == 0.60 and cfg.grade_b_min == 0.50
+
+
+def test_grade_not_pinned_to_C_strong_pick_reaches_A(tmp_path):
+    # Regression for the "always C" bug: under the old all-multiplicative scorer a
+    # strong setup still collapsed under the B line. The weighted average lets it
+    # reach A.
+    cfg = _config(tmp_path)
+    strong = _clean_pick(predicted_side="NO", calibrated_yes_probability=0.10,
+                         baseline_yes_probability=0.12, data_quality=0.95,
+                         evidence_quality=0.92)
+    q = ranker.quality_score(strong, None, cfg)
+    assert q >= cfg.grade_a_min
+    assert ranker.grade_for(q, cfg) == "A"
+
+
+def test_weak_pick_is_C(tmp_path):
+    cfg = _config(tmp_path)
+    weak = _clean_pick(predicted_side="NO", calibrated_yes_probability=0.48,
+                       baseline_yes_probability=0.50, data_quality=0.6,
+                       evidence_quality=0.6)
+    q = ranker.quality_score(weak, None, cfg)
+    assert q < cfg.grade_b_min
+    assert ranker.grade_for(q, cfg) == "C"
+
+
+def test_grade_monotonic_in_confidence(tmp_path):
+    # For a NO pick, a lower YES probability = higher chosen-side confidence =
+    # higher grade. Confidence is the dominant term, derived from the CALIBRATED
+    # probability (fix #3), so the grade tracks it.
+    cfg = _config(tmp_path)
+
+    def q(cal_yes):
+        return ranker.quality_score(
+            _clean_pick(predicted_side="NO", calibrated_yes_probability=cal_yes,
+                        baseline_yes_probability=cal_yes + 0.02), None, cfg)
+
+    assert q(0.45) < q(0.30) < q(0.15)
+
+
+def test_challenger_excluded_from_agreement_by_default(tmp_path):
+    # A wildly divergent (poorly-calibrated) challenger must not drag the grade
+    # unless explicitly folded in (fix #4).
+    cfg_excl = _config(tmp_path)
+    cfg_incl = _config(tmp_path, grade_includes_challenger=True)
+    pick = _clean_pick(predicted_side="NO", calibrated_yes_probability=0.25,
+                       baseline_yes_probability=0.24,
+                       challenger_yes_probability=0.90)
+    q_excl = ranker.quality_score(pick, None, cfg_excl)
+    q_incl = ranker.quality_score(pick, None, cfg_incl)
+    assert q_excl > q_incl
+    assert ranker.grade_for(q_excl, cfg_excl) == "A"     # excluded: strong pick stays A
+
+
 def _clean_pick(**over):
     pick = {
         "predicted_side": "NO", "selected_probability": 0.75, "data_quality": 0.8,

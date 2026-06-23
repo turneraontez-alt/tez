@@ -1,7 +1,7 @@
 {
-  "commit": "8d174cb",
-  "branch": "claude/challenger-shadow-comparison-zo7fhq",
-  "committed_at": "2026-06-22T05:04:18Z",
-  "summary": "read-only Polymarket Up/Down shadow (default-OFF, separate from Kalshi)",
-  "tests": "1024 passed, 4 skipped in 25.03s"
+  "commit": "2bb1460",
+  "branch": "claude/magical-cannon-6dkv8s",
+  "committed_at": "2026-06-22T22:10:36Z",
+  "summary": "ultoim: weighted-average grade fix (always-C -> real A/B/C spread)",
+  "tests": "1133 passed, 4 skipped in 41.52s"
 }

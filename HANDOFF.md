@@ -9,8 +9,8 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1061 passed, 4 skipped** in a complete env
-(skip count rises when `flask`/`websockets`/cffi/crypto aren't fully installed).
+Tests: `python3 -m pytest tests/ -q` → **1133 passed** (4 skipped in a complete env;
+skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
 - **Ship to main with one command:** `scripts/ship.sh "summary"` — fetches origin/main,
@@ -25,50 +25,167 @@ Tests: `python3 -m pytest tests/ -q` → **1061 passed, 4 skipped** in a complet
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Fix Shadow-vs-Your-System native grading (the "5:30 DOGE" bug)
-**Suite 1062 passed / 4 skipped** in a complete env (+10 tests:
-`tests/test_challenger_native_side_grading.py` ×9, timing NULL-side counter ×1).
-Deploy-pending on `main` + a Repl Stop ▸ Run; **then run the one-time backfill**
-(below) on the Repl.
-- **The bug (owner-reported):** the *Challenger Shadow vs Your System* report showed
-  a settled prediction (the 5:30 DOGE) as a CORRECT guess when production had it
-  WRONG. Root cause: the report re-derived the native "Your System" side from the
-  RAW champion prob (`control_prob_yes = raw_yes_probability`), but production's sent
-  `predicted_side` comes from the CALIBRATED prob. Raw vs calibrated land on opposite
-  sides of 0.5 in ~34% of rows → ~38% of native picks mis-graded; "Your System"
-  read **49%** vs its true **~69%** (made the challenger look competitive).
-- **Audited EVERY learning system** (4 parallel deep audits, verified against the real
-  `learning-snapshots` ledgers). CLEAN: production `ledger_v95` (1720/1720 grade on
-  the authoritative `predicted_side`/`correct`), Postgres `performance.py`/`db.py`,
-  `window_focus` grading, `shadow_signals`, `self_review`, `accuracy_report`,
-  `setup_miner`. The inaccuracy was confined to the challenger comparison + two
-  cosmetic/offline labels.
-- **The fix (challenger only; production untouched):** capture production's ACTUAL
-  decision on each shadow row — new columns `native_predicted_side` (calibrated sent
-  side, the ✓/✗ source of truth), `native_prob_yes` (calibrated prob), `native_rank`
-  (production's cross-asset rank). Grade/rank the native side from them in every
-  method (`_rank`/`_ranking_models`/`ranked_comparison`/`ranked_by_checkpoint`/
-  `latest_window_cases`/`best_filled_window_cases`/`latest_window_end_results`/
-  `comparison`/`scoreboard` control accuracy). Legacy rows fall back to the old raw
-  behaviour. Challenger side unchanged (it already grades on its own calibrated prob).
-  Verified on real data: native grade now equals production in **150/150** matched
-  rows (0 mismatches), native accuracy 49%→69%, control accuracy 49%→68%.
-- **Also fixed:** `extract_bridge` OOS champion prob now prefers CALIBRATED (offline
-  promotion eval showed champion ~50% vs true ~68%); `shadow_economics` control arm
-  relabelled **"Price gate"** (was "Live" — it only replays the edge threshold, not
-  production's full gate, so it overstated live entries 27 vs 4).
-- **⚠️ ONE-TIME BACKFILL (run on the Repl after deploy):**
-  `python3 -m tools.backfill_shadow_native_side` (add `--dry-run` first). It stamps
-  production's decision onto the 1171 pre-fix shadow rows so the all-time records
-  re-grade correctly. Read-only wrt production; idempotent.
-- **Also (counter hardening):** `timing_experiment_scoreboard` no longer banks a
-  resolved NULL-predicted-side row as a loss — it is excluded from the denominator
-  (`ledger_v95.py:~1192`). 0 rows affected on today's data; correctness guard. The
-  other latent item (model_version filter on the timing/flip settlement UPDATEs) was
-  reviewed and intentionally left: every READ already filters by model_version, so
-  there is no cross-version leak to fix and the settlement SQL stays untouched.
+## ✅ Shipped THIS session — Ultoim grade fix: "always C" → real A/B/C spread (branch `claude/magical-cannon-6dkv8s`)
+**Suite 1133 passed / 4 skipped** (+5 ultoim tests). Diagnosed via the live snapshot
+(`learning-snapshots` + pre-reset `tez_review_dump.json`): the Ultoim multi-factor grade was
+stuck at C on **every** pick because `quality_score` multiplied a base term (already small —
+`(side_prob-0.5)/0.49`) by ~5 sub-1.0 penalty factors, compounding every score under the B
+line. Real proof: all 12 stored ultoim picks were C (quality_score 0.015–0.471; the B cutoff
+was 0.48, so the best pick ever missed B by 0.009).
+- **Fix (all in `q15_upgrade/ultoim/{ranker,config,runner}.py`):** `quality_score` is now a
+  **weighted average** of positive signals (confidence 0.50 / data 0.15 / evidence 0.15 /
+  agreement 0.20) — not a product — so a strong setup lands high. Confidence uses the
+  **calibrated** chosen-side probability (champion is under-confident). The unvalidated,
+  miscalibrated **challenger is excluded** from the agreement term by default
+  (`Q15_ULTOIM_GRADE_INCLUDES_CHALLENGER=false`). Validated vetoes (YES-quality, flip, manip)
+  stay as bounded multiplicative penalties. `grade_b_min` recalibrated 0.48 → **0.50** to match
+  the new ~0.35–0.70 range. All knobs env-tunable; manip penalty promoted to config.
+- **Re-grading the 12 real picks with the shipped defaults: 3 A / 5 B / 4 C** (was 12 C).
+- **Tests:** `tests/test_ultoim_build.py` +5 (strong→A regression, weak→C, monotonic in
+  calibrated confidence, challenger-excluded-by-default, recalibrated default cutoff). Existing
+  penalty/ranking tests unchanged and green. `.env.example` documents the new vars.
+- Research-only + read-only; the champion and live alerts are untouched.
 
-## ✅ Shipped (prior session) — Ultoim Build: separate read-only research reporting system
+## ✅ Shipped THIS session — Interval-timing research collector (default-OFF, prospective)
+**Suite 1096 passed / 13 skipped** (+14 tests). New package `q15_upgrade/interval_research/`
+(`config/ledger/capture/runner/economics` + `tests/test_interval_research.py`). A SEPARATE,
+read-only research system (Ultoim pattern) that — when `Q15_INTERVAL_RESEARCH_ENABLED=true` —
+captures the frozen champion's per-asset analysis at EIGHT marks (15M/13M/12M/11M/10M/9M/8M/7M)
+into its own SQLite table `interval_captures` (DB `data/q15_interval_research_v1.sqlite3`).
+Motivation (from the timing analysis): EV peaks at **10M** (acc 70%, ask ~69¢, best/only-positive
+EV) and erodes by **7M** (acc 78% but ask ~79–97¢ → edge priced out); the fresh-7M-NO 97.7% is
+largely a **late-only coverage artifact**. 13M/12M/11M/9M/8M have NO history, so this collects them
+PROSPECTIVELY — no fabricated rows. Invariants: never trades/sends/alters the champion; wired as a
+read-only observer + settlement-resolver in `run_cycle` alongside Ultoim; default-OFF.
+- Captures per (ticker,interval): side, raw/calibrated/conservative prob, flip prob, manip score,
+  yes bid/ask, spread, depth, slippage/fees, distance-from-strike, stability, data-quality, executable
+  ask, net edge, trade_decision, entry_recommended, + one of 10 REASON_CODES when a capture is missing.
+- `economics.py` (read-only): per-interval executable economics (acc/ask/edge/entry-rate/EV/ROI/drawdown),
+  PREDICTION-quality vs TRADE-value kept SEPARATE (`classify`: 97%@97¢ => HIGH prediction / LOW trade),
+  cohort split (full / partial / late-only), matched-cohort comparison (only contracts at all compared
+  marks), defensive-exit grading (true/false/late warnings, lead time, value recoverable).
+- Restart-safe (UNIQUE(model_version,ticker,interval) + INSERT OR IGNORE), no look-ahead (point-in-time
+  band capture). Roles are PROVISIONAL: 10M=OFFENSIVE_ENTRY, 7M=CONFIRMATION_DEFENSIVE, others research.
+- NOT YET USEFUL: results require prospective resolved data; module reports n=0 honestly until then.
+  Enable + redeploy to start collecting; champion live behaviour unchanged.
+
+## ✅ Shipped THIS session — Manipulation reason×side scoreboard cut (validation tool)
+**Suite 1076 passed / 13 skipped** (+1 test). Read-only/additive. Adds `by_reason_side` to
+`ledger_v95._by_manipulation`: crosses tell-type (`absorption` = any ABSORPTION row; `pin_only`
+= rows whose only tell is PIN) with side (YES/NO). On the live ledger this REFUTED the earlier
+"ABSORPTION is the signal" read: controlling for side, pin_only·NO (71.5%, −0.75¢) ≈ absorption·NO
+(70.4%, −1.6¢), while both YES buckets bleed (~62-65%, −9¢). So the manipulation flag's only real
+discriminator is the **NO side**, not the reason type — the ABSORPTION edge was a side-mix confound.
+Also validated (read-only) that a PIN distance-tightening cut does NOT help: closer-to-strike PIN
+flags don't discriminate better (non-monotonic; tightest ~60% score 64.5% vs farthest ~40% at 70.9%),
+so `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA` should stay OFF.
+**Then built the PERSISTENCE cut** (`by_persistence`, point-in-time: does a flag fire at an EARLIER
+checkpoint of the same contract?). Pooled, persistent looked far better (72.6% vs 61.1%) — but that
+is an INTERVAL CONFOUND (15M flags are always "fresh" and 15M is the weak interval). Controlled per
+checkpoint the relationship REVERSES: 7M fresh 91.7% (+2.83¢) vs 7M persistent 75.8% (−4.37¢); 10M
+fresh 71.9% (+1.32¢) vs 10M persistent 69.2% (−2.9¢). So the real signal is **freshness near close,
+not persistence** — `by_persistence` ships BOTH the pooled and the `by_checkpoint` (honest) views so
+the confound stays visible. Best manipulation subset on record: **fresh-flag @ 7M (91.7%, +2.83¢, n=84)**.
+**Then validated & exposed that signal** (`by_persistence.fresh_near_close`, side-split). OOS-checked:
+accuracy holds out-of-sample (older half 92.9% → newer half 90.5%), NOT a recent-regime artifact
+(spread over 2 days, 4/84 recent), and concentrates on the **NO side: fresh-near-close·NO = 97.7%,
++8.92¢, n=43, Wilson CI [0.879, 0.996]** — the strongest manipulation subset found. Caveat: P&L noisier
+than accuracy (test half −1¢), so it's a confidence signal first.
+**ACTIVATED (owner directive) as a default-ON alert TAG** (`Q15_V95_FRESH_MANIP_TAG`, default true):
+at the 7M checkpoint, when manipulation is suspected AND the contract was NOT flagged at 15M/10M
+(`ledger.manipulation_flagged_before`, point-in-time), the checkpoint alert appends, to that asset's
+Manipulation-watch line, "🎯 FRESH 7M·<SIDE> — predicted <SIDE> NN.N% right (k/n)" where the rate is
+the LIVE historical hit-rate of that fresh-7M-<side> bucket (`ledger.fresh_near_close_rate(side)`,
+auto-updates; below `Q15_V95_SCOREBOARD_MIN_N` it says "building, n=k"). Fires on BOTH sides so the
+owner can weight them: live record is **NO 97.7% (42/43)** vs **YES 85.4% (35/41)** — NO is the real
+edge, YES is weaker and P&L-negative. Owner chose the SAFE form: it surfaces the signal only — it does
+NOT touch the frozen champion's probability/edge/entry decision, and preserves ENTRY/V9.5 CHECK markers.
+Toggle off with `Q15_V95_FRESH_MANIP_TAG=false`. ACCURACY ≠ profit: read the tag together with the
+entry/edge line (a 97%-accurate NO at a rich price is still thin). Next step if P&L proves durable: an
+opt-in confidence/quality boost.
+
+## ✅ Shipped THIS session — Challenger v6 research + Entry Economics v1 (two workstreams)
+**Suite 1066 passed / 13 skipped** in a complete env (+45 tests:
+`tests/test_entry_economics.py` 32, `tests/test_challenger_v6_research.py` 13).
+Both workstreams are READ-ONLY and ADDITIVE — with default env the live app and the
+live challenger shadow are byte-identical (no active prediction or entry gate
+changed). Deploy-pending on the branch + a Repl Stop ▸ Run; nothing auto-promoted.
+
+- **Workstream 1 — Challenger review (identity preserved).** Documented the
+  challenger's distinguishing logic (learned L2-logistic on its OWN ledger +
+  independent Platt/isotonic calibration + decisiveness ranking + own OOD + own
+  cost/decision model — vs Your System's market-baseline-plus-residual +
+  net-edge ranking). Added a NEW research version **`challenger-v6`** WITHOUT
+  touching the live v5 path:
+  - `q15_upgrade/challenger/features_v6.py` — leakage-safe, APPEND-ONLY superset of
+    the frozen v5 feature vector (+12 microstructure features: strike pressure,
+    time above/below strike, strike-cross rate, failed continuation, flow
+    persistence, book resiliency, return entropy, regime transition, spot-vs-
+    contract disagreement, cross-asset confirmation, manipulation score).
+  - `q15_upgrade/challenger/research.py` — purged walk-forward OOS harness that
+    grades v6 vs v5 PAIRED, with a strict promotion gate (significant log-loss win,
+    no Brier/calibration regression) — proven to promote a real signal and keep
+    noise in research. Plus a prediction-stability EMA (default OFF).
+  - Config switches `Q15_CHALLENGER_FEATURE_SET` (default `v5`) /
+    `Q15_CHALLENGER_STABILITY_HALFLIFE` (default 0). v6 stays in RESEARCH MODE —
+    promotion is a deliberate config switch after a win on real settled data.
+- **Workstream 2 — Entry Economics repair (`entry-econ-v1`).** NEW separate,
+  read-only package `q15_upgrade/entry_economics/` answering "is this contract
+  worth buying at an executable price?" with **ENTER / WAIT / SKIP**. Fixes the
+  real economics: the **Kalshi fee is now ceil-rounded** (was under-charged),
+  depth-walk slippage + partial-fill, latency + stale surcharge, a rich
+  **conservative probability** (calibration/sample/coverage/disagreement/
+  instability/regime/flip/manip/interval/asset — combined by geometric mean so a
+  genuine edge can still ENTER), break-even prob, max/recommended entry, EV +
+  EV-after-uncertainty, R:R, liquidity capacity. Compact Telegram panel + an
+  independent entry-performance ledger (only ENTER-sent-before-settlement counts;
+  WAIT/SKIP studied in background; restart-safe + dedup). Surfaced live in the
+  snapshot (`q15_entry_econ_*` + panel); ledger writes are default-OFF
+  (`Q15_ENTRY_ECON_LEDGER`). Wired read-only into `apply_v95_policy` (evaluate +
+  surface) and `ledger_v95._shadow_resolve` (settlement grading), both guarded.
+- **Operator tool** `tools/entry_research_report.py {challenger|entry}` — run the
+  v6 OOS comparison on the production ledger / print the entry scoreboard.
+- **Incomplete (honest):** crediting OFFICIAL entries (`mark_enter_sent`) requires
+  the entry-econ ENTER panel to actually be delivered before close; that delivery
+  hook is exposed on the runner but not wired into the send path this session (it
+  must couple to real Telegram delivery — no fabricated fills). Until wired,
+  `official_entries` stays 0 by design; direction grading + WAIT/SKIP studies do
+  populate once `Q15_ENTRY_ECON_LEDGER=true`.
+
+## ✅ Shipped THIS session — Challenger (shadow) orientation fix: calibrated control + cold-start mirror
+**Suite 1030 passed / 13 skipped** (+2 tests). Branch `claude/ultracode-mode-question-5aj8un` (PR #20).
+Shadow-only, zero live impact (`primary_probability` returns champion unless promoted AND trained — never).
+Root-caused from real data: the challenger looked anti-predictive (challenger_prob_yes 43.7%, control
+anti-calibrated) because of two orientation bugs, NOT a bad model:
+- **`ledger_v95.py` `_shadow_observe`** — fed the challenger `control_prob_yes=raw_yes_probability` (the
+  pre-calibration value, **50.8% directional acc, flat**) instead of `calibrated_yes_probability` (the
+  champion's REAL prob, **67.9% acc, monotonic**). The whole Shadow-vs-Yours comparison was against the
+  champion's throwaway raw number. Fixed to pass the calibrated prob.
+- **`challenger/runner.py observe`** — the cold-start mirror only triggered when `market_yes_prob is None`,
+  so with a quote present the untrained shadow parroted the raw market quote (~42% acc here). Now it mirrors
+  the champion whenever untrained (its own documented "start at parity" intent), regardless of the quote.
+- Verified: champion `calibrated_yes_probability` calibrates cleanly (0.0-0.3→11% YES, 0.7-1.0→84% YES);
+  `raw_yes_probability` does not (50.8%). Fix is forward-looking; historical shadow rows stay as recorded.
+- Tests: cold-start mirrors champion even with a quote; record_prediction hands the shadow the calibrated control.
+
+## ✅ Shipped THIS session — Manipulation detection: tunable PIN tell + scoreboard discrimination
+**Suite 1028 passed / 13 skipped** (+7 tests) on this container's env. Branch
+`claude/ultracode-mode-question-5aj8un` (PR #20, draft). Read-only, **defaults byte-identical**.
+Motivated by the live record: the manipulation flag fires on ~76% of markets at baseline
+accuracy (no edge), driven by an over-firing PIN tell.
+- **`checkpoint_v95.py`** — new default-OFF knob `Q15_V95_MANIPULATION_PIN_MAX_DISTANCE_SIGMA`
+  narrows the observational PIN *tell* below the regime's 0.25 band (recommended 0.15 to
+  validate). The FROZEN `THRESHOLD_PIN` *regime* (feeds champion uncertainty) is untouched;
+  `_pin_tell_passes` keeps the tell when the knob is unset or the measurement is missing.
+- **`ledger_v95.py`** — `_by_manipulation` scoreboard now adds `by_reason_isolated`
+  (single-tell-only buckets), `by_checkpoint`, and `by_side` (all purely additive; old keys
+  unchanged). On the live ledger this immediately separates **ABSORPTION-only 74.3% / −0.17¢**
+  (the edge) from **PIN-only 67.0% / −4.82¢** (the noise), and shows manip-flagged **NO side
+  is +0.74¢ vs YES −10.21¢** — structure the blended view hid.
+- Next: with `by_reason_isolated` now measurable, validate the PIN tightening out-of-sample,
+  then consider promoting a stricter default (significance-tested, per invariants).
+
+## ✅ Shipped THIS session — Ultoim Build: separate read-only research reporting system
 **Suite 1052 passed / 4 skipped** in a complete env (+15 tests). New package
 `q15_upgrade/ultoim/` + `tests/test_ultoim_build.py`; wired with two guarded,
 default-OFF hooks (`checkpoint_v95.run_cycle` observe + `app.py` reconcile).

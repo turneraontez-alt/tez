@@ -76,9 +76,39 @@ class UltoimConfig:
         default_factory=lambda: _float("Q15_ULTOIM_EDGE_SCALE_CENTS", 10.0)
     )
     # Multi-factor grade thresholds on the 0..1 quality score (tunable; the grade
-    # is research-only and recalibratable). A/B cutoffs; below B is C.
+    # is research-only and recalibratable). A/B cutoffs; below B is C. Calibrated
+    # to the weighted-average scorer below, whose realized range on live picks is
+    # ~0.35..0.70 (the old all-multiplicative scorer collapsed every pick under
+    # the B line, so every grade was a C).
     grade_a_min: float = field(default_factory=lambda: _float("Q15_ULTOIM_GRADE_A_MIN", 0.60))
-    grade_b_min: float = field(default_factory=lambda: _float("Q15_ULTOIM_GRADE_B_MIN", 0.48))
+    grade_b_min: float = field(default_factory=lambda: _float("Q15_ULTOIM_GRADE_B_MIN", 0.50))
+    # Grade = WEIGHTED AVERAGE of independent positive signals (directional
+    # confidence, data quality, evidence quality, model agreement) — not a product
+    # — so a strong setup lands high instead of being multiplied toward zero.
+    # Weights are tunable and need not sum to 1 (the scorer normalises by their
+    # sum). Confidence carries the most weight; it is necessary but not sufficient.
+    grade_weight_confidence: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_GRADE_W_CONFIDENCE", 0.50)
+    )
+    grade_weight_data: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_GRADE_W_DATA", 0.15)
+    )
+    grade_weight_evidence: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_GRADE_W_EVIDENCE", 0.15)
+    )
+    grade_weight_agreement: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_GRADE_W_AGREEMENT", 0.20)
+    )
+    # Exclude the unvalidated, poorly-calibrated observational challenger from the
+    # model-agreement term by default: per the live record it diverges and would
+    # otherwise drag the grade. Set true to fold it back in.
+    grade_includes_challenger: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_GRADE_INCLUDES_CHALLENGER", False)
+    )
+    # Manipulation anti-signal: bounded multiplicative penalty on the grade.
+    manip_grade_penalty: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_MANIP_GRADE_PENALTY", 0.85)
+    )
     # Flip influence on the grade. Held LOW by default: the flip predictor is in
     # active research and has not cleared its out-of-sample bar, so it informs the
     # grade only weakly until validated.
