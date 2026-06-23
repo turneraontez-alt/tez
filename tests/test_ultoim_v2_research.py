@@ -1,0 +1,221 @@
+"""Tests for the Ultoim V2 review-consensus additions (all record-only / robustness):
+
+  * ledger.distance_research_scoreboard — the near-strike-pin vs far split (the one
+    record-only feature shown to transport), measured prospectively.
+  * panel.build_recap surfaces the s15 + distance research screens, marker-safe.
+  * runner.observe() isolates a malformed asset per-candidate (never raises / never
+    drops the whole cycle).
+  * the REAL worker loop (queue + thread + task_done) records an observe job.
+
+Deterministic: stub Telegram, no network. The worker-loop test uses the real thread
+but joins the queue, so it is still deterministic.
+"""
+from __future__ import annotations
+
+import types
+
+import pytest
+
+from q15_upgrade.ultoim_v2.config import UltoimV2Config
+from q15_upgrade.ultoim_v2.ledger import UltoimV2Ledger
+from q15_upgrade.ultoim_v2 import panel
+from q15_upgrade.ultoim_v2.runner import UltoimV2Runner
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+class _StubTelegram:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    def send(self, text):
+        self.sent.append(text)
+        return {"ok": True, "delivered": True, "muted": False, "message_id": 1, "error": None}
+
+
+def _canon(ticker, secs, close):
+    return types.SimpleNamespace(ticker=ticker, seconds_remaining=secs,
+                                 settlement_time=close, feed_ages={})
+
+
+def _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35, **extra):
+    a = {
+        "prediction_available": True, "prediction_side": side,
+        "selected_probability": sel, "conservative_probability": sel - 0.02,
+        "yes_probability": mkt_yes, "raw_yes_probability": mkt_yes,
+        "market_implied_yes_probability": mkt_yes, "data_quality": 0.8,
+        "evidence_quality": 0.8, "net_edge_cents": net_edge, "entry_ask_cents": ask,
+        "quote": {"ask_cents": ask, "spread_cents": 2.0, "depth_contracts": 50.0,
+                  "quote_age_seconds": 1.0},
+        "costs": {"fee_cents": 1.0, "total_cost_cents": 2.0},
+        "regime": {"name": "TREND", "distance_sigma": 1.2},
+        "manipulation": {"suspected": False}, "flip_risk": {"score": 20.0},
+        "shadow_signals": {"order_flow_persistence": 0.05, "book_resiliency": 0.05,
+                           "prediction_stability": 0.05},
+        "snapshot_id": "snap-1",
+    }
+    a.update(extra)
+    return a
+
+
+def _runner(tmp_path, **over):
+    cfg = UltoimV2Config(
+        enabled=True, model_version="ultoim-v2", db_path=str(tmp_path / "u.sqlite3"),
+        telegram_chat_id="", min_confidence=0.55, ask_lo=50.0, ask_hi=72.0,
+        min_edge_cents=2.0, mark_band_seconds=90.0, reconcile_every_seconds=0.0,
+        recap_every_seconds=0.0, max_spot_stale_seconds=8.0, min_scoreboard_n=30, **over,
+    )
+    r = UltoimV2Runner(cfg)
+    r.telegram = _StubTelegram()
+    return r
+
+
+def _drow(**over):
+    row = {
+        "created_at": 1000.0, "model_version": "ultoim-v2", "asset": "BTC",
+        "ticker": "T1", "interval": "10M", "window_key": 5, "mark_seconds": 600.0,
+        "fired": 1, "predicted_side": "NO", "entry_ask_cents": 55.0,
+        "delivery_status": "SENT", "distance_sigma": 1.2,
+    }
+    row.update(over)
+    return row
+
+
+# --------------------------------------------------------------------------- #
+# distance_research_scoreboard
+# --------------------------------------------------------------------------- #
+def test_distance_research_scoreboard_splits_near_and_far(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    # FAR (|sigma|>=0.15): two wins. NEAR-pin (|sigma|<0.15): one win, one loss.
+    led.record_decision(_drow(ticker="F1", distance_sigma=1.20, entry_ask_cents=55.0))
+    led.record_decision(_drow(ticker="F2", interval="7M", distance_sigma=-0.50, entry_ask_cents=60.0))
+    led.record_decision(_drow(ticker="N1", interval="15M", distance_sigma=0.05, entry_ask_cents=52.0))
+    led.record_decision(_drow(ticker="N2", interval="12M", distance_sigma=-0.10, entry_ask_cents=58.0))
+    led.resolve("ultoim-v2", "F1", "NO", 9500.0)   # win +45
+    led.resolve("ultoim-v2", "F2", "NO", 9500.0)   # win +40
+    led.resolve("ultoim-v2", "N1", "NO", 9500.0)   # win +48
+    led.resolve("ultoim-v2", "N2", "YES", 9500.0)  # loss -58
+
+    sb = led.distance_research_scoreboard("ultoim-v2", pin_sigma=0.15)
+    assert sb["available"] and sb["pin_sigma"] == 0.15
+    assert sb["book"]["n"] == 4
+    assert sb["far"]["n"] == 2 and sb["far"]["right"] == 2          # far = clean
+    assert sb["near_pin"]["n"] == 2 and sb["near_pin"]["right"] == 1  # pin = mixed
+    # far P&L (+85) beats near-pin (+48-58 = -10) — the transporting direction.
+    assert sb["far"]["pnl_total_cents"] == pytest.approx(85.0)
+    assert sb["near_pin"]["pnl_total_cents"] == pytest.approx(-10.0)
+    # threshold is honoured: a tiny pin_sigma puts everything in 'far'.
+    sb2 = led.distance_research_scoreboard("ultoim-v2", pin_sigma=0.0)
+    assert sb2["far"]["n"] == 4 and sb2["near_pin"]["n"] == 0
+    led.close()
+
+
+def test_distance_scoreboard_only_settled_no_rows(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    led.record_decision(_drow(ticker="Y1", predicted_side="YES", fired=0, distance_sigma=1.0))
+    led.record_decision(_drow(ticker="X1", distance_sigma=None))       # null distance excluded
+    led.record_decision(_drow(ticker="N1", interval="7M", distance_sigma=0.4))
+    led.resolve("ultoim-v2", "Y1", "NO", 9500.0)
+    led.resolve("ultoim-v2", "N1", "NO", 9500.0)
+    sb = led.distance_research_scoreboard("ultoim-v2")
+    assert sb["book"]["n"] == 1                  # only the settled NO row with distance
+    led.close()
+
+
+# --------------------------------------------------------------------------- #
+# recap surfaces the research screens (marker-safe)
+# --------------------------------------------------------------------------- #
+_FORBIDDEN = ("V9.5 CHECK", "ENTRY RECOMMENDED", "NO ENTRY YET", "Hourly Report —", "TOP 3 PICKS")
+
+
+def _min_sb(**extra):
+    agg0 = {"n": 0, "right": 0, "wrong": 0}
+    sb = {
+        "min_n": 30, "resolved": 5, "total_recorded": 5, "delivery_counts": {},
+        "overall": {"n": 5, "right": 3, "wrong": 2, "accuracy": 0.6, "ci_low": 0.2,
+                    "ci_high": 0.9, "low_n": True, "pnl_total_cents": 10.0,
+                    "pnl_avg_cents": 2.0, "base_rate": 0.6, "base_rate_side": "NO",
+                    "edge_over_base": 0.0},
+        "by_interval": {iv: dict(agg0) for iv in ("15M", "10M", "7M")},
+        "by_side": {"NO": dict(agg0), "YES": dict(agg0)},
+        "by_regime_directional": {"NO_PRONE": dict(agg0), "YES_PRONE": dict(agg0),
+                                  "BALANCED": dict(agg0)},
+    }
+    sb.update(extra)
+    return sb
+
+
+def test_recap_shows_research_screens():
+    cfg = UltoimV2Config(enabled=True, min_scoreboard_n=30, min_promote_n=50)
+    bucket = lambda n, acc, avg: {"n": n, "right": int(round(acc * n)), "wrong": n - int(round(acc * n)),
+                                  "accuracy": acc, "ci_low": acc - 0.1, "ci_high": acc + 0.1,
+                                  "pnl_total_cents": avg * n, "pnl_avg_cents": avg}
+    sb = _min_sb(
+        s15_research={"available": True, "version": "lukewarm-cheap-1",
+                      "book": bucket(24, 0.67, 16.5), "gated": bucket(7, 1.0, 50.0),
+                      "gated_with_cal_drift": bucket(7, 1.0, 50.0), "gated_with_fresh": {"n": 0}},
+        distance_research={"available": True, "pin_sigma": 0.15,
+                           "book": bucket(68, 0.71, 5.0), "near_pin": bucket(40, 0.60, -2.0),
+                           "far": bucket(28, 0.86, 12.0)},
+    )
+    text = panel.build_recap(sb, [], [], cfg)
+    assert "15M screen — s15" in text and "would-fire" in text and "cal-drift" in text
+    assert "Distance-to-strike" in text and "near (pin)" in text and "far  (keep)" in text
+    assert "+50.0¢/pick" in text and "-2.0¢/pick" in text       # per-pick P&L rendered
+    assert "RESEARCH RECAP" in text
+    for m in _FORBIDDEN:
+        assert m not in text
+
+
+def test_recap_omits_research_screens_when_empty():
+    cfg = UltoimV2Config(enabled=True, min_scoreboard_n=30, min_promote_n=50)
+    # available but book n=0 -> block suppressed (no noise before data exists).
+    sb = _min_sb(s15_research={"available": True, "book": {"n": 0}},
+                 distance_research={"available": True, "pin_sigma": 0.15, "book": {"n": 0}})
+    text = panel.build_recap(sb, [], [], cfg)
+    assert "15M screen — s15" not in text and "Distance-to-strike" not in text
+
+
+# --------------------------------------------------------------------------- #
+# observe(): per-asset isolation (never raises / never drops the whole cycle)
+# --------------------------------------------------------------------------- #
+def test_observe_isolates_malformed_asset(tmp_path):
+    r = _runner(tmp_path)
+    captured: dict = {}
+    r._jobs.put_nowait = lambda item: captured.update(item[1])   # type: ignore
+    r._ensure_worker = lambda: None                              # type: ignore
+    good = _analysis(side="NO")
+    bad = _analysis(side="NO")
+    bad["structural"] = [1, 2, 3]      # structural.get("z_score") raises -> skip this asset
+    # Must NOT raise, and must keep the good asset.
+    r.observe(analyses={"BTC": good, "ETH": bad},
+              canonicals={"BTC": _canon("T-BTC", 900.0, 9000.0),
+                          "ETH": _canon("T-ETH", 900.0, 9000.0)}, now=1000.0)
+    cands = captured.get("candidates", [])
+    assert {c["asset"] for c in cands} == {"BTC"}      # ETH isolated, BTC survives
+
+
+def test_extract_candidate_skips_when_not_in_data(tmp_path):
+    r = _runner(tmp_path)
+    # missing canonical -> None; no prediction -> None.
+    assert r._extract_candidate("BTC", _analysis(), None, None) is None
+    assert r._extract_candidate("BTC", {"prediction_available": False},
+                                _canon("T", 900.0, 9000.0), None) is None
+    cand = r._extract_candidate("BTC", _analysis(), _canon("T-BTC", 900.0, 9000.0), None)
+    assert cand is not None and cand["asset"] == "BTC" and cand["predicted_side"] == "NO"
+
+
+# --------------------------------------------------------------------------- #
+# the REAL worker loop records an observe job (the previously-untested surface)
+# --------------------------------------------------------------------------- #
+def test_worker_loop_processes_real_observe_job(tmp_path):
+    r = _runner(tmp_path)                      # real _ensure_worker + queue + thread
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0)}
+    r.observe(analyses=a, canonicals=c, now=1000.0)
+    r._jobs.join()                             # block until the worker drains the job
+    sb = r.scoreboard()
+    assert sb["all_observations"]["recorded"] == 1
+    assert sb["all_observations"]["fired"] == 1
+    assert r.telegram.sent and "ULTOIM V2" in r.telegram.sent[0]

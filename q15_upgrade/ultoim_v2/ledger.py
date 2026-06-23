@@ -173,6 +173,23 @@ def _wilson(right: int, n: int, z: float = 1.96) -> tuple[float | None, float | 
     return p, centre - half, centre + half
 
 
+def _research_agg(rows: "Sequence[sqlite3.Row]") -> dict[str, Any]:
+    """Shared accuracy + P&L aggregate for the record-only research scoreboards
+    (s15, distance). Uses ``hypothetical_pnl_cents`` (win=100-ask, loss=-ask); pure,
+    read-only, never reads the gate or affects a decision."""
+    n = len(rows)
+    right = sum(1 for r in rows if r["correct"] == 1)
+    pnls = [float(r["hypothetical_pnl_cents"]) for r in rows
+            if r["hypothetical_pnl_cents"] is not None]
+    p, lo, hi = _wilson(right, n)
+    return {
+        "n": n, "right": right, "wrong": n - right,
+        "accuracy": p, "ci_low": lo, "ci_high": hi,
+        "pnl_total_cents": round(sum(pnls), 2) if pnls else 0.0,
+        "pnl_avg_cents": round(sum(pnls) / len(pnls), 3) if pnls else None,
+    }
+
+
 class UltoimV2Ledger:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -550,19 +567,6 @@ class UltoimV2Ledger:
                 (model_version,),
             ).fetchall()
 
-        def _agg(rs: Sequence[sqlite3.Row]) -> dict[str, Any]:
-            n = len(rs)
-            right = sum(1 for r in rs if r["correct"] == 1)
-            pnls = [float(r["hypothetical_pnl_cents"]) for r in rs
-                    if r["hypothetical_pnl_cents"] is not None]
-            p, lo, hi = _wilson(right, n)
-            return {
-                "n": n, "right": right, "wrong": n - right,
-                "accuracy": p, "ci_low": lo, "ci_high": hi,
-                "pnl_total_cents": round(sum(pnls), 2) if pnls else 0.0,
-                "pnl_avg_cents": round(sum(pnls) / len(pnls), 3) if pnls else None,
-            }
-
         gated = [r for r in rows if r["s15_pass"] == 1]
 
         def _with(code: str) -> list[sqlite3.Row]:
@@ -571,10 +575,36 @@ class UltoimV2Ledger:
         return {
             "available": True,
             "version": S15_VERSION,
-            "book": _agg(rows),
-            "gated": _agg(gated),
-            "gated_with_cal_drift": _agg(_with("CAL_DRIFT")),
-            "gated_with_fresh": _agg(_with("FRESH")),
+            "book": _research_agg(rows),
+            "gated": _research_agg(gated),
+            "gated_with_cal_drift": _research_agg(_with("CAL_DRIFT")),
+            "gated_with_fresh": _research_agg(_with("FRESH")),
+        }
+
+    def distance_research_scoreboard(self, model_version: str,
+                                     pin_sigma: float = 0.15) -> dict[str, Any]:
+        """Read-only: distance-to-strike (``distance_sigma``) is the one record-only
+        shadow feature shown to TRANSPORT across ledgers (near-strike NO loses, far NO
+        wins). This measures the candidate abstention prospectively over the settled NO
+        rows: NEAR-strike (``|distance_sigma| < pin_sigma`` — the would-abstain pin) vs
+        FAR (the would-keep). NEVER gates delivery; pure measurement so the rule can
+        prove (or disprove) itself on accruing data."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT correct, hypothetical_pnl_cents, distance_sigma "
+                "FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND predicted_side='NO' "
+                "AND official_result IS NOT NULL AND distance_sigma IS NOT NULL",
+                (model_version,),
+            ).fetchall()
+        near = [r for r in rows if abs(float(r["distance_sigma"])) < pin_sigma]
+        far = [r for r in rows if abs(float(r["distance_sigma"])) >= pin_sigma]
+        return {
+            "available": True,
+            "pin_sigma": pin_sigma,
+            "book": _research_agg(rows),
+            "near_pin": _research_agg(near),   # would-abstain (near strike / pin)
+            "far": _research_agg(far),         # would-keep (far from strike)
         }
 
     def resolved_rows(self, model_version: str) -> list[dict[str, Any]]:

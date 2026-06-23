@@ -105,17 +105,6 @@ def distance_risk(distance_sigma: Any) -> float | None:
     return -abs(ds)
 
 
-def size_fraction(risk: Any) -> float:
-    """Confidence-aware sizing fraction (1 - risk)^2, clamped to [0, 1]. PURE and
-    currently INERT — provided so a future, PROVEN screen can shrink dollar exposure
-    on the un-screenable tail instead of a hard skip. Not stored, not wired to
-    anything. A missing/invalid risk yields full size (1.0), never a surprise zero."""
-    r = _num(risk)
-    if r is None:
-        return 1.0
-    return _clip((1.0 - _clip(r, 0.0, 1.0)) ** 2, 0.0, 1.0)
-
-
 def shadow_features(row: Mapping[str, Any]) -> dict[str, Any]:
     """Derive the shadow columns for one candidate/row from its decision-time fields.
     Returns the exact dict the ledger stores: ``conf_gap``, ``blowup_risk``, and the
