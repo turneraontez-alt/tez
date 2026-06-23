@@ -25,6 +25,17 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Ultoim V2 pin-break SHADOW signals (record-only) (branch `claude/keen-fermat-ce81uv`)
+**Suite 1224 passed / 4 skipped here** (+4 ultoim_v2 tests, 75 total in the file). Deploy-pending — branch + PR #25. Read-only/paper; **record-only — changes NO decision**. Still DEFAULT-OFF.
+
+Outcome of a four-agent search for *what could actually lift v2 P&L* (the whole 08:00-snapshot session is summarized in the PR). Established, with evidence: **no decision-time skip-screen works** — conf_gap, distance_sigma, AND every signal v2 already records fail to separate winners from losers (the strike-pin 10M regime where the losses live is un-screenable; distance even flips sign between ledgers). The cross-system audit (champion v95 n=595 + ultoim v1 n=234) showed the real edge is **short-interval NO** (7M 80.5%/+667¢, 10M 72.5%/+333¢) and **15M is the structural loser** (52.6%/−2297¢) — already addressable via the existing `Q15_ULTOIM_V2_SKIP_15M` flag (built, NOT yet enabled live).
+
+The one new build: record two **pin-break** features, shadow-only, derived from the analysis dict `observe()` already receives (zero champion-code change, zero extra compute):
+- **`pin_break_drift`** = `analysis["structural"]["z_score"]` (checkpoint_v95.py:473) — vol-normalised drift THROUGH the strike; the only signal that keeps directional content when `distance_sigma`→0. Mechanistic best bet, but UNTESTABLE on stored data (structural isn't persisted in feature_json).
+- **`threshold_interaction`** = `analysis["feature_values"]["threshold_interaction"]` (the scalar; feature_json == feature_values). Backtested on the v95 136-row 10M-NO ledger: **AUC 0.698** (best discriminator found) and the **first signal to admit a winner-sparing OOS cut** (skip ti>0.5 → +38¢, 0 winners touched, holds out-of-sample). Small (1 loser, +6%) — promising, not proven.
+- **Files:** `q15_upgrade/ultoim_v2/{ledger,runner}.py`, `.env.example`, `tests/test_ultoim_v2.py` (+4: null-when-absent, persist, record-only-doesn't-change-fire, migrate+roundtrip). Two nullable columns via the idempotent ALTER migration (verified non-destructive on the real snapshot DB). No env knob (always recorded when overlay enabled, like conf_gap; pure dict reads).
+- **NEXT:** deploy main to the Repl (it's ahead — live runs 08221c4, main is past PR #25) so these + conf_gap/blowup_risk/x_market_flow actually accrue data; flip `Q15_ULTOIM_V2_SKIP_15M=true`; then validate threshold_interaction's winner-sparing cut prospectively before it could ever gate. Sizing: only fractional-bankroll (risk control) is defensible — edge-tilt was unproven (n=13, one-entry-driven).
+
 ## ✅ Shipped THIS session — Ultoim V2 blowup-risk SHADOW screen (record-only) + four-agent stress test (branch `claude/keen-fermat-ce81uv`)
 **Suite 1215 passed / 4 skipped here** (+11 ultoim_v2 tests, 66 total in the file). Deploy-pending — branch + PR #25. Read-only/paper; **record-only — changes NO decision** (no fire/size/alert/delivery effect). Still DEFAULT-OFF (`Q15_ULTOIM_V2_ENABLED`).
 

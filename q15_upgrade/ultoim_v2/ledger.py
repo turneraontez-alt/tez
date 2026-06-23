@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     conf_gap REAL,
     blowup_risk REAL,
     screen_version TEXT,
+    pin_break_drift REAL,
+    threshold_interaction REAL,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -198,6 +200,11 @@ class UltoimV2Ledger:
             ("screen_version", "TEXT"),
             # Record-only cross-asset market flow (measure-first; see runner). Nullable, never gates.
             ("x_market_flow", "REAL"),
+            # Record-only pin-break shadow features (see runner). Nullable, never gate.
+            # pin_break_drift = structural z_score (drift through the strike);
+            # threshold_interaction = champion's scalar threshold feature (failed-break family).
+            ("pin_break_drift", "REAL"),
+            ("threshold_interaction", "REAL"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -322,6 +329,7 @@ class UltoimV2Ledger:
         "gate_min_conf", "gate_ask_lo", "gate_ask_hi", "gate_min_edge",
         "close_time", "snapshot_id", "session_id", "delivery_status",
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
+        "pin_break_drift", "threshold_interaction",
     )
 
     # Sensible defaults for columns added after the first release, so any caller
