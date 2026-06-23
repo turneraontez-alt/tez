@@ -25,6 +25,45 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## 💡 IDEA — NOT IMPLEMENTED (parked for later) — Ultoim V2 manipulation YES+suspected veto
+**Status: investigated only, no code written.** Data as of `learning-snapshots` snapshot
+`2026-06-23T06:19Z` (git_commit `08221c4`); v2 ledger had **n=7 fired+resolved (~3h since reset)**
+→ directional, not significant. Revisit when v2 has more data.
+
+**The question:** can changing how the manipulation signal is used help Ultoim V2 without hurting it?
+
+**What v2 does today:** v2 RECORDS `manipulation_suspected` on every candidate row
+(`ultoim_v2/runner.py:148,263`) but the gate (`ultoim_v2/gate.py:evaluate`) **never reads it** —
+the decision is purely NO-only + conf≥0.55 + ask∈[50,72] + net_edge≥2¢ + not-stale. So manipulation
+is captured-but-unused dead weight in v2.
+
+**What the records show (champion ledger `q15_v95_ledger_v1`, n=306 suspected):** the manipulation
+flag's entire loss is ONE bucket — **YES + suspected = 54.5% acc, −13.2¢/contract (n=101)**. NO+suspected
+is +1.1¢, NO+clean +6.3¢, YES+clean +2.7¢. The flag over-fires (~80% of all rows; 82% of v2's candidates).
+
+**Two evidence-safe changes (the only ones the data backs):**
+1. **Default-OFF "veto YES + suspected" gate** in `ultoim_v2/gate.py` (+ `Q15_ULTOIM_V2_*` flag). It's a
+   **no-op on current behaviour** (v2 is NO-only → 0 YES fired) and only bites as a safety rail if anyone
+   sets `Q15_ULTOIM_V2_NO_ONLY=false`. Then it blocks exactly the −13.2¢ bucket while allowing YES+clean.
+2. **Add a manipulation split to v2's scoreboard/recap** (`ultoim_v2/ledger.py:scoreboard`, read-only) —
+   v2 tracks by_interval/by_regime but not by manipulation, even though every row carries the flag. This is
+   the instrument that tells you whether NO-suspected ever turns toxic at v2's gate before acting on it.
+
+**Backtest on v2's OWN record = ZERO measured impact (can't hurt, not yet proven to help):**
+- Took all v2 trades: **before veto +210¢ realized / +62¢ net-edge (n=7); after veto identical. Delta +0¢.**
+- Even simulating YES enabled: before/after both +158¢ — because all 3 YES+suspected candidates in v2's
+  record **fail v2's own conf/ask gate anyway** (BTC 15M conf 0.546; DOGE 7M ask 19¢; SOL 7M conf 0.508),
+  so the veto never had a trade to remove. Its justification is the champion's broader record, not v2's.
+
+**DO NOT do this (the trap):** a hard "veto NO+suspected" gate would have killed **6 of v2's 7 fires**
+(82% of candidates are flagged) and NO+suspected is still mildly +EV — gating the NO side is unsupported
+and the early v2 data leans against it (6/7 winners were suspected). Dropped the earlier "tie-break toward
+clean" idea for the same reason.
+
+**Next step when revisiting:** ship #2 (scoreboard split, read-only) first to accumulate the v2-native
+clean-vs-suspected record; add #1 (YES veto) only when/if `no_only` is turned off. Both `Q15_*`-gated,
+test-backed, no-ops on current behaviour.
+
 ## ✅ Shipped THIS session — Ultoim V2: paper entry-alert system (branch `claude/sleepy-cray-8ktugn`)
 **Suite 1125 passed / 13 skipped here** (+23 ultoim_v2 tests). Deploy-pending — branch + draft PR.
 **Default-OFF** (`Q15_ULTOIM_V2_ENABLED`, default false → app byte-identical when unset).
