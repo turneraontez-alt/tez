@@ -42,9 +42,10 @@ class PolymarketConfig:
     # Emit the compact "POLYMARKET SHADOW" Telegram card at each window boundary.
     report_enabled: bool = field(default_factory=lambda: _bool("Q15_POLYMARKET_REPORT", True))
 
-    # Assets to attempt. Polymarket runs 15-minute crypto only for a subset
-    # (BTC/ETH, SOL expected); everything else shows "NO MATCHING MARKET".
-    assets: tuple[str, ...] = field(default_factory=lambda: _assets("Q15_POLYMARKET_ASSETS", "BTC,ETH,SOL"))
+    # Assets to attempt. Polymarket runs 15-minute crypto Up/Down for BTC, ETH, SOL,
+    # XRP (confirmed via their 15m fee announcement + the live /crypto/15M board);
+    # anything else (e.g. the Kalshi-only DOGE/BNB/HYPE) shows "NO MATCHING MARKET".
+    assets: tuple[str, ...] = field(default_factory=lambda: _assets("Q15_POLYMARKET_ASSETS", "BTC,ETH,SOL,XRP"))
 
     # -- read-only HTTP endpoints (public; no auth needed for market data) --
     clob_base: str = field(default_factory=lambda: _str("Q15_POLYMARKET_CLOB_URL", "https://clob.polymarket.com"))

@@ -8,12 +8,14 @@ Only market-data endpoints are used; nothing here can place or cancel an order.
 Every call is timeout-bounded and swallows network/parse errors (returns None),
 so a Polymarket outage can never raise into the live loop.
 
-NOTE (live-validation): the exact Gamma field names for a 15-minute up/down
-event (the "price to beat" reference and the resolution payload) must be
-confirmed against the live API. Parsing here is deliberately tolerant — it checks
-several plausible fields and degrades to None rather than guessing — so an
-unexpected shape yields "no reference / not yet resolved", never a crash or a
-fabricated value.
+NOTE (live-validation): the event slug ``{asset}-updown-15m-{window_open_epoch}``
+is CONFIRMED against live Polymarket (e.g. the real event ``btc-updown-15m-1777269600``;
+markets exist for BTC/ETH/SOL/XRP on the /crypto/15M board). The exact Gamma JSON
+field names for the "price to beat" reference and the resolution payload are NOT yet
+byte-confirmed — run ``scripts/polymarket_smoke.py`` from a host that can reach the
+API (e.g. the Repl) to verify them. Parsing here is deliberately tolerant — it checks
+several plausible fields and degrades to None rather than guessing — so an unexpected
+shape yields "no reference / not yet resolved", never a crash or a fabricated value.
 """
 
 from __future__ import annotations

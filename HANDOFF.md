@@ -25,6 +25,13 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## ✅ Shipped THIS session — Polymarket shadow: verified 15m targeting + XRP + smoke test (branch `claude/brave-noether-2u4l5p` → PR + merge)
+**Suite 1258 passed / 13 skipped** (no new tests — config default + docs + one read-only script). Verified the EXISTING read-only Polymarket up/down shadow (`q15_upgrade/polymarket/`, gated by `Q15_POLYMARKET_ENABLED`, **default OFF**; wired at `checkpoint_v95.py:2723` observe + `app.py:625` reconcile/report) is correctly aimed at **Polymarket's 15-minute crypto Up/Down markets**: the slug `{asset}-updown-15m-{window_open}` matches a live event (`btc-updown-15m-1777269600`), the markets exist for BTC/ETH/SOL/XRP, and the contract (close≥open, Chainlink) matches the model. Changes:
+- Default assets `BTC,ETH,SOL` → **`BTC,ETH,SOL,XRP`** (Polymarket's confirmed 15m set; the Kalshi-only DOGE/BNB/HYPE aren't on Polymarket's 15m board → `NO MATCHING MARKET`).
+- Refreshed the `client.py` live-validation note: the slug is now CONFIRMED; only the exact Gamma JSON field names remain to byte-verify.
+- Added **`scripts/polymarket_smoke.py`** (read-only) — run it ON THE REPL to confirm discovery + field-parsing against the live API.
+- **Caveat:** the Polymarket API is network-blocked from the dev sandbox (403 policy denial on gamma-api/clob), so the final field-name confirmation + enabling must be validated on the Repl (verify it can reach `gamma-api.polymarket.com`/`clob.polymarket.com`). The code fails safe (degrades to `NO MATCHING MARKET`, never crashes production).
+
 ## ✅ Shipped THIS session — Ultoim V2 expensive-NO admit band, ENABLED (branch `claude/brave-noether-2u4l5p` → PR + merge)
 **Suite 1258 passed / 13 skipped here** (+12 tests: 11 `tests/test_ultoim_v2_expensive_no.py` + 1 runner e2e; the lone ask>72 ceiling test was updated for the new NO ceiling). The one P&L-ADD lever that cleared the owner's "raise P&L without adding net losers" bar (found by the expensive-NO research fan-out; the parked item).
 
