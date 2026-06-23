@@ -127,6 +127,16 @@ class UltoimV2Runner:
             manip = analysis.get("manipulation") or {}
             costs = analysis.get("costs") or {}
             regime = analysis.get("regime") or {}
+            # Pin-break shadow features (measure-first; never read by the gate):
+            #  * pin_break_drift = the structural z_score — vol-normalised drift
+            #    THROUGH the strike; the one signal that keeps directional content
+            #    when distance_sigma -> 0 (the strike-pin regime where the losses live).
+            #  * threshold_interaction = the champion's scalar threshold feature (the
+            #    "failed-break" family); on the v95 ledger it was the strongest loss
+            #    discriminator (AUC ~0.70) and the first to admit a winner-sparing OOS
+            #    cut. Both are recorded record-only and validated later.
+            structural = analysis.get("structural") or {}
+            feature_values = analysis.get("feature_values") or {}
             close_time = getattr(canonical, "settlement_time", None)
             total_cost = costs.get("total_cost_cents")
             if total_cost is None:
@@ -162,6 +172,8 @@ class UltoimV2Runner:
                 "book_resiliency": signals.get("book_resiliency"),
                 "prediction_stability": signals.get("prediction_stability"),
                 "x_market_flow": market_flow,
+                "pin_break_drift": structural.get("z_score"),
+                "threshold_interaction": feature_values.get("threshold_interaction"),
                 "snapshot_id": analysis.get("snapshot_id"),
             })
         if not candidates:
@@ -309,6 +321,8 @@ class UltoimV2Runner:
             "book_resiliency": cand.get("book_resiliency"),
             "prediction_stability": cand.get("prediction_stability"),
             "x_market_flow": cand.get("x_market_flow"),
+            "pin_break_drift": cand.get("pin_break_drift"),
+            "threshold_interaction": cand.get("threshold_interaction"),
             "gate_a_pass": 1 if verdict.get("gate_a") else 0,
             "gate_b_pass": 1 if verdict.get("gate_b") else 0,
             "gate_c_pass": 1 if verdict.get("gate_c") else 0,

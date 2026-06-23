@@ -1151,3 +1151,75 @@ def test_record_xflow_does_not_change_gate_decision(tmp_path):
         rows = r.ledger.recent_rows("ultoim-v2", limit=10)
         fired[flag] = (rows[0]["fired"], rows[0]["predicted_side"], rows[0]["interval"])
     assert fired[False] == fired[True]
+
+
+# --------------------------------------------------------------------------- #
+# pin-break shadow features (record-only): pin_break_drift + threshold_interaction
+# --------------------------------------------------------------------------- #
+def _with_pin(analysis, *, drift=None, ti=None):
+    """Attach the analysis fields the pin-break features read: structural.z_score
+    and feature_values.threshold_interaction."""
+    a = dict(analysis)
+    if drift is not None:
+        a["structural"] = {"z_score": drift, "projected_signed_drift": drift}
+    fv = dict(a.get("feature_values") or {})
+    if ti is not None:
+        fv["threshold_interaction"] = ti
+    a["feature_values"] = fv
+    return a
+
+
+def test_pin_break_signals_null_when_absent(tmp_path):
+    # A plain analysis (no structural / no threshold_interaction) records NULLs,
+    # never a crash or a fabricated 0.0.
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0)}
+    cands = _extract(r, a, c, now=1000.0)
+    assert cands and cands[0].get("pin_break_drift") is None
+    assert cands[0].get("threshold_interaction") is None
+    r._observe_sync(candidates=cands, now=1000.0)
+    row = r.ledger.recent_rows("ultoim-v2", limit=5)[0]
+    assert row["pin_break_drift"] is None and row["threshold_interaction"] is None
+
+
+def test_pin_break_signals_persist(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    a = {"BTC": _with_pin(_analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0,
+                                    mkt_yes=0.35), drift=1.5, ti=-0.8)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0)}
+    cands = _extract(r, a, c, now=1000.0)
+    assert cands[0]["pin_break_drift"] == pytest.approx(1.5)
+    assert cands[0]["threshold_interaction"] == pytest.approx(-0.8)
+    r._observe_sync(candidates=cands, now=1000.0)
+    row = r.ledger.recent_rows("ultoim-v2", limit=5)[0]
+    assert row["pin_break_drift"] == pytest.approx(1.5)
+    assert row["threshold_interaction"] == pytest.approx(-0.8)
+
+
+def test_pin_break_signals_are_record_only(tmp_path):
+    # Pure observation: an extreme pin_break_drift / threshold_interaction must not
+    # change which candidate fires (the gate never reads them).
+    base = _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0)}
+    fired = {}
+    for tag, a in (("plain", base),
+                   ("extreme", _with_pin(base, drift=9.9, ti=0.99))):
+        r = _runner(tmp_path / tag, telegram=_StubTelegram())
+        r._observe_sync(candidates=_extract(r, {"BTC": a}, c, now=1000.0), now=1000.0)
+        row = r.ledger.recent_rows("ultoim-v2", limit=5)[0]
+        fired[tag] = (row["fired"], row["predicted_side"], row["interval"])
+    assert fired["plain"] == fired["extreme"]
+
+
+def test_pin_break_columns_migrate_and_roundtrip(tmp_path):
+    path = str(tmp_path / "u.sqlite3")
+    led = UltoimV2Ledger(path)
+    led.record_decision(_row(ticker="P1", pin_break_drift=1.2, threshold_interaction=-0.5))
+    led.record_decision(_row(ticker="P2"))  # legacy-style row: columns default NULL
+    rows = {r["ticker"]: r for r in led.recent_rows("ultoim-v2", limit=10)}
+    assert rows["P1"]["pin_break_drift"] == pytest.approx(1.2)
+    assert rows["P1"]["threshold_interaction"] == pytest.approx(-0.5)
+    assert rows["P2"]["pin_break_drift"] is None
+    assert rows["P2"]["threshold_interaction"] is None
+    led.close()
