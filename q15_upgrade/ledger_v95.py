@@ -10,6 +10,7 @@ current release.
 from __future__ import annotations
 
 from contextlib import closing
+import copy
 import json
 import logging
 import math
@@ -304,6 +305,15 @@ def _parse_ts(value: Any) -> float | None:
 TRACKED_CHECKPOINTS = ("15M", "10M", "7M")
 LEARNING_CHECKPOINTS = ("10M", "15M")
 
+# status() is display-only (the live alert's "pushed accuracy" line and
+# /api/health), but the ~1s main loop calls it every cycle and it runs several
+# unbounded full-table scans over the (unpruned) predictions table — the dominant
+# "slower over time" cost. TTL-memoize it so it recomputes at most once per this
+# window. A short fixed staleness is harmless for a display value and, unlike the
+# data-version caches, must NOT be coupled to self._data_version (that would change
+# how often the calibration caches bust). Uses time.monotonic().
+_STATUS_CACHE_TTL_SECONDS = 15.0
+
 
 # Frozen champion logit weights. Each is the maximum logit swing a feature can
 # add to the structural base, applied as ``weight * value * quality`` where value
@@ -483,6 +493,12 @@ class V95Ledger:
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
+        # TTL cache for the display-only status() (see _STATUS_CACHE_TTL_SECONDS).
+        # Deliberately time-based (not _data_version-based): a few seconds of
+        # display staleness is harmless and avoids re-running its full-table scans
+        # on every ~1s cycle.
+        self._status_cache: dict[str, Any] | None = None
+        self._status_cache_at = 0.0
         try:
             self._initialize()
         except Exception as exc:  # fail closed but keep monitor alive
@@ -787,6 +803,26 @@ class V95Ledger:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_v95_flip_decisions "
                 "ON flip_decisions(model_version, checkpoint, official_result)"
+            )
+            # Performance indexes for the hot-path scans that grow with the
+            # (unpruned) predictions table. Idempotent (IF NOT EXISTS) so existing
+            # DBs gain them on init. Partial indexes (WHERE ...) keep the
+            # unresolved/resolved working sets small and stable over time.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_predictions_ticker_unresolved "
+                "ON predictions(ticker) WHERE official_result IS NULL"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_timing_experiment_contract "
+                "ON timing_experiment(contract)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_flip_decisions_contract "
+                "ON flip_decisions(contract)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_predictions_resolved_mv "
+                "ON predictions(model_version, resolved_at) WHERE official_result IS NOT NULL"
             )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
@@ -3459,6 +3495,13 @@ class V95Ledger:
     def status(self) -> dict[str, Any]:
         if not self._available:
             return {"available": False, "path": str(self.path), "error": self._last_error}
+        # Display-only TTL cache: the ~1s loop calls this every cycle, but its
+        # full-table scans only need to be fresh to within a few seconds for the
+        # "pushed accuracy" display line and /api/health. Return a deep copy so no
+        # caller can mutate the cached object (the dict nests sub-dicts/lists).
+        cached = self._status_cache
+        if cached is not None and (time.monotonic() - self._status_cache_at) < _STATUS_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached)
         with self._lock, closing(self._connect()) as connection:
             counts = connection.execute(
                 """SELECT COUNT(*) total,
@@ -3501,7 +3544,7 @@ class V95Ledger:
             }
             for r in regime_rows
         ]
-        return {
+        result: dict[str, Any] = {
             "available": True, "path": str(self.path), "version": VERSION,
             "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "unique_predictions": int(counts["total"] or 0), "unique_resolved": int(counts["resolved"] or 0),
@@ -3538,6 +3581,11 @@ class V95Ledger:
                 for r in pushed_rows
             },
         }
+        # Store an independent copy and stamp the (monotonic) refresh time; return a
+        # fresh copy so the caller and the cache never share mutable state.
+        self._status_cache = copy.deepcopy(result)
+        self._status_cache_at = time.monotonic()
+        return copy.deepcopy(result)
 
 
 __all__ = [

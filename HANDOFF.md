@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1232 passed / 13 skipped here** (4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1249 passed / 13 skipped here** (4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## ✅ Shipped THIS session — Ultoim V2 flow-against-NO research screen (record-only; the #1 loss fix) (branch `claude/elegant-mayer-js11yk`)
@@ -31,6 +31,15 @@ A four-agent FORENSIC loss analysis (v2 39 losers / v95 250) found the single ro
   (the Relay syncs files but the app doesn't hot-reload). `running_commit`/`matches_checkout`
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
+
+## ✅ Shipped (prior, now on main) — cycle-timing perf fixes: 3 unbounded-growth leaks (branch `claude/brave-noether-2u4l5p` → PR + merge)
+**Suite 1246 passed / 13 skipped here** (+17 tests). **Behavior-NEUTRAL** — no probability/edge/side/alert/prediction change; champion weights frozen; read-only preserved. Diagnosed by a 3-agent fan-out, fixed by 3 more on disjoint files; all diffs reviewed + full suite green before merge.
+
+The ~1s `refresh_loop` was degrading over runtime: several collections grow unbounded (no pruning/retention anywhere) and are scanned every cycle — classic O(n)-in-growing-data slowdown. Three independent leaks fixed:
+- **`ledger_v95.status()` ran ~5 full-table scans EVERY ~1s** (`checkpoint_v95.py:2860`, outside the 30s throttle) over the unpruned `predictions` table — and it's DISPLAY-ONLY (the alert "pushed accuracy" line + `/api/health`). Now TTL-memoized (`_STATUS_CACHE_TTL_SECONDS=15`, `time.monotonic`, deep-copied so callers can't mutate the cache; deliberately NOT coupled to `_data_version` so calibration-bust cadence is unchanged). Plus 4 idempotent indexes: `predictions(ticker) WHERE official_result IS NULL`, `timing_experiment(contract)`, `flip_decisions(contract)`, partial `predictions(model_version,resolved_at) WHERE official_result IS NOT NULL`.
+- **WS ticker-dict leak** — `ws_client._books`/`_trades`/`_market_status` and `hybrid_data._ticker_sources` were never evicted as 15m markets roll over (~28 new tickers/hr), and `health()` rescans them ~8×/cycle on the hot path. `subscribe()` now evicts entries not in the desired set (lock-safe, keyed off the authoritative desired set — never age, so an active book is never dropped).
+- **`window_focus._cycles`/`_rankings`/`_top_by_close`** grew ~672 keys/day, scanned O(n) every reconcile. New `_prune_settled_cycles` (2h retention) evicts graded+old cycles (re-hydrate from Postgres on demand via `_hydrate_cycle`); ungraded/recent/current/unparseable always retained.
+- **Confirmed NOT the cause:** the ultoim_v2 overlay + this session's distance-gate / interval-split / research_fired work all run on the throttled worker/recap thread, off the hot loop. **Confirm live:** `GET /api/health → cycle_watchdog` → `slowest_stage` / `worst_stage_seconds` (expect `run_cycle` to fall and stop climbing).
 
 ## ✅ Shipped (prior, now on main) — Ultoim V2 distance gate ENABLED + research-population honesty + interval-split (branch `claude/brave-noether-2u4l5p` → merged to main)
 **Suite 1229 passed / 13 skipped here** (+16 tests: 8 `tests/test_ultoim_v2_distance_gate.py`, 6 `tests/test_ultoim_v2_research_fired.py`, +2 interval-split in `tests/test_ultoim_v2_research.py`). Built by parallel agents on disjoint files; verified + merged via PR. **The distance gate is now ON by default (owner directive)** — set `Q15_ULTOIM_V2_DISTANCE_GATE=false` to opt out (byte-identical no-gate). The overlay master switch `Q15_ULTOIM_V2_ENABLED` is unchanged (still env-controlled, default-OFF).
