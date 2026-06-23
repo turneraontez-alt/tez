@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     order_flow_persistence REAL,
     book_resiliency REAL,
     prediction_stability REAL,
+    x_market_flow REAL,
     gate_a_pass INTEGER,
     gate_b_pass INTEGER,
     gate_c_pass INTEGER,
@@ -133,7 +134,19 @@ class UltoimV2Ledger:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._ensure_columns()
             self._conn.commit()
+
+    # Additive migration for DBs created before a column existed. CREATE TABLE IF
+    # NOT EXISTS never alters an existing table, so new nullable columns are added
+    # here (old rows read NULL). Must be called inside ``self._lock``.
+    def _ensure_columns(self) -> None:
+        existing = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(ultoim_v2_predictions)")}
+        for col, ddl in (("x_market_flow", "x_market_flow REAL"),):
+            if col not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE ultoim_v2_predictions ADD COLUMN {ddl}")
 
     # -- meta / reset marker + session id ------------------------------------
     def ensure_reset_marker(self, model_version: str, now: float) -> float:
@@ -247,6 +260,7 @@ class UltoimV2Ledger:
         "distance_sigma", "regime_name", "regime_directional", "data_quality",
         "evidence_quality", "manipulation_suspected", "flip_probability",
         "order_flow_persistence", "book_resiliency", "prediction_stability",
+        "x_market_flow",
         "gate_a_pass", "gate_b_pass", "gate_c_pass", "reason_codes",
         "gate_min_conf", "gate_ask_lo", "gate_ask_hi", "gate_min_edge",
         "close_time", "snapshot_id", "session_id", "delivery_status",
