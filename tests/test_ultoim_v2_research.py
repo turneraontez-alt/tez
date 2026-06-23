@@ -219,3 +219,66 @@ def test_worker_loop_processes_real_observe_job(tmp_path):
     assert sb["all_observations"]["recorded"] == 1
     assert sb["all_observations"]["fired"] == 1
     assert r.telegram.sent and "ULTOIM V2" in r.telegram.sent[0]
+
+
+# --------------------------------------------------------------------------- #
+# flow-against-NO research scoreboard + recap (the #1 loss-forensics fix, record-only)
+# --------------------------------------------------------------------------- #
+def _bucket(n, acc, avg):
+    right = int(round(acc * n))
+    return {"n": n, "right": right, "wrong": n - right, "accuracy": acc,
+            "ci_low": max(0.0, acc - 0.1), "ci_high": min(1.0, acc + 0.1),
+            "pnl_total_cents": avg * n, "pnl_avg_cents": avg}
+
+
+def test_flow_research_scoreboard_flow_and_regime_cuts(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    # flow>=0.6 = would-ABSTAIN (NO against strong buy flow). Make those the losers.
+    led.record_decision(_drow(ticker="A", champion_flow=0.80, regime_directional="YES_PRONE",
+                              entry_ask_cents=55.0))
+    led.record_decision(_drow(ticker="B", interval="7M", champion_flow=0.70,
+                              regime_directional="YES_PRONE", entry_ask_cents=58.0))
+    led.record_decision(_drow(ticker="C", interval="15M", champion_flow=0.10,
+                              regime_directional="NO_PRONE", entry_ask_cents=52.0))
+    led.record_decision(_drow(ticker="D", interval="12M", champion_flow=None,
+                              regime_directional="BALANCED", entry_ask_cents=50.0))
+    led.resolve("ultoim-v2", "A", "YES", 9500.0)   # NO loss -55 (high flow -> abstain was right)
+    led.resolve("ultoim-v2", "B", "YES", 9500.0)   # NO loss -58
+    led.resolve("ultoim-v2", "C", "NO", 9500.0)    # NO win +48 (low flow -> kept)
+    led.resolve("ultoim-v2", "D", "NO", 9500.0)    # NO win +50 (None flow -> kept)
+
+    sb = led.flow_research_scoreboard("ultoim-v2", flow_threshold=0.6)
+    assert sb["available"] and sb["flow_threshold"] == 0.6 and sb["book"]["n"] == 4
+    # champion_flow cut: the two high-flow rows are the would-abstain losers.
+    assert sb["flow_abstain"]["n"] == 2 and sb["flow_abstain"]["right"] == 0
+    assert sb["flow_abstain"]["pnl_total_cents"] == pytest.approx(-113.0)
+    assert sb["flow_keep"]["n"] == 2 and sb["flow_keep"]["right"] == 2      # incl. None-flow (kept)
+    # v2-native regime proxy cut (has data without champion_flow recorded).
+    assert sb["regime_abstain"]["n"] == 2 and sb["regime_abstain"]["right"] == 0
+    assert sb["regime_keep"]["n"] == 2 and sb["regime_keep"]["right"] == 2
+    led.close()
+
+
+def test_extract_candidate_captures_champion_flow(tmp_path):
+    r = _runner(tmp_path)
+    a = _analysis()
+    a["feature_values"] = {"flow": 0.72, "threshold_interaction": 0.3}
+    cand = r._extract_candidate("BTC", a, _canon("T-BTC", 900.0, 9000.0), None)
+    assert cand["champion_flow"] == pytest.approx(0.72)
+    assert cand["threshold_interaction"] == pytest.approx(0.3)
+    # absent feature_values -> None (no crash, never gates)
+    cand2 = r._extract_candidate("BTC", _analysis(), _canon("T-BTC", 900.0, 9000.0), None)
+    assert cand2["champion_flow"] is None
+
+
+def test_recap_shows_flow_research():
+    cfg = UltoimV2Config(enabled=True, min_scoreboard_n=30, min_promote_n=50)
+    sb = _min_sb(flow_research={
+        "available": True, "flow_threshold": 0.6, "book": _bucket(68, 0.71, 5.0),
+        "flow_keep": _bucket(60, 0.75, 8.0), "flow_abstain": _bucket(8, 0.30, -15.0),
+        "regime_keep": _bucket(61, 0.74, 6.0), "regime_abstain": _bucket(7, 0.0, -16.0)})
+    text = panel.build_recap(sb, [], [], cfg)
+    assert "Flow-against-NO" in text and "abstain (flow)" in text and "regime proxy" in text
+    assert "-15.0¢/pick" in text                      # the would-abstain bleed is shown
+    for m in _FORBIDDEN:
+        assert m not in text

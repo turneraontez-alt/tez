@@ -9,8 +9,15 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1213 passed / 13 skipped here** (4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1216 passed / 13 skipped here** (4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
+
+## ✅ Shipped THIS session — Ultoim V2 flow-against-NO research screen (record-only; the #1 loss fix) (branch `claude/elegant-mayer-js11yk`)
+**Suite 1216 passed / 13 skipped here** (+3 tests). Deploy-pending — branch + draft PR. Record-only; **changes NO decision**; DEFAULT-OFF.
+
+A four-agent FORENSIC loss analysis (v2 39 losers / v95 250) found the single robust, OOS-validated P&L fix: **abstain on a NO bet placed against strong buy-side flow** (`champion_flow = feature_values["flow"] >= 0.6`) — +513c (+50%) on the v95 NO side, survives a 3-way time-split + leave-one-asset-out, and is the *smart* 15M filter (drops ~8% of picks, keeps the 15M winners blanket-15M-abstain discards). Audited first: this signal does NOT already exist in v2 (v2 read `threshold_interaction` from feature_values but not `flow`); the v2-native proxy `regime_directional==YES_PRONE` IS already recorded + scoreboard-split, so the build complements it. Other agent findings: losses cluster into ~46 effective window-blocks (low power); blanket-15M-abstain and distance-pin-on-NO both FAIL the time-split (don't gate them); early-exit detects (AUC 0.83) but isn't net-positive (move already priced by 10M).
+
+**What shipped (record-only, NEVER gates):** capture `champion_flow` (new ledger col, from `feature_values["flow"]`, like threshold_interaction); `flow_research_scoreboard` measures the would-abstain (flow>=thr) vs keep AND the v2-native regime proxy; rendered in the recap (marker-safe); knob `Q15_ULTOIM_V2_FLOW_AGAINST_NO=0.6`. On the real 70-row NO snapshot the regime-proxy cut already shows it working: abstain n=7 @ 0% / -29.3c/pick vs keep n=63 @ 76% / +15.0c/pick. champion_flow accrues after the Repl redeploys. **NEXT: deploy → watch the recap flow block across sessions → gate only once flow-abstain clears validate.py's bar.**
 
 ## 🚀 Deploy / verify workflow (NEW)
 - **Ship to main with one command:** `scripts/ship.sh "summary"` — fetches origin/main,
@@ -25,7 +32,7 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Ultoim V2 review-consensus additions (record-only + robustness) (branch `claude/elegant-mayer-js11yk`)
+## ✅ Shipped (prior, now on main) — Ultoim V2 review-consensus additions (record-only + robustness) (branch `claude/elegant-mayer-js11yk`)
 **Suite 1213 passed / 13 skipped here** (+7 tests, new file `tests/test_ultoim_v2_research.py`; −1 dead test). Deploy-pending — branch + draft PR. All record-only / robustness; **changes NO decision**; DEFAULT-OFF.
 
 A four-agent review of v2 (perf C−, code A−/B+, shadow features: 1 of 6 works) found the gate adds ~0 selection lift over "bet NO" (calibration works, but fire/skip doesn't select), and the research machinery wasn't surfaced. The agents' consensus "add list" — implemented here, none of it a new gate:

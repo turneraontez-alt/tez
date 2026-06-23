@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     s15_version TEXT,
     pin_break_drift REAL,
     threshold_interaction REAL,
+    champion_flow REAL,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -234,6 +235,9 @@ class UltoimV2Ledger:
             # threshold_interaction = champion's scalar threshold feature (failed-break family).
             ("pin_break_drift", "REAL"),
             ("threshold_interaction", "REAL"),
+            # Record-only champion per-asset directional flow factor (feature_values
+            # ["flow"]); the flow-against-NO abstain candidate. Nullable, never gates.
+            ("champion_flow", "REAL"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -359,7 +363,7 @@ class UltoimV2Ledger:
         "close_time", "snapshot_id", "session_id", "delivery_status",
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
         "s15_pass", "s15_codes", "s15_cal_drift", "s15_version",
-        "pin_break_drift", "threshold_interaction",
+        "pin_break_drift", "threshold_interaction", "champion_flow",
     )
 
     # Sensible defaults for columns added after the first release, so any caller
@@ -605,6 +609,43 @@ class UltoimV2Ledger:
             "book": _research_agg(rows),
             "near_pin": _research_agg(near),   # would-abstain (near strike / pin)
             "far": _research_agg(far),         # would-keep (far from strike)
+        }
+
+    def flow_research_scoreboard(self, model_version: str,
+                                 flow_threshold: float = 0.6) -> dict[str, Any]:
+        """Read-only: the flow-against-NO abstain candidate — the single fix that lifted
+        P&L ~50% out-of-sample on the v95 NO side (and survived a 3-way time-split +
+        leave-one-asset-out). Measures it prospectively over the settled NO rows two ways:
+          * by the champion per-asset flow factor (``champion_flow``): would-ABSTAIN
+            (flow >= threshold, a NO bet against strong buy-side flow) vs would-KEEP.
+            Empty until the live engine records champion_flow.
+          * by the v2-native proxy ``regime_directional == 'YES_PRONE'`` (market leans
+            YES against our NO) — already recorded, so this cut has data today.
+        NEVER gates delivery; pure measurement so the fix can prove itself before gating."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT correct, hypothetical_pnl_cents, champion_flow, regime_directional "
+                "FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND predicted_side='NO' "
+                "AND official_result IS NOT NULL",
+                (model_version,),
+            ).fetchall()
+        # champion_flow cut (None flow => kept; can't abstain without the signal).
+        flow_abstain = [r for r in rows if r["champion_flow"] is not None
+                        and float(r["champion_flow"]) >= flow_threshold]
+        flow_keep = [r for r in rows if not (r["champion_flow"] is not None
+                                             and float(r["champion_flow"]) >= flow_threshold)]
+        # v2-native regime proxy cut (has data now).
+        regime_abstain = [r for r in rows if str(r["regime_directional"] or "") == "YES_PRONE"]
+        regime_keep = [r for r in rows if str(r["regime_directional"] or "") != "YES_PRONE"]
+        return {
+            "available": True,
+            "flow_threshold": flow_threshold,
+            "book": _research_agg(rows),
+            "flow_abstain": _research_agg(flow_abstain),   # would-cut (flow against NO)
+            "flow_keep": _research_agg(flow_keep),         # would-keep
+            "regime_abstain": _research_agg(regime_abstain),  # v2-native proxy: would-cut
+            "regime_keep": _research_agg(regime_keep),
         }
 
     def resolved_rows(self, model_version: str) -> list[dict[str, Any]]:

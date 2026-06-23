@@ -308,6 +308,19 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
         body.append(f"  far  (keep): {_screen_line(dist.get('far'))}")
         body.append(f"  near (pin) : {_screen_line(dist.get('near_pin'))}")
 
+    # Flow-against-NO — the OOS-validated abstain candidate. champion_flow cut accrues
+    # once the live engine records it; the v2-native regime proxy has data now.
+    flow = (scoreboard or {}).get("flow_research") or {}
+    if flow.get("available") and int((flow.get("book") or {}).get("n") or 0) > 0:
+        thr = _num(flow.get("flow_threshold"))
+        thr_txt = "—" if thr is None else f"{thr:.2f}"
+        body.append("")
+        body.append(f"Flow-against-NO (SHADOW · record-only · abstain if flow≥{thr_txt}):")
+        body.append(f"  keep (flow ok) : {_screen_line(flow.get('flow_keep'))}")
+        body.append(f"  abstain (flow) : {_screen_line(flow.get('flow_abstain'))}")
+        body.append(f"  regime proxy — keep   : {_screen_line(flow.get('regime_keep'))}")
+        body.append(f"  regime proxy — abstain: {_screen_line(flow.get('regime_abstain'))}")
+
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
