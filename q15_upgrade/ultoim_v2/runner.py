@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from .. import shadow_factors as cross_asset
 from . import gate, panel, screen, validate
 from .config import INTERVAL_MARKS, UltoimV2Config, is_enabled
 from .ledger import UltoimV2Ledger, _window_key
@@ -103,6 +104,12 @@ class UltoimV2Runner:
                 canonicals: Mapping[str, Any], now: float) -> None:
         """Extract compact, race-free per-asset fields synchronously and enqueue.
         Never raises into the live loop."""
+        # Broad-market cross-asset flow (measure-first; default OFF). Computed ONCE
+        # per cycle from the analyses already in hand — never read by the gate, so
+        # it cannot change a fire decision. None when disabled or unavailable.
+        market_flow: float | None = None
+        if self.config.record_xflow:
+            market_flow = _num(cross_asset.compute_market(analyses or {}).get("market_flow"))
         candidates: list[dict[str, Any]] = []
         for asset, analysis in (analyses or {}).items():
             canonical = (canonicals or {}).get(asset)
@@ -154,6 +161,7 @@ class UltoimV2Runner:
                 "order_flow_persistence": signals.get("order_flow_persistence"),
                 "book_resiliency": signals.get("book_resiliency"),
                 "prediction_stability": signals.get("prediction_stability"),
+                "x_market_flow": market_flow,
                 "snapshot_id": analysis.get("snapshot_id"),
             })
         if not candidates:
@@ -190,6 +198,10 @@ class UltoimV2Runner:
             windows.setdefault(wk, []).append(cand)
         for window_key, cands in windows.items():
             for interval, mark in INTERVAL_MARKS.items():
+                # Skip the weak/money-losing 15M bin when configured (default OFF).
+                # 10M/7M behaviour is untouched.
+                if cfg.skip_15m and interval == "15M":
+                    continue
                 in_band = [c for c in cands
                            if (mark - cfg.mark_band_seconds) <= c["seconds_remaining"] <= mark]
                 if not in_band:
@@ -296,6 +308,7 @@ class UltoimV2Runner:
             "order_flow_persistence": cand.get("order_flow_persistence"),
             "book_resiliency": cand.get("book_resiliency"),
             "prediction_stability": cand.get("prediction_stability"),
+            "x_market_flow": cand.get("x_market_flow"),
             "gate_a_pass": 1 if verdict.get("gate_a") else 0,
             "gate_b_pass": 1 if verdict.get("gate_b") else 0,
             "gate_c_pass": 1 if verdict.get("gate_c") else 0,

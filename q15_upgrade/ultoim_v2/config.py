@@ -73,6 +73,18 @@ class UltoimV2Config:
     # NO-only by default: the live record favours the NO side for these binaries,
     # and the paper system starts conservative. Set false to admit YES entries.
     no_only: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_ONLY", True))
+    # Skip the 15M (900s) checkpoint. DEFAULT OFF (byte-identical). The live record
+    # shows 15M is the weak, money-losing bin for these NO binaries (accuracy ~coin-
+    # flip and negative P&L at 15M, vs strong, priced-in 10M/7M); the frozen champion
+    # already disables its own 15M alert delivery. When true, v2 only ever fires at
+    # 10M/7M — observation/behaviour at those marks is unchanged.
+    skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", False))
+    # Record the broad-market cross-asset flow factor (x_market_flow) on every
+    # candidate row, for measure-first validation of a possible NO-side veto (high
+    # market-wide YES pressure precedes NO losses, per an OOS time-split). DEFAULT
+    # OFF (byte-identical; column stays NULL). Pure observation — NEVER read by the
+    # gate, so v2's fire decision is unaffected whether on or off.
+    record_xflow: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_RECORD_XFLOW", False))
     # A candidate fires when seconds_remaining first falls into [mark - band, mark].
     mark_band_seconds: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_MARK_BAND_SECONDS", 90.0)

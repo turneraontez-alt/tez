@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1133 passed** (4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1188 passed / 13 skipped here** (PRs #25+#26 integrated; 4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -64,6 +64,72 @@ Built off the previous entry (Ultoim V2 paper entry-alert system), which the han
 - **Scoreboard** — added `by_side` (NO delivered vs YES research, each with its own base-rate/edge) and a `resolved_rows` accessor feeding `validate.py`. Overlay guards bumped debug→warning so a persistently-failing overlay is observable.
 - **Tests (+25)** — gate float-boundary/bool/display/research_fired + multi-reason collection; Wilson & binomial known-values; lift/edge-bucket/regime/verdict; ledger by_side/resolved_rows/report-lock/base-rate-tie/restart-migration; runner RESEARCH_YES-alongside-delivered-NO (+ disabled + stale boundary); recap promotion verdict (insufficient/not-separable/beats+qualifier) + side/regime sections + derived caveat. `.env.example` now documents the whole overlay.
 - **NOT YET USEFUL until data accrues (honest):** the validation module reports n=0 / INSUFFICIENT until the overlay is enabled on the Repl and YES-prone windows settle. Enabling it can't trade, can't touch the champion, and can't deliver YES. Next step is unchanged from the prior entry: promote to "live" only once the verdict reads BEATS BASE RATE on the NO side AND the YES side / a YES-prone regime each clear the bar.
+
+## 💡 IDEA — NOT IMPLEMENTED (parked for later) — Ultoim V2 manipulation YES+suspected veto
+**Status: investigated only, no code written.** Data as of `learning-snapshots` snapshot
+`2026-06-23T06:19Z` (git_commit `08221c4`); v2 ledger had **n=7 fired+resolved (~3h since reset)**
+→ directional, not significant. Revisit when v2 has more data.
+
+**The question:** can changing how the manipulation signal is used help Ultoim V2 without hurting it?
+
+**What v2 does today:** v2 RECORDS `manipulation_suspected` on every candidate row
+(`ultoim_v2/runner.py:148,263`) but the gate (`ultoim_v2/gate.py:evaluate`) **never reads it** —
+the decision is purely NO-only + conf≥0.55 + ask∈[50,72] + net_edge≥2¢ + not-stale. So manipulation
+is captured-but-unused dead weight in v2.
+
+**What the records show (champion ledger `q15_v95_ledger_v1`, n=306 suspected):** the manipulation
+flag's entire loss is ONE bucket — **YES + suspected = 54.5% acc, −13.2¢/contract (n=101)**. NO+suspected
+is +1.1¢, NO+clean +6.3¢, YES+clean +2.7¢. The flag over-fires (~80% of all rows; 82% of v2's candidates).
+
+**Two evidence-safe changes (the only ones the data backs):**
+1. **Default-OFF "veto YES + suspected" gate** in `ultoim_v2/gate.py` (+ `Q15_ULTOIM_V2_*` flag). It's a
+   **no-op on current behaviour** (v2 is NO-only → 0 YES fired) and only bites as a safety rail if anyone
+   sets `Q15_ULTOIM_V2_NO_ONLY=false`. Then it blocks exactly the −13.2¢ bucket while allowing YES+clean.
+2. **Add a manipulation split to v2's scoreboard/recap** (`ultoim_v2/ledger.py:scoreboard`, read-only) —
+   v2 tracks by_interval/by_regime but not by manipulation, even though every row carries the flag. This is
+   the instrument that tells you whether NO-suspected ever turns toxic at v2's gate before acting on it.
+
+**Backtest on v2's OWN record = ZERO measured impact (can't hurt, not yet proven to help):**
+- Took all v2 trades: **before veto +210¢ realized / +62¢ net-edge (n=7); after veto identical. Delta +0¢.**
+- Even simulating YES enabled: before/after both +158¢ — because all 3 YES+suspected candidates in v2's
+  record **fail v2's own conf/ask gate anyway** (BTC 15M conf 0.546; DOGE 7M ask 19¢; SOL 7M conf 0.508),
+  so the veto never had a trade to remove. Its justification is the champion's broader record, not v2's.
+
+**DO NOT do this (the trap):** a hard "veto NO+suspected" gate would have killed **6 of v2's 7 fires**
+(82% of candidates are flagged) and NO+suspected is still mildly +EV — gating the NO side is unsupported
+and the early v2 data leans against it (6/7 winners were suspected). Dropped the earlier "tie-break toward
+clean" idea for the same reason.
+
+**Next step when revisiting:** ship #2 (scoreboard split, read-only) first to accumulate the v2-native
+clean-vs-suspected record; add #1 (YES veto) only when/if `no_only` is turned off. Both `Q15_*`-gated,
+test-backed, no-ops on current behaviour.
+
+## ✅ Shipped THIS session — Ultoim V2: skip-15M + cross-asset-flow recorder (branch `claude/dazzling-cori-85ptaa`)
+**Suite 1145 passed / 13 skipped here** (+4 ultoim_v2 tests; ~1137 in a complete env). Both DEFAULT-OFF,
+`Q15_*`-gated, gate untouched → byte-identical app unless a flag is flipped. Deploy-pending — branch + PR #26.
+
+Came out of a 3-agent research pass this session (RSI / chart-patterns / other-ideas, all read-only on the
+`learning-snapshots` data). Findings: **RSI = INSUFFICIENT** (recorded nowhere joinable to a v2 decision —
+0/546 champion rows; lives only in `window_focus.py:687`/`end_predictor.py:88` → Postgres, not exported;
+needs instrumentation + ~6-8wk before it's testable). **Head-and-shoulders / daily chart patterns =
+NOT-APPLICABLE** (multi-hour reversal vs ≤15-min settlement; ~10-min candle retention — 40-500× horizon
+mismatch; the existing 5s `patterns.py` is the right horizon). The two changes below are the evidence-backed,
+no-op-today wins the user picked:
+- **`Q15_ULTOIM_V2_SKIP_15M` (default false):** when true, V2 fires only at 10M/7M, dropping the weak 15M bin.
+  Verified on V2's OWN record (snapshot `2026-06-23T07:40Z`, commit `08221c4`): 15M fires 1/3 = −59¢ (only
+  losing bin) vs 10M 6/8 +147¢ / 7M 1/1 +50¢; dropping 15M lifts total **+138¢→+197¢** and per-trade
+  **+11.5¢→+21.9¢**. Corroborated by the timing-by-mark curve (900s 58% → 600s 77% → 420s 86%, n=98+) and by
+  the champion already disabling its own 15M alert delivery. (`config.py` flag; `runner._observe_sync` skips
+  `interval=="15M"`.) Tiny n caveat (15M n=3) — hence default-OFF, reversible.
+- **`Q15_ULTOIM_V2_RECORD_XFLOW` (default false):** measure-first. When true, records the broad-market
+  cross-asset flow factor `x_market_flow` (mean of per-asset `flow`, YES-signed, via `shadow_factors.compute_market`)
+  on every V2 candidate row — for later validation of a possible NO-side veto (high market-wide YES pressure
+  preceded NO losses on an OOS time-split: low-flow NO 78.5% vs high-flow 60%, n=93/35). **Pure observation —
+  NEVER read by the gate** (test-asserted the fire decision is identical on/off). New nullable `x_market_flow`
+  column (+additive `_ensure_columns` migration for the live DB; old rows read NULL).
+- **Files:** `q15_upgrade/ultoim_v2/{config,ledger,runner}.py`, `tests/test_ultoim_v2.py` (+4), `.env.example`
+  (new Ultoim V2 block). **Deploy:** set `Q15_ULTOIM_V2_SKIP_15M=true` and `Q15_ULTOIM_V2_RECORD_XFLOW=true`
+  in the Repl env, then Stop ▸ Run. The manipulation YES+suspected veto idea above stays PARKED (not built).
 
 ## ✅ Shipped a PRIOR session — Ultoim V2: paper entry-alert system (branch `claude/sleepy-cray-8ktugn`)
 **Suite 1125 passed / 13 skipped here** (+23 ultoim_v2 tests). Deploy-pending — branch + draft PR.

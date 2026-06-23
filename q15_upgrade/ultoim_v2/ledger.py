@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     order_flow_persistence REAL,
     book_resiliency REAL,
     prediction_stability REAL,
+    x_market_flow REAL,
     gate_a_pass INTEGER,
     gate_b_pass INTEGER,
     gate_c_pass INTEGER,
@@ -195,6 +196,8 @@ class UltoimV2Ledger:
             ("conf_gap", "REAL"),
             ("blowup_risk", "REAL"),
             ("screen_version", "TEXT"),
+            # Record-only cross-asset market flow (measure-first; see runner). Nullable, never gates.
+            ("x_market_flow", "REAL"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -314,6 +317,7 @@ class UltoimV2Ledger:
         "distance_sigma", "regime_name", "regime_directional", "data_quality",
         "evidence_quality", "manipulation_suspected", "flip_probability",
         "order_flow_persistence", "book_resiliency", "prediction_stability",
+        "x_market_flow",
         "gate_a_pass", "gate_b_pass", "gate_c_pass", "reason_codes",
         "gate_min_conf", "gate_ask_lo", "gate_ask_hi", "gate_min_edge",
         "close_time", "snapshot_id", "session_id", "delivery_status",

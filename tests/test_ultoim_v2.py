@@ -1065,3 +1065,89 @@ def test_recap_shows_shadow_line_and_is_marker_safe():
     assert "UNPROVEN" in text and "blowup AUC 0.67" in text
     for m in _FORBIDDEN_FULL:
         assert m not in text
+
+
+def _with_flow(analysis, flow):
+    """Attach the feature_values the cross-asset market-flow factor reads."""
+    a = dict(analysis)
+    a["feature_values"] = {"flow": flow, "momentum": 0.0}
+    return a
+
+
+# --------------------------------------------------------------------------- #
+# skip_15m (default OFF): drop the weak 15M bin, keep 10M/7M untouched
+# --------------------------------------------------------------------------- #
+def test_skip_15m_default_off_fires_at_15m(tmp_path):
+    # Default config (skip_15m False) still records/fires at the 15M mark.
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    assert r.config.skip_15m is False
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=900.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    assert [row["interval"] for row in rows] == ["15M"]
+
+
+def test_skip_15m_suppresses_15m_but_keeps_10m(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram(), skip_15m=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    # 15M band (900s): with skip_15m on, NOTHING is recorded (no fire, no abstain row).
+    c15 = {"BTC": _canon("T-BTC", secs=900.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c15, now=1000.0), now=1000.0)
+    assert r.scoreboard()["all_observations"]["recorded"] == 0
+    # 10M band (600s), same contract/window: still records & fires normally.
+    c10 = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c10, now=1300.0), now=1300.0)
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    assert [row["interval"] for row in rows] == ["10M"]
+
+
+# --------------------------------------------------------------------------- #
+# record_xflow (default OFF): observe-only cross-asset market flow column
+# --------------------------------------------------------------------------- #
+def test_record_xflow_off_by_default_is_null(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    assert r.config.record_xflow is False
+    a = {"BTC": _with_flow(_analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0,
+                                     mkt_yes=0.35), 0.4),
+         "ETH": _with_flow(_analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0,
+                                     mkt_yes=0.35), 0.2)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0), "ETH": _canon("T-ETH", 900.0, 9000.0)}
+    cands = _extract(r, a, c, now=1000.0)
+    assert cands and all(cand.get("x_market_flow") is None for cand in cands)
+    # And the recorded row's column stays NULL.
+    r._observe_sync(candidates=cands, now=1000.0)
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    assert rows and all(row["x_market_flow"] is None for row in rows)
+
+
+def test_record_xflow_on_persists_market_mean(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram(), record_xflow=True)
+    a = {"BTC": _with_flow(_analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0,
+                                     mkt_yes=0.35), 0.4),
+         "ETH": _with_flow(_analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0,
+                                     mkt_yes=0.35), 0.2)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0), "ETH": _canon("T-ETH", 900.0, 9000.0)}
+    cands = _extract(r, a, c, now=1000.0)
+    # market_flow = mean(0.4, 0.2) = 0.3, identical on every candidate this cycle.
+    assert cands and all(cand["x_market_flow"] == pytest.approx(0.3) for cand in cands)
+    # Persists through to the recorded row (one row per interval+window).
+    r._observe_sync(candidates=cands, now=1000.0)
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    assert rows and rows[0]["x_market_flow"] == pytest.approx(0.3)
+
+
+def test_record_xflow_does_not_change_gate_decision(tmp_path):
+    # The x_market_flow column is pure observation: turning it on must not change
+    # which candidate fires (gate ignores it).
+    a = {"BTC": _with_flow(_analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0,
+                                     mkt_yes=0.35), 0.9)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0)}
+    fired = {}
+    for flag in (False, True):
+        r = _runner(tmp_path / f"x{int(flag)}", telegram=_StubTelegram(),
+                    record_xflow=flag)
+        r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+        rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+        fired[flag] = (rows[0]["fired"], rows[0]["predicted_side"], rows[0]["interval"])
+    assert fired[False] == fired[True]
