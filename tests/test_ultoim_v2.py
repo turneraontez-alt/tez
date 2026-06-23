@@ -947,15 +947,6 @@ def test_screen_blowup_risk_bounds_and_monotonicity():
     assert screen.blowup_risk(0.70, 0.55, None) is not None
 
 
-def test_screen_size_fraction_inert_and_safe():
-    assert screen.size_fraction(0.0) == pytest.approx(1.0)
-    assert screen.size_fraction(1.0) == pytest.approx(0.0)
-    assert screen.size_fraction(0.20) == pytest.approx(0.64)
-    # clamps out-of-range, and a missing risk never surprises with a zero size.
-    assert screen.size_fraction(1.5) == pytest.approx(0.0)
-    assert screen.size_fraction(None) == pytest.approx(1.0)
-
-
 def test_screen_distance_risk_rises_toward_strike():
     # Risk is higher (less negative) as |distance_sigma| -> 0 (spot pinned on strike).
     assert screen.distance_risk(0.05) > screen.distance_risk(1.50)

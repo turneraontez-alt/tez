@@ -109,73 +109,24 @@ class UltoimV2Runner:
         # it cannot change a fire decision. None when disabled or unavailable.
         market_flow: float | None = None
         if self.config.record_xflow:
-            market_flow = _num(cross_asset.compute_market(analyses or {}).get("market_flow"))
+            try:
+                market_flow = _num(cross_asset.compute_market(analyses or {}).get("market_flow"))
+            except Exception:  # noqa: BLE001 - record-only side metric must never break observe
+                logger.debug("ultoim_v2 market_flow compute failed (ignored)", exc_info=True)
         candidates: list[dict[str, Any]] = []
         for asset, analysis in (analyses or {}).items():
-            canonical = (canonicals or {}).get(asset)
-            if canonical is None or not isinstance(analysis, Mapping):
+            # Per-asset isolation: a single malformed analysis/canonical must NEVER drop
+            # the whole cycle (honours this method's "never raises" contract in-module,
+            # not just via the call-site catch).
+            try:
+                cand = self._extract_candidate(
+                    asset, analysis, (canonicals or {}).get(asset), market_flow)
+            except Exception:  # noqa: BLE001 - skip the bad asset, keep the rest of the cycle
+                logger.debug("ultoim_v2 candidate extraction failed for %s (skipped)",
+                             asset, exc_info=True)
                 continue
-            secs = _num(getattr(canonical, "seconds_remaining", None))
-            ticker = getattr(canonical, "ticker", None)
-            if not ticker or secs is None:
-                continue
-            if not analysis.get("prediction_available"):
-                continue
-            quote = analysis.get("quote") or {}
-            signals = analysis.get("shadow_signals") or {}
-            flip = analysis.get("flip_risk") or {}
-            manip = analysis.get("manipulation") or {}
-            costs = analysis.get("costs") or {}
-            regime = analysis.get("regime") or {}
-            # Pin-break shadow features (measure-first; never read by the gate):
-            #  * pin_break_drift = the structural z_score — vol-normalised drift
-            #    THROUGH the strike; the one signal that keeps directional content
-            #    when distance_sigma -> 0 (the strike-pin regime where the losses live).
-            #  * threshold_interaction = the champion's scalar threshold feature (the
-            #    "failed-break" family); on the v95 ledger it was the strongest loss
-            #    discriminator (AUC ~0.70) and the first to admit a winner-sparing OOS
-            #    cut. Both are recorded record-only and validated later.
-            structural = analysis.get("structural") or {}
-            feature_values = analysis.get("feature_values") or {}
-            close_time = getattr(canonical, "settlement_time", None)
-            total_cost = costs.get("total_cost_cents")
-            if total_cost is None:
-                total_cost = costs.get("total_cents")
-            candidates.append({
-                "asset": str(asset),
-                "ticker": str(ticker),
-                "seconds_remaining": float(secs),
-                "close_time": float(close_time) if close_time is not None else None,
-                "predicted_side": str(analysis.get("prediction_side") or "").upper(),
-                "selected_probability": analysis.get("selected_probability"),
-                "calibrated_yes_probability": analysis.get("yes_probability"),
-                "conservative_probability": analysis.get("conservative_probability"),
-                "market_implied_yes_probability": analysis.get("market_implied_yes_probability"),
-                "raw_yes_probability": analysis.get("raw_yes_probability"),
-                "net_edge_cents": analysis.get("net_edge_cents"),
-                "entry_ask_cents": (analysis.get("entry_ask_cents")
-                                    if analysis.get("entry_ask_cents") is not None
-                                    else quote.get("ask_cents")),
-                "fee_cents": costs.get("fee_cents"),
-                "total_cost_cents": total_cost,
-                "spread_cents": quote.get("spread_cents"),
-                "depth_contracts": quote.get("depth_contracts"),
-                "quote_age_seconds": quote.get("quote_age_seconds"),
-                "spot_stale_age_seconds": self._spot_stale_age(canonical, analysis),
-                "distance_sigma": regime.get("distance_sigma"),
-                "regime_name": regime.get("name"),
-                "data_quality": analysis.get("data_quality"),
-                "evidence_quality": analysis.get("evidence_quality"),
-                "manipulation_suspected": bool(manip.get("suspected")),
-                "flip_probability": flip.get("score"),
-                "order_flow_persistence": signals.get("order_flow_persistence"),
-                "book_resiliency": signals.get("book_resiliency"),
-                "prediction_stability": signals.get("prediction_stability"),
-                "x_market_flow": market_flow,
-                "pin_break_drift": structural.get("z_score"),
-                "threshold_interaction": feature_values.get("threshold_interaction"),
-                "snapshot_id": analysis.get("snapshot_id"),
-            })
+            if cand is not None:
+                candidates.append(cand)
         if not candidates:
             return
         try:
@@ -183,6 +134,74 @@ class UltoimV2Runner:
             self._jobs.put_nowait(("observe", {"candidates": candidates, "now": now}))
         except queue.Full:
             logger.debug("ultoim_v2 observe queue full; cycle dropped")
+
+    def _extract_candidate(self, asset: Any, analysis: Mapping[str, Any], canonical: Any,
+                           market_flow: float | None) -> dict[str, Any] | None:
+        """Pull one candidate's compact, race-free fields from the (read-only) analysis /
+        canonical. Returns the candidate dict, or None to skip (missing canonical, not in
+        a window yet, or no prediction available). Pure extraction — never gates; raises
+        only on a genuinely malformed analysis, which ``observe`` isolates per-asset."""
+        if canonical is None or not isinstance(analysis, Mapping):
+            return None
+        secs = _num(getattr(canonical, "seconds_remaining", None))
+        ticker = getattr(canonical, "ticker", None)
+        if not ticker or secs is None:
+            return None
+        if not analysis.get("prediction_available"):
+            return None
+        quote = analysis.get("quote") or {}
+        signals = analysis.get("shadow_signals") or {}
+        flip = analysis.get("flip_risk") or {}
+        manip = analysis.get("manipulation") or {}
+        costs = analysis.get("costs") or {}
+        regime = analysis.get("regime") or {}
+        # Pin-break shadow features (measure-first; never read by the gate):
+        #  * pin_break_drift = the structural z_score — vol-normalised drift
+        #    THROUGH the strike; the one signal that keeps directional content
+        #    when distance_sigma -> 0 (the strike-pin regime where the losses live).
+        #  * threshold_interaction = the champion's scalar threshold feature (the
+        #    "failed-break" family); recorded record-only and validated later.
+        structural = analysis.get("structural") or {}
+        feature_values = analysis.get("feature_values") or {}
+        close_time = getattr(canonical, "settlement_time", None)
+        total_cost = costs.get("total_cost_cents")
+        if total_cost is None:
+            total_cost = costs.get("total_cents")
+        return {
+            "asset": str(asset),
+            "ticker": str(ticker),
+            "seconds_remaining": float(secs),
+            "close_time": float(close_time) if close_time is not None else None,
+            "predicted_side": str(analysis.get("prediction_side") or "").upper(),
+            "selected_probability": analysis.get("selected_probability"),
+            "calibrated_yes_probability": analysis.get("yes_probability"),
+            "conservative_probability": analysis.get("conservative_probability"),
+            "market_implied_yes_probability": analysis.get("market_implied_yes_probability"),
+            "raw_yes_probability": analysis.get("raw_yes_probability"),
+            "net_edge_cents": analysis.get("net_edge_cents"),
+            "entry_ask_cents": (analysis.get("entry_ask_cents")
+                                if analysis.get("entry_ask_cents") is not None
+                                else quote.get("ask_cents")),
+            "fee_cents": costs.get("fee_cents"),
+            "total_cost_cents": total_cost,
+            "spread_cents": quote.get("spread_cents"),
+            "depth_contracts": quote.get("depth_contracts"),
+            "quote_age_seconds": quote.get("quote_age_seconds"),
+            "spot_stale_age_seconds": self._spot_stale_age(canonical, analysis),
+            "distance_sigma": regime.get("distance_sigma"),
+            "regime_name": regime.get("name"),
+            "data_quality": analysis.get("data_quality"),
+            "evidence_quality": analysis.get("evidence_quality"),
+            "manipulation_suspected": bool(manip.get("suspected")),
+            "flip_probability": flip.get("score"),
+            "order_flow_persistence": signals.get("order_flow_persistence"),
+            "book_resiliency": signals.get("book_resiliency"),
+            "prediction_stability": signals.get("prediction_stability"),
+            "x_market_flow": market_flow,
+            "pin_break_drift": structural.get("z_score"),
+            "threshold_interaction": feature_values.get("threshold_interaction"),
+            "snapshot_id": analysis.get("snapshot_id"),
+        }
 
     @staticmethod
     def _spot_stale_age(canonical: Any, analysis: Mapping[str, Any]) -> float | None:
@@ -580,6 +599,12 @@ class UltoimV2Runner:
             # Record-only blowup SHADOW diagnostics (never gates anything).
             sb["blowup_shadow"] = validate.screen_shadow_report(
                 self.ledger.resolved_rows(mv), min_promote_n=self.config.min_promote_n)
+            # Record-only research screens, surfaced for prospective measurement so the
+            # would-fire edges accrue VISIBLY (never affect which entries fire): the 15M
+            # selective screen and the transporting distance-to-strike feature.
+            sb["s15_research"] = self.ledger.s15_research_scoreboard(mv)
+            sb["distance_research"] = self.ledger.distance_research_scoreboard(
+                mv, pin_sigma=self.config.distance_pin_sigma)
             recent = self.ledger.recent_rows(mv, limit=10)
             losses = self.ledger.loss_rows(mv, limit=10)
             text = panel.build_recap(sb, recent, losses, self.config)

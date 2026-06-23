@@ -287,9 +287,47 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
         body.append(f"  N={n_scored} scored · blowup AUC {auc_txt} · "
                     f"distance AUC {dist_txt} · UNPROVEN")
 
+    # 15M selective screen (s15) — record-only would-fire measurement, surfaced so the
+    # edge accrues visibly. SHADOW: never affects which entries fire.
+    s15 = (scoreboard or {}).get("s15_research") or {}
+    if s15.get("available") and int((s15.get("book") or {}).get("n") or 0) > 0:
+        body.append("")
+        body.append("15M screen — s15 (SHADOW · record-only · no effect on entries):")
+        body.append(f"  15M-NO book : {_screen_line(s15.get('book'))}")
+        body.append(f"  would-fire  : {_screen_line(s15.get('gated'))}")
+        body.append(f"   + cal-drift: {_screen_line(s15.get('gated_with_cal_drift'))}")
+
+    # Distance-to-strike — the one record-only feature shown to transport. Measures the
+    # candidate abstention: near-strike "pin" (would-abstain) vs far (would-keep).
+    dist = (scoreboard or {}).get("distance_research") or {}
+    if dist.get("available") and int((dist.get("book") or {}).get("n") or 0) > 0:
+        pin = _num(dist.get("pin_sigma"))
+        pin_txt = "—" if pin is None else f"{pin:.2f}"
+        body.append("")
+        body.append(f"Distance-to-strike (SHADOW · record-only · pin |sigma|<{pin_txt}):")
+        body.append(f"  far  (keep): {_screen_line(dist.get('far'))}")
+        body.append(f"  near (pin) : {_screen_line(dist.get('near_pin'))}")
+
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
+
+
+def _screen_line(agg: Mapping[str, Any] | None) -> str:
+    """One compact line for a record-only research-screen bucket: n, accuracy + Wilson
+    CI, and per-pick P&L. Pure formatting; ``None``/empty -> 'n=0'."""
+    a = agg or {}
+    n = int(a.get("n") or 0)
+    if n == 0:
+        return "n=0"
+    acc = a.get("accuracy")
+    lo = a.get("ci_low")
+    hi = a.get("ci_high")
+    acc_txt = "—" if acc is None else f"{acc * 100:.0f}%"
+    ci_txt = "" if lo is None or hi is None else f" [{lo * 100:.0f}–{hi * 100:.0f}]"
+    avg = a.get("pnl_avg_cents")
+    avg_txt = "—" if avg is None else f"{avg:+.1f}¢/pick"
+    return f"n={n} · acc {acc_txt}{ci_txt} · {avg_txt}"
 
 
 def _fmt_ask(value: Any) -> str:

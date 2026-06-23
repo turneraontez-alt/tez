@@ -98,6 +98,15 @@ class UltoimV2Config:
     s15_fresh_min_seconds: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_S15_FRESH_MIN_SEC", 875.0)
     )
+    # Distance-to-strike research SCREEN threshold (record-only; surfaced by the recap
+    # via ledger.distance_research_scoreboard). distance_sigma is the ONE record-only
+    # shadow feature shown to transport across ledgers (near-strike NO loses, far NO
+    # wins). NO rows with |distance_sigma| < this are the NEAR-strike "pin" (the
+    # would-abstain bucket the recap measures). Record-only — NEVER gates delivery.
+    # Default from the cross-ledger finding |sigma|>=~0.15 -> ~0% loss.
+    distance_pin_sigma: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_DISTANCE_PIN_SIGMA", 0.15)
+    )
     # Record the broad-market cross-asset flow factor (x_market_flow) on every
     # candidate row, for measure-first validation of a possible NO-side veto (high
     # market-wide YES pressure precedes NO losses, per an OOS time-split). DEFAULT

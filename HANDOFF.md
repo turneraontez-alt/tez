@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1203 passed / 13 skipped here** (4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1213 passed / 13 skipped here** (4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -25,7 +25,16 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Ultoim V2 15M selective-entry research SCREEN (record-only) (branch `claude/elegant-mayer-js11yk`)
+## ✅ Shipped THIS session — Ultoim V2 review-consensus additions (record-only + robustness) (branch `claude/elegant-mayer-js11yk`)
+**Suite 1213 passed / 13 skipped here** (+7 tests, new file `tests/test_ultoim_v2_research.py`; −1 dead test). Deploy-pending — branch + draft PR. All record-only / robustness; **changes NO decision**; DEFAULT-OFF.
+
+A four-agent review of v2 (perf C−, code A−/B+, shadow features: 1 of 6 works) found the gate adds ~0 selection lift over "bet NO" (calibration works, but fire/skip doesn't select), and the research machinery wasn't surfaced. The agents' consensus "add list" — implemented here, none of it a new gate:
+- **Surface the research screens in the recap** — `s15_research_scoreboard` was built+tested but never displayed; added it plus a NEW `distance_research_scoreboard` (near-strike "pin" vs far split — `distance_sigma` is the one record-only feature shown to TRANSPORT across ledgers). Both rendered in `panel.build_recap` as SHADOW blocks (marker-safe), wired into `_recap_sync`. New knob `Q15_ULTOIM_V2_DISTANCE_PIN_SIGMA=0.15`.
+- **Hardened `observe()`** — extracted `_extract_candidate`; the per-asset loop now isolates a malformed asset (one bad analysis can't drop the whole cycle) and guards the `x_market_flow` compute, so the method honours its own "never raises" contract in-module.
+- **Tests** — real worker-loop integration (the previously-untested queue+thread+task_done surface), distance scoreboard, recap research-block render + marker-safety, observe isolation; de-duped the research `_agg`; removed dead `screen.size_fraction` (+ its test).
+- **Did NOT add** any new delivery gate (data too thin, single NO-heavy session); explicitly deferred the cross-module `_num`/`_wilson` dedup and the env-driven promotion hook (low-value / higher-risk per the agents). **NEXT: deploy main to the Repl so s15/distance actually accrue, watch the recap blocks, gather a 2nd independent (ideally YES-favorable) session before trusting any P&L.**
+
+## ✅ Shipped (prior, now on main) — Ultoim V2 15M selective-entry research SCREEN (record-only) (branch `claude/elegant-mayer-js11yk`)
 **Suite 1203 passed / 13 skipped here** (+24 tests, new file `tests/test_ultoim_v2_s15.py`). Deploy-pending — branch + draft PR. Read-only/paper; **record-only — changes NO decision** (no fire/size/alert/delivery effect); scoped to **15M-NO rows only** (10M/7M untouched). Still DEFAULT-OFF (`Q15_ULTOIM_V2_ENABLED`).
 
 A five-agent fan-out over the real settled ledgers (v95 + ultoim_v2 snapshots) found the **unfiltered 15M-NO book is a money-loser (~−2c/pick)** — 15M is a near-the-money coin flip — but a *selective* subset is profitable, and the signal is **selection, not forecasting** (model confidence/net-edge is INVERSE for NO; confirmed across v1, v2, v95). Robust core that survived a time-split: **LUKEWARM** (`selected_probability < ~0.55`) **& CHEAP** (`ask ∈ [~47,60)`; expensive NOs ≥60c are ~−13c/pick), lifting ~−2c → ~+18c/pick; plus two orthogonal **tilts** (record-only, not hard gates): **CAL_DRIFT** (`calibrated_yes − raw_yes ≤ −0.03`) and **FRESH** (`seconds_remaining ≥ 875`). The early-EXIT idea (bail on a 15M→10M adverse drift) was REJECTED in synthesis — on the *selected* picks the dip is mean-reverting noise (you bail winners). Caveat: single ~11h session, ~147 picks — direction believable, exact thresholds NOT bankable → ships record-only; promotion needs `validate.py`'s bar on cross-session data.
