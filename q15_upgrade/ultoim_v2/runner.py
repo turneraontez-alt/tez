@@ -20,7 +20,7 @@ import time
 from typing import Any, Mapping
 
 from .. import shadow_factors as cross_asset
-from . import gate, panel, screen, validate
+from . import fifteen_min, gate, panel, screen, validate
 from .config import INTERVAL_MARKS, UltoimV2Config, is_enabled
 from .ledger import UltoimV2Ledger, _window_key
 from .telegram import UltoimV2Telegram
@@ -290,6 +290,9 @@ class UltoimV2Runner:
         # on this candidate. Stamped on every recorded row; NEVER gates fire/size/alert
         # (record-only — see screen.py). Inputs come from ``cand`` so it stays pure.
         shadow = screen.shadow_features(cand)
+        # Record-only 15M selective-entry SCREEN verdict (see fifteen_min.py). Stamped
+        # on every row; all-None outside 15M-NO; NEVER read by the gate / fire path.
+        s15 = fifteen_min.features(cand, interval, cfg)
         return {
             "created_at": now, "model_version": cfg.model_version,
             "asset": cand.get("asset"), "ticker": cand.get("ticker"),
@@ -340,6 +343,10 @@ class UltoimV2Runner:
             "conf_gap": shadow["conf_gap"],
             "blowup_risk": shadow["blowup_risk"],
             "screen_version": shadow["screen_version"],
+            "s15_pass": s15["s15_pass"],
+            "s15_codes": s15["s15_codes"],
+            "s15_cal_drift": s15["s15_cal_drift"],
+            "s15_version": s15["s15_version"],
             "_best_entry_cents": display,
         }
 

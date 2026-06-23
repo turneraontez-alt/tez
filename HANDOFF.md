@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1188 passed / 13 skipped here** (PRs #25+#26 integrated; 4 skipped in a complete env;
+Tests: `python3 -m pytest tests/ -q` → **1203 passed / 13 skipped here** (4 skipped in a complete env;
 skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
 
 ## 🚀 Deploy / verify workflow (NEW)
@@ -25,7 +25,19 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
-## ✅ Shipped THIS session — Ultoim V2 pin-break SHADOW signals (record-only) (branch `claude/keen-fermat-ce81uv`)
+## ✅ Shipped THIS session — Ultoim V2 15M selective-entry research SCREEN (record-only) (branch `claude/elegant-mayer-js11yk`)
+**Suite 1203 passed / 13 skipped here** (+24 tests, new file `tests/test_ultoim_v2_s15.py`). Deploy-pending — branch + draft PR. Read-only/paper; **record-only — changes NO decision** (no fire/size/alert/delivery effect); scoped to **15M-NO rows only** (10M/7M untouched). Still DEFAULT-OFF (`Q15_ULTOIM_V2_ENABLED`).
+
+A five-agent fan-out over the real settled ledgers (v95 + ultoim_v2 snapshots) found the **unfiltered 15M-NO book is a money-loser (~−2c/pick)** — 15M is a near-the-money coin flip — but a *selective* subset is profitable, and the signal is **selection, not forecasting** (model confidence/net-edge is INVERSE for NO; confirmed across v1, v2, v95). Robust core that survived a time-split: **LUKEWARM** (`selected_probability < ~0.55`) **& CHEAP** (`ask ∈ [~47,60)`; expensive NOs ≥60c are ~−13c/pick), lifting ~−2c → ~+18c/pick; plus two orthogonal **tilts** (record-only, not hard gates): **CAL_DRIFT** (`calibrated_yes − raw_yes ≤ −0.03`) and **FRESH** (`seconds_remaining ≥ 875`). The early-EXIT idea (bail on a 15M→10M adverse drift) was REJECTED in synthesis — on the *selected* picks the dip is mean-reverting noise (you bail winners). Caveat: single ~11h session, ~147 picks — direction believable, exact thresholds NOT bankable → ships record-only; promotion needs `validate.py`'s bar on cross-session data.
+
+**What shipped (all record-only, ZERO decision effect, 15M-NO scoped):**
+- **`fifteen_min.py` (NEW, pure/no-I/O)** — `evaluate_15m()` / `features()` → `{s15_pass (=LUKEWARM&CHEAP), s15_codes, s15_cal_drift, s15_version}`; all-None for 10M/7M and YES (inert). `S15_VERSION="lukewarm-cheap-1"`. Full rationale + single-session caveat in the module docstring.
+- **Config** — 5 tunable knobs (`Q15_ULTOIM_V2_S15_*`); none read by the gate.
+- **Ledger** — 4 nullable columns (`s15_pass, s15_codes, s15_cal_drift, s15_version`) via the existing idempotent ALTER migration; `_build_row` stamps every row (mirrors the `screen.py` blowup-shadow pattern), never reads `fired`. New read-only `s15_research_scoreboard()` compares the would-fire subset vs the full 15M-NO book (+ tilt cuts).
+- **Tests (+24)** — `tests/test_ultoim_v2_s15.py`: scoping/inertness, core+tilt boundary math, missing-data short-circuit, ledger round-trip + scoreboard, and the two **never-gates** proofs (a confident NO still fires with `s15_pass=0`; a lukewarm NO still abstains with `s15_pass=1`).
+- **NEXT (gate to ever influence a decision):** accrue cross-session 15M-NO data, then clear `validate.py`'s bar (n≥50, Wilson-lower > base, p<0.05) prospectively. Until then it only records.
+
+## ✅ Shipped (prior session) — Ultoim V2 pin-break SHADOW signals (record-only) (branch `claude/keen-fermat-ce81uv`)
 **Suite 1224 passed / 4 skipped here** (+4 ultoim_v2 tests, 75 total in the file). Deploy-pending — branch + PR #25. Read-only/paper; **record-only — changes NO decision**. Still DEFAULT-OFF.
 
 Outcome of a four-agent search for *what could actually lift v2 P&L* (the whole 08:00-snapshot session is summarized in the PR). Established, with evidence: **no decision-time skip-screen works** — conf_gap, distance_sigma, AND every signal v2 already records fail to separate winners from losers (the strike-pin 10M regime where the losses live is un-screenable; distance even flips sign between ledgers). The cross-system audit (champion v95 n=595 + ultoim v1 n=234) showed the real edge is **short-interval NO** (7M 80.5%/+667¢, 10M 72.5%/+333¢) and **15M is the structural loser** (52.6%/−2297¢) — already addressable via the existing `Q15_ULTOIM_V2_SKIP_15M` flag (built, NOT yet enabled live).
@@ -36,7 +48,7 @@ The one new build: record two **pin-break** features, shadow-only, derived from 
 - **Files:** `q15_upgrade/ultoim_v2/{ledger,runner}.py`, `.env.example`, `tests/test_ultoim_v2.py` (+4: null-when-absent, persist, record-only-doesn't-change-fire, migrate+roundtrip). Two nullable columns via the idempotent ALTER migration (verified non-destructive on the real snapshot DB). No env knob (always recorded when overlay enabled, like conf_gap; pure dict reads).
 - **NEXT:** deploy main to the Repl (it's ahead — live runs 08221c4, main is past PR #25) so these + conf_gap/blowup_risk/x_market_flow actually accrue data; flip `Q15_ULTOIM_V2_SKIP_15M=true`; then validate threshold_interaction's winner-sparing cut prospectively before it could ever gate. Sizing: only fractional-bankroll (risk control) is defensible — edge-tilt was unproven (n=13, one-entry-driven).
 
-## ✅ Shipped THIS session — Ultoim V2 blowup-risk SHADOW screen (record-only) + four-agent stress test (branch `claude/keen-fermat-ce81uv`)
+## ✅ Shipped (prior session) — Ultoim V2 blowup-risk SHADOW screen (record-only) + four-agent stress test (branch `claude/keen-fermat-ce81uv`)
 **Suite 1215 passed / 4 skipped here** (+11 ultoim_v2 tests, 66 total in the file). Deploy-pending — branch + PR #25. Read-only/paper; **record-only — changes NO decision** (no fire/size/alert/delivery effect). Still DEFAULT-OFF (`Q15_ULTOIM_V2_ENABLED`).
 
 The owner asked to add a 10M "blowup defense" using `conf_gap` (= `selected − conservative`, the model's own internal uncertainty), with two hard constraints: (A) never cost a positive-edge win, (B) never add a loss. A four-agent adversarial team stress-tested it on the **fresh 2026-06-23 07:20 UTC** learning snapshot (v95 ledger, 122 settled 10M-NO rows, + the independent ultoim_v2 ledger). **The screen did NOT hold up as a P&L gate** — so it ships as a record-only shadow, not a live filter:

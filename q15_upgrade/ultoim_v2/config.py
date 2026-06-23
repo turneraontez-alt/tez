@@ -79,6 +79,25 @@ class UltoimV2Config:
     # already disables its own 15M alert delivery. When true, v2 only ever fires at
     # 10M/7M — observation/behaviour at those marks is unchanged.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", False))
+    # --- 15M selective-entry research SCREEN thresholds (record-only; fifteen_min.py).
+    # Scoped to 15M NO candidates ONLY; NEVER gates fire/delivery and never affects the
+    # 10M/7M marks. The runner stamps, for every 15M NO row, whether this SELECTIVE gate
+    # WOULD fire (s15_pass = LUKEWARM & CHEAP) plus two orthogonal tilt signals
+    # (CAL_DRIFT / FRESH), so the rule accrues prospective, gradeable data. Defaults from
+    # a five-agent study of the settled ledgers (single-session fit — must clear
+    # validate.py's promotion bar on the cross-session record before it could ever gate).
+    # All tunable; none of them is read by the live gate.
+    s15_sel_max: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_S15_SEL_MAX", 0.55)
+    )
+    s15_ask_lo: float = field(default_factory=lambda: _float("Q15_ULTOIM_V2_S15_ASK_LO", 47.0))
+    s15_ask_hi: float = field(default_factory=lambda: _float("Q15_ULTOIM_V2_S15_ASK_HI", 60.0))
+    s15_cal_drift_max: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_S15_CAL_DRIFT_MAX", -0.03)
+    )
+    s15_fresh_min_seconds: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_S15_FRESH_MIN_SEC", 875.0)
+    )
     # Record the broad-market cross-asset flow factor (x_market_flow) on every
     # candidate row, for measure-first validation of a possible NO-side veto (high
     # market-wide YES pressure precedes NO losses, per an OOS time-split). DEFAULT
