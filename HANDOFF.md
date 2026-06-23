@@ -25,6 +25,46 @@ skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
   cross-check the live `git HEAD` against the stamp. Boot also logs a `BUILD …` line.
 - **Automatic CI:** `.github/workflows/tests.yml` runs the suite on every push to main + PRs.
 
+## 🔬 Investigated THIS session — Ultoim V2 cross-regime failure: "why did the gate fire into the YES-prone window?" (NO code shipped — analysis only)
+Snapshot `origin/learning-snapshots` @ 03:39 UTC (v95 ledger, 259 preds / 238 settled, ~7h, ~1 regime).
+V2's OWN ledger (`q15_ultoim_v2_v1.sqlite3`) now exists in the snapshot (V2 got enabled on the Repl)
+but is **still 0 rows** — so all analysis is the V2 gate applied as a pure function over the v95
+`predictions` features (same method as before). Master extract + per-thread findings live in the
+session scratchpad (`master.jsonl`, `AGENT_BRIEF.md`, `FINDING_basket.md`). Ran **5 parallel analysis
+agents + 1 own thread**; all six converge.
+
+- **Label correction:** the fire-and-lose window is **01:00** (NO-rate 0.14, gate fired 4 NO, lost all
+  4, −233¢), NOT "00:45/02:15" as earlier summaries said. Its controlled twin is **00:00** (identical
+  NO-rate 0.14, n=21, same regimes) where the gate fired **0**. That pair is the whole answer.
+- **Mechanism — SOLVED.** The gate only fires on coin-flip-priced NO contracts (ask 50–72) where the
+  MODEL leads the MARKET (net_edge = model-NO% − market-NO% > 0). The ask band is effectively a
+  "spot pinned at the strike" selector. In **00:00** spot sat well below strike → market priced those
+  NOs **expensive** (ask 77–87, out of band) → abstain (the market's high ask was protective wisdom).
+  In **01:00** spot was pinned **at** strike (window-mean dist_sigma −0.19 vs 00:00's −0.77) → market
+  priced the same NOs **cheap** (ask 50–72, in band) → model insisted NO into a correct YES-drift →
+  fired 4 → all lost. All 5 losers were 10M/15M (drift runway); the only 7M fire won.
+- **What predicts it (ranked, honest):** (1) **threshold_interaction `f_thresh`** — best single lead,
+  the only var that blocks losers with ~0 winner cost (>0 → 3/5 losers, 0–1/11 winners), real
+  population corr to settlement **+0.178**, and **V2 does NOT currently log it**; (2) **window pinned
+  at strike** (mean dist_sigma > −0.20) — vetoes 01:00, blocks all 4 of its losers, 0 winners lost
+  (+233¢) but razor-thin (viable threshold band only 0.027 wide; caps at 4/5, can't reach the lone
+  00:15 loser); (3) **dist_sigma cushion** — right axis, protective in the tails (≤−1 → ~78% NO acc)
+  but losers/winners interleaved AT the strike where all fires live. **TRAP — `f_momentum` is
+  BACKWARDS** (looks separative on 16 fires but wrong-signed on the population: positive momentum →
+  HIGHER NO acc; corr to settlement ≈0). **Market-disagreement** perfectly EXPLAINS 00:00-vs-01:00 but
+  yields no usable threshold (low-ask 50–60 is SAFER than 60–72). **Basket/BTC bellwether is BLIND**
+  (00:00 and 01:00 looked physically identical at decision time — the trap was a post-mark drift).
+- **Blunt statistical verdict — NOTHING promotable.** The gate's own edge is unestablished (11/16=69%
+  vs NO base 63%, Fisher **p=0.79**); no abstain rule reaches significance (best **p=0.106**); **4 of
+  5 losers are ONE correlated window (01:00)** so n_effective≈2 — every rule is curve-fit to that
+  window and LOSES money on an honest temporal holdout. To confirm a predictor at 80% power needs
+  **~84+ fires across ~15–20 distinct losing windows ≈ 3–4+ days** of settled data.
+- **Proposed path (NOT yet done — awaiting owner):** instrument V2 to LOG the missing signals
+  (`threshold_interaction`, model-vs-market `disagreement = sel − ask/100`, window-mean dist_sigma),
+  pre-register the two candidate flags (`f_thresh>0`; window-pinned-at-strike) as **logged-only, not
+  gating**, and auto-validate them in the 30-min recap with Wilson CIs until one clears the base rate
+  across ≥15 losing windows. Do NOT gate live now. Keep V2 paper/research; do not promote.
+
 ## ✅ Shipped THIS session — Ultoim V2: paper entry-alert system (branch `claude/sleepy-cray-8ktugn`)
 **Suite 1125 passed / 13 skipped here** (+23 ultoim_v2 tests). Deploy-pending — branch + draft PR.
 **Default-OFF** (`Q15_ULTOIM_V2_ENABLED`, default false → app byte-identical when unset).
