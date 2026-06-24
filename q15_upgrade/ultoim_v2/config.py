@@ -79,6 +79,23 @@ class UltoimV2Config:
     # already disables its own 15M alert delivery. When true, v2 only ever fires at
     # 10M/7M — observation/behaviour at those marks is unchanged.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", False))
+    # DELIVERY breadth + selection. Default = the legacy SINGLE best candidate per
+    # (interval, window), chosen by net-edge (byte-identical). Opt in per the research:
+    #  * deliver_top_n (>=1): deliver the top-N candidates per checkpoint/window instead
+    #    of just one. The settled record shows top-3/top-4 by reward:risk lifts EV and
+    #    total P&L over the single pick. N>1 means up to N paper alerts per window per
+    #    checkpoint (still one per CONTRACT per window via the alert lock) — it RAISES
+    #    correlated exposure (co-settling assets move together) and alert volume, so size
+    #    accordingly. 7M tends to carry the EV; this delivers more there because 7M asks
+    #    run cheaper, which reward:risk selection favours.
+    #  * deliver_by_reward_risk: pick by CHEAPEST ask (best payoff per $) instead of the
+    #    highest net-edge — the higher-EV selection on the NO book.
+    deliver_top_n: int = field(
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 1.0)))
+    )
+    deliver_by_reward_risk: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", False)
+    )
     # --- 15M selective-entry research SCREEN thresholds (record-only; fifteen_min.py).
     # Scoped to 15M NO candidates ONLY; NEVER gates fire/delivery and never affects the
     # 10M/7M marks. The runner stamps, for every 15M NO row, whether this SELECTIVE gate

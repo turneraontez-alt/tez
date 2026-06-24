@@ -273,17 +273,33 @@ class UltoimV2Runner:
                 abstained_stale = True
             evaluated.append({"cand": cand, "verdict": verdict, "stale": abstained_stale})
 
-        # -- DELIVERED path (unchanged): the chosen candidate, NO-only alert.
+        # -- DELIVERED path: the top-N candidates per (interval, window), NO-only alerts.
+        # Default (deliver_top_n=1, by net-edge) is byte-identical to the prior single-
+        # best rule. With deliver_top_n>1 / deliver_by_reward_risk it delivers the N best
+        # by REWARD:RISK (cheapest NO ask = best payoff per $), which the settled record
+        # found beats the single max-edge pick. One alert per CONTRACT per window still
+        # holds (the alert lock); N>1 just widens how many of the co-settling assets fire.
         fired = [e for e in evaluated if e["verdict"]["fired"]]
-        chosen = None
+        delivered_tickers: set[str] = set()
         if fired:
-            chosen = max(fired, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
+            n = max(1, int(getattr(cfg, "deliver_top_n", 1) or 1))
+            if getattr(cfg, "deliver_by_reward_risk", False):
+                # cheapest ask first (best reward:risk); net-edge breaks ties / missing ask.
+                ordered = sorted(fired, key=lambda e: (
+                    _num(e["cand"].get("entry_ask_cents"))
+                    if _num(e["cand"].get("entry_ask_cents")) is not None else 1e9,
+                    -(_num(e["verdict"]["net_edge_cents"]) or -1e9)))
+            else:
+                ordered = sorted(
+                    fired, key=lambda e: -(_num(e["verdict"]["net_edge_cents"]) or -1e9))
+            for e in ordered[:n]:
+                delivered_tickers.add(str(e["cand"].get("ticker") or ""))
+                self._record_and_maybe_alert(e, interval, mark, window_key, now)
         elif evaluated:
-            chosen = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
-        delivered_ticker = None
-        if chosen is not None:
-            delivered_ticker = str(chosen["cand"].get("ticker") or "")
-            self._record_and_maybe_alert(chosen, interval, mark, window_key, now)
+            # nothing fired -> record the single best for research (unchanged).
+            best = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
+            delivered_tickers.add(str(best["cand"].get("ticker") or ""))
+            self._record_and_maybe_alert(best, interval, mark, window_key, now)
 
         # -- RESEARCH-YES path: record the best YES candidate so YES-prone windows
         # finally produce gradeable data. Never alerted; never claims the alert
@@ -294,7 +310,7 @@ class UltoimV2Runner:
                    if str(e["cand"].get("predicted_side") or "").upper() == "YES"]
             if yes:
                 best_yes = max(yes, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
-                if str(best_yes["cand"].get("ticker") or "") != delivered_ticker:
+                if str(best_yes["cand"].get("ticker") or "") not in delivered_tickers:
                     self._record_research_yes(best_yes, interval, mark, window_key, now)
 
     def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
