@@ -9,8 +9,12 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1258 passed / 13 skipped here** (4 skipped in a complete env;
-skip count rises when `flask`/`websockets`/cffi/crypto aren't installed).
+Tests: `python3 -m pytest tests/ -q` → **1263 passed / 4 skipped here** (8 app tests uncollectable
+in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
+count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — Ultoim V2 flow-against-NO now VISIBLE on the live entry alert (branch `claude/sweet-ride-wq61n7` → PR #36)
+**Suite 1263 passed / 4 skipped here** (+4: PR #32 flow screen +3, live flow warning +1). Brought PR #32's record-only flow screen into this branch (cherry-pick `256c2fd`) AND, per owner directive, surfaced the signal on the LIVE notification — `panel.build_entry_alert` now prints `⚠️ Flow against NO: buy-side flow {f} ≥ {thr} (historical loss-zone — info only, not graded)` directly under the BEST ENTRY line whenever a fired **NO** card has `champion_flow ≥ flow_against_no_threshold` (default 0.6). **Visibility ONLY:** the alert is still SENT (never abstained) and grading/P&L are UNCHANGED — a P&L-safety helper verified the grading functions are byte-identical to main and `gate.evaluate` never reads `champion_flow`/`flow_against_no_threshold` (the warning is display text inserted AFTER the fire decision; `champion_flow` is a nullable record-only column). Shown only for NO + flow≥thr; never for YES, weak flow, or missing flow. **NEXT:** watch the live cards + the recap flow block accrue real `champion_flow` data; consider a true abstain gate only once flow-abstain clears `validate.py`'s bar.
 
 ## ✅ Shipped THIS session — Ultoim V2 flow-against-NO research screen (record-only; the #1 loss fix) (branch `claude/elegant-mayer-js11yk`)
 **Suite 1216 passed / 13 skipped here** (+3 tests). Deploy-pending — branch + draft PR. Record-only; **changes NO decision**; DEFAULT-OFF.
