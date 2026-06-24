@@ -97,21 +97,21 @@ class UltoimV2Config:
     cap_7m_ask_max: int = field(
         default_factory=lambda: int(_float("Q15_ULTOIM_V2_CAP_7M_ASK_MAX", 72.0))
     )
-    # 11M / 12M marks — DEFAULT ON (owner-enabled). 12M DELIVERS live alerts (it is NOT in
-    # research_only_intervals): for a selective 1-pick-per-window trader the redundancy concern
-    # is moot (you take ONE entry, not a stack), and 12M entries run CHEAPER/earlier than 10M
-    # for a similar in-sample win (12M@60-69 ~91%, both-halves 93/89, broad per-asset) => better
-    # reward:risk per trade. 11M stays RECORD-ONLY (in research_only_intervals): it is the
-    # redundant middle between 12M and 10M, so it accrues gradeable data without adding a near-
-    # duplicate third alert. CAVEAT: 12M/11M rest on ~one in-sample day (~27 windows); 10M is the
-    # more-proven anchor. 13M is deliberately excluded (fragile, both-halves 82%->65%).
+    # 11M / 12M marks — captured DEFAULT ON, but both RECORD-ONLY (never deliver/trade). 12M
+    # was briefly promoted to live delivery on ~1 in-sample day, but the larger ~42h capture
+    # replay showed the DELIVERED 12M slice runs net-NEGATIVE (57.6% win at a ~60c break-even,
+    # -2c/bet) while 10M/7M carry the book (+10c / +21c per bet) — so the owner reverted 12M to
+    # record-only (delivery is "back to 10M and 7M"). Both marks stay ENABLED so they keep
+    # accruing gradeable data without adding a near-duplicate alert/trade; to re-promote either,
+    # drop it from research_only_intervals (a deliberate, tested edit). 13M stays excluded
+    # (fragile, both-halves 82%->65%). 10M is the proven anchor.
     enable_11m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_11M", True))
     enable_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_12M", True))
-    # Marks that may RECORD but never DELIVER, even when enabled. 11M stays here (record-only);
-    # 12M was promoted to live delivery (owner-directed, selective-trader use). To promote 11M
-    # too, drop it from this set (a deliberate, tested edit).
+    # Marks that may RECORD but never DELIVER (and so never TRADE — the executor only fires on a
+    # delivered row), even when enabled. 11M and 12M are both here: the delivered marks are 10M
+    # and 7M only (15M is skipped via skip_15m). To promote a mark to live delivery, drop it.
     research_only_intervals: frozenset[str] = field(
-        default_factory=lambda: frozenset({"11M"})
+        default_factory=lambda: frozenset({"11M", "12M"})
     )
     # DELIVERY breadth + selection. DEFAULT 1 (owner-enabled, SELECTIVE): the single best
     # by reward:risk per (interval, window). The owner trades 1-2 picks per 15-min window

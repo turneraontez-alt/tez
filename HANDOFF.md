@@ -9,9 +9,26 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1295 passed / 13 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1296 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — 12M reverted to RECORD-ONLY (delivery back to 10M + 7M)
+**Suite 1296 passed / 13 skipped** (+1 net test). Owner-directed after a faithful **~42h replay** of the
+live config over `interval_captures` (4774 captures → 2614 resolved evals, 87 windows — far more than the
+~1 in-sample day 12M was enabled on). The replay drove the REAL `gate.evaluate` + delivery rule and matched
+the actual ledger (+7.3¢/bet replay vs +7.1¢ live, so it's faithful). Finding: the DELIVERED **12M** slice
+runs net-NEGATIVE (57.6% win at a ~60¢ break-even, −2¢/bet) while **10M/7M carry the book** (+10¢/+21¢ per bet).
+- **Change:** `research_only_intervals` default `{"11M"}` → `{"11M","12M"}` in `ultoim_v2/config.py`. 12M
+  stays ENABLED (keeps accruing gradeable data) but never DELIVERS — and since the executor only fires on a
+  delivered row (`runner._maybe_execute` runs only when `verdict["fired"]`), 12M now **never alerts and never
+  trades**. Delivered/traded marks = **10M + 7M** (15M skipped). Fully reversible (drop 12M from the set).
+- **Replay of the change:** delivered book 139→93 bets, **68.3%→72.0% win, +7.3¢→+9.7¢/bet** (+$451@$50 over 42h).
+- Tests: `test_owner_default_config_is_aggressive` updated; `test_12m_delivers_live_alert_when_enabled` →
+  `test_12m_records_only_by_default` + new `test_10m_still_delivers_live_alert`.
+- **NOT changed** (offered, owner did not take it up): top-1 ranking stays `deliver_by_reward_risk=True`
+  (cheapest ask). Replay suggested ranking by edge/confidence beats cheapest-ask (+9¢ vs +7¢, 78% vs 68% win) —
+  left as a measurement note for a future call.
 
 ## ✅ Shipped THIS session — executor `--verify-direction` preflight (branch `claude/confident-bohr-soiqy0` → main)
 **Suite 1295 passed / 13 skipped here** (no new tests — preflight is a manual diagnostic; deploy-pending on the Repl). The ONE thing blocking real-money live trading was unverified: does our `buy NO -> bid/ask` mapping (`_v2_side_price` in `trading_client.py`) actually put us LONG NO, or backwards into YES? A wrong mapping = the exact opposite position. Resolved it with a definitive, ~few-cents real test instead of a multi-day dry-run.

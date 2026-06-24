@@ -191,9 +191,11 @@ def test_owner_default_config_is_aggressive():
     # Owner-enabled net levers, LIVE by default (each reversible via its Q15_* env var):
     assert cfg.cap_7m_ask is True          # the delivered-data-backed net win
     assert cfg.cap_7m_ask_max == 72
-    assert cfg.enable_11m is True          # active...
+    assert cfg.enable_11m is True          # captured...
     assert cfg.enable_12m is True
-    assert cfg.research_only_intervals == frozenset({"11M"})  # ...but 11M records only; 12M delivers
+    # ...but BOTH record-only now: 12M reverted from delivery after the ~42h replay showed the
+    # delivered 12M slice runs net-negative. Delivered marks are 10M + 7M only.
+    assert cfg.research_only_intervals == frozenset({"11M", "12M"})
 
 
 def test_gate_missing_data():
@@ -675,18 +677,37 @@ def test_11m_records_research_only_and_never_delivers(tmp_path):
     assert tg.sent == []                              # no alert sent
 
 
-def test_12m_delivers_live_alert_when_enabled(tmp_path):
-    """12M is promoted to LIVE delivery (owner-enabled): a would-fire 12M NO delivers a real
-    alert (fired=1, no RESEARCH_ONLY_MARK tag), unlike record-only 11M."""
+def test_12m_records_only_by_default(tmp_path):
+    """12M reverted to RECORD-ONLY (owner-directed, after the ~42h replay): a would-fire 12M NO
+    is recorded for grading (RESEARCH_ONLY_MARK, fired=0) but NEVER alerts or trades — exactly
+    like 11M. Delivery is back to 10M + 7M only."""
     tg = _StubTelegram()
-    r = _runner(tmp_path, telegram=tg, enable_12m=True, deliver_by_reward_risk=True)
+    r = _runner(tmp_path, telegram=tg, enable_12m=True, deliver_by_reward_risk=True,
+                research_only_intervals=frozenset({"11M", "12M"}))
     a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
     c = {"BTC": _canon("T-BTC", secs=719.0, close=9000.0)}   # 719s: 12M band only
     r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
     rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
             if row["interval"] == "12M"]
     assert len(rows) == 1
-    assert rows[0]["fired"] == 1                              # DELIVERS (not research-only)
+    assert rows[0]["fired"] == 0                              # RECORD-ONLY (does not deliver)
+    assert "RESEARCH_ONLY_MARK" in (rows[0]["reason_codes"] or "")
+    assert len(tg.sent) == 0                                 # NO alert (and so no trade)
+
+
+def test_10m_still_delivers_live_alert(tmp_path):
+    """The proven anchor still DELIVERS: a would-fire 10M NO sends a real alert (fired=1, no
+    RESEARCH_ONLY_MARK) — confirming only 12M moved to record-only, not the delivery path."""
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, deliver_by_reward_risk=True,
+                research_only_intervals=frozenset({"11M", "12M"}))
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=599.0, close=9000.0)}   # 599s: 10M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "10M"]
+    assert len(rows) == 1
+    assert rows[0]["fired"] == 1                              # DELIVERS
     assert "RESEARCH_ONLY_MARK" not in (rows[0]["reason_codes"] or "")
     assert len(tg.sent) == 1                                 # a real alert was sent
 
