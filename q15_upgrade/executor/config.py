@@ -72,9 +72,11 @@ class ExecutorConfig:
     daily_loss_limit_pct: float = field(default_factory=lambda: _float("Q15_EXEC_DAILY_LOSS_LIMIT_PCT", 0.20))
     max_open_positions: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_OPEN_POSITIONS", 6))
     # HARD per-pick stake ceiling in CENTS — the absolute most one trade can risk, on top of
-    # the % sizing. Default $50 (owner-set for live testing): even with a big bankroll, no
-    # single contract order risks more than this. 0 = no cap (rely on per_pick_pct only).
-    max_stake_per_pick_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_STAKE_PER_PICK_CENTS", 5000))
+    # the % sizing. Default $75 (owner-set; raised from $50): even with a big bankroll, no
+    # single contract order risks more than this. NOTE: with per_pick_pct=4% this cap only
+    # BINDS once bankroll exceeds ~$1,875 (4% * 1875 = $75); below that the % sizing is the
+    # smaller, binding limit. 0 = no cap (rely on per_pick_pct only).
+    max_stake_per_pick_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_STAKE_PER_PICK_CENTS", 7500))
 
     # --- Order sanity band (refuse anything outside it — defence in depth vs a bad signal) ---
     min_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MIN_PRICE_CENTS", 50))
