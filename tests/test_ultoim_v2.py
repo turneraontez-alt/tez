@@ -433,6 +433,55 @@ def test_runner_records_abstain_when_nothing_fires(tmp_path):
     assert sb["all_observations"]["fired"] == 0
 
 
+# --------------------------------------------------------------------------- #
+# top-N delivery (reward:risk selection) — research-backed widening of the
+# single-best rule. Default stays byte-identical (top-1 by net-edge).
+# --------------------------------------------------------------------------- #
+def _no_book(r, asks_sels, secs=600.0, close=9000.0, now=1300.0):
+    """Candidates for several NO assets at one checkpoint/window: {asset: (ask, sel)}.
+    The gate recomputes edge = sel*100 - ask - cost, so varying sel makes net-edge
+    order DIFFER from reward:risk (cheapest-ask) order."""
+    a = {asset: _analysis(side="NO", sel=sel, ask=ask, mkt_yes=0.35)
+         for asset, (ask, sel) in asks_sels.items()}
+    c = {asset: _canon(f"T-{asset}", secs=secs, close=close) for asset in asks_sels}
+    return _extract(r, a, c, now=now)
+
+
+# Edges (sel*100-ask-2): SOL=4, ETH=5, BTC=8 -> net-edge ranks BTC>ETH>SOL;
+# reward:risk (cheapest ask) ranks SOL(52)>ETH(56)>BTC(62). The two disagree.
+_BOOK = {"SOL": (52.0, 0.58), "ETH": (56.0, 0.63), "BTC": (62.0, 0.72)}
+
+
+def test_deliver_default_is_single_best_by_edge(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg)               # defaults: top_n=1, by net-edge
+    r._observe_sync(candidates=_no_book(r, _BOOK), now=1300.0)
+    assert len(tg.sent) == 1                          # one alert (legacy single-best)
+    assert "BTC" in tg.sent[0]                        # the max net-edge pick (edge 8)
+
+
+def test_deliver_top_n_by_reward_risk_picks_cheapest(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, deliver_top_n=2, deliver_by_reward_risk=True)
+    r._observe_sync(candidates=_no_book(r, _BOOK), now=1300.0)
+    assert len(tg.sent) == 2                           # top-2 delivered
+    body = " ".join(tg.sent)
+    assert "SOL" in body and "ETH" in body            # the two CHEAPEST asks (52, 56)
+    assert "BTC" not in body                           # 62c excluded (worst reward:risk)
+
+
+def test_deliver_top_n_caps_at_available_and_holds_alert_lock(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, deliver_top_n=5, deliver_by_reward_risk=True)
+    r._observe_sync(candidates=_no_book(r, _BOOK), now=1300.0)
+    assert len(tg.sent) == 3                           # only 3 available (N>available)
+    # same contract at the next checkpoint, same window -> NOT re-alerted (one per
+    # contract per window still holds with top-N).
+    r._observe_sync(candidates=_no_book(r, {"BTC": (62.0, 0.72)}, secs=420.0, now=1580.0),
+                    now=1580.0)
+    assert len(tg.sent) == 3
+
+
 def test_runner_reconcile_grades_against_resolver(tmp_path):
     tg = _StubTelegram()
     r = _runner(tmp_path, telegram=tg)
