@@ -41,6 +41,8 @@ REASON_CODES = (
     "STALE_FEED",
     "NEAR_STRIKE_PIN",
     "EXPENSIVE_NO_ADMIT",
+    "ASK_CAP_7M",
+    "RESEARCH_ONLY_MARK",
 )
 
 # Tolerance for the inclusive edge comparator — absorbs float-repr slack only
@@ -180,6 +182,18 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
         and ask <= exp_ask_hi
     )
 
+    # 7M ASK CAP (DEFAULT OFF). At the 7M mark only, a NO whose ask exceeds cap_7m_ask_max
+    # is vetoed: the 73-85c 7M slice is live net-negative on the delivered book. This
+    # OVERRIDES the expensive-NO admit at 7M and suppresses BOTH delivery and research (it
+    # is a delivery-quality cap, not a research mark — see research_fired below). 10M and
+    # the YES side are never affected. With the flag off, behaviour is byte-identical.
+    ask_cap_7m = bool(
+        getattr(cfg, "cap_7m_ask", False)
+        and side == "NO"
+        and interval == "7M"
+        and ask > getattr(cfg, "cap_7m_ask_max", 72)
+    )
+
     # gate_b — admit (confidence + ask band, inclusive). Collect each sub-failure.
     gate_b_conf = sel >= cfg.min_confidence
     if not gate_b_conf:
@@ -208,7 +222,10 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     elif no_edge_waive and net_edge < cfg.min_edge_cents - _EDGE_EPS:
         reason_codes.append("NO_EDGE_WAIVE")
 
-    research_fired = gate_b and gate_c
+    # The 7M cap is a hard veto on both delivery and research for the over-cap 7M NO.
+    if ask_cap_7m:
+        reason_codes.append("ASK_CAP_7M")
+    research_fired = gate_b and gate_c and not ask_cap_7m
 
     # Distance GATE (DEFAULT OFF). Scoped to 15M NO only: ABSTAIN on the near-strike
     # "pin" where cross-ledger evidence shows the NO side loses. Suppresses DELIVERY

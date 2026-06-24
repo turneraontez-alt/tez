@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1268 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1271 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
@@ -37,6 +37,19 @@ Data = `interval_captures` (the per-checkpoint chart, ~1151 resolved NO + the YE
 14. **Current config on the chart day:** ~86 alerts → +$2,423 net at $100/bet (86% win), ~125 alerts/day. In-sample; treat as shape, not a promise.
 
 **NEXT for a future session:** re-run ALL of the above on v2's OWN multi-day data once it accrues (the live captures are building it). Per-asset / time-of-day / loss-curb / dip-buy / YES-side were ALL one-day artifacts — only re-validate, don't re-derive from scratch.
+
+## ✅ Shipped THIS session — Ultoim V2 net levers: 7M ask-cap (live-able) + 11M/12M measure-first capture (branch `claude/confident-bohr-soiqy0`)
+**Suite 1271 passed / 13 skipped here** (+5 tests). All DEFAULT-OFF / byte-identical when unset. Basis: a 6-agent verification workflow + direct re-checks on the FRESH learning-snapshot (`q15_ultoim_v2_v1` 223-row delivered book + `interval_captures` 3276 rows). **Still ~one in-sample day** — each lever ships OFF behind its own env flag; promotion to default-ON is a separate, forward-validated step.
+
+**Levers added to v2 (config.py `INTERVAL_MARKS` now `{15M,12M,11M,10M,7M}`; new fields after `skip_15m`):**
+- **`cap_7m_ask` (NEW, default OFF — the one robust net win; recommended ON).** At the 7M mark only, do not admit a NO whose `ask > cap_7m_ask_max` (default 72¢). Evidenced on the **DELIVERED book** (not in-sample research): 7M asks >72¢ are **live net-NEGATIVE** (−57¢ over 21 bets, −2.7¢/bet) vs **+26¢/bet** for ≤72¢; that slice also both-halves sign-flips (+17.1¢→−2.5¢/bet). `gate.evaluate` vetoes it (suppresses BOTH `fired` and `research_fired`, tag `ASK_CAP_7M`); 10M and YES untouched. **Activate: `Q15_ULTOIM_V2_CAP_7M_ASK=true`.**
+- **`enable_11m` / `enable_12m` (NEW, default OFF — MEASURE-FIRST).** When on, the runner RECORDS research-only (never-delivered, `fired=0`/`research_fired=1`, tag `RESEARCH_ONLY_MARK`) NO captures at that mark so forward multi-day data accrues. Records the would-FIRE favourites (top-N reward:risk), NOT the max-`net_edge` longshot (edge is inverse for NO). Live delivery stays 10M/7M. `research_only_intervals={11M,12M}` gates this; **promotion to live = drop the mark from that set (separate, tested edit).**
+
+**Why 11M/12M are NOT live deliverers (the key verification result):** they pass robustness (both-halves stable — 11M 86%→79%, 12M 84%→78% — and broad per-asset, unlike **13M which is fragile 82%→65% and is deliberately EXCLUDED**), BUT **~75% of 11M's net is REDUNDANT re-bets of windows already held at 10M/7M** (same settlement, just deeper correlated stacking, not new alpha); the genuinely-new-window portion is thin/fragile/small-n. Firing them live would add correlated tail risk (same-settlement stacking 2×→3×), not clean net — so capture-and-confirm.
+
+**REJECTED (do not add):** raising `deliver_top_n` (marginal bets correlated, not significant, both-halves fails); raising `ask_lo` (per-bet EV is flat across the band, so it only cuts volume+net); 13M (fragile). **DO NOT TOUCH** the already-optimal `no_edge_waive` / `expensive_no` (10M) / `skip_15m` / ask band.
+
+**Promotion gate (before any of this goes default-ON / 11M-12M go live):** accrue 11M/12M research-only over MULTIPLE days (≥30–40 *independent windows*/mark, not per-bet n), re-run both-halves + leave-one-asset-out + window-collapsed Wilson-low > NO breakeven, and re-run the marginal-net test on forward data (the new-window net must be positive/stable — the test 11M FAILED in-sample); confirm the 7M cap still beats >72¢ on the next delivered slice. Visibility note: scoreboard/panel/validate hardcode `(15M,10M,7M)`, so 11M/12M rows grade but are invisible there until those tuples are extended (part of the promotion edit) — query the DB directly meanwhile.
 
 ## ✅ Shipped THIS session — Ultoim V2 owner-enabled LIVE config: edge-waive + skip-15M + top-3 reward:risk (branch `claude/sweet-ride-wq61n7` → main)
 **Suite 1268 passed / 4 skipped here.** ⚠️ **Behaviour-changing, owner-directed, ONE in-sample day of basis** — all reversible via env. Four V2 defaults flipped ON (owner trades real money off these alerts, so watch volume/results and revert if off):

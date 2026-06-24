@@ -39,7 +39,7 @@ def _str(name: str, default: str) -> str:
 # The entry-research intervals and their fire mark (seconds before settlement).
 # Matches the champion's three live checkpoints so the paper entry card lines up
 # 1:1 with the live 15M / 10M / 7M cards it visually resembles.
-INTERVAL_MARKS: dict[str, int] = {"15M": 900, "10M": 600, "7M": 420}
+INTERVAL_MARKS: dict[str, int] = {"15M": 900, "12M": 720, "11M": 660, "10M": 600, "7M": 420}
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,33 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
+    # --- Net-improvement levers (all DEFAULT OFF; byte-identical when unset). From a
+    # workflow-verified analysis of the settled ledgers; see HANDOFF.md.
+    # 7M ASK CAP: at the 7M mark only, do not admit a NO whose ask > cap_7m_ask_max. The
+    # DELIVERED v2 book shows 7M asks >72c are live net-NEGATIVE (-57c over 21 bets,
+    # -2.7c/bet) vs +26c/bet for <=72c; research shows that slice both-halves sign-flips
+    # (+17.1c -> -2.5c/bet). Suppresses BOTH delivery and research for the over-cap 7M NO
+    # (a delivery-quality cap, not a research mark); 10M and the YES side are untouched.
+    # Read-only; never places/modifies/cancels an order. Set =true to activate.
+    cap_7m_ask: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_CAP_7M_ASK", False))
+    cap_7m_ask_max: int = field(
+        default_factory=lambda: int(_float("Q15_ULTOIM_V2_CAP_7M_ASK_MAX", 72.0))
+    )
+    # 11M / 12M MEASURE-FIRST capture (DEFAULT OFF). When ON, the runner RECORDS research-only
+    # (never-delivered) NO captures at that mark so forward multi-day data can confirm/refute
+    # before promotion. Does NOT place paper or real entries; live delivery stays at 10M/7M.
+    # Basis: 11M/12M show the best research EV/$, BUT most of their headline net is REDUNDANT
+    # re-bets of windows already held at 10M/7M, and the genuinely-new portion is ~one-in-
+    # sample-day and fragile -- so capture-and-confirm, do NOT deliver in-sample. (13M is
+    # deliberately excluded: it is fragile, both-halves win% 82%->65%.)
+    enable_11m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_11M", False))
+    enable_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_12M", False))
+    # Marks that may RECORD but must NEVER deliver, even when their enable flag is on.
+    # Promotion to live delivery = remove the mark from this set (a separate, deliberate,
+    # tested edit), never bundled into the measure-first change that introduced the mark.
+    research_only_intervals: frozenset[str] = field(
+        default_factory=lambda: frozenset({"11M", "12M"})
+    )
     # DELIVERY breadth + selection. DEFAULT ON (owner-enabled): top-3 by reward:risk per
     # (interval, window). Set TOP_N=1 + BY_RR=false to restore the legacy single best-by-
     # edge pick.

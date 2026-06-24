@@ -187,6 +187,12 @@ def test_owner_default_config_is_aggressive():
     assert cfg.skip_15m is True
     assert cfg.deliver_top_n == 3
     assert cfg.deliver_by_reward_risk is True
+    # Net-improvement levers ship DEFAULT OFF (byte-identical until explicitly enabled).
+    assert cfg.cap_7m_ask is False
+    assert cfg.cap_7m_ask_max == 72
+    assert cfg.enable_11m is False
+    assert cfg.enable_12m is False
+    assert cfg.research_only_intervals == frozenset({"11M", "12M"})
 
 
 def test_gate_missing_data():
@@ -606,6 +612,66 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
     assert row["entry_ask_cents"] == pytest.approx(80.0)
     assert row["best_entry_cents"] == 80                         # the ask, not 72
     assert "EXPENSIVE_NO_ADMIT" in (row["reason_codes"] or "")
+
+
+# --------------------------------------------------------------------------- #
+# Net-improvement levers: 7M ask cap + 11M/12M measure-first capture.
+# --------------------------------------------------------------------------- #
+def test_cap_7m_ask_off_admits_expensive_7m_no():
+    """Default OFF -> byte-identical: a 7M NO at ask 80 is still admitted via expensive_no."""
+    cfg = UltoimV2Config(enabled=True)               # cap_7m_ask defaults False
+    v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
+                                 entry_ask_cents=80.0, total_cost_cents=0.0),
+                      cfg, interval="7M")
+    assert v["fired"] is True and v["expensive_no"] is True
+    assert "ASK_CAP_7M" not in v["reason_codes"]
+
+
+def test_cap_7m_ask_on_vetoes_expensive_7m_no_interval_scoped():
+    cfg = UltoimV2Config(enabled=True, cap_7m_ask=True)   # cap_7m_ask_max defaults 72
+    # 7M NO at 80c (>72): capped -> neither delivers NOR records-as-research.
+    v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
+                                 entry_ask_cents=80.0, total_cost_cents=0.0),
+                      cfg, interval="7M")
+    assert v["fired"] is False and v["research_fired"] is False
+    assert "ASK_CAP_7M" in v["reason_codes"]
+    # 7M NO at 70c (<=72): still admitted normally.
+    v2 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.65,
+                                  entry_ask_cents=70.0, total_cost_cents=0.0),
+                       cfg, interval="7M")
+    assert v2["fired"] is True and "ASK_CAP_7M" not in v2["reason_codes"]
+    # interval-scoped: a 10M NO at 80c is UNAFFECTED (still admitted via expensive_no).
+    v3 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
+                                  entry_ask_cents=80.0, total_cost_cents=0.0),
+                       cfg, interval="10M")
+    assert v3["fired"] is True and "ASK_CAP_7M" not in v3["reason_codes"]
+
+
+def test_11m_12m_inert_by_default(tmp_path):
+    """Default (enable flags OFF): an 11M-band candidate is dropped entirely -- no row,
+    byte-identical to before the marks were added to INTERVAL_MARKS."""
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=601.0, close=9000.0)}   # 601s: 11M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert r.scoreboard()["all_observations"]["recorded"] == 0
+
+
+def test_11m_records_research_only_and_never_delivers(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, enable_11m=True,
+                deliver_top_n=3, deliver_by_reward_risk=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=601.0, close=9000.0)}   # 601s: 11M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "11M"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fired"] == 0                          # NEVER delivers
+    assert row["research_fired"] == 1                 # but gradeable on settlement
+    assert "RESEARCH_ONLY_MARK" in (row["reason_codes"] or "")
+    assert tg.sent == []                              # no alert sent
 
 
 def test_gate_research_fired_yes_side_never_delivers():
