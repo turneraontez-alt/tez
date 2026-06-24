@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 
 # Allow running as `python3 scripts/exec_preflight.py` from the repo root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,6 +60,13 @@ def _discover_ticker() -> str | None:
             fut.sort(key=lambda m: m.get("close_time", ""))
             return fut[0]["ticker"]
     return None
+
+
+def _fresh_coid() -> str:
+    """A NEW random UUID per call. The production executor uses DETERMINISTic ids
+    (idempotent retries), but a repeatable manual test must use a fresh id each run —
+    Kalshi remembers every client_order_id account-wide and rejects a reuse with 409."""
+    return str(uuid.uuid4())
 
 
 def _order(cli, ticker, side, price, coid, count=1, reduce_only=False):
@@ -124,7 +132,6 @@ def _cancel_all_resting(cli, ticker):
 def _flatten(cli, ticker) -> int:
     """Close any open position on ``ticker`` back to zero (reduce-only, marketable), and
     clear any resting orders. Use this to clean up after an inconclusive verify run."""
-    from q15_upgrade.executor.trading_client import _coid_uuid
     _cancel_all_resting(cli, ticker)
     pos = _pos_int(cli, ticker)
     print(f"  position on {ticker}: {pos}")
@@ -133,7 +140,7 @@ def _flatten(cli, ticker) -> int:
     # negative = long NO -> buy YES (bid) to close; positive = long YES -> sell YES (ask).
     side, price = ("bid", "0.9900") if pos < 0 else ("ask", "0.0100")
     print(f"  CLOSE: side={side} price={price} x{abs(pos)} reduce_only ...")
-    rc = _order(cli, ticker, side, price, _coid_uuid(f"flatten-{ticker}"), count=abs(pos), reduce_only=True)
+    rc = _order(cli, ticker, side, price, _fresh_coid(), count=abs(pos), reduce_only=True)
     if not rc.get("ok"):
         print("  CLOSE FAILED ->", rc.get("error")); return 1
     final = _poll_pos(cli, ticker, differ_from=pos)
@@ -152,7 +159,7 @@ def _verify_direction(cli, ticker) -> int:
     lags a fill), reports CORRECT vs BACKWARDS, then CLOSES exactly what it opened and
     re-confirms flat. Kalshi convention: positive = long YES, negative = long NO. A
     try/finally guarantees no resting order is ever left on the book."""
-    from q15_upgrade.executor.trading_client import _v2_side_price, _coid_uuid
+    from q15_upgrade.executor.trading_client import _v2_side_price
     base = _pos_int(cli, ticker)
     print(f"  baseline position on {ticker}: {base}")
 
@@ -160,7 +167,7 @@ def _verify_direction(cli, ticker) -> int:
         # buy NO @ 99c == sell YES @ 1c -> crosses ANY yes bid >= 1c, so it fills if the book is 2-sided.
         v2_side, price = _v2_side_price("no", "buy", 99)
         print(f"  OPEN (our 'buy NO'): side={v2_side} price={price} x1 ...")
-        r = _order(cli, ticker, v2_side, price, _coid_uuid("verifydir-open"))
+        r = _order(cli, ticker, v2_side, price, _fresh_coid())
         if not r.get("ok"):
             print("  OPEN FAILED ->", r.get("error")); return 1
         od = r.get("data") or {}
@@ -189,7 +196,7 @@ def _verify_direction(cli, ticker) -> int:
         # Close EXACTLY the net change: long NO (delta<0) -> buy YES; long YES (delta>0) -> sell YES.
         side, cprice = ("bid", "0.9900") if delta < 0 else ("ask", "0.0100")
         print(f"  CLOSE (flatten {abs(delta)}): side={side} price={cprice} reduce_only ...")
-        rc = _order(cli, ticker, side, cprice, _coid_uuid("verifydir-close"),
+        rc = _order(cli, ticker, side, cprice, _fresh_coid(),
                     count=abs(delta), reduce_only=True)
         rcd = rc.get("data") or {}
         rcid = (rcd.get("order") or rcd).get("order_id") if isinstance(rcd, dict) else None
@@ -274,10 +281,10 @@ def main(argv: list[str]) -> int:
                 print("  python3 scripts/exec_preflight.py --probe-order <full-current-ticker>")
                 return 2
             print(f"auto-discovered live market: {ticker}")
-        from q15_upgrade.executor.trading_client import _v2_side_price, _coid_uuid
+        from q15_upgrade.executor.trading_client import _v2_side_price
         v2_side, price_str = _v2_side_price("no", "buy", 1)   # buy NO @ 1c -> unfillable
         print(f"\n[PROBE] V2 order on {ticker}: 1x {v2_side} @ {price_str} (cannot fill), then cancel...")
-        body = {"ticker": ticker, "client_order_id": _coid_uuid("exec-preflight-probe"),
+        body = {"ticker": ticker, "client_order_id": _fresh_coid(),
                 "side": v2_side, "count": "1.00", "price": price_str,
                 "time_in_force": "good_till_canceled", "self_trade_prevention_type": "taker_at_cross",
                 "post_only": False, "cancel_order_on_pause": False, "reduce_only": False,
