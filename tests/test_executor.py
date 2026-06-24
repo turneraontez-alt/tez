@@ -208,14 +208,25 @@ class _StubSigner:
     def sign(self, method, path): raise AssertionError("signer must NOT be used in dry-run")
 
 
+def test_v2_side_price_mapping():
+    from q15_upgrade.executor.trading_client import _v2_side_price
+    assert _v2_side_price("yes", "buy", 65) == ("bid", "0.6500")
+    assert _v2_side_price("no", "buy", 65) == ("ask", "0.3500")    # buy NO@65 == sell YES@35
+    assert _v2_side_price("no", "sell", 30) == ("bid", "0.7000")   # sell NO@30 == buy YES@70
+
+
 def test_trading_client_dry_run_logs_no_network():
+    import uuid as _uuid
     cli = KalshiTradingClient(_cfg(dry_run=True), signer=_StubSigner(), session=_BoomSession())
     ready, why = cli.live_ready
     assert ready is False and why == "dry-run"
     r = cli.place_order(ticker="T-BTC", side="no", count=10, price_cents=65,
                         client_order_id="v2x-1-T-BTC-entry")
     assert r["ok"] is True and r["dry_run"] is True
-    assert r["would_place"]["no_price"] == 65 and r["would_place"]["count"] == 10
+    wp = r["would_place"]
+    # V2 schema: bid/ask side, dollar-string price, string count, UUID client_order_id.
+    assert wp["side"] == "ask" and wp["price"] == "0.3500" and wp["count"] == "10.00"
+    _uuid.UUID(wp["client_order_id"])   # valid UUID (raises if not)
 
 
 def test_trading_client_live_ready_requires_all_gates():

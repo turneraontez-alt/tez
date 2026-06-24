@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
+import uuid
 from typing import Any, Mapping
 
 logger = logging.getLogger("q15.executor.client")
@@ -21,6 +22,38 @@ try:  # requests is already a project dep (used by the read-only client)
     import requests
 except Exception:  # pragma: no cover - import guard
     requests = None  # type: ignore
+
+# Fixed namespace -> deterministic UUID from our client_order_id string, so retries of the
+# same logical order carry the same id (Kalshi V2 requires a UUID client_order_id; idempotent).
+_COID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+
+def _coid_uuid(raw: str) -> str:
+    return str(uuid.uuid5(_COID_NAMESPACE, raw))
+
+
+def _v2_side_price(side: str, action: str, price_cents: int) -> tuple[str, str]:
+    """Map (yes/no, buy/sell, cents) -> Kalshi V2 (side 'bid'/'ask', dollar-string price).
+
+    The V2 book is YES-denominated: a 'bid' buys YES, an 'ask' sells YES. Binary duality:
+        buy NO  @ q  ==  sell YES @ (100-q)
+        sell NO @ q  ==  buy  YES @ (100-q)
+    so a NO trade is sent as the opposite YES side at the complementary price.
+
+    *** DIRECTION ASSUMPTION — CONFIRM against the docs' `side` field semantics before any
+        LIVE money: a wrong mapping = the exact opposite position. Dry-run/probe never risk
+        this (they place $0.01 unfillable orders). ***
+    """
+    s = (side or "").lower()
+    a = (action or "").lower()
+    if s == "yes":
+        v2_side = "bid" if a == "buy" else "ask"
+        p = price_cents
+    else:  # NO -> trade YES at the complementary price
+        v2_side = "ask" if a == "buy" else "bid"
+        p = 100 - price_cents
+    p = max(1, min(99, int(p)))
+    return v2_side, f"{p / 100:.4f}"
 
 
 class KalshiTradingClient:
@@ -81,32 +114,34 @@ class KalshiTradingClient:
             return (r.get("data") or {}).get("market_positions") or []
         return []
 
-    # -- write (the live-money path) ---------------------------------------------
+    # -- write (the live-money path) — Kalshi V2 events/orders schema -------------
     def place_order(self, *, ticker: str, side: str, count: int, price_cents: int,
                     action: str = "buy", client_order_id: str) -> dict[str, Any]:
-        """Place (dry-run: LOG) a limit order. ``side`` 'no'/'yes'; ``action`` buy/sell."""
-        side_l = (side or "").lower()
-        price_field = "no_price" if side_l == "no" else "yes_price"
+        """Place (dry-run: LOG) a limit order on the V2 endpoint. ``side`` 'no'/'yes';
+        ``action`` buy/sell. Maps to the V2 single-book bid/ask + dollar-string schema."""
+        v2_side, price_str = _v2_side_price(side, action, int(price_cents))
         body = {
             "ticker": ticker,
-            "action": action,
-            "side": side_l,
-            "count": int(count),
-            "type": "limit",
-            price_field: int(price_cents),
-            "client_order_id": client_order_id,
+            "client_order_id": _coid_uuid(client_order_id),  # deterministic UUID (idempotent)
+            "side": v2_side,
+            "count": f"{int(count):.2f}",                    # string quantity, e.g. "10.00"
+            "price": price_str,                              # fixed-point dollars, e.g. "0.6500"
+            "time_in_force": "good_till_canceled",
+            "post_only": False,
+            "reduce_only": (action or "").lower() == "sell",  # an exit only ever reduces
         }
         # Defence in depth: the dry-run / disabled / kill paths NEVER touch the network.
         ready, why = self.live_ready
         if not ready:
-            logger.info("[DRY-RUN/%s] would place: %s", why, body)
+            logger.info("[DRY-RUN/%s] would place (v2): %s", why, body)
             return {"ok": True, "dry_run": True, "reason": why, "would_place": body}
-        logger.warning("[LIVE] placing order: %s", body)
-        return self._request("POST", "/portfolio/orders", body)
+        logger.warning("[LIVE] placing v2 order: %s", body)
+        return self._request("POST", "/portfolio/events/orders", body)
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         ready, why = self.live_ready
         if not ready:
             logger.info("[DRY-RUN/%s] would cancel order %s", why, order_id)
             return {"ok": True, "dry_run": True, "reason": why}
+        return self._request("DELETE", f"/portfolio/events/orders/{order_id}")
         return self._request("DELETE", f"/portfolio/orders/{order_id}")

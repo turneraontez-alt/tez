@@ -57,19 +57,24 @@ def main(argv: list[str]) -> int:
         if not ticker:
             print("\n--probe-order needs a TICKER (an active market, e.g. KXBTCD-...).")
             return 2
-        print(f"\n[PROBE] placing 1x NO @ 1c on {ticker} (cannot fill), then cancelling...")
-        body = {"ticker": ticker, "action": "buy", "side": "no", "count": 1,
-                "type": "limit", "no_price": 1, "client_order_id": "exec-preflight-probe"}
-        r = cli._request("POST", "/portfolio/orders", body)          # explicit test: bypasses dry-run
+        from q15_upgrade.executor.trading_client import _v2_side_price, _coid_uuid
+        v2_side, price_str = _v2_side_price("no", "buy", 1)   # buy NO @ 1c -> unfillable
+        print(f"\n[PROBE] V2 order on {ticker}: 1x {v2_side} @ {price_str} (cannot fill), then cancel...")
+        body = {"ticker": ticker, "client_order_id": _coid_uuid("exec-preflight-probe"),
+                "side": v2_side, "count": "1.00", "price": price_str,
+                "time_in_force": "good_till_canceled", "post_only": False, "reduce_only": False}
+        r = cli._request("POST", "/portfolio/events/orders", body)   # explicit test: bypasses dry-run
         if r.get("ok"):
-            oid = ((r.get("data") or {}).get("order") or {}).get("order_id")
-            print(f"  PLACE OK -> *** TRADE PERMISSION CONFIRMED *** (order_id {oid})")
+            oid = (r.get("data") or {}).get("order_id")
+            print(f"  PLACE OK -> *** ENDPOINT + KEY WORK *** (order_id {oid})")
             if oid:
-                c = cli._request("DELETE", f"/portfolio/orders/{oid}")  # force-cancel regardless of cfg
+                c = cli._request("DELETE", f"/portfolio/events/orders/{oid}")  # force-cancel
                 print(f"  cancelled: {c.get('ok')}")
+            print("  NOTE: this confirms the V2 schema is accepted. CONFIRM the NO->bid/ask")
+            print("        DIRECTION against the docs before going live (see trading_client).")
             return 0
         print("  PLACE FAILED ->", r.get("error"))
-        print("  -> still read-only / no trade scope / unfunded. THIS is the blocker.")
+        print("  -> read the error: schema field issue, or trade scope / funding.")
         return 1
 
     print("\nNote: balance + positions confirm AUTH and READ access. A read-only key can")
