@@ -74,14 +74,20 @@ def _analysis(side="NO", sel=0.60, ask=60.0, net_edge=3.0, dq=0.8, eq=0.8,
 
 
 def _config(tmp_path, **over):
-    return UltoimV2Config(
+    base = dict(
         enabled=True, model_version="ultoim-v2",
         db_path=str(tmp_path / "ultoim_v2.sqlite3"),
         telegram_chat_id="", min_confidence=0.55, ask_lo=50.0, ask_hi=72.0,
         min_edge_cents=2.0, no_only=True, mark_band_seconds=90.0,
         reconcile_every_seconds=0.0, recap_every_seconds=0.0,
-        max_spot_stale_seconds=8.0, min_scoreboard_n=30, **over,
+        max_spot_stale_seconds=8.0, min_scoreboard_n=30,
+        # Pin the LEGACY defaults so these tests isolate the original behaviour; the
+        # owner-enabled live defaults (top-3 reward:risk, skip-15M, NO edge-waive) are
+        # asserted in test_owner_default_config_is_aggressive. Overrides win.
+        skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
     )
+    base.update(over)
+    return UltoimV2Config(**base)
 
 
 def _runner(tmp_path, telegram=None, **over):
@@ -148,11 +154,39 @@ def test_gate_blocks_ask_above_band():
 
 
 def test_gate_blocks_edge_below_min():
-    cfg = UltoimV2Config(enabled=True)
+    # edge gate in isolation: pin the waive OFF (owner default is ON, tested below).
+    cfg = UltoimV2Config(enabled=True, no_edge_waive=False)
     # edge = 60 - 59 - 0 = 1.0 < 2.0
     v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=59.0,
                                  total_cost_cents=0.0), cfg)
     assert "EDGE_BELOW_MIN" in v["reason_codes"] and v["fired"] is False
+
+
+def test_no_edge_waive_fires_sub_min_edge_no():
+    # DEFAULT-ON waive: a NO with sub-min stated edge in the [ask_lo, ask_hi] band now
+    # FIRES (the inverse-edge finding). Confidence + ask band still apply.
+    cfg = UltoimV2Config(enabled=True)               # no_edge_waive defaults True
+    v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=59.0,
+                                 total_cost_cents=0.0), cfg)        # edge 1.0 < 2.0
+    assert v["fired"] is True and v["gate_c"] is True
+    assert "NO_EDGE_WAIVE" in v["reason_codes"]
+    # YES is unaffected (gate_a blocks it regardless of the NO-only edge waive).
+    y = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.60,
+                                 entry_ask_cents=59.0, total_cost_cents=0.0), cfg)
+    assert y["fired"] is False
+    # Confidence + ask band still gate even with the waive on.
+    lowconf = gate.evaluate(_candidate(selected_probability=0.50, entry_ask_cents=59.0), cfg)
+    assert lowconf["fired"] is False and "CONF_BELOW_MIN" in lowconf["reason_codes"]
+
+
+def test_owner_default_config_is_aggressive():
+    """The live defaults the owner enabled: edge-waive + skip-15M + top-3 reward:risk.
+    Each is reversible via its Q15_* env var."""
+    cfg = UltoimV2Config()
+    assert cfg.no_edge_waive is True
+    assert cfg.skip_15m is True
+    assert cfg.deliver_top_n == 3
+    assert cfg.deliver_by_reward_risk is True
 
 
 def test_gate_missing_data():
@@ -527,7 +561,7 @@ def _extract(runner, analyses, canonicals, now):
 def test_gate_edge_float_boundary_admits_true_two_cent_edge():
     """0.58*100 - 56 == 1.999999999999993 in binary float; the inclusive 2.0¢ bar
     must still admit a mathematically-exact 2.0¢ edge (the one fitted knob)."""
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_edge_waive=False)   # isolate the edge bar
     assert 0.58 * 100.0 - 56.0 < 2.0  # the float underflow is real
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.58,
                                  entry_ask_cents=56.0, total_cost_cents=0.0), cfg)

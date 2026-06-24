@@ -193,12 +193,20 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
         reason_codes.append("ASK_ABOVE_BAND")
     gate_b = gate_b_conf and gate_b_ask_lo and gate_b_ask_hi
 
-    # gate_c — edge (inclusive, float-repr tolerant). WAIVED for the expensive-NO band.
-    gate_c = (net_edge >= cfg.min_edge_cents - _EDGE_EPS) or expensive_no
+    # gate_c — edge (inclusive, float-repr tolerant). WAIVED for (a) the expensive-NO
+    # band, and (b) the whole NO band when no_edge_waive is on (DEFAULT ON, owner-enabled):
+    # for NO the model's stated edge is INVERSE, so requiring edge>=min cut the cheapest,
+    # highest reward:risk NO WINNERS (settled record: the edge gate removed ~+$35/bet
+    # picks). Confidence floor + ask band still apply; min_edge_cents is untouched so the
+    # best-entry price is unchanged. Set Q15_ULTOIM_V2_NO_EDGE_WAIVE=false to restore it.
+    no_edge_waive = bool(getattr(cfg, "no_edge_waive", False) and side == "NO")
+    gate_c = (net_edge >= cfg.min_edge_cents - _EDGE_EPS) or expensive_no or no_edge_waive
     if not gate_c:
         reason_codes.append("EDGE_BELOW_MIN")
     if expensive_no:
         reason_codes.append("EXPENSIVE_NO_ADMIT")
+    elif no_edge_waive and net_edge < cfg.min_edge_cents - _EDGE_EPS:
+        reason_codes.append("NO_EDGE_WAIVE")
 
     research_fired = gate_b and gate_c
 

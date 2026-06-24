@@ -60,12 +60,16 @@ def _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35, **extra
 
 
 def _runner(tmp_path, **over):
-    cfg = UltoimV2Config(
+    base = dict(
         enabled=True, model_version="ultoim-v2", db_path=str(tmp_path / "u.sqlite3"),
         telegram_chat_id="", min_confidence=0.55, ask_lo=50.0, ask_hi=72.0,
         min_edge_cents=2.0, mark_band_seconds=90.0, reconcile_every_seconds=0.0,
-        recap_every_seconds=0.0, max_spot_stale_seconds=8.0, min_scoreboard_n=30, **over,
+        recap_every_seconds=0.0, max_spot_stale_seconds=8.0, min_scoreboard_n=30,
+        # pin legacy defaults (owner live-defaults asserted in test_ultoim_v2.py)
+        skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
     )
+    base.update(over)
+    cfg = UltoimV2Config(**base)
     r = UltoimV2Runner(cfg)
     r.telegram = _StubTelegram()
     return r

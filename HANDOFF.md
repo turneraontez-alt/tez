@@ -9,9 +9,17 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1266 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1268 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — Ultoim V2 owner-enabled LIVE config: edge-waive + skip-15M + top-3 reward:risk (branch `claude/sweet-ride-wq61n7` → main)
+**Suite 1268 passed / 4 skipped here.** ⚠️ **Behaviour-changing, owner-directed, ONE in-sample day of basis** — all reversible via env. Four V2 defaults flipped ON (owner trades real money off these alerts, so watch volume/results and revert if off):
+- **`no_edge_waive=true`** (NEW flag): waives the edge gate (`gate_c`) for NO. The stated NO edge is INVERSE, so `edge>=min` was cutting the cheapest, highest reward:risk NO **winners** (settled record: removed ~+$35/bet picks; gate-pass NO book ~+$1.8k→~+$4.1k at $100/bet). Conf floor + ask band still apply; `min_edge_cents`/best-entry price untouched (clean flag, not a min_edge hack). `gate.py` adds `NO_EDGE_WAIVE` tag. Revert: `Q15_ULTOIM_V2_NO_EDGE_WAIVE=false`.
+- **`skip_15m=true`**: fire only at 10M/7M (15M is -EV on all 7 assets cross-ledger). Revert: `=false`.
+- **`deliver_top_n=3` + `deliver_by_reward_risk=true`**: top-3 by cheapest ask per checkpoint (7M-weighted). RAISES correlated exposure + alert volume — pair with per-window stake cap + fractional-bankroll sizing. Revert: `=1` / `=false`.
+
+Tests pin the LEGACY defaults in the shared `_config`/`_runner`/`_cfg` helpers so existing tests isolate old behaviour; new defaults asserted in `test_owner_default_config_is_aggressive` + `test_no_edge_waive_fires_sub_min_edge_no`. **NEXT:** this is a live experiment — let v2-native multi-day data accrue, then re-grade (per-asset/time/sizing) before trusting the dollars or sizing up.
 
 ## ✅ Shipped THIS session — Ultoim V2 top-N reward:risk delivery (opt-in; default byte-identical) (branch `claude/sweet-ride-wq61n7`)
 **Suite 1266 passed / 4 skipped here** (+3 tests). DEFAULT-OFF / reversible — `deliver_top_n=1` + net-edge selection is byte-identical to the prior single-best rule. Backtest motivation (v95 637-NO + native interval_captures chart, ~1 day, in-sample): the single best-by-edge pick per (interval, window) keeps the *expensive* NOs (confidence corr ask +0.49) and drops the cheaper high-payoff ones — delivered EV ~+$8/bet vs gate-pass EV ~+$28. Delivering **top-3/4 by reward:risk (cheapest ask)** recovers most of it (top-4 EV +$33 vs deliver-all +$28, with less correlation). And **7M ≫ 10M** (EV +$45 vs +$12; closer to settlement, fewer flips) — reward:risk delivers more at 7M because 7M asks run cheaper.

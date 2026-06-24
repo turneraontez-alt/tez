@@ -73,28 +73,36 @@ class UltoimV2Config:
     # NO-only by default: the live record favours the NO side for these binaries,
     # and the paper system starts conservative. Set false to admit YES entries.
     no_only: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_ONLY", True))
-    # Skip the 15M (900s) checkpoint. DEFAULT OFF (byte-identical). The live record
-    # shows 15M is the weak, money-losing bin for these NO binaries (accuracy ~coin-
-    # flip and negative P&L at 15M, vs strong, priced-in 10M/7M); the frozen champion
-    # already disables its own 15M alert delivery. When true, v2 only ever fires at
-    # 10M/7M — observation/behaviour at those marks is unchanged.
-    skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", False))
-    # DELIVERY breadth + selection. Default = the legacy SINGLE best candidate per
-    # (interval, window), chosen by net-edge (byte-identical). Opt in per the research:
-    #  * deliver_top_n (>=1): deliver the top-N candidates per checkpoint/window instead
-    #    of just one. The settled record shows top-3/top-4 by reward:risk lifts EV and
-    #    total P&L over the single pick. N>1 means up to N paper alerts per window per
-    #    checkpoint (still one per CONTRACT per window via the alert lock) — it RAISES
-    #    correlated exposure (co-settling assets move together) and alert volume, so size
-    #    accordingly. 7M tends to carry the EV; this delivers more there because 7M asks
-    #    run cheaper, which reward:risk selection favours.
+    # Waive the edge gate (gate_c) for the NO side. DEFAULT ON (owner-enabled). For NO the
+    # model's stated edge is INVERSE, so requiring edge>=min cut the cheapest, highest
+    # reward:risk NO winners (settled record: the edge gate removed ~+$35/bet picks; the
+    # gate-pass NO book lifts from ~+$1.8k to ~+$4.1k at $100/bet with it off, one in-
+    # sample day). Confidence floor + ask band still apply; min_edge_cents is untouched
+    # (best-entry price unchanged). Set Q15_ULTOIM_V2_NO_EDGE_WAIVE=false to restore it.
+    no_edge_waive: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_EDGE_WAIVE", True)
+    )
+    # Skip the 15M (900s) checkpoint. DEFAULT ON (owner-enabled). 15M is the weak, money-
+    # losing bin for these NO binaries (accuracy ~coin-flip, negative P&L; -EV on all 7
+    # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
+    # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
+    skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
+    # DELIVERY breadth + selection. DEFAULT ON (owner-enabled): top-3 by reward:risk per
+    # (interval, window). Set TOP_N=1 + BY_RR=false to restore the legacy single best-by-
+    # edge pick.
+    #  * deliver_top_n (>=1): deliver the top-N candidates per checkpoint/window. The
+    #    settled record shows top-3/top-4 by reward:risk lifts EV + total P&L over the
+    #    single pick. N>1 means up to N paper alerts per window per checkpoint (still one
+    #    per CONTRACT per window via the alert lock) — it RAISES correlated exposure (co-
+    #    settling assets move together) and alert volume, so size per window. 7M tends to
+    #    carry the EV; this delivers more there because 7M asks run cheaper.
     #  * deliver_by_reward_risk: pick by CHEAPEST ask (best payoff per $) instead of the
     #    highest net-edge — the higher-EV selection on the NO book.
     deliver_top_n: int = field(
-        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 1.0)))
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 3.0)))
     )
     deliver_by_reward_risk: bool = field(
-        default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", False)
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)
     )
     # --- 15M selective-entry research SCREEN thresholds (record-only; fifteen_min.py).
     # Scoped to 15M NO candidates ONLY; NEVER gates fire/delivery and never affects the

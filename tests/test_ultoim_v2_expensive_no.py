@@ -23,8 +23,11 @@ from q15_upgrade.ultoim_v2.config import UltoimV2Config
 
 def _cfg(**over):
     # Real defaults: ask_lo=50, ask_hi=72, min_confidence=0.55, min_edge_cents=2.0,
-    # expensive_no_enabled=True, expensive_no_ask_hi=85.0.
-    return UltoimV2Config(enabled=True, **over)
+    # expensive_no_enabled=True, expensive_no_ask_hi=85.0. Pin no_edge_waive=False so
+    # these tests isolate the expensive-NO / edge-gate path (owner default is waive ON).
+    base = dict(enabled=True, no_edge_waive=False)
+    base.update(over)
+    return UltoimV2Config(**base)
 
 
 def _no(ask, sel, cost=0.0):
