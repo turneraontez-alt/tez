@@ -94,8 +94,15 @@ def main(argv: list[str]) -> int:
                 "subaccount": 0, "exchange_index": 0}
         r = cli._request("POST", "/portfolio/events/orders", body)   # explicit test: bypasses dry-run
         if r.get("ok"):
-            oid = (r.get("data") or {}).get("order_id")
+            data = r.get("data") or {}
+            oid = data.get("order_id")
+            filled = str(data.get("fill_count") or "0")
             print(f"  PLACE OK -> *** ENDPOINT + KEY WORK *** (order_id {oid})")
+            if filled not in ("0", "0.0", "0.00", ""):
+                print(f"  *** WARNING: order FILLED {filled} contract(s) before cancel — you now")
+                print(f"      HOLD a real position on {ticker}. Close it manually on Kalshi! ***")
+            else:
+                print("  fill_count: 0 (did NOT fill — no position left, as intended)")
             if oid:
                 c = cli._request("DELETE", f"/portfolio/events/orders/{oid}")  # force-cancel
                 print(f"  cancelled: {c.get('ok')}")
