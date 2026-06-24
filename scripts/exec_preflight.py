@@ -21,6 +21,29 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _discover_ticker() -> str | None:
+    """Auto-find a current live Kalshi 15-min crypto market ticker (so you don't have to
+    hunt for one). 15-min markets aren't under status=open, so query a forward close-time
+    window and take the soonest future market."""
+    import time
+    try:
+        from kalshi_client import KalshiClient
+    except Exception:
+        from q15_upgrade.kalshi_rest import KalshiClient  # type: ignore
+    c = KalshiClient()
+    now = int(time.time())
+    for series in ("KXBTC15M", "KXETH15M", "KXSOL15M"):
+        try:
+            mkts = c.discover(series, min_close_ts=now, max_close_ts=now + 6 * 3600) or c.discover(series)
+        except Exception:
+            continue
+        fut = [m for m in (mkts or []) if m.get("ticker")]
+        if fut:
+            fut.sort(key=lambda m: m.get("close_time", ""))
+            return fut[0]["ticker"]
+    return None
+
+
 def main(argv: list[str]) -> int:
     from q15_upgrade.executor.config import ExecutorConfig
     from q15_upgrade.executor.trading_client import KalshiTradingClient
@@ -54,9 +77,13 @@ def main(argv: list[str]) -> int:
     if "--probe-order" in argv:
         idx = argv.index("--probe-order")
         ticker = argv[idx + 1] if idx + 1 < len(argv) else None
-        if not ticker:
-            print("\n--probe-order needs a TICKER (an active market, e.g. KXBTCD-...).")
-            return 2
+        if not ticker or ticker == "auto":
+            ticker = _discover_ticker()
+            if not ticker:
+                print("\ncould not auto-discover a live market; pass one explicitly:")
+                print("  python3 scripts/exec_preflight.py --probe-order <full-current-ticker>")
+                return 2
+            print(f"auto-discovered live market: {ticker}")
         from q15_upgrade.executor.trading_client import _v2_side_price, _coid_uuid
         v2_side, price_str = _v2_side_price("no", "buy", 1)   # buy NO @ 1c -> unfillable
         print(f"\n[PROBE] V2 order on {ticker}: 1x {v2_side} @ {price_str} (cannot fill), then cancel...")
