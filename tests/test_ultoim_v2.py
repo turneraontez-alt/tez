@@ -340,6 +340,34 @@ def test_build_entry_alert_grammar_and_no_collision():
         assert marker not in text
 
 
+def test_entry_alert_flow_against_no_is_informational_only():
+    """Owner directive: a NO card against strong buy-side flow SHOWS the loss-zone
+    warning (so it's visible) but is still SENT and never gates/grades. The line
+    appears only for NO + champion_flow >= threshold; never for YES, low flow, or
+    a missing flow (no crash)."""
+    cfg = UltoimV2Config(enabled=True, flow_against_no_threshold=0.6)
+    base = {
+        "asset": "BTC", "ticker": "T-BTC", "interval": "10M", "window_key": 5,
+        "selected_probability": 0.62, "entry_ask_cents": 60.0,
+        "best_entry_cents": 58, "net_edge_cents": 2.5,
+    }
+    # NO + strong flow -> warning shown, card still fully rendered (still "sent").
+    hot = panel.build_entry_alert({**base, "predicted_side": "NO", "champion_flow": 0.80}, {"resolved": 0}, cfg)
+    assert "Flow against NO" in hot and "0.80" in hot and "not graded" in hot
+    assert "BEST ENTRY — BTC NO" in hot and "RESEARCH SIGNAL" in hot   # alert intact, not suppressed
+    for marker in _FORBIDDEN:
+        assert marker not in hot
+    # NO + weak flow -> no warning.
+    cold = panel.build_entry_alert({**base, "predicted_side": "NO", "champion_flow": 0.30}, {"resolved": 0}, cfg)
+    assert "Flow against NO" not in cold
+    # YES + strong flow -> never warns (the loss-zone is NO-side only).
+    yes = panel.build_entry_alert({**base, "predicted_side": "YES", "champion_flow": 0.90}, {"resolved": 0}, cfg)
+    assert "Flow against NO" not in yes
+    # Missing flow (pre-feature row) -> no warning, no crash.
+    none = panel.build_entry_alert({**base, "predicted_side": "NO"}, {"resolved": 0}, cfg)
+    assert "Flow against NO" not in none
+
+
 def test_build_recap_insufficient_data():
     cfg = UltoimV2Config(enabled=True, min_scoreboard_n=30)
     sb = {

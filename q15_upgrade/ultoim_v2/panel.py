@@ -61,6 +61,21 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     ask_txt = "—" if ask is None else f"{ask:.0f}¢"
     display_txt = "—" if display is None else f"{int(display)}¢"
 
+    # Flow-against-NO — INFORMATIONAL warning surfaced on the live NO card so the owner
+    # can SEE the historical loss-zone (a NO bet into strong buy-side flow, i.e.
+    # champion_flow >= cfg.flow_against_no_threshold; the OOS-validated #1 loss signal).
+    # By owner directive it is VISIBILITY ONLY: the alert is still SENT (never abstained)
+    # and grading / P&L are UNCHANGED — it never gates a decision. champion_flow is
+    # captured at decision time (feature_values["flow"]); absent on pre-feature rows.
+    flow = _num(pick.get("champion_flow"))
+    flow_thr = _num(getattr(cfg, "flow_against_no_threshold", None))
+    flow_warn = (
+        f"⚠️ Flow against NO: buy-side flow {flow:.2f} ≥ {flow_thr:.2f} "
+        f"(historical loss-zone — info only, not graded)"
+        if side == "NO" and flow is not None and flow_thr is not None and flow >= flow_thr
+        else None
+    )
+
     header = f"🧪 <b>ULTOIM V2 · {interval} · PAPER ENTRY</b>"
     body = [
         "RESEARCH SIGNAL — paper only, NOT a live call. No orders placed.",
@@ -76,6 +91,8 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
         f"{yes_prone_n} YES-prone · CI wide",
         "Ultoim V2 · research/paper · not advice · no orders placed",
     ]
+    if flow_warn is not None:
+        body.insert(3, flow_warn)  # directly under the BEST ENTRY headline
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
 
 
