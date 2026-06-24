@@ -39,10 +39,14 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _discover_ticker() -> str | None:
+def _discover_ticker(min_runway_s: int = 0) -> str | None:
     """Auto-find a current live Kalshi 15-min crypto market ticker (so you don't have to
     hunt for one). 15-min markets aren't under status=open, so query a forward close-time
-    window and take the soonest future market."""
+    window and take the soonest future market.
+
+    ``min_runway_s`` skips markets about to settle: the direction test must hold a 1-lot
+    long enough to READ the position back, so it needs a window with runway (a near-close
+    market fills at ~99c and resolves before /portfolio/positions ever shows it)."""
     import time
     try:
         from kalshi_client import KalshiClient
@@ -50,9 +54,10 @@ def _discover_ticker() -> str | None:
         from q15_upgrade.kalshi_rest import KalshiClient  # type: ignore
     c = KalshiClient()
     now = int(time.time())
+    cutoff = now + int(min_runway_s)
     for series in ("KXBTC15M", "KXETH15M", "KXSOL15M"):
         try:
-            mkts = c.discover(series, min_close_ts=now, max_close_ts=now + 6 * 3600) or c.discover(series)
+            mkts = c.discover(series, min_close_ts=cutoff, max_close_ts=now + 6 * 3600) or c.discover(series)
         except Exception:
             continue
         fut = [m for m in (mkts or []) if m.get("ticker")]
@@ -174,6 +179,10 @@ def _verify_direction(cli, ticker) -> int:
         # nested or flat: V2 may return {"order": {...}} — handle both.
         inner = od.get("order") if isinstance(od.get("order"), dict) else od
         print(f"  order ack: {inner}")
+        try:
+            filled = float(inner.get("fill_count") or 0)
+        except (TypeError, ValueError):
+            filled = 0.0
         oid = inner.get("order_id")
         if oid:
             _cancel(cli, oid)   # kill any unfilled remainder immediately
@@ -182,8 +191,15 @@ def _verify_direction(cli, ticker) -> int:
         delta = after - base
         print(f"  position now: {after}  (delta {delta:+d})")
         if delta == 0:
-            print("  VERDICT: inconclusive — no position change (thin/one-sided book: nothing")
-            print("           crossed). Re-run on the next window, or use the docs' side def.")
+            if filled > 0:
+                print(f"  order FILLED {filled} @ {inner.get('average_fill_price')} but the position")
+                print("  reads 0 -> the market likely SETTLED or the feed lags. Raw position entry:")
+                for p in cli.get_positions():
+                    if p.get("ticker") == ticker:
+                        print("   ", p)
+                print("  Re-run on a window with more runway (auto-discovery now asks for >=6 min).")
+            else:
+                print("  VERDICT: inconclusive — nothing crossed (thin/one-sided book).")
             return 2
         if delta < 0:
             print("  VERDICT: ✅ CORRECT — our 'buy NO' produced a NO position (delta negative).")
@@ -260,12 +276,13 @@ def main(argv: list[str]) -> int:
         idx = argv.index("--verify-direction")
         ticker = argv[idx + 1] if idx + 1 < len(argv) else None
         if not ticker or ticker == "auto":
-            ticker = _discover_ticker()
+            # need RUNWAY (>=6 min) so the 1-lot doesn't settle before we can read it back.
+            ticker = _discover_ticker(min_runway_s=360)
             if not ticker:
-                print("\ncould not auto-discover a live market; pass one explicitly:")
+                print("\ncould not auto-discover a live market with runway; pass one explicitly:")
                 print("  python3 scripts/exec_preflight.py --verify-direction <full-current-ticker>")
                 return 2
-            print(f"auto-discovered live market: {ticker}")
+            print(f"auto-discovered live market (>=6min runway): {ticker}")
         print(f"\n[VERIFY-DIRECTION] real ~few-cent test on {ticker}: buy 1 NO, read the")
         print("position back, then CLOSE exactly what opened (reduce-only). Confirms the")
         print("buy-NO -> bid/ask mapping puts you LONG NO before any real-size trading.\n")
