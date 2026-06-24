@@ -127,8 +127,12 @@ class KalshiTradingClient:
             "count": f"{int(count):.2f}",                    # string quantity, e.g. "10.00"
             "price": price_str,                              # fixed-point dollars, e.g. "0.6500"
             "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",  # required by the V2 endpoint
             "post_only": False,
+            "cancel_order_on_pause": False,
             "reduce_only": (action or "").lower() == "sell",  # an exit only ever reduces
+            "subaccount": 0,
+            "exchange_index": 0,
         }
         # Defence in depth: the dry-run / disabled / kill paths NEVER touch the network.
         ready, why = self.live_ready

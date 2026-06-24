@@ -62,7 +62,9 @@ def main(argv: list[str]) -> int:
         print(f"\n[PROBE] V2 order on {ticker}: 1x {v2_side} @ {price_str} (cannot fill), then cancel...")
         body = {"ticker": ticker, "client_order_id": _coid_uuid("exec-preflight-probe"),
                 "side": v2_side, "count": "1.00", "price": price_str,
-                "time_in_force": "good_till_canceled", "post_only": False, "reduce_only": False}
+                "time_in_force": "good_till_canceled", "self_trade_prevention_type": "taker_at_cross",
+                "post_only": False, "cancel_order_on_pause": False, "reduce_only": False,
+                "subaccount": 0, "exchange_index": 0}
         r = cli._request("POST", "/portfolio/events/orders", body)   # explicit test: bypasses dry-run
         if r.get("ok"):
             oid = (r.get("data") or {}).get("order_id")
