@@ -691,6 +691,26 @@ def test_12m_delivers_live_alert_when_enabled(tmp_path):
     assert len(tg.sent) == 1                                 # a real alert was sent
 
 
+def test_runner_fires_executor_hook_on_delivered_no(tmp_path, monkeypatch):
+    """A confirmed fired NO delivery hands the pick to the opt-in executor (when present).
+    Default (get_executor -> None) is a no-op, covered by the rest of the suite passing."""
+    calls = []
+
+    class _ExStub:
+        def on_fire(self, pick): calls.append(pick); return {"placed": True}
+        def on_exit(self, *a, **k): return {"placed": False}
+
+    import q15_upgrade.executor as exmod
+    monkeypatch.setattr(exmod, "get_executor", lambda: _ExStub())
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}     # 10M -> delivers
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert len(calls) == 1
+    assert calls[0]["ticker"] == "T-BTC" and calls[0]["predicted_side"] == "NO"
+    assert calls[0]["window_key"] is not None
+
+
 def test_gate_research_fired_yes_side_never_delivers():
     cfg = UltoimV2Config(enabled=True)  # no_only=True
     v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.65,

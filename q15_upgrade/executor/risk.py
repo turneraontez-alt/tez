@@ -93,6 +93,9 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if remaining <= 0:
         return Decision(False, "WINDOW_FULL")
     stake = min(stake, remaining)
+    # HARD per-pick dollar ceiling — the absolute cap on one trade's risk.
+    if cfg.max_stake_per_pick_cents > 0:
+        stake = min(stake, cfg.max_stake_per_pick_cents)
 
     count = stake // price   # whole contracts only (integer cents)
     if count < 1:

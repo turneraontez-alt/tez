@@ -87,6 +87,16 @@ def test_decide_window_cap_clamps_stake():
     assert d.count == 1000 // 50 == 20
 
 
+def test_decide_per_pick_dollar_cap_binds():
+    # $5000 bankroll, 4% = $200/pick, but the $50 hard cap wins.
+    cfg = _cfg(bankroll_cents=500_000)
+    st = PortfolioState(bankroll_cents=500_000)
+    d = decide(_pick(price=65), st, cfg)
+    assert d.place is True
+    assert d.stake_cents <= 5000                 # never more than $50 risked
+    assert d.count == 5000 // 65 == 76
+
+
 def test_decide_size_too_small_blocks():
     # tiny bankroll: 4% of $5 = 20c, below one 65c contract -> refuse.
     cfg = _cfg(bankroll_cents=500)

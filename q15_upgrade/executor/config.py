@@ -71,6 +71,10 @@ class ExecutorConfig:
     # day-start bankroll (the daily circuit breaker). Exits still allowed.
     daily_loss_limit_pct: float = field(default_factory=lambda: _float("Q15_EXEC_DAILY_LOSS_LIMIT_PCT", 0.20))
     max_open_positions: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_OPEN_POSITIONS", 6))
+    # HARD per-pick stake ceiling in CENTS — the absolute most one trade can risk, on top of
+    # the % sizing. Default $50 (owner-set for live testing): even with a big bankroll, no
+    # single contract order risks more than this. 0 = no cap (rely on per_pick_pct only).
+    max_stake_per_pick_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_STAKE_PER_PICK_CENTS", 5000))
 
     # --- Order sanity band (refuse anything outside it — defence in depth vs a bad signal) ---
     min_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MIN_PRICE_CENTS", 50))
@@ -92,6 +96,7 @@ class ExecutorConfig:
         if self.kill_switch:
             return "EXECUTOR ENABLED but KILL SWITCH ON — no orders will be placed"
         mode = "DRY-RUN (orders logged, nothing sent)" if self.dry_run else "*** LIVE REAL MONEY ***"
-        return (f"EXECUTOR ENABLED — {mode}; size {self.per_pick_pct*100:.0f}%/pick, "
+        cap = f"${self.max_stake_per_pick_cents/100:.0f}/pick cap" if self.max_stake_per_pick_cents > 0 else "no per-pick cap"
+        return (f"EXECUTOR ENABLED — {mode}; size {self.per_pick_pct*100:.0f}%/pick ({cap}), "
                 f"<= {self.max_picks_per_window} picks/window, <= {self.max_per_window_pct*100:.0f}%/window, "
                 f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%")
