@@ -16,7 +16,7 @@ def _cfg(**over):
     # $75); the flat-mode behaviour has its own tests below. Overrides win.
     base = dict(enabled=True, dry_run=True, bankroll_cents=100_000,  # $1000
                 per_pick_pct=0.04, max_picks_per_window=2, max_per_window_pct=0.08,
-                daily_loss_limit_pct=0.20, max_open_positions=6,
+                daily_loss_limit_pct=0.20, daily_loss_limit_cents=0, max_open_positions=6,
                 flat_stake_cents=0, min_price_cents=50, max_price_cents=85)
     base.update(over)
     return ExecutorConfig(**base)
@@ -56,10 +56,53 @@ def test_decide_price_band_blocks():
 
 
 def test_decide_daily_stop_blocks():
-    cfg = _cfg()
+    cfg = _cfg()   # daily_loss_limit_cents=0 -> the %-based stop applies
     st = PortfolioState(bankroll_cents=100_000, day_start_bankroll_cents=100_000,
                         day_realized_pnl_cents=-20_001)   # past -20%
     assert decide(_pick(), st, cfg).reason == "DAILY_STOP"
+
+
+def test_decide_absolute_stop_loss_blocks_at_dollar_limit():
+    # $100 absolute stop: down $100 halts new entries; $99.99 still trades.
+    cfg = _cfg(daily_loss_limit_cents=10_000)
+    st = PortfolioState(bankroll_cents=34_000, day_start_bankroll_cents=34_000,
+                        day_realized_pnl_cents=-10_000)        # exactly -$100
+    assert decide(_pick(), st, cfg).reason == "DAILY_STOP"
+    st_ok = PortfolioState(bankroll_cents=34_000, day_start_bankroll_cents=34_000,
+                           day_realized_pnl_cents=-9_999)      # -$99.99
+    assert decide(_pick(price=65), st_ok, cfg).place is True
+
+
+def test_absolute_stop_loss_governs_over_pct():
+    # With BOTH set, the absolute $100 governs: a -$80 day (past $100? no) still trades even
+    # though it is past 20% of a tiny day-start; and -$100 stops even when under 20%.
+    cfg = _cfg(daily_loss_limit_cents=10_000, daily_loss_limit_pct=0.20)
+    # day-start $1000, down $100 = 10% (< 20%) but hits the absolute -> stop.
+    st = PortfolioState(bankroll_cents=100_000, day_start_bankroll_cents=100_000,
+                        day_realized_pnl_cents=-10_000)
+    assert decide(_pick(), st, cfg).reason == "DAILY_STOP"
+    # down $90 = 9% and under the $100 absolute -> trades (the % would NOT have stopped here either).
+    st2 = PortfolioState(bankroll_cents=100_000, day_start_bankroll_cents=100_000,
+                         day_realized_pnl_cents=-9_000)
+    assert decide(_pick(price=65), st2, cfg).place is True
+
+
+def test_executor_stop_loss_fires_from_live_balance():
+    # Live balance falls $100 below the day-start -> the next entry is refused (STOP/DAILY_STOP),
+    # and NO order is placed. Stub returns $340 at init, $240 on the refresh read.
+    class _BalClient:
+        def __init__(self, bals): self._b = list(bals); self.orders = []
+        def get_balance_cents(self):
+            return self._b.pop(0) if len(self._b) > 1 else self._b[0]
+        def place_order(self, **kw):
+            self.orders.append(kw); return {"ok": True, "dry_run": False}
+    ex = Executor(_cfg(enabled=True, dry_run=False, bankroll_cents=0,
+                       flat_stake_cents=7500, daily_loss_limit_cents=10_000),
+                  client=_BalClient([34_000, 24_000]))   # init reads 34000; refresh reads 24000
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "entry_price_cents": 65, "window_key": 1})
+    assert r["placed"] is False and r["reason"] == "DAILY_STOP"
+    assert ex.client.orders == []                         # nothing was placed after the stop
 
 
 def test_decide_max_open_blocks():

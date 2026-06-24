@@ -9,9 +9,27 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1301 passed / 13 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1304 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — executor ABSOLUTE $100 stop loss (owner-chosen)
+**Suite 1304 / 13 skipped** (+3 tests). Owner wanted a hard $-stop, not the %-based one.
+- **`executor/config.py`**: new `daily_loss_limit_cents` (env `Q15_EXEC_DAILY_LOSS_LIMIT_CENTS`, default
+  **10000=$100**). When >0 it GOVERNS the daily stop (the 20% `daily_loss_limit_pct` is ignored). `safety_summary`
+  now prints `stop -$100`.
+- **`executor/risk.py`**: `decide()` floor = `-daily_loss_limit_cents` when set, else the % of day-start; halt
+  NEW entries (DAILY_STOP) once `day_realized_pnl_cents <= floor`. Exits never gated.
+- **`executor/executor.py`**: `_refresh_daily_pnl()` reads the LIVE balance before each `on_fire` and sets
+  realized P&L = `balance − day_start_balance` (cash-drawdown basis: a still-open position reads as a loss, so it
+  errs toward STOPPING — the safe direction). `_day_start_balance` captured at init from the real balance (live)
+  or bankroll (dry-run). No-op in dry-run.
+- ⚠️ **Limitations (be honest w/ owner):** (1) in-memory — a Repl restart resets `_day_start_balance`, so the
+  day's loss counter restarts (the standing persistence TODO). (2) Post-trade check + $75 flat bets straddle $100:
+  after one −$75 loss you're not yet at −$100 so a 2nd entry is allowed; if it also loses you reach ~−$150 before
+  the stop trips. To cap realized at exactly $100 you'd need pre-trade budgeting or a smaller stake.
+- Reversible: `Q15_EXEC_DAILY_LOSS_LIMIT_CENTS=0` → back to the 20% stop. Tests pin `daily_loss_limit_cents=0`
+  in `_cfg`; +3 tests (absolute stop binds, governs over %, fires from a falling live balance).
 
 ## ✅ Shipped THIS session — executor FLAT $75/pick sizing, 1 pick/window (owner-chosen)
 **Suite 1301 / 13 skipped** (+5 flat-mode tests). Owner switched from %-sizing to a FIXED dollar stake.
