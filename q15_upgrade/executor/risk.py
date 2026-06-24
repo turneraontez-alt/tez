@@ -39,6 +39,7 @@ class PortfolioState:
     day_realized_pnl_cents: int = 0
     open_count: int = 0
     open_tickers: frozenset[str] = field(default_factory=frozenset)
+    positions: dict[str, int] = field(default_factory=dict)               # ticker -> contracts held
     # per-window bookkeeping for the current (and recent) windows
     window_count: dict[int, int] = field(default_factory=dict)            # window_key -> picks placed
     window_committed_cents: dict[int, int] = field(default_factory=dict)  # window_key -> cents staked
@@ -118,9 +119,27 @@ def apply_fill(state: PortfolioState, pick: Pick, decision: Decision) -> Portfol
         day_realized_pnl_cents=state.day_realized_pnl_cents,
         open_count=state.open_count + 1,
         open_tickers=state.open_tickers | {pick.ticker},
+        positions={**state.positions, pick.ticker: decision.count},
         window_count={**state.window_count, wk: state.window_count.get(wk, 0) + 1},
         window_committed_cents={**state.window_committed_cents,
                                 wk: state.window_committed_cents.get(wk, 0) + decision.stake_cents},
         window_tickers={**state.window_tickers,
                         wk: state.window_tickers.get(wk, frozenset()) | {pick.ticker}},
+    )
+
+
+def apply_exit(state: PortfolioState, ticker: str) -> PortfolioState:
+    """Return a NEW state with ``ticker`` closed out (after a sell)."""
+    if ticker not in state.positions:
+        return state
+    return PortfolioState(
+        bankroll_cents=state.bankroll_cents,
+        day_start_bankroll_cents=state.day_start_bankroll_cents,
+        day_realized_pnl_cents=state.day_realized_pnl_cents,
+        open_count=max(0, state.open_count - 1),
+        open_tickers=state.open_tickers - {ticker},
+        positions={k: v for k, v in state.positions.items() if k != ticker},
+        window_count=state.window_count,
+        window_committed_cents=state.window_committed_cents,
+        window_tickers=state.window_tickers,
     )

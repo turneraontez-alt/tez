@@ -179,14 +179,19 @@ def test_executor_disabled_blocks_and_factory_returns_none(monkeypatch):
     assert executor_mod.get_executor() is None
 
 
-def test_executor_exit_requires_open_position():
+def test_executor_exit_sells_full_position_and_closes_out():
     ex = _exec()
     assert ex.on_exit("T-BTC", 1, 30)["reason"] == "NO_POSITION"
     ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
                 "entry_price_cents": 60, "window_key": 1})
+    held = ex.state.positions["T-BTC"]               # the count it bought
+    assert held == 4000 // 60 == 66
     r = ex.on_exit("T-BTC", 1, 30)
-    assert r["placed"] is True
-    assert ex.client.orders[-1]["action"] == "sell"
+    assert r["placed"] is True and r["count"] == held  # sells the WHOLE position, not 1
+    assert ex.client.orders[-1]["action"] == "sell" and ex.client.orders[-1]["count"] == held
+    # position is closed out -> a second exit finds nothing.
+    assert "T-BTC" not in ex.state.positions
+    assert ex.on_exit("T-BTC", 1, 30)["reason"] == "NO_POSITION"
 
 
 # --------------------------------------------------------------------------- #
