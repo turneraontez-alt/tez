@@ -12,10 +12,12 @@ from q15_upgrade.executor.trading_client import KalshiTradingClient
 
 
 def _cfg(**over):
+    # flat_stake_cents=0 pins these to the % sizing path (the production default is now FLAT
+    # $75); the flat-mode behaviour has its own tests below. Overrides win.
     base = dict(enabled=True, dry_run=True, bankroll_cents=100_000,  # $1000
                 per_pick_pct=0.04, max_picks_per_window=2, max_per_window_pct=0.08,
                 daily_loss_limit_pct=0.20, max_open_positions=6,
-                min_price_cents=50, max_price_cents=85)
+                flat_stake_cents=0, min_price_cents=50, max_price_cents=85)
     base.update(over)
     return ExecutorConfig(**base)
 
@@ -119,6 +121,57 @@ def test_apply_fill_updates_state():
     assert "T-BTC" in st2.open_tickers
     assert st2.window_count[1] == 1
     assert st2.window_committed_cents[1] == d.stake_cents
+
+
+# --------------------------------------------------------------------------- #
+# FLAT sizing mode (owner default: $75 flat / pick, 1 pick/window)
+# --------------------------------------------------------------------------- #
+def test_owner_default_executor_sizing_is_flat_75_one_pick():
+    cfg = ExecutorConfig()      # production defaults
+    assert cfg.flat_stake_cents == 7500          # $75 flat per pick
+    assert cfg.max_picks_per_window == 1         # single best pick per window
+    assert cfg.max_stake_per_pick_cents == 7500  # hard cap matches
+
+
+def test_flat_stake_overrides_pct_sizing():
+    # flat $75 ignores the 4% (=$40 on $1000) — stakes the fixed amount instead.
+    cfg = _cfg(flat_stake_cents=7500)
+    st = PortfolioState(bankroll_cents=100_000)
+    d = decide(_pick(price=65), st, cfg)
+    assert d.place is True
+    assert d.stake_cents == (7500 // 65) * 65     # $75 worth of whole contracts
+    assert d.count == 7500 // 65 == 115
+
+
+def test_flat_stake_one_pick_per_window_blocks_second():
+    cfg = _cfg(flat_stake_cents=7500, max_picks_per_window=1)
+    st = PortfolioState(bankroll_cents=100_000)
+    p = _pick(wk=1)
+    d = decide(p, st, cfg)
+    assert d.place is True and d.count == 115
+    st2 = apply_fill(st, p, d)
+    # a second pick in the same window is refused (1 pick/window).
+    assert decide(_pick(ticker="T-ETH", wk=1), st2, cfg).reason == "WINDOW_FULL"
+
+
+def test_flat_stake_window_budget_allows_two_when_maxpicks_two():
+    # flat window budget = flat * max_picks; with max_picks=2 a second $75 pick fits.
+    cfg = _cfg(flat_stake_cents=7500, max_picks_per_window=2)
+    st = PortfolioState(bankroll_cents=100_000, window_committed_cents={1: 7475},
+                        window_count={1: 1})
+    d = decide(_pick(ticker="T-ETH", wk=1, price=65), st, cfg)
+    assert d.place is True and d.count == 115     # second flat $75 still fits in the $150 budget
+
+
+def test_flat_stake_clamped_to_bankroll_and_hard_cap():
+    # bankroll only $50 -> can't stake the full flat $75; clamps to bankroll.
+    cfg = _cfg(flat_stake_cents=7500, bankroll_cents=5000)
+    d = decide(_pick(price=65), PortfolioState(bankroll_cents=5000), cfg)
+    assert d.place is True and d.stake_cents <= 5000
+    # flat above the hard per-pick cap is clamped to the cap.
+    cfg2 = _cfg(flat_stake_cents=20000, max_stake_per_pick_cents=7500)
+    d2 = decide(_pick(price=65), PortfolioState(bankroll_cents=100_000), cfg2)
+    assert d2.place is True and d2.stake_cents <= 7500
 
 
 # --------------------------------------------------------------------------- #

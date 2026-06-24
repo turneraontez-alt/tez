@@ -57,12 +57,13 @@ class ExecutorConfig:
     kill_switch: bool = field(default_factory=lambda: _bool("Q15_EXEC_KILL", False))
     base_url: str = field(default_factory=lambda: os.environ.get("Q15_EXEC_BASE_URL") or BASE_URL)
 
-    # --- Sizing (owner rule: 2 picks/window @ ~4% each, ~8% per-window cap) ---
+    # --- Sizing. Owner rule (current): FLAT $75 per pick, 1 pick/window. The % fields below are
+    # the FALLBACK used only when flat_stake_cents=0 (then ~4%/pick, ~8%/window). ---
     # Bankroll the % sizing is computed against, in CENTS. If 0, the executor reads the
     # live Kalshi balance instead (live mode only); a fixed value is safer for testing.
     bankroll_cents: int = field(default_factory=lambda: _int("Q15_EXEC_BANKROLL_CENTS", 0))
     per_pick_pct: float = field(default_factory=lambda: _float("Q15_EXEC_PER_PICK_PCT", 0.04))
-    max_picks_per_window: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PICKS_PER_WINDOW", 2))
+    max_picks_per_window: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PICKS_PER_WINDOW", 1))
     # Hard ceiling on TOTAL stake committed to one (settlement) window, as a fraction of
     # bankroll — the correlation guard (picks in a window co-settle ~76%). Never exceeded
     # even if per_pick_pct * max_picks would.
@@ -77,6 +78,12 @@ class ExecutorConfig:
     # BINDS once bankroll exceeds ~$1,875 (4% * 1875 = $75); below that the % sizing is the
     # smaller, binding limit. 0 = no cap (rely on per_pick_pct only).
     max_stake_per_pick_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_STAKE_PER_PICK_CENTS", 7500))
+    # FLAT per-pick stake in CENTS. When > 0 it OVERRIDES the % sizing: every pick stakes exactly
+    # this fixed dollar amount (still bounded by the bankroll on hand and the hard per-pick cap
+    # above; the per-window budget becomes flat * max_picks_per_window). Owner default $75 with
+    # max_picks_per_window=1 -> a flat $75 on the single best pick each window. Set
+    # Q15_EXEC_FLAT_STAKE_CENTS=0 to fall back to per_pick_pct % sizing.
+    flat_stake_cents: int = field(default_factory=lambda: _int("Q15_EXEC_FLAT_STAKE_CENTS", 7500))
 
     # --- Order sanity band (refuse anything outside it — defence in depth vs a bad signal) ---
     min_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MIN_PRICE_CENTS", 50))
@@ -99,6 +106,10 @@ class ExecutorConfig:
             return "EXECUTOR ENABLED but KILL SWITCH ON — no orders will be placed"
         mode = "DRY-RUN (orders logged, nothing sent)" if self.dry_run else "*** LIVE REAL MONEY ***"
         cap = f"${self.max_stake_per_pick_cents/100:.0f}/pick cap" if self.max_stake_per_pick_cents > 0 else "no per-pick cap"
-        return (f"EXECUTOR ENABLED — {mode}; size {self.per_pick_pct*100:.0f}%/pick ({cap}), "
-                f"<= {self.max_picks_per_window} picks/window, <= {self.max_per_window_pct*100:.0f}%/window, "
+        if self.flat_stake_cents > 0:
+            size = f"FLAT ${self.flat_stake_cents/100:.0f}/pick ({cap})"
+        else:
+            size = f"{self.per_pick_pct*100:.0f}%/pick ({cap})"
+        return (f"EXECUTOR ENABLED — {mode}; size {size}, "
+                f"<= {self.max_picks_per_window} pick(s)/window, <= {self.max_per_window_pct*100:.0f}%/window, "
                 f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%")
