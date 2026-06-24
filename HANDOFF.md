@@ -13,6 +13,31 @@ Tests: `python3 -m pytest tests/ -q` → **1268 passed / 4 skipped here** (8 app
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## 🔬 V2 RESEARCH FINDINGS (this session — analysis on the learning-snapshot chart; ALL ~1 in-sample day, treat as direction not forecast)
+Data = `interval_captures` (the per-checkpoint chart, ~1151 resolved NO + the YES side) + v95 (637 NO) + v1 (277 NO). Everything is ONE ~17h session — directionally informative, dollar figures unproven. The shipped config (above) encodes the winners; the **dead ends below are the valuable part — do NOT re-chase them.**
+
+**WHAT WORKS (→ shipped in the live config):**
+1. **Drop 15M.** -EV on all 7 assets cross-ledger (v95 15M EV −8.7¢, n=308). 10M/7M carry the book.
+2. **Edge gate is counterproductive for NO** (the stated edge is INVERSE). Waiving it (`no_edge_waive`) lifts the gate-pass NO book ~+$1.8k→~+$4.1k at $100/bet; the picks it cut were the cheapest, highest-EV winners (~+$35/bet).
+3. **Deliver top-3/4 by reward:risk, NOT single best-by-edge.** confidence corr ask = **+0.49**, so "most confident" = "most expensive" = worst reward:risk. Single-best delivered EV ~+$8/bet vs top-3 ~+$31. Live = per-checkpoint (can't pool 10M+7M without look-ahead).
+4. **7M ≫ 10M** (closer to settlement, fewer flips): per-bet EV ~+$32–45 (7M) vs ~+$12–27 (10M). reward:risk auto-weights 7M (cheaper asks).
+5. **Cross-learner check:** V2's gate on v95 (637 NO) and v1 (277 NO) holds ~80% W/L, EV ~+$10/bet — vindicates the thin 29-trade book on 10–20× the data.
+
+**DEAD ENDS — proven NOT to work OOS (do not rebuild):**
+6. **No loss-curbing rule exists on the gated book.** A 7-agent fleet (flow-against-NO, ask-cap, distance/pin, confidence, flip-risk, microstructure, multi-signal) + 2 adversarial validators: ZERO survive time-split + cross-ledger. Residual losses are **time-clustered** (one bad evening, ~7–11pm ET that day), not feature-separable — any in-sample "loss filter" reverses OOS.
+7. **`flow-against-NO` (PR #32) is NOT a loss-curb on the gated book** — its value was the 15M losers, which `skip_15m` already drops. corr(flow,win)≈0; carried by 3 DOGE rows; fails cross-ledger. It's shipped as an **info-only alert label**, not a gate.
+8. **Per-asset bans don't hold.** SOL looked worst on v95 but is FINE/best on the native chart — the "worst ticker" reshuffles every dataset (noise). v1 is the SAME day as v95 (not independent confirmation).
+9. **Time-of-day filters don't hold** — one bad evening, not a recurring pattern (needs multi-day data).
+10. **Two-sided (bet YES when model crosses YES) adds ≈ $0.** The YES read is ~75% accurate but the YES ask is ~73¢ when confident (market already priced the flip) → YES side per-contract +0.6¢ to −11¢. NO-only is data-correct.
+11. **YES dip-buy doesn't work.** YES picks DO dip after 10M then recover — but the LOSERS dip MORE (63–94% of NO-settling picks dip to ≤60–70¢ vs 29–49% of winners). A dip-buy limit crashes win-rate 75%→58% and goes NEGATIVE. The dip is information (price falling toward the outcome), not a discount.
+
+**ECONOMICS / SIZING (for when real money is sized off this):**
+12. Adverse R:R: you buy the FAVORED side (~68–72¢), so a win pays ~+$40 but a loss costs the full −$100 → breakeven win-rate ~69%. Losses are full-stake → managing loss IMPACT (sizing) beats predicting losses (impossible, see #6).
+13. **Sizing:** bet a FRACTION of current bankroll (can't ruin), **2–3%** (NOT Kelly — full-Kelly here is ~39%, blows up; a 6-loss streak exists in the data). **Cap per WINDOW** (5–7 co-settling assets = one correlated bet, worst-window −$563 at flat $100). Reward:risk sizing > confidence sizing for $-stakes (confidence = expensive = bad R:R).
+14. **Current config on the chart day:** ~86 alerts → +$2,423 net at $100/bet (86% win), ~125 alerts/day. In-sample; treat as shape, not a promise.
+
+**NEXT for a future session:** re-run ALL of the above on v2's OWN multi-day data once it accrues (the live captures are building it). Per-asset / time-of-day / loss-curb / dip-buy / YES-side were ALL one-day artifacts — only re-validate, don't re-derive from scratch.
+
 ## ✅ Shipped THIS session — Ultoim V2 owner-enabled LIVE config: edge-waive + skip-15M + top-3 reward:risk (branch `claude/sweet-ride-wq61n7` → main)
 **Suite 1268 passed / 4 skipped here.** ⚠️ **Behaviour-changing, owner-directed, ONE in-sample day of basis** — all reversible via env. Four V2 defaults flipped ON (owner trades real money off these alerts, so watch volume/results and revert if off):
 - **`no_edge_waive=true`** (NEW flag): waives the edge gate (`gate_c`) for NO. The stated NO edge is INVERSE, so `edge>=min` was cutting the cheapest, highest reward:risk NO **winners** (settled record: removed ~+$35/bet picks; gate-pass NO book ~+$1.8k→~+$4.1k at $100/bet). Conf floor + ask band still apply; `min_edge_cents`/best-entry price untouched (clean flag, not a min_edge hack). `gate.py` adds `NO_EDGE_WAIVE` tag. Revert: `Q15_ULTOIM_V2_NO_EDGE_WAIVE=false`.
