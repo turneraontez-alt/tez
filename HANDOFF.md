@@ -13,6 +13,28 @@ Tests: `python3 -m pytest tests/ -q` → **1296 passed / 13 skipped here** (8 ap
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## ✅ Shipped THIS session — ROI-sweep config: edge gate ENFORCED + expensive cap 78 + top-2 (owner-chosen)
+**Suite 1296 passed / 13 skipped** (defaults changed, tests updated — no net new tests). A **13-agent ultracode
+workflow** (6 sweep + skeptics + synth, 254k tok) searched the v2 config space for highest ROBUST ROI over the
+~42h captures, with adversarial verification (both time-halves + leave-one-asset-out). I re-verified every number
+with the shared harness (`scratchpad/replay_grid.py`). Findings:
+- The remembered **7M-only ~24% ROI is a MIRAGE** — fails the time-split (first-half 47.5% ROI/90% win →
+  second-half 2.0%/65%). Skeptics killed it; do not chase it.
+- **Verified robust winner (owner picked it):** marks 10M+7M, rank cheap, **edge gate ENFORCED** (no_edge_waive
+  off), **expensive_no_ask_hi 78** (was 85), **deliver_top_n 2**. ROI **15.6%→23.4%**, win **72%→81%**, n=73,
+  +$11.20@$1; both time-halves positive (27% / 17%), every leave-one-asset-out >0.
+- **Config defaults changed** (`ultoim_v2/config.py`, all reversible via Q15_* env): `no_edge_waive` True→**False**,
+  `expensive_no_ask_hi` 85→**78**, `deliver_top_n` 1→**2**.
+- ⚠️ **This REVERSES the earlier owner-enabled `no_edge_waive=True`.** That waive optimized TOTAL gross $ on a
+  smaller sample; the ROI sweep optimizes ROI (return per $ staked) on the fuller data — they point different ways.
+  Enforcing the gate trims the expensive 7M tail so the delivered book leans 10M (7M 35→8 bets). The owner chose ROI.
+  A gentler, higher-GROSS alternative was offered & declined: exp_hi 78 + top-2 with waive ON → +$15.5@$1, 18.6% ROI,
+  keeps 7M. To revert to that: `Q15_ULTOIM_V2_NO_EDGE_WAIVE=true`.
+- Tests: `test_owner_default_config_is_aggressive` now asserts no_edge_waive False / exp_hi 78 / top_n 2; the
+  edge-waive + expensive-band + 7M-cap mechanism tests pin their own fixture values (waive on / band 85) so only the
+  production default moved. Harness + replays live in `scratchpad/` (not committed — analysis artifacts).
+- **Still PAPER + one ~42h regime + n=73**: treat as a forward-test hypothesis; re-verify after +30-40 settled picks.
+
 ## ✅ Shipped THIS session — 12M reverted to RECORD-ONLY (delivery back to 10M + 7M)
 **Suite 1296 passed / 13 skipped** (+1 net test). Owner-directed after a faithful **~42h replay** of the
 live config over `interval_captures` (4774 captures → 2614 resolved evals, 87 windows — far more than the

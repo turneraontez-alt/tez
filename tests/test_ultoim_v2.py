@@ -142,8 +142,8 @@ def test_gate_blocks_ask_below_band():
 
 
 def test_gate_blocks_ask_above_band():
-    # With the expensive-NO admit ON (default), the NO ceiling is expensive_no_ask_hi=85,
-    # so an ask ABOVE that is still blocked (here 90 on a non-15M interval).
+    # With the expensive-NO admit ON (default), the NO ceiling is expensive_no_ask_hi=78
+    # (ROI-sweep tightened), so an ask ABOVE that is still blocked (here 90 on a non-15M interval).
     cfg = UltoimV2Config(enabled=True)
     v = gate.evaluate(_candidate(selected_probability=0.95, entry_ask_cents=90.0),
                       cfg, interval="10M")
@@ -164,9 +164,9 @@ def test_gate_blocks_edge_below_min():
 
 
 def test_no_edge_waive_fires_sub_min_edge_no():
-    # DEFAULT-ON waive: a NO with sub-min stated edge in the [ask_lo, ask_hi] band now
-    # FIRES (the inverse-edge finding). Confidence + ask band still apply.
-    cfg = UltoimV2Config(enabled=True)               # no_edge_waive defaults True
+    # The WAIVE behaviour (now opt-in; production default is ENFORCED after the ROI sweep): with
+    # the waive ON, a NO with sub-min stated edge in the [ask_lo, ask_hi] band FIRES. Pinned ON here.
+    cfg = UltoimV2Config(enabled=True, no_edge_waive=True)   # pin the waive ON to test it
     v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=59.0,
                                  total_cost_cents=0.0), cfg)        # edge 1.0 < 2.0
     assert v["fired"] is True and v["gate_c"] is True
@@ -181,12 +181,13 @@ def test_no_edge_waive_fires_sub_min_edge_no():
 
 
 def test_owner_default_config_is_aggressive():
-    """The live defaults the owner enabled: edge-waive + skip-15M + top-3 reward:risk.
-    Each is reversible via its Q15_* env var."""
+    """The live defaults the owner enabled. Updated by the ROI sweep: the edge gate is now
+    ENFORCED (not waived) and delivery is top-2; each is reversible via its Q15_* env var."""
     cfg = UltoimV2Config()
-    assert cfg.no_edge_waive is True
+    assert cfg.no_edge_waive is False      # ROI-sweep: enforcing the edge gate maximizes ROI
+    assert cfg.expensive_no_ask_hi == 78.0 # ROI-sweep: tightened from 85
     assert cfg.skip_15m is True
-    assert cfg.deliver_top_n == 1          # selective: single best per mark, 1-2/window
+    assert cfg.deliver_top_n == 2          # top-2 by reward:risk per mark (matches 2-picks/window)
     assert cfg.deliver_by_reward_risk is True
     # Owner-enabled net levers, LIVE by default (each reversible via its Q15_* env var):
     assert cfg.cap_7m_ask is True          # the delivered-data-backed net win
@@ -603,7 +604,7 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
     """Wiring: a 10M NO at ask 80 with negative edge is double-blocked off-band, but the
     default-ON expensive-NO admit records a FIRED row whose displayed entry is the ask
     (80, not a never-fill 72) and carries the EXPENSIVE_NO_ADMIT marker."""
-    r = _runner(tmp_path)
+    r = _runner(tmp_path, expensive_no_ask_hi=85.0)   # pin the band at 85 (prod default now 78)
     a = {"BTC": _analysis(side="NO", sel=0.78, ask=80.0, net_edge=-4.0, mkt_yes=0.30)}
     c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}       # 600s -> 10M mark
     r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
@@ -622,7 +623,7 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_cap_7m_ask_off_admits_expensive_7m_no():
     """Cap OFF -> byte-identical: a 7M NO at ask 80 is still admitted via expensive_no."""
-    cfg = UltoimV2Config(enabled=True, cap_7m_ask=False)   # explicitly off (live default is ON)
+    cfg = UltoimV2Config(enabled=True, cap_7m_ask=False, expensive_no_ask_hi=85.0)   # cap off (live=ON); pin band 85
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
                                  entry_ask_cents=80.0, total_cost_cents=0.0),
                       cfg, interval="7M")
@@ -631,15 +632,15 @@ def test_cap_7m_ask_off_admits_expensive_7m_no():
 
 
 def test_cap_7m_ask_on_vetoes_expensive_7m_no_interval_scoped():
-    cfg = UltoimV2Config(enabled=True, cap_7m_ask=True)   # cap_7m_ask_max defaults 72
+    cfg = UltoimV2Config(enabled=True, cap_7m_ask=True, expensive_no_ask_hi=85.0)  # cap_max 72; pin band 85
     # 7M NO at 80c (>72): capped -> neither delivers NOR records-as-research.
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
                                  entry_ask_cents=80.0, total_cost_cents=0.0),
                       cfg, interval="7M")
     assert v["fired"] is False and v["research_fired"] is False
     assert "ASK_CAP_7M" in v["reason_codes"]
-    # 7M NO at 70c (<=72): still admitted normally.
-    v2 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.65,
+    # 7M NO at 70c (<=72): still admitted normally (sel 0.78 -> edge +8 clears the enforced gate).
+    v2 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
                                   entry_ask_cents=70.0, total_cost_cents=0.0),
                        cfg, interval="7M")
     assert v2["fired"] is True and "ASK_CAP_7M" not in v2["reason_codes"]
