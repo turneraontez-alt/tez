@@ -9,9 +9,16 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1292 passed / 13 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1295 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — executor `--verify-direction` preflight (branch `claude/confident-bohr-soiqy0` → main)
+**Suite 1295 passed / 13 skipped here** (no new tests — preflight is a manual diagnostic; deploy-pending on the Repl). The ONE thing blocking real-money live trading was unverified: does our `buy NO -> bid/ask` mapping (`_v2_side_price` in `trading_client.py`) actually put us LONG NO, or backwards into YES? A wrong mapping = the exact opposite position. Resolved it with a definitive, ~few-cents real test instead of a multi-day dry-run.
+- **`scripts/exec_preflight.py --verify-direction <ticker|auto>`** — buys 1 NO through the REAL mapping (marketable at a 95¢ limit so it fills at the book), reads the position back (Kalshi convention: positive=long YES, negative=long NO), prints CORRECT vs 🚨 BACKWARDS, then CLOSES exactly what it opened (reduce-only, reversing the *actual* delta side) and re-reads to confirm flat — warns loudly if not. Cost ≈ the bid/ask spread (a few cents), self-closing. Auto-discovers a live 15-min market with `auto`.
+- Helpers `_order` / `_pos` / `_verify_direction` added; wired into `main()` alongside `--probe-order`.
+- Also removed a dead unreachable second `return` in `trading_client.cancel_order` (leftover from the V1→V2 endpoint migration).
+- **NEXT (owner action):** run `python3 scripts/exec_preflight.py --verify-direction auto` on the Repl. If ✅ CORRECT → mapping is proven; clear to flip live (`Q15_EXEC_ENABLED=true`, `Q15_EXEC_DRY_RUN=false`, $50/pick cap holds). If 🚨 BACKWARDS → flip the NO branch in `_v2_side_price` before any real size. **STILL TODO before real money: order persistence + fill reconciliation** (executor snapshot is in-memory; a Repl restart orphans open-position state).
 
 ## ⚠️ NEW — Ultoim V2 EXECUTOR (`q15_upgrade/executor/`): opt-in LIVE-ORDER layer (DEFAULT-OFF, DRY-RUN)
 **+22 tests.** Owner is building toward automated REAL trading. This is the FIRST code in the repo

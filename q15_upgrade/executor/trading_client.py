@@ -148,4 +148,3 @@ class KalshiTradingClient:
             logger.info("[DRY-RUN/%s] would cancel order %s", why, order_id)
             return {"ok": True, "dry_run": True, "reason": why}
         return self._request("DELETE", f"/portfolio/events/orders/{order_id}")
-        return self._request("DELETE", f"/portfolio/orders/{order_id}")
