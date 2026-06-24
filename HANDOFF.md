@@ -9,9 +9,31 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1272 passed / 13 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1292 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ⚠️ NEW — Ultoim V2 EXECUTOR (`q15_upgrade/executor/`): opt-in LIVE-ORDER layer (DEFAULT-OFF, DRY-RUN)
+**+20 tests.** Owner is building toward automated REAL trading. This is the FIRST code in the repo
+that can place a live Kalshi order — it is double-gated and v2 itself stays read-only. **It is NOT
+wired into the live app loop yet** (deliberate — see "Activation" below); the core (config + pure
+risk manager + signed trading client + orchestrator) is built, tested, and dry-run-safe.
+- **`config.py`** — `enabled` (default False) + `dry_run` (default True) + `kill_switch` panic env.
+  Sizing defaults encode the owner rule: `per_pick_pct=0.04`, `max_picks_per_window=2`,
+  `max_per_window_pct=0.08` (correlation guard — picks co-settle ~76%), `daily_loss_limit_pct=0.20`.
+- **`risk.py`** — PURE `decide(pick, state, cfg)`: sizes count from bankroll (integer cents) and
+  enforces KILL / WRONG_SIDE / PRICE_BAND / DAILY_STOP / MAX_OPEN / DUP_TICKER / WINDOW_FULL /
+  SIZE_TOO_SMALL. Fully unit-tested, no I/O.
+- **`trading_client.py`** — reuses the existing RSA-PSS `KalshiSigner` (`kalshi_auth.py`) for signed
+  POST `/portfolio/orders`. In dry-run it LOGS the would-be order and touches NO network/signer
+  (tests assert this). Idempotent via deterministic `client_order_id`.
+- **`executor.py`** — `on_fire(pick)` -> risk -> place/dry-run -> update snapshot; `on_exit()` sells a
+  flipped position. `get_executor()` returns None unless enabled.
+- **ACTIVATION (deliberate, NOT done):** (1) wire `executor.on_fire` into the runner's delivered-NO
+  path + `on_exit` into the exit-warning path; (2) `Q15_EXEC_ENABLED=true` + `DRY_RUN=true` to log
+  would-be orders for several days; (3) verify logged orders + real fills vs the paper ask; (4) only
+  then `DRY_RUN=false` at tiny size. **DO NOT flip live until the edge is multi-day confirmed AND
+  fills are validated** — the whole book rests on ~1 in-sample day and assumes you fill at the ask.
 
 ## 🔬 V2 RESEARCH FINDINGS (this session — analysis on the learning-snapshot chart; ALL ~1 in-sample day, treat as direction not forecast)
 Data = `interval_captures` (the per-checkpoint chart, ~1151 resolved NO + the YES side) + v95 (637 NO) + v1 (277 NO). Everything is ONE ~17h session — directionally informative, dollar figures unproven. The shipped config (above) encodes the winners; the **dead ends below are the valuable part — do NOT re-chase them.**
