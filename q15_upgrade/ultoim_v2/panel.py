@@ -61,6 +61,21 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     ask_txt = "—" if ask is None else f"{ask:.0f}¢"
     display_txt = "—" if display is None else f"{int(display)}¢"
 
+    # Flow-against-NO — INFORMATIONAL warning surfaced on the live NO card so the owner
+    # can SEE the historical loss-zone (a NO bet into strong buy-side flow, i.e.
+    # champion_flow >= cfg.flow_against_no_threshold; the OOS-validated #1 loss signal).
+    # By owner directive it is VISIBILITY ONLY: the alert is still SENT (never abstained)
+    # and grading / P&L are UNCHANGED — it never gates a decision. champion_flow is
+    # captured at decision time (feature_values["flow"]); absent on pre-feature rows.
+    flow = _num(pick.get("champion_flow"))
+    flow_thr = _num(getattr(cfg, "flow_against_no_threshold", None))
+    flow_warn = (
+        f"⚠️ Flow against NO: buy-side flow {flow:.2f} ≥ {flow_thr:.2f} "
+        f"(historical loss-zone — info only, not graded)"
+        if side == "NO" and flow is not None and flow_thr is not None and flow >= flow_thr
+        else None
+    )
+
     header = f"🧪 <b>ULTOIM V2 · {interval} · PAPER ENTRY</b>"
     body = [
         "RESEARCH SIGNAL — paper only, NOT a live call. No orders placed.",
@@ -76,6 +91,8 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
         f"{yes_prone_n} YES-prone · CI wide",
         "Ultoim V2 · research/paper · not advice · no orders placed",
     ]
+    if flow_warn is not None:
+        body.insert(3, flow_warn)  # directly under the BEST ENTRY headline
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
 
 
@@ -318,6 +335,19 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
                 if int((split.get("book") or {}).get("n") or 0) > 0:
                     body.append(f"    {iv} near: {_screen_line(split.get('near_pin'))}")
                     body.append(f"    {iv} far : {_screen_line(split.get('far'))}")
+
+    # Flow-against-NO — the OOS-validated abstain candidate. champion_flow cut accrues
+    # once the live engine records it; the v2-native regime proxy has data now.
+    flow = (scoreboard or {}).get("flow_research") or {}
+    if flow.get("available") and int((flow.get("book") or {}).get("n") or 0) > 0:
+        thr = _num(flow.get("flow_threshold"))
+        thr_txt = "—" if thr is None else f"{thr:.2f}"
+        body.append("")
+        body.append(f"Flow-against-NO (SHADOW · record-only · abstain if flow≥{thr_txt}):")
+        body.append(f"  keep (flow ok) : {_screen_line(flow.get('flow_keep'))}")
+        body.append(f"  abstain (flow) : {_screen_line(flow.get('flow_abstain'))}")
+        body.append(f"  regime proxy — keep   : {_screen_line(flow.get('regime_keep'))}")
+        body.append(f"  regime proxy — abstain: {_screen_line(flow.get('regime_abstain'))}")
 
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")

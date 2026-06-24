@@ -135,6 +135,17 @@ class UltoimV2Config:
     expensive_no_ask_hi: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI", 85.0)
     )
+    # Flow-against-NO research SCREEN threshold (record-only; surfaced by the recap via
+    # ledger.flow_research_scoreboard). The champion's per-asset directional flow factor
+    # (feature_values["flow"]) recorded as `champion_flow`: a NO bet placed against
+    # strong buy-side flow (flow >= this) is the loss zone — the single fix that lifted
+    # P&L ~50% out-of-sample on the v95 NO side (and survived a 3-way time-split +
+    # leave-one-asset-out). The recap measures the candidate abstention (would-keep
+    # flow<thr vs would-abstain flow>=thr) AND the v2-native regime_directional proxy.
+    # Record-only — NEVER gates delivery. Default 0.6 from the OOS finding.
+    flow_against_no_threshold: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_FLOW_AGAINST_NO", 0.6)
+    )
     # Record the broad-market cross-asset flow factor (x_market_flow) on every
     # candidate row, for measure-first validation of a possible NO-side veto (high
     # market-wide YES pressure precedes NO losses, per an OOS time-split). DEFAULT
