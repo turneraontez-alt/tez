@@ -467,6 +467,30 @@ class UltoimV2Runner:
             status, mid = "DELIVERY_FAILED", None
         self.ledger.set_report_message(cfg.model_version, interval, window_key, mid)
         self.ledger.mark_delivery(row_id, status, mid, result.get("error"))
+        # OPT-IN EXECUTOR (default-OFF): hand this confirmed, fired NO delivery to the
+        # live-order layer. get_executor() returns None unless Q15_EXEC_ENABLED is set, so
+        # this is a byte-identical no-op by default; even when enabled it is dry-run by
+        # default. v2 NEVER places an order itself — it only emits the pick. Failures here
+        # are swallowed so the executor can never disrupt the read-only paper path.
+        self._maybe_execute(cand, display, window_key)
+
+    def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
+                       window_key: int) -> None:
+        try:
+            from q15_upgrade.executor import get_executor
+            ex = get_executor()
+            if ex is None:
+                return
+            ex.on_fire({
+                "ticker": cand.get("ticker"),
+                "asset": cand.get("asset"),
+                "predicted_side": cand.get("predicted_side"),
+                "best_entry_cents": best_entry_cents,
+                "entry_ask_cents": cand.get("entry_ask_cents"),
+                "window_key": window_key,
+            })
+        except Exception:  # never let execution disrupt the paper system
+            logger.exception("executor on_fire hook failed (non-fatal)")
 
     def _record_research_yes(self, entry: dict[str, Any], interval: str, mark: int,
                              window_key: int, now: float) -> None:
@@ -603,6 +627,15 @@ class UltoimV2Runner:
         else:
             status, mid = "DELIVERY_FAILED", None
         self.ledger.mark_exit_delivery(warning_id, status, mid, result.get("error"))
+        # OPT-IN EXECUTOR (default-OFF): on a confirmed flip warning, tell the live-order
+        # layer to SELL the position (it no-ops if disabled / holds no position).
+        try:
+            from q15_upgrade.executor import get_executor
+            ex = get_executor()
+            if ex is not None and exit_value is not None:
+                ex.on_exit(str(cand.get("ticker") or ""), window_key, int(round(exit_value)))
+        except Exception:
+            logger.exception("executor on_exit hook failed (non-fatal)")
 
     # -- reconcile (settlement grading) --------------------------------------
     def reconcile(self, now: float, resolver: Any) -> None:

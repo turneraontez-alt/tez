@@ -14,13 +14,15 @@ in this container from a broken `cryptography`/pyo3 binding — env issue, not t
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
 ## ⚠️ NEW — Ultoim V2 EXECUTOR (`q15_upgrade/executor/`): opt-in LIVE-ORDER layer (DEFAULT-OFF, DRY-RUN)
-**+20 tests.** Owner is building toward automated REAL trading. This is the FIRST code in the repo
-that can place a live Kalshi order — it is double-gated and v2 itself stays read-only. **It is NOT
-wired into the live app loop yet** (deliberate — see "Activation" below); the core (config + pure
-risk manager + signed trading client + orchestrator) is built, tested, and dry-run-safe.
+**+22 tests.** Owner is building toward automated REAL trading. This is the FIRST code in the repo
+that can place a live Kalshi order — it is double-gated and v2 itself stays read-only. **WIRED into
+the runner** (`_record_and_maybe_alert` → `executor.on_fire`; exit-warning → `on_exit`), guarded so
+it is a byte-identical no-op while disabled (`get_executor()` returns None; hook failures swallowed).
+Owner set a **HARD $50 per-pick cap** for live testing. Core built, tested, dry-run-safe. Suite 1294.
 - **`config.py`** — `enabled` (default False) + `dry_run` (default True) + `kill_switch` panic env.
   Sizing defaults encode the owner rule: `per_pick_pct=0.04`, `max_picks_per_window=2`,
-  `max_per_window_pct=0.08` (correlation guard — picks co-settle ~76%), `daily_loss_limit_pct=0.20`.
+  `max_per_window_pct=0.08` (correlation guard — picks co-settle ~76%), `daily_loss_limit_pct=0.20`,
+  **`max_stake_per_pick_cents=5000` ($50 hard cap/trade)**.
 - **`risk.py`** — PURE `decide(pick, state, cfg)`: sizes count from bankroll (integer cents) and
   enforces KILL / WRONG_SIDE / PRICE_BAND / DAILY_STOP / MAX_OPEN / DUP_TICKER / WINDOW_FULL /
   SIZE_TOO_SMALL. Fully unit-tested, no I/O.
@@ -29,11 +31,14 @@ risk manager + signed trading client + orchestrator) is built, tested, and dry-r
   (tests assert this). Idempotent via deterministic `client_order_id`.
 - **`executor.py`** — `on_fire(pick)` -> risk -> place/dry-run -> update snapshot; `on_exit()` sells a
   flipped position. `get_executor()` returns None unless enabled.
-- **ACTIVATION (deliberate, NOT done):** (1) wire `executor.on_fire` into the runner's delivered-NO
-  path + `on_exit` into the exit-warning path; (2) `Q15_EXEC_ENABLED=true` + `DRY_RUN=true` to log
-  would-be orders for several days; (3) verify logged orders + real fills vs the paper ask; (4) only
-  then `DRY_RUN=false` at tiny size. **DO NOT flip live until the edge is multi-day confirmed AND
-  fills are validated** — the whole book rests on ~1 in-sample day and assumes you fill at the ask.
+- **ACTIVATION:** (1) wiring DONE. (2) `Q15_EXEC_ENABLED=true` + `Q15_EXEC_DRY_RUN=true` (+ keys +
+  `Q15_EXEC_BANKROLL_CENTS`) on the Repl → logs the orders it WOULD place against live fires for
+  several days; (3) verify logged orders + that real fills match the paper ask; (4) only then
+  `Q15_EXEC_DRY_RUN=false` (still under the $50/pick cap). **DO NOT flip live until the edge is
+  multi-day confirmed AND fills are validated** — the whole book rests on ~1 in-sample day and
+  assumes you fill at the ask. `Q15_EXEC_KILL=true` is the instant panic stop. **STILL TODO before
+  real money: order persistence + fill reconciliation** (the executor tracks an in-memory snapshot
+  only; a restart loses open-position state — fine for dry-run, must be added before live size).
 
 ## 🔬 V2 RESEARCH FINDINGS (this session — analysis on the learning-snapshot chart; ALL ~1 in-sample day, treat as direction not forecast)
 Data = `interval_captures` (the per-checkpoint chart, ~1151 resolved NO + the YES side) + v95 (637 NO) + v1 (277 NO). Everything is ONE ~17h session — directionally informative, dollar figures unproven. The shipped config (above) encodes the winners; the **dead ends below are the valuable part — do NOT re-chase them.**
