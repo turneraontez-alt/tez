@@ -85,10 +85,17 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if bankroll <= 0:
         return Decision(False, "BANKROLL")
 
-    # Per-pick stake, then CLAMP so the window total never exceeds the per-window cap
-    # (the correlation guard — picks in a window co-settle).
-    stake = int(round(cfg.per_pick_pct * bankroll))
-    window_cap = int(round(cfg.max_per_window_pct * bankroll))
+    # Per-pick stake. FLAT mode (flat_stake_cents > 0) stakes a fixed dollar amount per pick,
+    # overriding the % sizing; its per-window budget is flat * max_picks. Otherwise size as a
+    # % of bankroll. Either way the window total is then CLAMPED to the per-window budget (the
+    # correlation guard — picks in a window co-settle).
+    flat = int(getattr(cfg, "flat_stake_cents", 0) or 0)
+    if flat > 0:
+        stake = flat
+        window_cap = flat * max(1, cfg.max_picks_per_window)
+    else:
+        stake = int(round(cfg.per_pick_pct * bankroll))
+        window_cap = int(round(cfg.max_per_window_pct * bankroll))
     already = state.window_committed_cents.get(wk, 0)
     remaining = window_cap - already
     if remaining <= 0:
@@ -97,6 +104,8 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     # HARD per-pick dollar ceiling — the absolute cap on one trade's risk.
     if cfg.max_stake_per_pick_cents > 0:
         stake = min(stake, cfg.max_stake_per_pick_cents)
+    # Never stake more than the bankroll actually on hand.
+    stake = min(stake, bankroll)
 
     count = stake // price   # whole contracts only (integer cents)
     if count < 1:

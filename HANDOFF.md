@@ -9,9 +9,21 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1296 passed / 13 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1301 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — executor FLAT $75/pick sizing, 1 pick/window (owner-chosen)
+**Suite 1301 / 13 skipped** (+5 flat-mode tests). Owner switched from %-sizing to a FIXED dollar stake.
+- **`executor/config.py`**: new `flat_stake_cents` (env `Q15_EXEC_FLAT_STAKE_CENTS`, default **7500=$75**);
+  `max_picks_per_window` default 2→**1**; `max_stake_per_pick_cents` 5000→**7500** (earlier this session).
+- **`executor/risk.py`**: `decide()` flat branch — when `flat_stake_cents>0`, stake = that fixed amount
+  (per-window budget = flat × max_picks), overriding `per_pick_pct`; still clamped to the hard per-pick cap
+  AND to bankroll-on-hand. The `%` path is the fallback when flat=0.
+- Net effect LIVE: a flat **$75 on the single best pick per window** (~115 contracts at a 65¢ ask). At the
+  ~$252 balance that's ~30%/trade; the −20% daily stop (≈−$50) halts new entries after one $75 loss.
+- Reversible: `Q15_EXEC_FLAT_STAKE_CENTS=0` → back to 4%/pick. `safety_summary()` prints `FLAT $75/pick`.
+- Tests: `_cfg` pins `flat_stake_cents=0` (existing % tests unchanged); new owner-default + flat-mode tests.
 
 ## ✅ Shipped THIS session — ROI-sweep config: edge gate ENFORCED + expensive cap 78 + top-2 (owner-chosen)
 **Suite 1296 passed / 13 skipped** (defaults changed, tests updated — no net new tests). A **13-agent ultracode
