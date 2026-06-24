@@ -73,14 +73,17 @@ class UltoimV2Config:
     # NO-only by default: the live record favours the NO side for these binaries,
     # and the paper system starts conservative. Set false to admit YES entries.
     no_only: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_ONLY", True))
-    # Waive the edge gate (gate_c) for the NO side. DEFAULT ON (owner-enabled). For NO the
-    # model's stated edge is INVERSE, so requiring edge>=min cut the cheapest, highest
-    # reward:risk NO winners (settled record: the edge gate removed ~+$35/bet picks; the
-    # gate-pass NO book lifts from ~+$1.8k to ~+$4.1k at $100/bet with it off, one in-
-    # sample day). Confidence floor + ask band still apply; min_edge_cents is untouched
-    # (best-entry price unchanged). Set Q15_ULTOIM_V2_NO_EDGE_WAIVE=false to restore it.
+    # Edge gate (gate_c) for the NO side. DEFAULT: ENFORCED (no_edge_waive=False). History: it
+    # was briefly WAIVED — the inverse-edge finding lifted TOTAL gross P&L on a smaller/earlier
+    # sample. But a 13-agent ROI sweep + adversarial verification over the fuller ~42h capture
+    # data (4774 captures) found ENFORCING the edge gate MAXIMIZES ROI (return per $ staked):
+    # 10M/7M ROI 15.6%->~23%, win 72%->81%, holding in BOTH time-halves and every leave-one-
+    # asset-out. Enforcing trims the low/negative-edge NOs (mostly the expensive 7M tail) so the
+    # book leans 10M. NOTE: this REVERSES the earlier owner-enabled waive — gross $ and ROI can
+    # point different ways and this default optimizes ROI (owner choice). Confidence floor + ask
+    # band still apply. Set Q15_ULTOIM_V2_NO_EDGE_WAIVE=true to waive again (higher-gross, lower-ROI).
     no_edge_waive: bool = field(
-        default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_EDGE_WAIVE", True)
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_EDGE_WAIVE", False)
     )
     # Skip the 15M (900s) checkpoint. DEFAULT ON (owner-enabled). 15M is the weak, money-
     # losing bin for these NO binaries (accuracy ~coin-flip, negative P&L; -EV on all 7
@@ -121,8 +124,13 @@ class UltoimV2Config:
     # ~+13c/bet vs ~+11c taking all, fewer fees, less correlated exposure). Set TOP_N>1 to widen
     # (raises correlated exposure + alert volume); =1 + BY_RR=false restores legacy best-by-edge.
     #  * deliver_by_reward_risk: pick by CHEAPEST ask (best payoff per $) not highest net-edge.
+    # DEFAULT 2 (owner ROI-sweep choice): the top-2 by reward:risk per (mark, window), deduped per
+    # contract across marks -> ~1-2 distinct alerts/window, matching the executor's 2-picks/window
+    # cap (the "two @ 4%" sizing). The ROI sweep's verified winner (edge gate ON + exp_hi 78) ran at
+    # top_n 2: ROI 23.4%, win 80.8%, n=73, +$11.2@$1, both time-halves positive. Set TOP_N=1 for a
+    # strictly single pick/window; >2 widens correlated exposure + alert volume.
     deliver_top_n: int = field(
-        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 1.0)))
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 2.0)))
     )
     deliver_by_reward_risk: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)
@@ -180,8 +188,12 @@ class UltoimV2Config:
     expensive_no_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_EXPENSIVE_NO", True)
     )
+    # Ceiling TIGHTENED to 78 (was 85) by the ROI sweep: the (78,85] expensive-NO slice is thin-
+    # payoff (100-ask) where the rare loss dominates ROI, so capping at 78 lifts return per $ staked
+    # without hurting the robust win rate. Set Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI=85 to restore the
+    # wider band.
     expensive_no_ask_hi: float = field(
-        default_factory=lambda: _float("Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI", 85.0)
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI", 78.0)
     )
     # Flow-against-NO research SCREEN threshold (record-only; surfaced by the recap via
     # ledger.flow_research_scoreboard). The champion's per-asset directional flow factor
