@@ -26,6 +26,12 @@ Run ON THE REPL (where the KALSHI_* secrets live):
         and cancel any resting orders. Run this if a verify/probe run was inconclusive
         and you want to be certain nothing is left open. ('auto' picks a live market.)
 
+    python3 scripts/exec_preflight.py --orders
+        READ-ONLY diagnostic: list recent orders on the account with a size histogram, so
+        you can tell whether something placed many tiny (1-contract ~$1) orders, or one
+        larger order that simply FILLED in many small pieces (which looks the same in a
+        fills/activity view but is a single bet).
+
 The no-flag run now also LISTS every open position (ticker, size, long NO/YES) so you
 can eyeball whether anything is open before/after a test.
 """
@@ -260,6 +266,36 @@ def main(argv: list[str]) -> int:
         print(f"  - {p.get('ticker')}: {p.get('position')} ({sign})")
     ready, why = cli.live_ready
     print(f"live-ready for REAL orders: {ready}  ({why})")
+
+    if "--orders" in argv:
+        # READ-ONLY diagnostic: list recent orders on the account so we can tell whether the
+        # executor placed many tiny orders, or one big order that just FILLED in many pieces.
+        from collections import Counter
+        recent = cli._request("GET", "/portfolio/orders")
+        orders = (recent.get("data") or {}).get("orders") or []
+        if not recent.get("ok"):
+            print("\norders read FAILED ->", recent.get("error")); return 1
+        print(f"\n[ORDERS] {len(orders)} order(s) returned by Kalshi (most recent first):")
+        # size histogram: how many orders were 1-contract ('$1 bets') vs larger.
+        def _cnt(o):
+            for k in ("initial_count", "count", "place_count"):
+                if o.get(k) not in (None, ""):
+                    try: return int(float(o[k]))
+                    except (TypeError, ValueError): pass
+            return None
+        hist = Counter(_cnt(o) for o in orders)
+        ones = sum(n for c, n in hist.items() if c == 1)
+        print(f"  size histogram (contracts -> #orders): {dict(sorted((k,v) for k,v in hist.items() if k is not None))}")
+        print(f"  -> {ones} order(s) were 1 contract (~$1 bets); {len(orders)-ones} were larger")
+        statuses = Counter(o.get("status") for o in orders)
+        print(f"  status: {dict(statuses)}")
+        print("  most recent 25:")
+        for o in orders[:25]:
+            px = o.get("yes_price") if o.get("yes_price") is not None else o.get("price")
+            print(f"    {o.get('created_time','?')} {o.get('ticker')} side={o.get('side')} "
+                  f"action={o.get('action')} count={_cnt(o)} price={px} "
+                  f"status={o.get('status')} filled={o.get('fill_count')} coid={str(o.get('client_order_id'))[:18]}")
+        return 0
 
     if "--flatten" in argv:
         idx = argv.index("--flatten")
