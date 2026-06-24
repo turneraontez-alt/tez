@@ -13,7 +13,7 @@ import logging
 from typing import Any, Mapping
 
 from .config import ExecutorConfig
-from .risk import Pick, PortfolioState, decide, apply_fill
+from .risk import Pick, PortfolioState, decide, apply_fill, apply_exit
 from .trading_client import KalshiTradingClient
 
 logger = logging.getLogger("q15.executor")
@@ -93,14 +93,17 @@ class Executor:
         them — closing risk is never gated by the daily/window caps."""
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
-        if ticker not in self.state.open_tickers:
+        count = self.state.positions.get(ticker, 0)
+        if count < 1:
             return {"placed": False, "reason": "NO_POSITION"}
         res = self.client.place_order(
-            ticker=ticker, side="no", count=1, price_cents=int(exit_price_cents),
+            ticker=ticker, side="no", count=count, price_cents=int(exit_price_cents),
             action="sell", client_order_id=_coid(window_key, ticker, "exit"),
         )
-        return {"placed": bool(res.get("ok")), "mode": "dry-run" if res.get("dry_run") else "LIVE",
-                "order": res}
+        if res.get("ok"):
+            self.state = apply_exit(self.state, ticker)   # close it out of the snapshot
+        return {"placed": bool(res.get("ok")), "count": count,
+                "mode": "dry-run" if res.get("dry_run") else "LIVE", "order": res}
 
 
 _executor: Executor | None = None
