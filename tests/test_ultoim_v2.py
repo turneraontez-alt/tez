@@ -82,9 +82,10 @@ def _config(tmp_path, **over):
         reconcile_every_seconds=0.0, recap_every_seconds=0.0,
         max_spot_stale_seconds=8.0, min_scoreboard_n=30,
         # Pin the LEGACY defaults so these tests isolate the original behaviour; the
-        # owner-enabled live defaults (top-3 reward:risk, skip-15M, NO edge-waive) are
-        # asserted in test_owner_default_config_is_aggressive. Overrides win.
+        # owner-enabled live defaults (top-1 reward:risk, skip-15M, NO edge-waive, 7M cap,
+        # 12M delivery) are asserted in test_owner_default_config_is_aggressive. Overrides win.
         skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
+        cap_7m_ask=False, enable_11m=False, enable_12m=False,
     )
     base.update(over)
     return UltoimV2Config(**base)
@@ -185,8 +186,14 @@ def test_owner_default_config_is_aggressive():
     cfg = UltoimV2Config()
     assert cfg.no_edge_waive is True
     assert cfg.skip_15m is True
-    assert cfg.deliver_top_n == 3
+    assert cfg.deliver_top_n == 1          # selective: single best per mark, 1-2/window
     assert cfg.deliver_by_reward_risk is True
+    # Owner-enabled net levers, LIVE by default (each reversible via its Q15_* env var):
+    assert cfg.cap_7m_ask is True          # the delivered-data-backed net win
+    assert cfg.cap_7m_ask_max == 72
+    assert cfg.enable_11m is True          # active...
+    assert cfg.enable_12m is True
+    assert cfg.research_only_intervals == frozenset({"11M"})  # ...but 11M records only; 12M delivers
 
 
 def test_gate_missing_data():
@@ -606,6 +613,82 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
     assert row["entry_ask_cents"] == pytest.approx(80.0)
     assert row["best_entry_cents"] == 80                         # the ask, not 72
     assert "EXPENSIVE_NO_ADMIT" in (row["reason_codes"] or "")
+
+
+# --------------------------------------------------------------------------- #
+# Net-improvement levers: 7M ask cap + 11M/12M measure-first capture.
+# --------------------------------------------------------------------------- #
+def test_cap_7m_ask_off_admits_expensive_7m_no():
+    """Cap OFF -> byte-identical: a 7M NO at ask 80 is still admitted via expensive_no."""
+    cfg = UltoimV2Config(enabled=True, cap_7m_ask=False)   # explicitly off (live default is ON)
+    v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
+                                 entry_ask_cents=80.0, total_cost_cents=0.0),
+                      cfg, interval="7M")
+    assert v["fired"] is True and v["expensive_no"] is True
+    assert "ASK_CAP_7M" not in v["reason_codes"]
+
+
+def test_cap_7m_ask_on_vetoes_expensive_7m_no_interval_scoped():
+    cfg = UltoimV2Config(enabled=True, cap_7m_ask=True)   # cap_7m_ask_max defaults 72
+    # 7M NO at 80c (>72): capped -> neither delivers NOR records-as-research.
+    v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
+                                 entry_ask_cents=80.0, total_cost_cents=0.0),
+                      cfg, interval="7M")
+    assert v["fired"] is False and v["research_fired"] is False
+    assert "ASK_CAP_7M" in v["reason_codes"]
+    # 7M NO at 70c (<=72): still admitted normally.
+    v2 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.65,
+                                  entry_ask_cents=70.0, total_cost_cents=0.0),
+                       cfg, interval="7M")
+    assert v2["fired"] is True and "ASK_CAP_7M" not in v2["reason_codes"]
+    # interval-scoped: a 10M NO at 80c is UNAFFECTED (still admitted via expensive_no).
+    v3 = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
+                                  entry_ask_cents=80.0, total_cost_cents=0.0),
+                       cfg, interval="10M")
+    assert v3["fired"] is True and "ASK_CAP_7M" not in v3["reason_codes"]
+
+
+def test_11m_12m_inert_when_disabled(tmp_path):
+    """With the enable flags OFF, an 11M/12M-band candidate is dropped entirely -- no row,
+    byte-identical to before the marks were added to INTERVAL_MARKS."""
+    r = _runner(tmp_path, telegram=_StubTelegram(), enable_11m=False, enable_12m=False)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=601.0, close=9000.0)}   # 601s: 11M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert r.scoreboard()["all_observations"]["recorded"] == 0
+
+
+def test_11m_records_research_only_and_never_delivers(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, enable_11m=True,
+                deliver_top_n=3, deliver_by_reward_risk=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=601.0, close=9000.0)}   # 601s: 11M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "11M"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fired"] == 0                          # 11M NEVER delivers (research-only)
+    assert row["research_fired"] == 1                 # but gradeable on settlement
+    assert "RESEARCH_ONLY_MARK" in (row["reason_codes"] or "")
+    assert tg.sent == []                              # no alert sent
+
+
+def test_12m_delivers_live_alert_when_enabled(tmp_path):
+    """12M is promoted to LIVE delivery (owner-enabled): a would-fire 12M NO delivers a real
+    alert (fired=1, no RESEARCH_ONLY_MARK tag), unlike record-only 11M."""
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, enable_12m=True, deliver_by_reward_risk=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=719.0, close=9000.0)}   # 719s: 12M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "12M"]
+    assert len(rows) == 1
+    assert rows[0]["fired"] == 1                              # DELIVERS (not research-only)
+    assert "RESEARCH_ONLY_MARK" not in (rows[0]["reason_codes"] or "")
+    assert len(tg.sent) == 1                                 # a real alert was sent
 
 
 def test_gate_research_fired_yes_side_never_delivers():

@@ -39,7 +39,7 @@ def _str(name: str, default: str) -> str:
 # The entry-research intervals and their fire mark (seconds before settlement).
 # Matches the champion's three live checkpoints so the paper entry card lines up
 # 1:1 with the live 15M / 10M / 7M cards it visually resembles.
-INTERVAL_MARKS: dict[str, int] = {"15M": 900, "10M": 600, "7M": 420}
+INTERVAL_MARKS: dict[str, int] = {"15M": 900, "12M": 720, "11M": 660, "10M": 600, "7M": 420}
 
 
 @dataclass(frozen=True)
@@ -87,19 +87,42 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
-    # DELIVERY breadth + selection. DEFAULT ON (owner-enabled): top-3 by reward:risk per
-    # (interval, window). Set TOP_N=1 + BY_RR=false to restore the legacy single best-by-
-    # edge pick.
-    #  * deliver_top_n (>=1): deliver the top-N candidates per checkpoint/window. The
-    #    settled record shows top-3/top-4 by reward:risk lifts EV + total P&L over the
-    #    single pick. N>1 means up to N paper alerts per window per checkpoint (still one
-    #    per CONTRACT per window via the alert lock) — it RAISES correlated exposure (co-
-    #    settling assets move together) and alert volume, so size per window. 7M tends to
-    #    carry the EV; this delivers more there because 7M asks run cheaper.
-    #  * deliver_by_reward_risk: pick by CHEAPEST ask (best payoff per $) instead of the
-    #    highest net-edge — the higher-EV selection on the NO book.
+    # --- Net-improvement levers (workflow-verified; owner-enabled LIVE, all reversible).
+    # 7M ASK CAP — DEFAULT ON (owner-enabled). At the 7M mark only, do not admit a NO whose
+    # ask > cap_7m_ask_max. The DELIVERED v2 book shows 7M asks >72c are live net-NEGATIVE
+    # (-57c over 21 bets, -2.7c/bet) vs +26c/bet for <=72c; research shows that slice both-
+    # halves sign-flips. Suppresses BOTH delivery and research for the over-cap 7M NO; 10M and
+    # the YES side are untouched. Read-only. Set =false to restore the uncapped band.
+    cap_7m_ask: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_CAP_7M_ASK", True))
+    cap_7m_ask_max: int = field(
+        default_factory=lambda: int(_float("Q15_ULTOIM_V2_CAP_7M_ASK_MAX", 72.0))
+    )
+    # 11M / 12M marks — DEFAULT ON (owner-enabled). 12M DELIVERS live alerts (it is NOT in
+    # research_only_intervals): for a selective 1-pick-per-window trader the redundancy concern
+    # is moot (you take ONE entry, not a stack), and 12M entries run CHEAPER/earlier than 10M
+    # for a similar in-sample win (12M@60-69 ~91%, both-halves 93/89, broad per-asset) => better
+    # reward:risk per trade. 11M stays RECORD-ONLY (in research_only_intervals): it is the
+    # redundant middle between 12M and 10M, so it accrues gradeable data without adding a near-
+    # duplicate third alert. CAVEAT: 12M/11M rest on ~one in-sample day (~27 windows); 10M is the
+    # more-proven anchor. 13M is deliberately excluded (fragile, both-halves 82%->65%).
+    enable_11m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_11M", True))
+    enable_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_12M", True))
+    # Marks that may RECORD but never DELIVER, even when enabled. 11M stays here (record-only);
+    # 12M was promoted to live delivery (owner-directed, selective-trader use). To promote 11M
+    # too, drop it from this set (a deliberate, tested edit).
+    research_only_intervals: frozenset[str] = field(
+        default_factory=lambda: frozenset({"11M"})
+    )
+    # DELIVERY breadth + selection. DEFAULT 1 (owner-enabled, SELECTIVE): the single best
+    # by reward:risk per (interval, window). The owner trades 1-2 picks per 15-min window
+    # manually, and now fires across more marks (12M/10M/7M), so top-1-per-mark keeps total
+    # alert volume to ~1-2 distinct contracts/window (deduped per CONTRACT across marks) AND
+    # concentrates capital on the single best reward:risk pick (settled record: best-per-window
+    # ~+13c/bet vs ~+11c taking all, fewer fees, less correlated exposure). Set TOP_N>1 to widen
+    # (raises correlated exposure + alert volume); =1 + BY_RR=false restores legacy best-by-edge.
+    #  * deliver_by_reward_risk: pick by CHEAPEST ask (best payoff per $) not highest net-edge.
     deliver_top_n: int = field(
-        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 3.0)))
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 1.0)))
     )
     deliver_by_reward_risk: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)

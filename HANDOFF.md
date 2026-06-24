@@ -9,7 +9,7 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1268 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1272 passed / 13 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
@@ -37,6 +37,22 @@ Data = `interval_captures` (the per-checkpoint chart, ~1151 resolved NO + the YE
 14. **Current config on the chart day:** ~86 alerts → +$2,423 net at $100/bet (86% win), ~125 alerts/day. In-sample; treat as shape, not a promise.
 
 **NEXT for a future session:** re-run ALL of the above on v2's OWN multi-day data once it accrues (the live captures are building it). Per-asset / time-of-day / loss-curb / dip-buy / YES-side were ALL one-day artifacts — only re-validate, don't re-derive from scratch.
+
+## ✅ Shipped THIS session — Ultoim V2 net levers ACTIVATED + selective-trader preset (branch `claude/confident-bohr-soiqy0` → main)
+**Suite 1272 passed / 13 skipped here** (+6 tests). Owner-directed: make the data-backed profit levers LIVE now (all reversible via `Q15_*` env). Basis: a 6-agent verification workflow + direct re-checks on the FRESH learning-snapshot (`q15_ultoim_v2_v1` delivered book + `interval_captures` 3276 rows). The owner trades **1–2 picks per 15-min window manually** off the alerts, so the preset optimizes for *the single best entry, surfaced early/cheap, plus the sell signal.*
+
+**New owner-default LIVE config (config.py `INTERVAL_MARKS` now `{15M,12M,11M,10M,7M}`):**
+- **`cap_7m_ask=True` (NEW, default ON).** At 7M only, veto a NO whose `ask > 72¢`. Evidenced on the **DELIVERED book**: 7M >72¢ is **live net-NEGATIVE** (−57¢/21 bets) vs **+26¢/bet** ≤72¢; that slice both-halves sign-flips. `gate.evaluate` suppresses BOTH `fired` and `research_fired` (tag `ASK_CAP_7M`); 10M/YES untouched. The one delivered-money-backed lever. Revert `=false`.
+- **`enable_12m=True` + 12M DELIVERS live** (removed from `research_only_intervals`). 12M entries run cheaper/earlier than 10M for a similar in-sample win (12M@60-69 ~91%, both-halves 93/89, broad per-asset) → better reward:risk. For a 1-pick-per-window trader the redundancy concern is moot (you take ONE entry, not a stack), and the per-CONTRACT alert lock fires each contract once at its earliest qualifying mark. **CAVEAT: 12M rests on ~1 in-sample day (~27 windows); 10M is the more-proven anchor.**
+- **`enable_11m=True` but RECORD-ONLY** (`research_only_intervals={11M}`): 11M is the redundant middle between 12M and 10M, so it accrues gradeable data without a 3rd near-duplicate alert. Records the would-FIRE favourites (top-N reward:risk), NOT the max-`net_edge` longshot (edge is inverse for NO). To promote: drop 11M from that set.
+- **`deliver_top_n=1` (was 3, default 1 now).** Single best by reward:risk per mark; with 12M/10M/7M firing + per-contract dedup → ~1–2 distinct alerts/window, concentrated on the best pick (settled: ~+13¢/bet vs ~+11¢ taking all, fewer fees). **13M deliberately EXCLUDED (fragile, 82%→65%).**
+- Already live (unchanged): `exit_warnings` (defensive-flip SELL alert — backtested net **+19%/trade**: 13 warnings, 11 correct, recovered 202.9¢ − forfeited 39.0¢ = **+163.9¢**), `no_edge_waive`, `expensive_no` (10M), `skip_15m`, `deliver_by_reward_risk`.
+
+**REJECTED (do not add):** raising `deliver_top_n` beyond the selective 1 for the auto book (marginal bets correlated, not significant); raising `ask_lo` (per-bet EV flat → only cuts net); 13M (fragile); prior-window / trend / cross-asset / volume-flow / regime / time-of-day features (all confirmed dead ends). **DO NOT re-enable edge gating for NO** (`no_edge_waive` is load-bearing — NO edge is inverse).
+
+**Per-trade economics confirmed (delivered book, ~29h / 1 day):** v2 **10M hit rate 90.7%** (49/54, CI 80–96%); break-even at 65¢ entry is 64.5%. Sizing: 5% of bankroll (NOT 15% — worst real stretch is −50% at 15% vs −16% at 5%; full-Kelly blows up). **Liquidity ceiling is the hard cap** — thin 15-min books mean the strategy tops out at low-tens-of-thousands of bankroll; compounding projections past that are fiction. **NEXT: confirm the delivered-10M rate holds ≥80% across MULTIPLE days before sizing up; 12M/11M new-window edge must re-confirm forward before 11M promotes / 12M is trusted beyond discretionary use.**
+
+**Promotion gate (before any of this goes default-ON / 11M-12M go live):** accrue 11M/12M research-only over MULTIPLE days (≥30–40 *independent windows*/mark, not per-bet n), re-run both-halves + leave-one-asset-out + window-collapsed Wilson-low > NO breakeven, and re-run the marginal-net test on forward data (the new-window net must be positive/stable — the test 11M FAILED in-sample); confirm the 7M cap still beats >72¢ on the next delivered slice. Visibility note: scoreboard/panel/validate hardcode `(15M,10M,7M)`, so 11M/12M rows grade but are invisible there until those tuples are extended (part of the promotion edit) — query the DB directly meanwhile.
 
 ## ✅ Shipped THIS session — Ultoim V2 owner-enabled LIVE config: edge-waive + skip-15M + top-3 reward:risk (branch `claude/sweet-ride-wq61n7` → main)
 **Suite 1268 passed / 4 skipped here.** ⚠️ **Behaviour-changing, owner-directed, ONE in-sample day of basis** — all reversible via env. Four V2 defaults flipped ON (owner trades real money off these alerts, so watch volume/results and revert if off):

@@ -236,6 +236,12 @@ class UltoimV2Runner:
                 # 10M/7M behaviour is untouched.
                 if cfg.skip_15m and interval == "15M":
                     continue
+                # 11M/12M are MEASURE-FIRST marks: inert unless explicitly enabled, so the
+                # added INTERVAL_MARKS entries are byte-identical no-ops by default.
+                if interval == "11M" and not cfg.enable_11m:
+                    continue
+                if interval == "12M" and not cfg.enable_12m:
+                    continue
                 in_band = [c for c in cands
                            if (mark - cfg.mark_band_seconds) <= c["seconds_remaining"] <= mark]
                 if not in_band:
@@ -256,6 +262,7 @@ class UltoimV2Runner:
     def _decide_interval(self, interval: str, mark: int, window_key: int,
                          cands: list[dict[str, Any]], now: float) -> None:
         cfg = self.config
+        research_only = interval in cfg.research_only_intervals
         evaluated: list[dict[str, Any]] = []
         for cand in cands:
             verdict = gate.evaluate(cand, cfg, interval=interval)
@@ -272,6 +279,42 @@ class UltoimV2Runner:
                 verdict["reason_codes"] = reasons
                 abstained_stale = True
             evaluated.append({"cand": cand, "verdict": verdict, "stale": abstained_stale})
+
+        # -- MEASURE-FIRST path (11M/12M): record the would-FIRE favourites but NEVER
+        # deliver. We force fired=False (no alert, no alert-lock claim) while leaving
+        # research_fired intact so the row grades on settlement. We pick the would-fire
+        # picks by the SAME top-N reward:risk rule as delivery -- NOT the max-net_edge one,
+        # because net_edge is INVERSE for NO (the max-edge candidate is the losing longshot,
+        # not the favourite we want to measure). Returns early: these marks never reach the
+        # delivered or research-YES paths.
+        if research_only:
+            would = [e for e in evaluated if e["verdict"]["fired"]]
+            if would:
+                n = max(1, int(getattr(cfg, "deliver_top_n", 1) or 1))
+                if getattr(cfg, "deliver_by_reward_risk", False):
+                    ordered = sorted(would, key=lambda e: (
+                        _num(e["cand"].get("entry_ask_cents"))
+                        if _num(e["cand"].get("entry_ask_cents")) is not None else 1e9,
+                        -(_num(e["verdict"]["net_edge_cents"]) or -1e9)))
+                else:
+                    ordered = sorted(
+                        would, key=lambda e: -(_num(e["verdict"]["net_edge_cents"]) or -1e9))
+                chosen = ordered[:n]
+            elif evaluated:
+                # nothing would fire -> record the single best for research (unchanged idiom).
+                chosen = [max(evaluated,
+                              key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)]
+            else:
+                chosen = []
+            for e in chosen:
+                v = dict(e["verdict"])
+                v["fired"] = False
+                rc = list(v.get("reason_codes") or [])
+                if "RESEARCH_ONLY_MARK" not in rc:
+                    rc.append("RESEARCH_ONLY_MARK")
+                v["reason_codes"] = rc
+                self._record_and_maybe_alert({**e, "verdict": v}, interval, mark, window_key, now)
+            return
 
         # -- DELIVERED path: the top-N candidates per (interval, window), NO-only alerts.
         # Default (deliver_top_n=1, by net-edge) is byte-identical to the prior single-
