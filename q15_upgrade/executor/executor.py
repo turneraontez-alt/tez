@@ -27,22 +27,39 @@ class Executor:
     def __init__(self, cfg: ExecutorConfig | None = None, client: Any | None = None):
         self.cfg = cfg or ExecutorConfig.from_env()
         self.client = client or KalshiTradingClient(self.cfg)
-        bankroll = self._initial_bankroll()
+        live_bal = None
+        if self.cfg.enabled and not self.cfg.dry_run:
+            live_bal = self.client.get_balance_cents()
+        bankroll = self._initial_bankroll(live_bal)
+        # Day-start balance is the stop-loss reference: the REAL balance when live, else the
+        # configured/dry-run bankroll. The stop measures realized loss as a drop from this.
+        self._day_start_balance = live_bal if live_bal is not None else bankroll
         self.state = PortfolioState(
             bankroll_cents=bankroll,
-            day_start_bankroll_cents=bankroll,
+            day_start_bankroll_cents=self._day_start_balance,
         )
         logger.info("executor init: %s | bankroll=%dc", self.cfg.safety_summary(), bankroll)
 
-    def _initial_bankroll(self) -> int:
+    def _initial_bankroll(self, live_bal: int | None = None) -> int:
         if self.cfg.bankroll_cents > 0:
             return self.cfg.bankroll_cents
-        # live mode with no fixed bankroll: read the account balance
-        if self.cfg.enabled and not self.cfg.dry_run:
-            bal = self.client.get_balance_cents()
-            if bal is not None:
-                return bal
+        # live mode with no fixed bankroll: use the account balance read at init
+        if live_bal is not None:
+            return live_bal
         return 0
+
+    def _refresh_daily_pnl(self) -> None:
+        """Update the day's realized P&L from the LIVE balance so the stop-loss can fire.
+        Cash-drawdown basis (realized = current_balance - day_start_balance): while a position
+        is still open the staked cash reads as a loss, so this errs toward STOPPING — the safe
+        direction for a stop. No-op in dry-run/disabled (no real balance moves)."""
+        if self.cfg.dry_run or not self.cfg.enabled:
+            return
+        bal = self.client.get_balance_cents()
+        if bal is None:
+            return
+        from dataclasses import replace
+        self.state = replace(self.state, day_realized_pnl_cents=int(bal) - int(self._day_start_balance))
 
     def on_fire(self, pick: Mapping[str, Any]) -> dict[str, Any]:
         """Handle one v2 delivered NO pick. Returns a result dict (never raises on a
@@ -50,6 +67,7 @@ class Executor:
         price (cents), window_key."""
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
+        self._refresh_daily_pnl()   # pull live realized P&L so the stop-loss can gate this entry
         price = pick.get("entry_price_cents")
         if price is None:
             price = pick.get("best_entry_cents") or pick.get("entry_ask_cents")

@@ -66,11 +66,17 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if not (cfg.min_price_cents <= price <= cfg.max_price_cents):
         return Decision(False, "PRICE_BAND")
 
-    # Daily circuit breaker: stop NEW entries once down the limit on the day.
-    if cfg.daily_loss_limit_pct > 0 and state.day_start_bankroll_cents > 0:
+    # Daily circuit breaker: stop NEW entries once down the limit on the day. An ABSOLUTE
+    # dollar stop (daily_loss_limit_cents) GOVERNS when set; otherwise the % of day-start
+    # bankroll. Exits are never gated by this (closing risk is always allowed).
+    abs_cap = int(getattr(cfg, "daily_loss_limit_cents", 0) or 0)
+    floor: int | None = None
+    if abs_cap > 0:
+        floor = -abs_cap
+    elif cfg.daily_loss_limit_pct > 0 and state.day_start_bankroll_cents > 0:
         floor = -int(round(cfg.daily_loss_limit_pct * state.day_start_bankroll_cents))
-        if state.day_realized_pnl_cents <= floor:
-            return Decision(False, "DAILY_STOP")
+    if floor is not None and state.day_realized_pnl_cents <= floor:
+        return Decision(False, "DAILY_STOP")
 
     if state.open_count >= cfg.max_open_positions:
         return Decision(False, "MAX_OPEN")

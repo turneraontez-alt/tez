@@ -69,8 +69,13 @@ class ExecutorConfig:
     # even if per_pick_pct * max_picks would.
     max_per_window_pct: float = field(default_factory=lambda: _float("Q15_EXEC_MAX_PER_WINDOW_PCT", 0.08))
     # Stop opening NEW entries once the day's realized P&L is down this fraction of the
-    # day-start bankroll (the daily circuit breaker). Exits still allowed.
+    # day-start bankroll (the daily circuit breaker, %-based). Exits still allowed.
     daily_loss_limit_pct: float = field(default_factory=lambda: _float("Q15_EXEC_DAILY_LOSS_LIMIT_PCT", 0.20))
+    # ABSOLUTE-dollar stop loss in CENTS. When > 0 it GOVERNS the daily stop (the % above is
+    # ignored): halt new entries once the day's realized loss reaches this many cents. Owner
+    # default $100 (10000c). Fed from the live balance (executor._refresh_daily_pnl); exits are
+    # never blocked. 0 = use the %-based limit instead. Set Q15_EXEC_DAILY_LOSS_LIMIT_CENTS.
+    daily_loss_limit_cents: int = field(default_factory=lambda: _int("Q15_EXEC_DAILY_LOSS_LIMIT_CENTS", 10000))
     max_open_positions: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_OPEN_POSITIONS", 6))
     # HARD per-pick stake ceiling in CENTS — the absolute most one trade can risk, on top of
     # the % sizing. Default $75 (owner-set; raised from $50): even with a big bankroll, no
@@ -110,6 +115,8 @@ class ExecutorConfig:
             size = f"FLAT ${self.flat_stake_cents/100:.0f}/pick ({cap})"
         else:
             size = f"{self.per_pick_pct*100:.0f}%/pick ({cap})"
+        stop = (f"stop -${self.daily_loss_limit_cents/100:.0f}" if self.daily_loss_limit_cents > 0
+                else f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%")
         return (f"EXECUTOR ENABLED — {mode}; size {size}, "
                 f"<= {self.max_picks_per_window} pick(s)/window, <= {self.max_per_window_pct*100:.0f}%/window, "
-                f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%")
+                f"{stop}")
