@@ -477,10 +477,10 @@ class UltoimV2Runner:
         # this is a byte-identical no-op by default; even when enabled it is dry-run by
         # default. v2 NEVER places an order itself — it only emits the pick. Failures here
         # are swallowed so the executor can never disrupt the read-only paper path.
-        self._maybe_execute(cand, display, window_key, interval)
+        self._maybe_execute(cand, display, window_key, interval, now)
 
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
-                       window_key: int, interval: str) -> None:
+                       window_key: int, interval: str, now: float) -> None:
         try:
             from q15_upgrade.executor import get_executor
             ex = get_executor()
@@ -494,6 +494,7 @@ class UltoimV2Runner:
                 "entry_ask_cents": cand.get("entry_ask_cents"),
                 "window_key": window_key,
                 "interval": interval,   # backstops the executor's optional interval allowlist
+                "fired_at": now,        # cycle wall-clock -> executor measures snapshot->order age
             })
         except Exception:  # never let execution disrupt the paper system
             logger.exception("executor on_fire hook failed (non-fatal)")

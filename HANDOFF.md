@@ -20,6 +20,11 @@ and a follow-up probe of the recent session found 1 profit lever (interval sizin
 shipped (rejected: BTC gate / evidence floor / ceiling 78→85 / flip-veto / recal / time-of-day block /
 60c ask-floor / first-fire selector / exit-on-every-warning — HURTS, thin, or one-day overfit).
 Deploy-pending. Each reversible via its `Q15_*` env var.
+- **Latency instrumentation `executor/executor.py` + `ultoim_v2/runner.py`**: `on_fire` now logs+returns
+  `snapshot_age_ms` (cycle decision -> order POST, fed by a new `fired_at` plumbed from the runner),
+  `balance_latency_ms` (the pre-order balance GET), and `order_latency_ms` (the POST). Pure observability,
+  no order-behaviour change. Log line: `executor timing TICKER wWINDOW: snapshot_age=…ms balance=…ms order=…ms total=…ms`.
+  Use it to decide whether to cross the spread (`Q15_EXEC_LIMIT_OFFSET_CENTS`). Suite 1318/13.
 - **Rec #7 (PROFIT lever) `executor/{config,risk}.py`**: interval-conditioned stake
   (`Q15_EXEC_STAKE_BY_INTERVAL`, e.g. `10M:10000` -> $100 on 10M; default empty = flat $75 for all,
   byte-identical). The override is the stake AND the per-pick ceiling for that interval (supersedes the

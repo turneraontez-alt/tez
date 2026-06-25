@@ -10,6 +10,7 @@ kind), so a duplicated fire or a retry cannot double-place.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Mapping
 
 from .config import ExecutorConfig
@@ -67,7 +68,14 @@ class Executor:
         price (cents), window_key."""
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
+        # Latency instrumentation — so fire->ack timing on the live book can be MEASURED, not
+        # guessed. fired_at is the cycle wall-clock the pick was decided at; snapshot_age below =
+        # how stale the quoted ask is by the time the order lands (worker queue + alert + the
+        # balance GET + the order POST). Pure observability; never changes the order.
+        fired_at = pick.get("fired_at")
+        _t0 = time.perf_counter()
         self._refresh_daily_pnl()   # pull live realized P&L so the stop-loss can gate this entry
+        _bal_ms = (time.perf_counter() - _t0) * 1000.0
         # Band-check and limit on the SAME price the v2 gate admitted on (entry_ask_cents). The
         # gate keys its [ask_lo, ask_hi] admission on entry_ask_cents; if the executor instead
         # banded on best_entry_cents (the optimistic "or lower" display price, ~1.7c below the
@@ -95,23 +103,37 @@ class Executor:
             logger.info("skip %s w%s: %s", p.ticker, p.window_key, d.reason)
             return {"placed": False, "reason": d.reason}
 
+        _t1 = time.perf_counter()
         res = self.client.place_order(
             ticker=p.ticker, side="no", count=d.count,
             price_cents=d.limit_price_cents, action="buy",
             client_order_id=_coid(p.window_key, p.ticker, "entry"),
         )
+        _order_ms = (time.perf_counter() - _t1) * 1000.0
+        _age_ms = None
+        if fired_at is not None:
+            try:
+                _age_ms = (time.time() - float(fired_at)) * 1000.0
+            except (TypeError, ValueError):
+                _age_ms = None
         if not res.get("ok"):
             logger.error("order FAILED %s: %s", p.ticker, res.get("error"))
-            return {"placed": False, "reason": "ORDER_FAILED", "detail": res}
+            return {"placed": False, "reason": "ORDER_FAILED", "detail": res,
+                    "balance_latency_ms": round(_bal_ms, 1), "order_latency_ms": round(_order_ms, 1)}
 
         # Commit the position to the snapshot (so window/open caps see it).
         self.state = apply_fill(self.state, p, d)
         mode = "dry-run" if res.get("dry_run") else "LIVE"
+        _age_str = f"{_age_ms:.0f}ms" if _age_ms is not None else "n/a"
+        logger.info("executor timing %s w%s: snapshot_age=%s balance=%.0fms order=%.0fms total=%.0fms",
+                    p.ticker, p.window_key, _age_str, _bal_ms, _order_ms, _bal_ms + _order_ms)
         logger.info("placed[%s] %s x%d @ %dc (stake %dc)", mode, p.ticker, d.count,
                     d.limit_price_cents, d.stake_cents)
         return {"placed": True, "mode": mode, "ticker": p.ticker, "count": d.count,
                 "limit_price_cents": d.limit_price_cents, "stake_cents": d.stake_cents,
-                "dry_run": bool(res.get("dry_run")), "order": res}
+                "dry_run": bool(res.get("dry_run")), "order": res,
+                "balance_latency_ms": round(_bal_ms, 1), "order_latency_ms": round(_order_ms, 1),
+                "snapshot_age_ms": (round(_age_ms, 1) if _age_ms is not None else None)}
 
     def on_exit(self, ticker: str, window_key: Any, exit_price_cents: int) -> dict[str, Any]:
         """Defensive-exit: SELL an open NO position at ``exit_price_cents``. The kill
