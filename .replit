@@ -123,6 +123,14 @@ Q15_EXEC_LIMIT_OFFSET_CENTS = "1"
 # by setting MAX_PICKS back to 1.
 Q15_EXEC_MAX_PICKS_PER_WINDOW = "2"
 Q15_EXEC_SECOND_PICK_MIN_ASK = "60"
+# BTC CROSS-ASSET GATE — owner LIVE (default ON in code; pinned here for visibility + kill switch).
+# Suppresses an alt-NO entry when BTC is contemporaneously bullish (lean>=0.50) OR the complex is
+# risk-on (prior-window breadth>=0.50) — the regime where alt-NO fails because the alts co-move up
+# with BTC. EXEMPTS >=3-co-trigger 10M conviction windows (those run ~100% and are protected by the
+# defensive exit). Backtest (in-sample ~2.6 days): lifted kept-book accuracy 78->90% and trimmed the
+# BTC-up co-settling losers. ⚠️ in-sample/thin data — watch it across regimes. KILL SWITCH: set
+# Q15_EXEC_BTC_GATE="false" to disable instantly. Thresholds: Q15_EXEC_BTC_GATE_LEAN / _BREADTH.
+Q15_EXEC_BTC_GATE = "true"
 # 1ST-PICK ASK FLOOR (owner-approved, data-backed): EVERY pick (incl. the 1st/main pick) must have
 # ask>=59c. Closes the cheap-NO loss zone: on the fuller fired-NO sample the whole 55-58c band is
 # net-negative (55c 17%/-230c, 57c 0%/-114c; 55-58 combined ~-282c over n=14) while 59c+ is the clean

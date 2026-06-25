@@ -24,6 +24,16 @@ def _coid(window_key: Any, ticker: str, kind: str) -> str:
     return f"v2x-{window_key}-{ticker}-{kind}"
 
 
+def _opt_float(v: Any) -> float | None:
+    """Coerce an optional numeric (BTC gate input) to float, or None if absent/bad."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 class Executor:
     def __init__(self, cfg: ExecutorConfig | None = None, client: Any | None = None):
         self.cfg = cfg or ExecutorConfig.from_env()
@@ -121,6 +131,8 @@ class Executor:
                 window_key=int(pick.get("window_key")),
                 interval=str(pick.get("interval") or ""),
                 stake_multiplier=int(pick.get("stake_multiplier") or 1),
+                btc_lean=_opt_float(pick.get("btc_lean")),
+                prior_breadth=_opt_float(pick.get("prior_breadth")),
             )
         except (TypeError, ValueError):
             return {"placed": False, "reason": "BAD_PICK"}

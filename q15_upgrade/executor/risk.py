@@ -34,6 +34,9 @@ class Pick:
     window_key: int
     interval: str = ""   # "10M" / "7M" / ... — informational; gates the allowlist, NOT the coid
     stake_multiplier: int = 1  # conviction size factor from v2 (2 on >=3 co-triggering 10M); 1 = normal
+    # Cross-asset gate inputs (from v2, at-or-before this pick's decision; None when unavailable):
+    btc_lean: float | None = None        # BTC's contemporaneous market-implied P(YES) this window
+    prior_breadth: float | None = None   # fraction of the complex that settled YES in window_key-1
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,24 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     floor = int(getattr(cfg, "min_entry_ask", 0) or 0)
     if price < floor:
         return Decision(False, "ENTRY_ASK_FLOOR")
+
+    # BTC CROSS-ASSET GATE (owner LIVE, cfg.btc_gate_enabled default ON). The alts co-move with
+    # BTC, so an alt-NO is unreliable when BTC is contemporaneously bullish (pick.btc_lean high)
+    # OR the complex is risk-on (pick.prior_breadth high, the prior window settled mostly YES).
+    # Suppress the entry in that regime — EXCEPT a >=3-co-trigger 10M CONVICTION window
+    # (stake_multiplier > 1): those run ~100% and are protected by the defensive exit, so they
+    # stay at full size. Only acts on a PRESENT signal (a missing lean/breadth never gates), and
+    # uses BTC's at-or-before-decision read (no same-window-settlement lookahead). Backtest
+    # (in-sample ~2 days) lifted kept-book accuracy and P&L. Disable instantly with
+    # Q15_EXEC_BTC_GATE=false — no code change.
+    if (getattr(cfg, "btc_gate_enabled", False) and side == "NO"
+            and int(getattr(pick, "stake_multiplier", 1) or 1) <= 1):
+        lean = getattr(pick, "btc_lean", None)
+        brd = getattr(pick, "prior_breadth", None)
+        lean_thr = float(getattr(cfg, "btc_gate_lean", 0.5) or 0.5)
+        brd_thr = float(getattr(cfg, "btc_gate_breadth", 0.5) or 0.5)
+        if (lean is not None and float(lean) >= lean_thr) or (brd is not None and float(brd) >= brd_thr):
+            return Decision(False, "BTC_GATE")
 
     # Daily circuit breaker: stop NEW entries once down the limit on the day. An ABSOLUTE
     # dollar stop (daily_loss_limit_cents) GOVERNS when set; otherwise the % of day-start
