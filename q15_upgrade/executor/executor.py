@@ -14,7 +14,7 @@ import time
 from typing import Any, Mapping
 
 from .config import ExecutorConfig
-from .risk import Pick, PortfolioState, decide, apply_fill, apply_exit
+from .risk import Pick, PortfolioState, decide, apply_fill, apply_exit, prune_settled
 from .trading_client import KalshiTradingClient
 
 logger = logging.getLogger("q15.executor")
@@ -84,6 +84,16 @@ class Executor:
         price (cents), window_key."""
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
+        # Release positions whose 15-min window has already settled, so the optimistic in-memory
+        # open_count / open_tickers can't grow forever and pin at MAX_OPEN / block every ticker with
+        # DUP_TICKER (the cause of the bot silently halting after ~max_open entries). Uses the
+        # incoming pick's window; strictly-older windows have settled on the exchange.
+        try:
+            prune_wk = int(pick.get("window_key"))
+        except (TypeError, ValueError):
+            prune_wk = None
+        if prune_wk is not None:
+            self.state = prune_settled(self.state, prune_wk)
         # Latency instrumentation — so fire->ack timing on the live book can be MEASURED, not
         # guessed. fired_at is the cycle wall-clock the pick was decided at; snapshot_age below =
         # how stale the quoted ask is by the time the order lands (worker queue + alert + the

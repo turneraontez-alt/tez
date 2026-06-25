@@ -269,6 +269,66 @@ def test_interval_allowlist_parses_env(monkeypatch):
     assert ExecutorConfig().allowed_intervals == frozenset({"10M", "7M"})
 
 
+def test_prune_settled_releases_old_windows():
+    from q15_upgrade.executor.risk import prune_settled
+    st = PortfolioState(bankroll_cents=100_000, open_count=2,
+                        open_tickers=frozenset({"T-BTC", "T-ETH"}),
+                        positions={"T-BTC": 10, "T-ETH": 10},
+                        window_count={5: 1, 6: 1}, window_committed_cents={5: 7500, 6: 7500},
+                        window_tickers={5: frozenset({"T-BTC"}), 6: frozenset({"T-ETH"})})
+    # a fire arrives for window 7 -> windows 5 and 6 have settled -> both released.
+    pruned = prune_settled(st, 7)
+    assert pruned.open_count == 0 and pruned.open_tickers == frozenset()
+    assert pruned.window_tickers == {}
+    # a fire for window 6 keeps window 6 (still open), releases only the older window 5.
+    p2 = prune_settled(st, 6)
+    assert p2.open_count == 1 and p2.open_tickers == frozenset({"T-ETH"})
+
+
+def test_bot_keeps_trading_after_windows_settle():
+    """Regression for the live halt: without pruning, optimistic apply_fill made open_count climb to
+    MAX_OPEN and every ticker hit DUP_TICKER, silently stopping the bot after ~6 entries. With
+    per-window pruning, each new settlement window releases the prior (settled) positions, so the bot
+    trades INDEFINITELY — way past max_open_positions — instead of pinning at the cap."""
+    cfg = _cfg(flat_stake_cents=7500, max_open_positions=6, max_picks_per_window=1)
+    class _Rec:
+        def get_balance_cents(self): return None
+        def place_order(self, **kw): return {"ok": True, "dry_run": True}
+    ex = Executor(cfg, client=_Rec())
+    assets = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
+    # 14 entries across 14 increasing windows -> well past the old cap of 6; every one must place.
+    for i in range(14):
+        a = assets[i % len(assets)]
+        r = ex.on_fire({"ticker": f"T-{a}", "asset": a, "predicted_side": "NO",
+                        "entry_ask_cents": 65, "window_key": 1000 + i})
+        assert r["placed"] is True and r.get("reason") != "MAX_OPEN", \
+            f"entry {i} (window {1000+i}) was blocked: {r.get('reason')}"
+    # open exposure reflects only the CURRENT window, never the lifetime total.
+    assert ex.state.open_count == 1
+    # a ticker that traded in an OLD window trades again now (the stale DUP_TICKER is gone).
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "entry_ask_cents": 65, "window_key": 2000})
+    assert r["placed"] is True
+
+
+def test_same_window_caps_still_apply():
+    """Pruning must NOT loosen the WITHIN-window caps: concurrent positions in the SAME (current)
+    window still count toward MAX_OPEN and the per-window pick cap."""
+    cfg = _cfg(flat_stake_cents=7500, max_open_positions=2, max_picks_per_window=5)
+    class _Rec:
+        def get_balance_cents(self): return None
+        def place_order(self, **kw): return {"ok": True, "dry_run": True}
+    ex = Executor(cfg, client=_Rec())
+    assert ex.on_fire({"ticker": "T-A", "asset": "A", "predicted_side": "NO",
+                       "entry_ask_cents": 65, "window_key": 9})["placed"] is True
+    assert ex.on_fire({"ticker": "T-B", "asset": "B", "predicted_side": "NO",
+                       "entry_ask_cents": 65, "window_key": 9})["placed"] is True
+    # third concurrent position in the SAME window 9 -> MAX_OPEN (2) still binds.
+    third = ex.on_fire({"ticker": "T-C", "asset": "C", "predicted_side": "NO",
+                        "entry_ask_cents": 65, "window_key": 9})
+    assert third["placed"] is False and third["reason"] == "MAX_OPEN"
+
+
 def test_bot_trades_independently_of_external_manual_positions():
     """The bot can take a trade even if the OWNER manually holds a position on that ticker. The
     DUP_TICKER / MAX_OPEN / WINDOW caps are scoped to the bot's OWN in-memory state (open_tickers /

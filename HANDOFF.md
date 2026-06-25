@@ -18,6 +18,13 @@ count varies with `flask`/`websockets`/cffi/crypto install state).
 telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
 config flips — the **10M=$100 profit lever** and a **1c limit offset** (Q15_EXEC_LIMIT_OFFSET_CENTS=1,
 fill reliability) — both set in `.replit [userenv.shared]`.
+- **CRITICAL FIX — executor position leak halted the bot `executor/risk.py` + `executor.py`**: optimistic
+  `apply_fill` incremented `open_count`/`open_tickers` on every placement but only the rare defensive
+  `apply_exit` ever removed them — so positions settled on the exchange every 15 min but were NEVER released
+  in memory. `open_count` climbed to `MAX_OPEN=6` and every asset hit `DUP_TICKER` after its first entry ->
+  the bot silently STOPPED taking trades after ~6-7 entries (until a restart reset it). Fix: `prune_settled()`
+  releases positions whose 15-min window (`window_key=close_time//900`, monotonic) is strictly older than the
+  incoming pick's; called in `on_fire` before the caps. Within-window caps unchanged. +3 tests.
 - **Daily stop REMOVED (owner-chosen) `executor/{executor,config}.py` + `.replit`**: both
   `Q15_EXEC_DAILY_LOSS_LIMIT_CENTS=0` and `_PCT=0` -> no daily loss circuit breaker. `_refresh_daily_pnl`
   now SKIPS the per-order balance GET when the stop is disabled (removes latency + decouples the bot from
