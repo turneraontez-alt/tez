@@ -133,6 +133,27 @@ def test_on_fire_bands_on_entry_ask_not_best_entry():
     assert r2["placed"] is True and r2["limit_price_cents"] == 60
 
 
+def test_on_fire_reports_latency():
+    """Observability: on_fire returns balance/order latency (ms) and the snapshot->order age, so
+    the live fire->ack timing can be MEASURED rather than guessed. Deterministic (no real sleep)."""
+    import time as _time
+    class _RecClient:
+        def get_balance_cents(self): return None
+        def place_order(self, **kw): return {"ok": True, "dry_run": True}
+    ex = Executor(_cfg(enabled=True, dry_run=True, bankroll_cents=100_000, flat_stake_cents=7500),
+                  client=_RecClient())
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "entry_ask_cents": 65, "window_key": 1, "fired_at": _time.time()})
+    assert r["placed"] is True
+    assert isinstance(r["order_latency_ms"], (int, float)) and r["order_latency_ms"] >= 0
+    assert isinstance(r["balance_latency_ms"], (int, float)) and r["balance_latency_ms"] >= 0
+    assert r["snapshot_age_ms"] is not None and r["snapshot_age_ms"] >= 0
+    # no fired_at stamped -> snapshot_age is gracefully None (still places).
+    r2 = ex.on_fire({"ticker": "T-ETH", "asset": "ETH", "predicted_side": "NO",
+                     "entry_ask_cents": 65, "window_key": 2})
+    assert r2["placed"] is True and r2["snapshot_age_ms"] is None
+
+
 def test_decide_max_open_blocks():
     cfg = _cfg(max_open_positions=2)
     st = PortfolioState(bankroll_cents=100_000, open_count=2)
