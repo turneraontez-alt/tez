@@ -5,3 +5,4 @@
 - [Kalshi alert-engine invariants](kalshi-alert-engine-invariants.md) — read-only engine; latch alert intent at decision, claim_event before every send (shared dev+prod DB+chat); SCALP rows stay out of the learning corpus.
 - [Kalshi WS integration contract](kalshi-ws-integration-contract.md) — future auth WS must own an isolated cache; refresh_loop stays the sole engine mutator; never auto-activate on secret presence.
 - [GitHub auto-push relay](github-auto-push-relay.md) — main-agent git writes are guard-blocked; do pushes/merges from a workflow process (inline-auth URL, explicit refs/heads/main, no force, inline identity for merges).
+- [Python interpreter pin](python-interpreter-pin.md) — run app as `python3.11 app.py`; bare `python3` resolves to 3.12 (broken psycopg2 + cffi/crypto signing); deploy run cmd has same hazard.
