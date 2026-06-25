@@ -9,9 +9,24 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1411 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1425 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — executor latency: order before Telegram (fill-rate fix)
+**Suite 1425 / 4 skipped** (+4 tests). Diagnosis (11-agent workflow, all hops cited file:line): real orders
+were built on a **5.4s-avg (8.1s max) stale price** (`snapshot_age_ms`), so the limit stopped crossing and
+**~59% of entries RESTED unfilled** (13 FILLED/12 RESTED/4 PARTIAL/3 FAILED of 32). The HTTP order POST
+(~136ms) and balance GET (~0ms, skipped) are NOT the bottleneck — the lag was upstream. Root cause: in
+`ultoim_v2/runner.py:_record_and_maybe_alert` the **synchronous `telegram.send` ran BEFORE `_maybe_execute`**
+on the single serial worker, so every real order waited behind its own pick's Telegram RTT AND every earlier
+co-settling pick's record+Telegram. **Fix A (shipped): moved `_maybe_execute` to run before `telegram.send`,
+strictly inside the fired + claim_alert-won block.** Safety (both adversarial verdicts SHIP/safe): deterministic
+`client_order_id=_coid(window_key,ticker,'entry')` + the unchanged `claim_alert` lock + in-`decide()` gates
+make a duplicate/wrong-side/ungated order impossible — the reorder changes only WHEN the order POSTs. Direction
+was separately confirmed CORRECT (buy NO = sell YES per Kalshi duality; fills land at ~100-NO_px on the YES
+book). NOT yet done (follow-ups): Fix B async/off-worker Telegram, Fix D fresh re-quote in on_fire (re-gated),
+price-aware entry offset bump (1->3 only for ask>=75c), and the deeper snapshot-latency cut.
 
 ## ✅ Shipped THIS session — settlement-streak signal (observational, +3 tests)
 Owner asked "does 3 YES in a row = uptrend?" Live data: weak/noise-level (after 3 YES, next-YES 67%

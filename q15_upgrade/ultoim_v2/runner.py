@@ -529,6 +529,17 @@ class UltoimV2Runner:
         if not self.ledger.claim_alert(cfg.model_version, ticker, window_key, now):
             self.ledger.mark_delivery(row_id, "RECORDED", None, "alert_already_sent")
             return
+        # EXECUTE BEFORE TELEGRAM (latency fix): place the real order BEFORE the synchronous
+        # Telegram send. telegram.send is a blocking network call (~0.3-1.5s typ, up to ~8-17s on
+        # retries) and on the single serial worker it sat in front of EVERY order — its own and
+        # every later co-settling pick's — inflating snapshot_age to ~5.4s and resting ~59% of
+        # entries. This call stays STRICTLY inside the fired + claim_alert-won block, so the
+        # executor still fires at most once per contract per window (the alert lock gates both);
+        # the deterministic client_order_id and the in-decide() gates keep it idempotent and fully
+        # gated, so the reorder changes only WHEN the existing order POSTs, never which/whether.
+        # get_executor() is None unless Q15_EXEC_ENABLED, so it is a byte-identical no-op by
+        # default; failures are swallowed so the executor can never disrupt the paper path.
+        self._maybe_execute(cand, display, window_key, interval, now, stake_multiplier=stake)
         alert_row = dict(row)
         alert_row["best_entry_cents"] = display
         summary = self._alert_summary()
@@ -542,12 +553,6 @@ class UltoimV2Runner:
             status, mid = "DELIVERY_FAILED", None
         self.ledger.set_report_message(cfg.model_version, interval, window_key, mid)
         self.ledger.mark_delivery(row_id, status, mid, result.get("error"))
-        # OPT-IN EXECUTOR (default-OFF): hand this confirmed, fired NO delivery to the
-        # live-order layer. get_executor() returns None unless Q15_EXEC_ENABLED is set, so
-        # this is a byte-identical no-op by default; even when enabled it is dry-run by
-        # default. v2 NEVER places an order itself — it only emits the pick. Failures here
-        # are swallowed so the executor can never disrupt the read-only paper path.
-        self._maybe_execute(cand, display, window_key, interval, now, stake_multiplier=stake)
 
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
                        window_key: int, interval: str, now: float,
