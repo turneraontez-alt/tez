@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     pin_break_drift REAL,
     threshold_interaction REAL,
     champion_flow REAL,
+    stake_multiplier INTEGER DEFAULT 1,
     UNIQUE(model_version, ticker, interval)
 );
 CREATE INDEX IF NOT EXISTS idx_ultoim_v2_resolve
@@ -253,6 +254,10 @@ class UltoimV2Ledger:
             # outcome settled-window run as of prediction time (+N YES / -N NO). Nullable,
             # never gates; graded in streak_research_scoreboard.
             ("settlement_streak", "INTEGER"),
+            # Bet SIZE actually taken on this entry (1 = normal, 2 = conviction-doubled on
+            # >=3 co-triggering 10M alerts). hypothetical_pnl_cents is scored at THIS size,
+            # so the ledger reflects staked paper P&L. Legacy rows default to 1 (unchanged).
+            ("stake_multiplier", "INTEGER DEFAULT 1"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -379,13 +384,14 @@ class UltoimV2Ledger:
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
         "s15_pass", "s15_codes", "s15_cal_drift", "s15_version",
         "pin_break_drift", "threshold_interaction", "champion_flow",
-        "settlement_streak",
+        "settlement_streak", "stake_multiplier",
     )
 
     # Sensible defaults for columns added after the first release, so any caller
     # that builds a row without them (e.g. older tools/tests) still inserts cleanly
     # rather than tripping the NOT NULL constraint.
-    _COL_DEFAULTS = {"record_kind": "DELIVERED_CANDIDATE", "research_fired": 0}
+    _COL_DEFAULTS = {"record_kind": "DELIVERED_CANDIDATE", "research_fired": 0,
+                     "stake_multiplier": 1}
 
     def record_decision(self, row: Mapping[str, Any]) -> int | None:
         placeholders = ",".join("?" for _ in self._COLS)
@@ -437,7 +443,8 @@ class UltoimV2Ledger:
         ts = time.time() if now is None else now
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, predicted_side, entry_ask_cents FROM ultoim_v2_predictions "
+                "SELECT id, predicted_side, entry_ask_cents, stake_multiplier "
+                "FROM ultoim_v2_predictions "
                 "WHERE model_version=? AND ticker=? AND official_result IS NULL",
                 (model_version, ticker),
             ).fetchall()
@@ -448,7 +455,12 @@ class UltoimV2Ledger:
                 ask = r["entry_ask_cents"]
                 pnl = None
                 if ask is not None:
-                    pnl = (100.0 - float(ask)) if correct else (-float(ask))
+                    # Staked paper P&L: per-contract payoff times the bet size taken
+                    # (stake_multiplier=2 on conviction-doubled rows). Legacy rows carry
+                    # stake 1, so their grading is unchanged.
+                    stake = r["stake_multiplier"] if r["stake_multiplier"] is not None else 1
+                    unit = (100.0 - float(ask)) if correct else (-float(ask))
+                    pnl = unit * float(stake)
                 self._conn.execute(
                     "UPDATE ultoim_v2_predictions SET official_result=?, resolved_at=?, "
                     "correct=?, hypothetical_pnl_cents=? WHERE id=?",

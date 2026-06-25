@@ -33,6 +33,7 @@ class Pick:
     price_cents: int     # the signalled ask (what we'd pay per contract)
     window_key: int
     interval: str = ""   # "10M" / "7M" / ... — informational; gates the allowlist, NOT the coid
+    stake_multiplier: int = 1  # conviction size factor from v2 (2 on >=3 co-triggering 10M); 1 = normal
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,21 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     else:
         stake = int(round(cfg.per_pick_pct * bankroll))
         window_cap = int(round(cfg.max_per_window_pct * bankroll))
+    # CONVICTION sizing (owner: "first $150, extras double"): a >=3-co-trigger pick carries
+    # stake_multiplier>1 from v2. The LEAD pick of a window always stays at the base stake;
+    # only the 2nd-or-later pick of a >=3 window is sized up by that factor (window_count is
+    # 0 for the first pick). We scale the per-window budget so the up-sized extra isn't clamped
+    # by the correlation guard — but NOT the hard per-pick ceiling, which stays an ABSOLUTE cap
+    # (the owner sets it to the intended doubled size, e.g. $300, so a runaway flat can't blow
+    # past it). bankroll still binds below. NOTE: leverage — a conviction window commits more on
+    # correlated co-settlers than a normal window.
+    mult = int(getattr(pick, "stake_multiplier", 1) or 1)
+    is_extra_pick = state.window_count.get(wk, 0) >= 1
+    if not getattr(cfg, "conviction_sizing", True) or mult < 1 or not is_extra_pick:
+        mult = 1
+    if mult > 1:
+        stake *= mult
+        window_cap *= mult
     already = state.window_committed_cents.get(wk, 0)
     remaining = window_cap - already
     if remaining <= 0:

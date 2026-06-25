@@ -125,6 +125,14 @@ class ExecutorConfig:
     # exactly the -$100 daily stop in one trade — deliberate concentration, gated. Intervals not
     # listed keep flat_stake_cents. Set Q15_EXEC_STAKE_BY_INTERVAL.
     stake_by_interval: dict = field(default_factory=lambda: _stake_map("Q15_EXEC_STAKE_BY_INTERVAL"))
+    # CONVICTION sizing. DEFAULT ON. When a v2 pick carries stake_multiplier>1 (a >=3-co-trigger
+    # 10M window), size up the 2nd-or-later pick of that window by the multiplier — the LEAD pick
+    # of every window always stays at the base stake (owner: "first $150, extras double"). The
+    # hard per-pick cap must be high enough to admit the doubled extra (else it clamps). Leverage
+    # on thin (~3-day) data — set Q15_EXEC_CONVICTION_SIZING=false to size every pick flat.
+    conviction_sizing: bool = field(
+        default_factory=lambda: _bool("Q15_EXEC_CONVICTION_SIZING", True)
+    )
 
     # GLOBAL entry ask floor (applies to EVERY pick, incl. the 1st — distinct from
     # second_pick_min_ask which gates only 2nd-or-later picks, and from the min_price_cents sanity

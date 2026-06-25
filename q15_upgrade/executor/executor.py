@@ -120,6 +120,7 @@ class Executor:
                 price_cents=int(round(float(price))) if price is not None else -1,
                 window_key=int(pick.get("window_key")),
                 interval=str(pick.get("interval") or ""),
+                stake_multiplier=int(pick.get("stake_multiplier") or 1),
             )
         except (TypeError, ValueError):
             return {"placed": False, "reason": "BAD_PICK"}
