@@ -121,6 +121,13 @@ Q15_EXEC_LIMIT_OFFSET_CENTS = "1"
 # by setting MAX_PICKS back to 1.
 Q15_EXEC_MAX_PICKS_PER_WINDOW = "2"
 Q15_EXEC_SECOND_PICK_MIN_ASK = "60"
+# 1ST-PICK ASK FLOOR (owner-approved, data-backed): EVERY pick (incl. the 1st/main pick) must have
+# ask>=56c. The 2nd-pick floor (60c above) already covered 2nd picks; this closes the gap where the
+# main pick could be a losing cheap-NO. Data (ultoim_v2 live, n=230 fired NO resolved): the loss is
+# concentrated at ask<=51 (-356c combined); ask>=52 is a positive plateau (52->60 all ~+1600c, within
+# noise). 56 sits in that plateau with margin against the thin 52-55 cells. Protects the $100 10M
+# stake first (10M at ask<58 was -7c/pick, the one zone 10M loses). 0 = no floor. Reversible.
+Q15_EXEC_MIN_ENTRY_ASK = "56"
 # DAILY STOP OFF (owner-chosen): both limits 0 -> no daily loss circuit breaker, and the per-order
 # balance read is skipped (less latency + the bot is decoupled from the shared account, so manual
 # trades never pause it). REMAINING guards: $75/$100 per-pick cap, max-6-open, 1-pick/window, and
