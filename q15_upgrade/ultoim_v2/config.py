@@ -349,6 +349,14 @@ class UltoimV2Config:
     exit_min_flip_conf: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_MIN_FLIP_CONF", 0.55)
     )
+    # Record-only SETTLEMENT-STREAK signal (observational; default ON). At each prediction,
+    # stamp the asset's consecutive same-outcome settled-window run (signed: +N = N YES in a
+    # row, -N = N NO in a row, time-adjacent only) so the recap can GRADE whether a streak
+    # predicts the next window's settlement. NEVER gates fire/size/alert — one indexed read
+    # per recorded row. Set Q15_ULTOIM_V2_STREAK_SIGNAL=false to disable.
+    streak_signal_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_STREAK_SIGNAL", True)
+    )
 
     @classmethod
     def from_env(cls) -> "UltoimV2Config":

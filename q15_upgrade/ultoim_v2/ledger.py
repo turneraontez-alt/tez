@@ -192,6 +192,17 @@ def _research_agg(rows: "Sequence[sqlite3.Row]") -> dict[str, Any]:
     }
 
 
+def _yes_agg(rows: "Sequence[sqlite3.Row]") -> dict[str, Any]:
+    """P(settles YES) aggregate for the record-only settlement-streak scoreboard: n, the
+    fraction of windows that settled YES, and a Wilson CI. Shaped for the recap's
+    ``_screen_line`` (``accuracy`` carries P(YES); no per-pick P&L). Pure, read-only."""
+    n = len(rows)
+    yes = sum(1 for r in rows if str(r["official_result"] or "").upper() == "YES")
+    p, lo, hi = _wilson(yes, n)
+    return {"n": n, "yes": yes, "accuracy": p, "ci_low": lo, "ci_high": hi,
+            "pnl_avg_cents": None}
+
+
 class UltoimV2Ledger:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -239,6 +250,10 @@ class UltoimV2Ledger:
             # Record-only champion per-asset directional flow factor (feature_values
             # ["flow"]); the flow-against-NO abstain candidate. Nullable, never gates.
             ("champion_flow", "REAL"),
+            # Record-only SETTLEMENT-STREAK signal: the asset's signed consecutive same-
+            # outcome settled-window run as of prediction time (+N YES / -N NO). Nullable,
+            # never gates; graded in streak_research_scoreboard.
+            ("settlement_streak", "INTEGER"),
             # Bet SIZE actually taken on this entry (1 = normal, 2 = conviction-doubled on
             # >=3 co-triggering 10M alerts). hypothetical_pnl_cents is scored at THIS size,
             # so the ledger reflects staked paper P&L. Legacy rows default to 1 (unchanged).
@@ -369,7 +384,7 @@ class UltoimV2Ledger:
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
         "s15_pass", "s15_codes", "s15_cal_drift", "s15_version",
         "pin_break_drift", "threshold_interaction", "champion_flow",
-        "stake_multiplier",
+        "settlement_streak", "stake_multiplier",
     )
 
     # Sensible defaults for columns added after the first release, so any caller
@@ -687,6 +702,71 @@ class UltoimV2Ledger:
             "flow_keep": _research_agg(flow_keep),         # would-keep
             "regime_abstain": _research_agg(regime_abstain),  # v2-native proxy: would-cut
             "regime_keep": _research_agg(regime_keep),
+        }
+
+    def settlement_streak(self, model_version: str, asset: str,
+                          before_window_key: int) -> int:
+        """Signed run of consecutive same-outcome SETTLED windows for ``asset`` ending at
+        the most recent settled window strictly before ``before_window_key``. ``+N`` = N
+        YES in a row, ``-N`` = N NO in a row, ``0`` = no settled history. Time-adjacent
+        only: the run breaks at the first gap (an unsettled/missing window), so it means a
+        true "N in a row". Uses only prior settled windows — no lookahead. Record-only;
+        never gates a decision."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT window_key, MAX(official_result) AS res "
+                "FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND asset=? AND official_result IS NOT NULL "
+                "AND window_key < ? GROUP BY window_key ORDER BY window_key DESC LIMIT 64",
+                (model_version, str(asset), int(before_window_key)),
+            ).fetchall()
+        streak = 0
+        last_side: str | None = None
+        prev_wk: int | None = None
+        for r in rows:
+            side = str(r["res"] or "").upper()
+            wk = int(r["window_key"])
+            if side not in ("YES", "NO"):
+                continue
+            if last_side is None:
+                last_side, streak, prev_wk = side, 1, wk
+            elif side == last_side and wk == prev_wk - 1:
+                streak += 1
+                prev_wk = wk
+            else:
+                break
+        if last_side is None:
+            return 0
+        return streak if last_side == "YES" else -streak
+
+    def streak_research_scoreboard(self, model_version: str) -> dict[str, Any]:
+        """Read-only grading of the SETTLEMENT-STREAK signal: among settled windows, does
+        the asset's prior consecutive-outcome run predict THIS window's settlement? Buckets
+        by the recorded ``settlement_streak`` and reports P(window settles YES) + Wilson CI
+        per bucket, against the overall base. One outcome per (asset, window). NEVER gates
+        anything; pure measurement so a streak edge can prove itself before any promotion."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT asset, window_key, MAX(settlement_streak) AS settlement_streak, "
+                "MAX(official_result) AS official_result FROM ultoim_v2_predictions "
+                "WHERE model_version=? AND official_result IS NOT NULL "
+                "AND settlement_streak IS NOT NULL GROUP BY asset, window_key",
+                (model_version,),
+            ).fetchall()
+
+        def bucket(pred):
+            return _yes_agg([r for r in rows if pred(int(r["settlement_streak"]))])
+
+        return {
+            "available": True,
+            "base": _yes_agg(rows),
+            "yes_run_3plus": bucket(lambda s: s >= 3),
+            "yes_run_2": bucket(lambda s: s == 2),
+            "yes_run_1": bucket(lambda s: s == 1),
+            "flat_0": bucket(lambda s: s == 0),
+            "no_run_1": bucket(lambda s: s == -1),
+            "no_run_2": bucket(lambda s: s == -2),
+            "no_run_3plus": bucket(lambda s: s <= -3),
         }
 
     def resolved_rows(self, model_version: str) -> list[dict[str, Any]]:
