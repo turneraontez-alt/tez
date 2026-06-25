@@ -101,14 +101,16 @@ Q15_ULTOIM_V2_SKIP_15M = "true"
 Q15_ULTOIM_V2_DELIVER_12M = "true"
 Q15_EXEC_DRY_RUN = "false"
 Q15_EXEC_ENABLED = "true"
-# PROFIT LEVER (stress-tested): concentrate stake on the proven +EV 10M engine. 10M picks stake
-# $100 (10000c) instead of the flat $75; 7M/12M/15M stay flat $75. The override supersedes the
-# per-pick cap for 10M ONLY and is still gated by the $100 daily stop (checked before sizing).
-# Basis: 10M 80.6%/+1171c n=103 (the only interval with a positive margin over breakeven); probe
-# +16.2% session / +126c full-sample / +$0.62 on a 23-window out-of-sample holdout. Watch the live
-# 10M win rate vs the ~63.5% breakeven; a single losing 10M NO at $100 = the -$100 daily stop in one
-# trade. Remove this line to revert to flat $75 (byte-identical).
-Q15_EXEC_STAKE_BY_INTERVAL = "10M:10000"
+# SIZING (owner-set): flat $150 (15000c) per pick on EVERY interval — the prior 10M=$100 lever is
+# folded into this uniform base. Hard per-pick ceiling raised to $300 (30000c) so the conviction
+# upsize can land. CONVICTION DOUBLING (Q15_EXEC_CONVICTION_SIZING, default on): in a window where
+# 3+ assets co-trigger a NO at 10M, the LEAD pick stays $150 and the 2nd-or-later pick doubles to
+# $300 ("first 150, extras double") — so a 2-pick conviction window commits up to $450. Leverage on
+# thin (~3-day) data; NO daily circuit breaker is set, so per-trade size is the main risk control.
+# Revert: FLAT_STAKE_CENTS=7500 (or 0 for % sizing) and/or CONVICTION_SIZING=false.
+Q15_EXEC_FLAT_STAKE_CENTS = "15000"
+Q15_EXEC_MAX_STAKE_PER_PICK_CENTS = "30000"
+Q15_EXEC_CONVICTION_SIZING = "true"
 # FILL RELIABILITY: limit at the ask + 1c (still clamped to the 50-85c band) so a fast tick-up
 # doesn't leave the order resting unfilled. Costs at most 1c/contract; converts "missed/rested"
 # into "filled" on a marketable NO buy. Owner-approved. 0 = pay exactly the ask. Set to 0 to revert.

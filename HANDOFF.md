@@ -9,12 +9,28 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1359 passed / 13 skipped in this container** (the 8 app tests
-can't collect here from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled; with it
-they collect — PR #52 measured 1385/4 before this session's +6 exit tests. Env issue, not the diff;
-skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+Tests: `python3 -m pytest tests/ -q` → **1411 passed / 4 skipped here** (8 app tests uncollectable
+in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
+issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
-## ✅ Shipped THIS session — 1st-pick ask floor (live config, owner-approved)
+## ✅ Shipped THIS session — executor sizing: $150/pick + conviction doubling (LIVE real-money)
+**Suite 1411 / 4 skipped** (+9 tests). Owner-directed live sizing change on PR #55 (with the V2
+conviction rules below). The executor is LIVE (`Q15_EXEC_ENABLED=true`, `DRY_RUN=false`), so this is
+REAL money. ⚠️ Leverage on thin (~3-day) data; **no daily circuit breaker is set**, so per-trade size
+is the main risk control.
+- **`.replit` (live config):** flat per-pick stake **$75→$150** (`Q15_EXEC_FLAT_STAKE_CENTS=15000`),
+  hard per-pick cap **$75→$300** (`Q15_EXEC_MAX_STAKE_PER_PICK_CENTS=30000`), and the old
+  `Q15_EXEC_STAKE_BY_INTERVAL="10M:10000"` ($100 10M lever) **removed** so 10M is the uniform $150 too.
+- **Conviction doubling (`executor/{risk,config,executor}.py`, `Q15_EXEC_CONVICTION_SIZING` default ON):**
+  a v2 pick from a >=3-co-trigger 10M window carries `stake_multiplier=2` (threaded `on_fire`→`Pick`→
+  `decide`). Owner rule: **"first $150, extras double"** — the LEAD pick of a window stays $150; only the
+  **2nd-or-later** pick of a >=3 window doubles to $300 (gated on `window_count>=1`). The per-window budget
+  scales with the multiplier so the extra isn't clamped; the hard per-pick cap is **absolute** (NOT scaled)
+  so it still ceilings the doubled extra. A 2-pick conviction window commits up to **$450**.
+- Reversible: `Q15_EXEC_FLAT_STAKE_CENTS=7500` / `Q15_EXEC_CONVICTION_SIZING=false`. Note: the executor's
+  `max_picks_per_window=2` (live) is what makes a 2nd pick — hence any doubling — possible.
+
+## ✅ Shipped a PRIOR session — 1st-pick ask floor (live config, owner-approved)
 **`.replit` only — no code change** (the `ENTRY_ASK_FLOOR` gate already exists in `risk.py` and is tested,
 `test_executor.py:414-441`). Set `Q15_EXEC_MIN_ENTRY_ASK = "55"` so EVERY pick (incl. the 1st/main) must
 have ask≥55c. Previously only the 2nd pick was floored (`SECOND_PICK_MIN_ASK=60`); the main pick had no
@@ -23,7 +39,7 @@ the loss is concentrated at **ask≤51 (−356c)**; ask≥52 is a positive plate
 noise). 55 sits at the low edge of that plateau. Protects the **$100 10M stake first** — 10M at ask<58
 was −7c/pick, the one zone 10M loses. Reversible (set 0). Owner set 56 (PR #54), then lowered to 55.
 
-## ✅ Shipped THIS session — defensive-exit FIX (live-money path) + sooner exits
+## ✅ Shipped a PRIOR session — defensive-exit FIX (live-money path) + sooner exits
 **Suite 1349 / 13 skipped** (+6 tests). Branch `claude/gifted-thompson-77cd01`.
 - **Root cause (confirmed from real data, `learning-snapshots:dbs/q15_executor_orders_v1.sqlite3`):** the
   exit-WARNING layer works (51 warnings, 84% correct, net +624c), but **every defensive SELL failed**.
@@ -48,6 +64,25 @@ was −7c/pick, the one zone 10M loses. Reversible (set 0). Owner set 56 (PR #54
   positions it actually holds are exitable — separate from the (broader) warning layer.
 - Tests: reduce_only⇒IoC vs buy⇒GTC; exit prices under fair value + clamps to 1c + offset=0 keeps fair;
   config defaults (offset=3, watch=480). +6 tests, full suite green.
+
+## ✅ Shipped THIS session — V2 conviction rules (owner-enabled, DEFAULT ON)
+**Suite 1396 / 4 skipped** (+11 tests). Two owner-chosen rules on the V2 (`ultoim_v2`) NO-only entry
+system, keyed on how many assets co-trigger a NO in the SAME 15-min window this cycle (count of
+would-fire entries — known at bet time, **no look-ahead**, top_n-independent). Derived from a
+hand-audit of the settled alert ledger (3 days, thin) cross-checked by two workflows:
+- **Rule A — `Q15_ULTOIM_V2_SKIP_12M_UNLESS_MIN` (default ON, MIN=3)** `ultoim_v2/runner.py`: skip 12M
+  delivery unless >=3 co-trigger; below that the picks downgrade to research (graded, never
+  alerted/fired/executed, reason `SKIP_12M_UNDER_MIN`). Purely defensive — 12M loses money as a whole
+  (62.5%, −85c) and the lone/pair 12M alerts are the losers. This one genuinely cuts losses.
+- **Rule B — `Q15_ULTOIM_V2_DOUBLE_10M_ON_MIN` (default ON, MIN=3, stake 2)** `ultoim_v2/runner.py`: 2x
+  the 10M stake when >=3 co-trigger (settled cohort ~86% vs ~74%). **LEVERAGE on the COUNT, not
+  correctness — it doubles a losing window too** (a market-wide YES sweep; e.g. yesterday a −193c 10M
+  window would become −386c). New `stake_multiplier` column (default 1, migrated); `hypothetical_pnl_cents`
+  is now scored at the size taken so the ledger tracks staked P&L (legacy rows stake 1 = unchanged). The
+  alert shows `🔥 2× CONVICTION` so the owner (manual sizer) doubles; executor payload carries the size hint.
+- Honesty caveats carried in code + `.env.example`: evidence is ~3 days/thin; in-sample backtest showed
+  +1242c→+2286c (+84%) but ~28% of that (12M) rests on 2 windows. Both reversible via their `Q15_*` vars.
+  In-sample on the bad-window check, Rule A cut losses; Rule B amplified them — owner accepted the leverage.
 
 ## ✅ Shipped THIS session — YES-prediction edge audit + 3 gated knobs
 **Suite 1385 / 4 skipped** (+10 tests). Merged to `main` via PR #52 (branch
