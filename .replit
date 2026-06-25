@@ -3,7 +3,7 @@ modules = ["python-3.11", "postgresql-16"]
 expertMode = true
 
 [nix]
-packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
+packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc", "executor"]
 channel = "stable-25_05"
 
 [[ports]]
