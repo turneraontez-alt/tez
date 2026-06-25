@@ -136,6 +136,15 @@ class ExecutorConfig:
     # Limit orders by default (you set the price). Limit at the signalled ask + this offset
     # (0 = pay the ask; negative = try to fill cheaper, may not fill).
     limit_offset_cents: int = field(default_factory=lambda: _int("Q15_EXEC_LIMIT_OFFSET_CENTS", 0))
+    # ORDER RECORDING (default ON when the executor runs). Persists every placement + the RAW
+    # broker response + a best-effort fill classification to its own sqlite, so "how many orders
+    # missed (placed-but-unfilled)" is answerable from our side and the optimistic in-memory fill
+    # is observable. Read/append only; a store failure never disrupts an order. Set
+    # Q15_EXEC_RECORD_ORDERS=false to disable.
+    record_orders: bool = field(default_factory=lambda: _bool("Q15_EXEC_RECORD_ORDERS", True))
+    orders_db_path: str = field(
+        default_factory=lambda: os.environ.get("Q15_EXEC_ORDERS_DB")
+        or "data/q15_executor_orders_v1.sqlite3")
 
     @classmethod
     def from_env(cls) -> "ExecutorConfig":

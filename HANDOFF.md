@@ -13,8 +13,22 @@ Tests: `python3 -m pytest tests/ -q` → **1304 passed / 13 skipped here** (8 ap
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
-## ✅ Shipped THIS session — V2 audit fixes (7 stress-tested recs, all gated/default-OFF)
-**Suite 1317 / 13 skipped** (+13 tests). A multi-agent audit + adversarial stress-test of V2's
+## ✅ Shipped THIS session — V2 audit fixes + live-execution hardening
+**Suite 1321 / 13 skipped** (+17 tests). Plus, on top of the 7 audit recs below: executor latency
+telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
+config flips — the **10M=$100 profit lever** and a **1c limit offset** (Q15_EXEC_LIMIT_OFFSET_CENTS=1,
+fill reliability) — both set in `.replit [userenv.shared]`.
+- **Fill reconciliation `executor/store.py` (new) + `executor/{config,executor}.py` + `scripts/exec_preflight.py`**:
+  every placement is recorded with the RAW Kalshi response + a defensive fill classification
+  (FILLED/PARTIAL/RESTED/CANCELED/FAILED/DRY_RUN/UNKNOWN) to `data/q15_executor_orders_v1.sqlite3`
+  (gated `Q15_EXEC_RECORD_ORDERS`, default ON; best-effort, never blocks an order). `on_fire`/`on_exit`
+  log+return `fill_status`. `exec_preflight.py --fills` answers "how many missed" from the LIVE account
+  (final fills) AND the local store (immediate). NOTE: `apply_fill` bookkeeping is still optimistic —
+  classifier validated against real responses FIRST, then wire the bookkeeping fix (a follow-up).
+- **1c limit offset (LIVE, owner-approved)**: `Q15_EXEC_LIMIT_OFFSET_CENTS=1` -> limit at ask+1c
+  (clamped to the 50-85c band) so a fast tick-up doesn't leave the NO buy resting. <=1c/contract cost.
+## ✅ V2 audit fixes (7 stress-tested recs, all gated/default-OFF)
+A multi-agent audit + adversarial stress-test of V2's
 live-money path (189 fired NO, 74.6%, +977c) surfaced 2 confirmed live-money defects + 4 backstops,
 and a follow-up probe of the recent session found 1 profit lever (interval sizing). All survivors
 shipped (rejected: BTC gate / evidence floor / ceiling 78→85 / flip-veto / recal / time-of-day block /

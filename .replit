@@ -105,3 +105,7 @@ Q15_EXEC_ENABLED = "true"
 # 10M win rate vs the ~63.5% breakeven; a single losing 10M NO at $100 = the -$100 daily stop in one
 # trade. Remove this line to revert to flat $75 (byte-identical).
 Q15_EXEC_STAKE_BY_INTERVAL = "10M:10000"
+# FILL RELIABILITY: limit at the ask + 1c (still clamped to the 50-85c band) so a fast tick-up
+# doesn't leave the order resting unfilled. Costs at most 1c/contract; converts "missed/rested"
+# into "filled" on a marketable NO buy. Owner-approved. 0 = pay exactly the ask. Set to 0 to revert.
+Q15_EXEC_LIMIT_OFFSET_CENTS = "1"
