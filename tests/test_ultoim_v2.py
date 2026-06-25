@@ -190,8 +190,8 @@ def test_owner_default_config_is_aggressive():
     assert cfg.deliver_top_n == 2          # top-2 by reward:risk per mark (matches 2-picks/window)
     assert cfg.deliver_by_reward_risk is True
     # Owner-enabled net levers, LIVE by default (each reversible via its Q15_* env var):
-    assert cfg.cap_7m_ask is True          # the delivered-data-backed net win
-    assert cfg.cap_7m_ask_max == 72
+    assert cfg.cap_7m_ask is False         # flipped OFF: inverted on the fuller 189-sample
+    assert cfg.cap_7m_ask_max == 72        # threshold retained for when the cap is re-enabled
     assert cfg.enable_11m is True          # captured...
     assert cfg.enable_12m is True
     # ...but BOTH record-only now: 12M reverted from delivery after the ~42h replay showed the
@@ -621,9 +621,18 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
 # --------------------------------------------------------------------------- #
 # Net-improvement levers: 7M ask cap + 11M/12M measure-first capture.
 # --------------------------------------------------------------------------- #
+def test_cap_7m_ask_defaults_off():
+    """Regression: the 7M ask cap defaults OFF after the 189-sample reversal. The cap was
+    inverted (it vetoed the +98c/40 winners at ask>72 and kept the -174c/27 losers at
+    ask<=72), so re-enabling it should be a deliberate, env-driven choice."""
+    assert UltoimV2Config().cap_7m_ask is False
+    # The threshold is retained so flipping the env back on restores the documented behaviour.
+    assert UltoimV2Config(cap_7m_ask=True).cap_7m_ask_max == 72
+
+
 def test_cap_7m_ask_off_admits_expensive_7m_no():
-    """Cap OFF -> byte-identical: a 7M NO at ask 80 is still admitted via expensive_no."""
-    cfg = UltoimV2Config(enabled=True, cap_7m_ask=False, expensive_no_ask_hi=85.0)   # cap off (live=ON); pin band 85
+    """Cap OFF (now the default) -> byte-identical: a 7M NO at ask 80 is still admitted via expensive_no."""
+    cfg = UltoimV2Config(enabled=True, cap_7m_ask=False, expensive_no_ask_hi=85.0)   # cap off (now default); pin band 85
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
                                  entry_ask_cents=80.0, total_cost_cents=0.0),
                       cfg, interval="7M")
@@ -944,6 +953,65 @@ def test_runner_research_yes_can_be_disabled(tmp_path):
     r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
     tickers = {row["ticker"] for row in r.ledger.recent_rows("ultoim-v2", limit=10)}
     assert tickers == {"T-BTC"}                            # no YES research row written
+
+
+def test_delivery_selector_is_reward_risk_not_max_edge(tmp_path):
+    """Rec #5 guard: the delivery selector ranks by CHEAPEST ask (reward:risk), with net_edge a
+    tie-break only — NOT by max net_edge. net_edge is INVERSE for NO (the cheap favourite wins,
+    the expensive longshot loses), so this locks the selector against a regression to edge-
+    maximisation that would silently start picking the losers. The cheap-ask candidate has the
+    LOWER edge here, yet must be the one delivered."""
+    # cheap ask 55 / sel .58 -> recomputed edge 3 ; expensive ask 70 / sel .85 -> edge 15. Both fire.
+    a = {"BTC": _analysis(side="NO", sel=0.58, ask=55.0, mkt_yes=0.42, total_cost=0.0),
+         "ETH": _analysis(side="NO", sel=0.85, ask=70.0, mkt_yes=0.15, total_cost=0.0)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0),
+         "ETH": _canon("T-ETH", secs=600.0, close=9000.0)}
+    # reward:risk (the production default): the cheaper ask (T-BTC) is delivered despite lower edge.
+    r = _runner(tmp_path, telegram=_StubTelegram(), deliver_top_n=1, deliver_by_reward_risk=True)
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    fired = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10) if row["fired"] == 1]
+    assert len(fired) == 1 and fired[0]["ticker"] == "T-BTC"
+    # legacy max-edge ordering would instead pick the expensive longshot (T-ETH) — the regression
+    # this guard exists to catch.
+    r2 = _runner(tmp_path / "b", telegram=_StubTelegram(), deliver_top_n=1, deliver_by_reward_risk=False)
+    r2._observe_sync(candidates=_extract(r2, a, c, now=1000.0), now=1000.0)
+    fired2 = [row for row in r2.ledger.recent_rows("ultoim-v2", limit=10) if row["fired"] == 1]
+    assert len(fired2) == 1 and fired2[0]["ticker"] == "T-ETH"
+
+
+def test_no_only_locked_at_gate_and_executor():
+    """Rec #6: NO-only stays LOCKED at BOTH layers (v2 gate + executor). Foregone YES at the
+    deliverable 50-85c band is net-negative (55.8% acc, -983c, n=120), so enabling YES would
+    import a losing book onto the live executor. Confirmatory guard — flips here are deliberate."""
+    from q15_upgrade.executor.config import ExecutorConfig
+    assert UltoimV2Config().no_only is True
+    assert ExecutorConfig().no_only is True
+
+
+def test_stale_fail_closed_default_off_fires_on_unknown_staleness(tmp_path):
+    """Rec #4: by default (fail-OPEN) a would-fire with UNKNOWN staleness (None) still fires —
+    byte-identical to before."""
+    r = _runner(tmp_path, telegram=_StubTelegram())   # stale_fail_closed defaults False
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35, stale=None)}  # no staleness
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert r.scoreboard()["all_observations"]["fired"] == 1
+
+
+def test_stale_fail_closed_on_abstains_on_unknown_staleness(tmp_path):
+    """Rec #4: with the gated fail-CLOSED flag on, an UNKNOWN staleness is treated as STALE and
+    the would-fire abstains — the live path never fires blind to feed freshness."""
+    r = _runner(tmp_path, telegram=_StubTelegram(), stale_fail_closed=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35, stale=None)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    row = r.ledger.recent_rows("ultoim-v2", limit=5)[0]
+    assert row["fired"] == 0 and "STALE_FEED" in (row["reason_codes"] or "")
+    # a KNOWN-fresh staleness still fires even with the flag on.
+    r2 = _runner(tmp_path / "b", telegram=_StubTelegram(), stale_fail_closed=True)
+    a2 = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35, stale=1.0)}
+    r2._observe_sync(candidates=_extract(r2, a2, c, now=1000.0), now=1000.0)
+    assert r2.scoreboard()["all_observations"]["fired"] == 1
 
 
 def test_runner_stale_boundary_inclusive(tmp_path):

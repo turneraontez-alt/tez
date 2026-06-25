@@ -68,9 +68,16 @@ class Executor:
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
         self._refresh_daily_pnl()   # pull live realized P&L so the stop-loss can gate this entry
+        # Band-check and limit on the SAME price the v2 gate admitted on (entry_ask_cents). The
+        # gate keys its [ask_lo, ask_hi] admission on entry_ask_cents; if the executor instead
+        # banded on best_entry_cents (the optimistic "or lower" display price, ~1.7c below the
+        # ask and sometimes across a band boundary) the two layers could disagree — the gate
+        # admits while the executor refuses on PRICE_BAND, or vice versa (42/189 fired rows
+        # differ). entry_ask_cents is also the marketable price that actually fills a buy.
+        # An explicit entry_price_cents override still wins; best_entry_cents is the last resort.
         price = pick.get("entry_price_cents")
         if price is None:
-            price = pick.get("best_entry_cents") or pick.get("entry_ask_cents")
+            price = pick.get("entry_ask_cents") or pick.get("best_entry_cents")
         try:
             p = Pick(
                 ticker=str(pick.get("ticker") or ""),
@@ -78,6 +85,7 @@ class Executor:
                 side=str(pick.get("predicted_side") or pick.get("side") or "NO"),
                 price_cents=int(round(float(price))) if price is not None else -1,
                 window_key=int(pick.get("window_key")),
+                interval=str(pick.get("interval") or ""),
             )
         except (TypeError, ValueError):
             return {"placed": False, "reason": "BAD_PICK"}

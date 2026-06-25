@@ -7,6 +7,7 @@ guard is deterministically testable. All money is INTEGER CENTS (no float drift)
 Guards (a refusal short-circuits with a single reason code):
   KILL            — kill switch on
   WRONG_SIDE      — not the NO side (no_only)
+  INTERVAL_BLOCKED— interval not in the (optional) allowlist
   PRICE_BAND      — price outside [min,max]
   DAILY_STOP      — day realized P&L past the loss limit (circuit breaker)
   MAX_OPEN        — already at max open positions
@@ -29,6 +30,7 @@ class Pick:
     side: str            # "NO" / "YES"
     price_cents: int     # the signalled ask (what we'd pay per contract)
     window_key: int
+    interval: str = ""   # "10M" / "7M" / ... — informational; gates the allowlist, NOT the coid
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,11 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
         return Decision(False, "KILL")
     if cfg.no_only and side != "NO":
         return Decision(False, "WRONG_SIDE")
+    # Interval allowlist (default empty = allow-all -> this guard is inert). When set, refuse a
+    # fire whose interval is not listed — a backstop against a structurally -EV 15M/12M order.
+    allowed = getattr(cfg, "allowed_intervals", frozenset())
+    if allowed and (pick.interval or "").upper() not in allowed:
+        return Decision(False, "INTERVAL_BLOCKED")
     price = int(pick.price_cents)
     if not (cfg.min_price_cents <= price <= cfg.max_price_cents):
         return Decision(False, "PRICE_BAND")
@@ -91,12 +98,20 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if bankroll <= 0:
         return Decision(False, "BANKROLL")
 
-    # Per-pick stake. FLAT mode (flat_stake_cents > 0) stakes a fixed dollar amount per pick,
-    # overriding the % sizing; its per-window budget is flat * max_picks. Otherwise size as a
-    # % of bankroll. Either way the window total is then CLAMPED to the per-window budget (the
-    # correlation guard — picks in a window co-settle).
+    # Per-pick stake. An INTERVAL override (stake_by_interval) wins first: that exact amount is the
+    # stake AND the per-pick ceiling for this interval (it supersedes both flat and the hard cap),
+    # so a 10M pick can stake $100 while the global cap stays $75. Else FLAT mode stakes a fixed
+    # amount per pick; else size as a % of bankroll. The window total is then CLAMPED to the
+    # per-window budget (the correlation guard — picks in a window co-settle).
     flat = int(getattr(cfg, "flat_stake_cents", 0) or 0)
-    if flat > 0:
+    by_interval = getattr(cfg, "stake_by_interval", None) or {}
+    interval_stake = by_interval.get((pick.interval or "").upper())
+    per_pick_cap = int(getattr(cfg, "max_stake_per_pick_cents", 0) or 0)
+    if interval_stake and int(interval_stake) > 0:
+        stake = int(interval_stake)
+        window_cap = int(interval_stake) * max(1, cfg.max_picks_per_window)
+        per_pick_cap = int(interval_stake)   # the override is the ceiling for this interval
+    elif flat > 0:
         stake = flat
         window_cap = flat * max(1, cfg.max_picks_per_window)
     else:
@@ -108,8 +123,8 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
         return Decision(False, "WINDOW_FULL")
     stake = min(stake, remaining)
     # HARD per-pick dollar ceiling — the absolute cap on one trade's risk.
-    if cfg.max_stake_per_pick_cents > 0:
-        stake = min(stake, cfg.max_stake_per_pick_cents)
+    if per_pick_cap > 0:
+        stake = min(stake, per_pick_cap)
     # Never stake more than the bankroll actually on hand.
     stake = min(stake, bankroll)
 

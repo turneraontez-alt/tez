@@ -105,10 +105,65 @@ def test_executor_stop_loss_fires_from_live_balance():
     assert ex.client.orders == []                         # nothing was placed after the stop
 
 
+def test_on_fire_bands_on_entry_ask_not_best_entry():
+    """Rec #2 alignment: the executor must band/fill on entry_ask_cents (the field the v2 gate
+    admitted on), not best_entry_cents. Here best_entry_cents=48 is BELOW the executor's 50c
+    floor while the gate-admitted entry_ask_cents=55 is inside the band — keying on the ask makes
+    the gate-admitted set and the executor-accepted set agree (before the fix this was refused)."""
+    class _RecClient:
+        def __init__(self): self.orders = []
+        def get_balance_cents(self): return None
+        def place_order(self, **kw):
+            self.orders.append(kw); return {"ok": True, "dry_run": True}
+    ex = Executor(_cfg(enabled=True, dry_run=True, bankroll_cents=100_000,
+                       flat_stake_cents=7500, min_price_cents=50, max_price_cents=85),
+                  client=_RecClient())
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "best_entry_cents": 48, "entry_ask_cents": 55, "window_key": 1})
+    assert r["placed"] is True
+    assert r["limit_price_cents"] == 55                  # banded/limited on the ask, not 48
+    assert ex.client.orders and ex.client.orders[0]["price_cents"] == 55
+    # entry_price_cents (explicit override) still wins when provided.
+    ex2 = Executor(_cfg(enabled=True, dry_run=True, bankroll_cents=100_000,
+                        flat_stake_cents=7500, min_price_cents=50, max_price_cents=85),
+                   client=_RecClient())
+    r2 = ex2.on_fire({"ticker": "T-ETH", "asset": "ETH", "predicted_side": "NO",
+                      "entry_price_cents": 60, "best_entry_cents": 48, "entry_ask_cents": 55,
+                      "window_key": 2})
+    assert r2["placed"] is True and r2["limit_price_cents"] == 60
+
+
 def test_decide_max_open_blocks():
     cfg = _cfg(max_open_positions=2)
     st = PortfolioState(bankroll_cents=100_000, open_count=2)
     assert decide(_pick(), st, cfg).reason == "MAX_OPEN"
+
+
+def test_interval_allowlist_default_allows_all():
+    """Rec #3: default empty allowlist is byte-identical — any interval (or none) places."""
+    cfg = _cfg()
+    assert cfg.allowed_intervals == frozenset()
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="15M"), st, cfg).place is True
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval=""), st, cfg).place is True
+
+
+def test_interval_allowlist_blocks_non_listed_interval():
+    """Rec #3: with {10M,7M} set, a 10M fire places but a 15M/12M fire is refused — a backstop
+    so a v2 gating regression cannot leak a structurally -EV early-interval order to real money."""
+    cfg = _cfg(allowed_intervals=frozenset({"10M", "7M"}))
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg).place is True
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="7M"), st, cfg).place is True
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="15M"), st, cfg).reason == "INTERVAL_BLOCKED"
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="12M"), st, cfg).reason == "INTERVAL_BLOCKED"
+    # an unknown/missing interval is also refused when an allowlist is in force (fail-closed).
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval=""), st, cfg).reason == "INTERVAL_BLOCKED"
+
+
+def test_interval_allowlist_parses_env(monkeypatch):
+    monkeypatch.setenv("Q15_EXEC_ALLOWED_INTERVALS", "10m, 7M ")
+    assert ExecutorConfig().allowed_intervals == frozenset({"10M", "7M"})
 
 
 def test_decide_dup_ticker_blocks():
@@ -184,6 +239,43 @@ def test_flat_stake_overrides_pct_sizing():
     assert d.place is True
     assert d.stake_cents == (7500 // 65) * 65     # $75 worth of whole contracts
     assert d.count == 7500 // 65 == 115
+
+
+def test_stake_by_interval_default_empty_is_flat():
+    """Rec #7: default empty stake_by_interval -> every interval stakes flat $75 (byte-identical)."""
+    cfg = ExecutorConfig()
+    assert cfg.stake_by_interval == {}
+    cfg2 = _cfg(flat_stake_cents=7500)
+    st = PortfolioState(bankroll_cents=100_000)
+    d = decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg2)
+    assert d.count == 7500 // 65 == 115            # flat $75 regardless of interval
+
+
+def test_stake_by_interval_upsizes_10m_only():
+    """Rec #7: 10M=$100 override stakes ~$100 on 10M (above the $75 flat AND the $75 per-pick cap)
+    while 7M stays at flat $75. Concentrates capital on the proven +EV 10M engine."""
+    cfg = _cfg(flat_stake_cents=7500, max_stake_per_pick_cents=7500, max_picks_per_window=1,
+               stake_by_interval={"10M": 10_000})
+    st = PortfolioState(bankroll_cents=100_000)
+    d10 = decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg)
+    assert d10.place is True and d10.stake_cents == (10_000 // 65) * 65   # ~$100 of whole contracts
+    assert d10.count == 10_000 // 65 == 153                              # above the $75 cap
+    d7 = decide(Pick("T-ETH", "ETH", "NO", 65, 2, interval="7M"), st, cfg)
+    assert d7.count == 7500 // 65 == 115                                  # 7M unchanged at flat $75
+
+
+def test_stake_by_interval_still_gated_by_daily_stop():
+    """Rec #7: a bigger 10M stake cannot bypass the $100 circuit breaker — the daily stop is
+    checked BEFORE sizing, so a -$100 day refuses the $100 10M entry too."""
+    cfg = _cfg(flat_stake_cents=7500, daily_loss_limit_cents=10_000, stake_by_interval={"10M": 10_000})
+    st = PortfolioState(bankroll_cents=34_000, day_start_bankroll_cents=34_000,
+                        day_realized_pnl_cents=-10_000)        # exactly -$100
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg).reason == "DAILY_STOP"
+
+
+def test_stake_by_interval_parses_env(monkeypatch):
+    monkeypatch.setenv("Q15_EXEC_STAKE_BY_INTERVAL", "10m:10000, 7M:5000 ,bad,x:y")
+    assert ExecutorConfig().stake_by_interval == {"10M": 10_000, "7M": 5_000}
 
 
 def test_flat_stake_one_pick_per_window_blocks_second():

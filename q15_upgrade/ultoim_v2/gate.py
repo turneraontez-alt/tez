@@ -182,11 +182,12 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
         and ask <= exp_ask_hi
     )
 
-    # 7M ASK CAP (DEFAULT OFF). At the 7M mark only, a NO whose ask exceeds cap_7m_ask_max
-    # is vetoed: the 73-85c 7M slice is live net-negative on the delivered book. This
-    # OVERRIDES the expensive-NO admit at 7M and suppresses BOTH delivery and research (it
-    # is a delivery-quality cap, not a research mark — see research_fired below). 10M and
-    # the YES side are never affected. With the flag off, behaviour is byte-identical.
+    # 7M ASK CAP (DEFAULT OFF — see config.py). At the 7M mark only, a NO whose ask exceeds
+    # cap_7m_ask_max is vetoed. NON-STATIONARY: an earlier small sample showed the >72c 7M slice
+    # net-negative, but the fuller 189-fired sample reversed it (>72c is +98c/40, the cap vetoed
+    # winners), so the default was flipped to OFF. When ON it OVERRIDES the expensive-NO admit at
+    # 7M and suppresses BOTH delivery and research (a delivery-quality cap, not a research mark —
+    # see research_fired below). 10M and the YES side are never affected. Off => byte-identical.
     ask_cap_7m = bool(
         getattr(cfg, "cap_7m_ask", False)
         and side == "NO"

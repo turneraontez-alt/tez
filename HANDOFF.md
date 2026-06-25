@@ -13,7 +13,40 @@ Tests: `python3 -m pytest tests/ -q` → **1304 passed / 13 skipped here** (8 ap
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
-## ✅ Shipped THIS session — executor ABSOLUTE $100 stop loss (owner-chosen)
+## ✅ Shipped THIS session — V2 audit fixes (7 stress-tested recs, all gated/default-OFF)
+**Suite 1317 / 13 skipped** (+13 tests). A multi-agent audit + adversarial stress-test of V2's
+live-money path (189 fired NO, 74.6%, +977c) surfaced 2 confirmed live-money defects + 4 backstops,
+and a follow-up probe of the recent session found 1 profit lever (interval sizing). All survivors
+shipped (rejected: BTC gate / evidence floor / ceiling 78→85 / flip-veto / recal / time-of-day block /
+60c ask-floor / first-fire selector / exit-on-every-warning — HURTS, thin, or one-day overfit).
+Deploy-pending. Each reversible via its `Q15_*` env var.
+- **Rec #7 (PROFIT lever) `executor/{config,risk}.py`**: interval-conditioned stake
+  (`Q15_EXEC_STAKE_BY_INTERVAL`, e.g. `10M:10000` -> $100 on 10M; default empty = flat $75 for all,
+  byte-identical). The override is the stake AND the per-pick ceiling for that interval (supersedes the
+  $75 cap), still gated by the $100 daily stop (checked before sizing). Concentrates capital on the only
+  +EV-over-breakeven interval (10M 80.6%/+1171c n=103). Probe verdict: +16.2% session, +126c full-sample
+  (full lift EXCEEDS session = anti-overfit), +$0.62 on a 23-window out-of-sample holdout. ⚠️ a single
+  losing 10M NO at $100 = the -$100 daily stop in one trade (deliberate, gated). 7M downsize NOT shipped
+  (net-negative in isolation). Owner chose "10M=$100 only".
+- **Rec #1 `ultoim_v2/config.py` + `gate.py`**: `cap_7m_ask` default **True→False**. The 7M ask cap was
+  INVERTED on the fuller 189-sample (vetoed ask>72 winners 82.5%/+98c n=40, kept ask<=72 losers
+  55.6%/-174c n=27); flipped OFF + reconciled the stale gate.py "DEFAULT OFF" comment. Re-enable via
+  `Q15_ULTOIM_V2_CAP_7M_ASK=true`. Thin signal (non-stationary) — documented in the comment.
+- **Rec #2 `executor/executor.py`**: `on_fire` now bands/limits on `entry_ask_cents` (the gate's admission
+  field + the marketable fill price), not `best_entry_cents` — they differed in 42/189 rows so the gate-
+  admitted and executor-accepted sets could diverge (gate admits, executor refuses PRICE_BAND). `entry_price_cents` override still wins.
+- **Rec #3 `executor/{config,risk,executor}.py` + `ultoim_v2/runner.py`**: optional executor interval allowlist
+  (`Q15_EXEC_ALLOWED_INTERVALS`, default empty = ALLOW-ALL/byte-identical). When set (e.g. `10M,7M`) refuses a
+  non-listed interval → backstop so a v2 gating regression can't leak a -EV 15M/12M order to real money.
+  `interval` plumbed runner→Pick→decide; kept OUT of `client_order_id` (idempotency unaffected).
+- **Rec #4 `ultoim_v2/{config,runner}.py`**: gated fail-CLOSED stale option (`Q15_ULTOIM_V2_STALE_FAIL_CLOSED`,
+  default OFF). When ON, an UNKNOWN spot-staleness (None) abstains (STALE_FEED) instead of fail-open firing.
+  ⚠️ depth_contracts/quote_age population is an UPSTREAM champion-feed follow-up (still 100% NULL — not wired here).
+- **Rec #5 (test-only)**: guard test locking the delivery selector to reward:risk (cheapest ask), net_edge
+  tie-break only — net_edge is INVERSE for NO, so this catches a future edge-max regression that would pick losers.
+- **Rec #6 (test-only)**: lock test asserting `no_only=True` at BOTH gate + executor (foregone YES is -983c/n=120).
+
+## ✅ Shipped (prior session) — executor ABSOLUTE $100 stop loss (owner-chosen)
 **Suite 1304 / 13 skipped** (+3 tests). Owner wanted a hard $-stop, not the %-based one.
 - **`executor/config.py`**: new `daily_loss_limit_cents` (env `Q15_EXEC_DAILY_LOSS_LIMIT_CENTS`, default
   **10000=$100**). When >0 it GOVERNS the daily stop (the 20% `daily_loss_limit_pct` is ignored). `safety_summary`
