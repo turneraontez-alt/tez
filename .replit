@@ -97,3 +97,11 @@ Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
 Q15_EXEC_DRY_RUN = "false"
 Q15_EXEC_ENABLED = "true"
+# PROFIT LEVER (stress-tested): concentrate stake on the proven +EV 10M engine. 10M picks stake
+# $100 (10000c) instead of the flat $75; 7M/12M/15M stay flat $75. The override supersedes the
+# per-pick cap for 10M ONLY and is still gated by the $100 daily stop (checked before sizing).
+# Basis: 10M 80.6%/+1171c n=103 (the only interval with a positive margin over breakeven); probe
+# +16.2% session / +126c full-sample / +$0.62 on a 23-window out-of-sample holdout. Watch the live
+# 10M win rate vs the ~63.5% breakeven; a single losing 10M NO at $100 = the -$100 daily stop in one
+# trade. Remove this line to revert to flat $75 (byte-identical).
+Q15_EXEC_STAKE_BY_INTERVAL = "10M:10000"
