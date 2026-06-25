@@ -82,6 +82,14 @@ class ExecutorConfig:
     bankroll_cents: int = field(default_factory=lambda: _int("Q15_EXEC_BANKROLL_CENTS", 0))
     per_pick_pct: float = field(default_factory=lambda: _float("Q15_EXEC_PER_PICK_PCT", 0.04))
     max_picks_per_window: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PICKS_PER_WINDOW", 1))
+    # CONDITIONAL gate on the 2nd-or-later pick in a window: it must have ask (price) >= this many
+    # cents, else it is refused (SECOND_PICK_ASK_FLOOR). The FIRST pick of a window is never gated.
+    # DEFAULT 0 = OFF / no condition (the gate is `price >= 0`, always true -> byte-identical). Pairs
+    # with max_picks_per_window>1: when a 2nd pick is allowed at all, this keeps it in the proven
+    # expensive-NO band. On the v2 ledger the 2nd-cheapest-ask pick is +EV overall (78.7%, +8.9c/bet,
+    # n=47) but its edge lives entirely at ask>=60 (82.9%, +10.7c/bet, n=41); the sub-60 cheap-NO band
+    # is the loss zone (50%, -3.5c/bet, n=6). 60 is the clean cut. Set Q15_EXEC_SECOND_PICK_MIN_ASK.
+    second_pick_min_ask: int = field(default_factory=lambda: _int("Q15_EXEC_SECOND_PICK_MIN_ASK", 0))
     # Hard ceiling on TOTAL stake committed to one (settlement) window, as a fraction of
     # bankroll — the correlation guard (picks in a window co-settle ~76%). Never exceeded
     # even if per_pick_pct * max_picks would.

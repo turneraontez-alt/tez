@@ -13,6 +13,7 @@ Guards (a refusal short-circuits with a single reason code):
   MAX_OPEN        — already at max open positions
   DUP_TICKER      — already hold / already traded this ticker+window
   WINDOW_FULL     — already placed max picks for this window
+  SECOND_PICK_ASK_FLOOR — a 2nd-or-later pick in a window below the (optional) ask floor
   BANKROLL        — no bankroll to size against
   SIZE_TOO_SMALL  — computed count < 1 contract after the per-window cap
 """
@@ -93,6 +94,12 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
         return Decision(False, "DUP_TICKER")
     if state.window_count.get(wk, 0) >= cfg.max_picks_per_window:
         return Decision(False, "WINDOW_FULL")
+    # CONDITIONAL 2nd-pick ask floor: the first pick of a window is unchanged; any 2nd-or-later pick
+    # must clear the floor (the proven expensive-NO band). Default floor 0 => `price >= 0` always
+    # true => byte-identical. Never loosens the WINDOW_FULL cap above (checked first).
+    second_floor = int(getattr(cfg, "second_pick_min_ask", 0) or 0)
+    if state.window_count.get(wk, 0) >= 1 and price < second_floor:
+        return Decision(False, "SECOND_PICK_ASK_FLOOR")
 
     bankroll = int(state.bankroll_cents)
     if bankroll <= 0:

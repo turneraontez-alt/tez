@@ -356,6 +356,40 @@ def test_decide_window_full_blocks():
     assert decide(_pick(wk=1), st, cfg).reason == "WINDOW_FULL"
 
 
+def test_second_pick_floor_default_off_is_byte_identical():
+    # second_pick_min_ask defaults to 0 -> the gate `price >= 0` is always true, so a 2nd pick
+    # places regardless of its ask (when max_picks_per_window>=2). One pick already in window 1.
+    cfg = _cfg(max_picks_per_window=2)  # second_pick_min_ask unset -> 0
+    assert cfg.second_pick_min_ask == 0
+    st = PortfolioState(bankroll_cents=100_000, window_count={1: 1},
+                        window_committed_cents={1: 4000})
+    d = decide(_pick(wk=1, price=50), st, cfg)  # cheap 2nd pick still allowed
+    assert d.place is True
+
+
+def test_second_pick_floor_blocks_cheap_second_pick():
+    # With the floor at 60c: a 2nd pick below 60 is refused SECOND_PICK_ASK_FLOOR, but the FIRST
+    # pick of a window at that same low ask still places (the floor only gates picks beyond the 1st).
+    cfg = _cfg(max_picks_per_window=2, second_pick_min_ask=60)
+    # first pick of an empty window at ask 55 -> places (not gated)
+    st_first = PortfolioState(bankroll_cents=100_000)
+    assert decide(_pick(wk=1, price=55), st_first, cfg).place is True
+    # second pick of the same window at ask 55 -> refused by the floor
+    st_second = PortfolioState(bankroll_cents=100_000, window_count={1: 1},
+                               window_committed_cents={1: 4000})
+    assert decide(_pick(wk=1, price=55), st_second, cfg).reason == "SECOND_PICK_ASK_FLOOR"
+    # second pick at/above the floor -> places
+    assert decide(_pick(wk=1, price=60), st_second, cfg).place is True
+
+
+def test_second_pick_floor_does_not_loosen_window_cap():
+    # max_picks_per_window=1 still blocks the 2nd with WINDOW_FULL even if it clears the ask floor —
+    # the new gate is checked AFTER WINDOW_FULL and never overrides the hard cap.
+    cfg = _cfg(max_picks_per_window=1, second_pick_min_ask=60)
+    st = PortfolioState(bankroll_cents=100_000, window_count={1: 1})
+    assert decide(_pick(wk=1, price=70), st, cfg).reason == "WINDOW_FULL"
+
+
 def test_decide_window_cap_clamps_stake():
     # per_pick 4% = 4000c, but only 1000c of the 8000c window cap remains -> clamp.
     cfg = _cfg()

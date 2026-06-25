@@ -113,6 +113,14 @@ Q15_EXEC_STAKE_BY_INTERVAL = "10M:10000"
 # doesn't leave the order resting unfilled. Costs at most 1c/contract; converts "missed/rested"
 # into "filled" on a marketable NO buy. Owner-approved. 0 = pay exactly the ask. Set to 0 to revert.
 Q15_EXEC_LIMIT_OFFSET_CENTS = "1"
+# 2 PICKS PER WINDOW, CONDITIONAL (owner-approved). Take up to 2 picks per settlement window, but the
+# 2nd pick must have ask>=60c (the proven expensive-NO band; sub-60 is the cheap-NO loss zone). Data:
+# 2nd pick +8.9c/bet overall, +10.7c/bet at ask>=60 (n=41). Cap is 2 (3rd pick is -EV). NOTE: this
+# ~doubles per-window variance (same-window picks co-settle ~79-89%; worst all-lost 2-pick 10M window
+# = -$200); the per-window budget self-caps at ~$200 and the daily stop is OFF (owner's choice). Revert
+# by setting MAX_PICKS back to 1.
+Q15_EXEC_MAX_PICKS_PER_WINDOW = "2"
+Q15_EXEC_SECOND_PICK_MIN_ASK = "60"
 # DAILY STOP OFF (owner-chosen): both limits 0 -> no daily loss circuit breaker, and the per-order
 # balance read is skipped (less latency + the bot is decoupled from the shared account, so manual
 # trades never pause it). REMAINING guards: $75/$100 per-pick cap, max-6-open, 1-pick/window, and
