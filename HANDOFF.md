@@ -9,9 +9,10 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1304 passed / 13 skipped here** (8 app tests uncollectable
-in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
-count varies with `flask`/`websockets`/cffi/crypto install state).
+Tests: `python3 -m pytest tests/ -q` → **1359 passed / 13 skipped in this container** (the 8 app tests
+can't collect here from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled; with it
+they collect — PR #52 measured 1385/4 before this session's +6 exit tests. Env issue, not the diff;
+skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
 ## ✅ Shipped THIS session — defensive-exit FIX (live-money path) + sooner exits
 **Suite 1349 / 13 skipped** (+6 tests). Branch `claude/gifted-thompson-77cd01`.
@@ -39,7 +40,37 @@ count varies with `flask`/`websockets`/cffi/crypto install state).
 - Tests: reduce_only⇒IoC vs buy⇒GTC; exit prices under fair value + clamps to 1c + offset=0 keeps fair;
   config defaults (offset=3, watch=480). +6 tests, full suite green.
 
-## ✅ Shipped THIS session — slow-cycle log attribution (diagnostic)
+## ✅ Shipped THIS session — YES-prediction edge audit + 3 gated knobs
+**Suite 1385 / 4 skipped** (+10 tests). Merged to `main` via PR #52 (branch
+`claude/intelligent-mccarthy-c1gi38`). Deep audit (real `learning-snapshots` data @ 972f92f, 24-agent workflow, all 14 numeric
+claims independently re-verified) of why YES underperforms NO and where YES pulls ahead. Key finding:
+**YES is NOT less accurate than NO overall (0.673 vs 0.677, n=3164)** — the deficit is a 15M
+issuance/selection problem (YES recall 0.385 vs 0.671; model issues YES 35% vs ~46% base rate) that
+vanishes by 7M (YES is the only profitable side at 7M, +1.43c). The side cut is a clean symmetric
+`>=0.5` (`checkpoint_v95.py`); the lean is upstream in the probabilities, and calibration is correctly
+fixing it (70% of raw-YES→cal-NO flips were really NO). V2's "foregone YES" is net **−1079c** (market
+prices the ask efficiently) — its NO-only restriction is economically correct. Three default-OFF,
+frozen-champion-safe knobs landed (every prior test byte-identical):
+- **R1 — shadow scoreboard visibility fix `challenger/ledger.py`**: reporting/marker methods defaulted
+  `model_version` to the dead literal `"challenger-v1"`, but live rows are `challenger-v5`, so a bare
+  `scoreboard()` (as `tools/learning_export.py` calls) matched 0 rows → snapshot reported `resolved:0`
+  while **3164 resolved rows existed**, hiding the challenger's real late-checkpoint YES skill (10M YES
+  recall 0.670 vs v95 0.622; BNB +0.206, HYPE +0.124). Now defaults to `ChallengerConfig().model_version`
+  (module const `_DEFAULT_MODEL_VERSION`). Reporting-only, no trading path. +3 tests.
+- **R2 — 15M YES decision-threshold knob `checkpoint_v95.py`**: `Q15_V95_YES_DECISION_THRESHOLD_15M`
+  (default 0.5 = byte-identical), 15M-scoped (10M/7M always 0.5), clamped 0.40–0.60. Lever for the one
+  checkpoint where the deficit lives; observational until A/B-validated (global threshold cuts backfire,
+  0.707→0.668, so it is deliberately 15M-only). +4 tests.
+- **R3 — observational challenger YES-assist `checkpoint_v95.py`**: `Q15_V95_CHALLENGER_YES_ASSIST`
+  (default OFF) marks the 10M/7M × BNB/HYPE/XRP/DOGE pocket where the challenger calls YES but the
+  champion leans NO. Recorded in the snapshot only — **never** changes `side`/alert (the challenger is
+  globally worse, Brier 0.214 vs 0.205, and must not drive a live decision). +3 tests.
+
+Open follow-ups: R4 (class-balanced Platt fit, calibration-side) and R5 (V2 7M YES delivery — likely
+net-negative, recommend research-only) were NOT implemented. 15M high-confidence YES is data-thin
+(n=10 @ selected≥0.7) — collect before trusting any 15M threshold relaxation.
+
+## ✅ Shipped a PRIOR session — slow-cycle log attribution (diagnostic)
 **Suite 1343 / 13 skipped** (+5 tests). On branch `claude/gifted-thompson-77cd01` (draft PR; NOT
 merged to main — owner asked for a safe change that can't touch the live money path).
 - **Why:** owner's logs showed repeated slow refresh cycles (~10–14s vs the ~1s target; last 14.43s,
@@ -58,7 +89,7 @@ merged to main — owner asked for a safe change that can't touch the live money
   move the every-30s settlement reconcile off the run_cycle thread (`checkpoint_v95.py:2833-2847`,
   mirror the polymarket/ultoim off-thread shadows) and make the Telegram first-send async.
 
-## ✅ Shipped THIS session — V2 audit fixes + live-execution hardening
+## ✅ Shipped a PRIOR session — V2 audit fixes + live-execution hardening
 **Suite 1322 / 13 skipped** (+18 tests). Plus, on top of the 7 audit recs below: executor latency
 telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
 config flips — the **10M=$100 profit lever** and a **1c limit offset** (Q15_EXEC_LIMIT_OFFSET_CENTS=1,
