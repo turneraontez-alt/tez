@@ -120,17 +120,25 @@ class KalshiTradingClient:
         """Place (dry-run: LOG) a limit order on the V2 endpoint. ``side`` 'no'/'yes';
         ``action`` buy/sell. Maps to the V2 single-book bid/ask + dollar-string schema."""
         v2_side, price_str = _v2_side_price(side, action, int(price_cents))
+        # A sell is always a defensive CLOSE: reduce_only so it can never flip us short.
+        # Kalshi REJECTS a reduce_only order that is good-till-canceled (HTTP 400
+        # "reduce_only can only be used with IoC orders"), which silently killed every
+        # defensive exit. Send the close immediate-or-cancel: it is the right semantics for a
+        # close anyway (take the liquidity resting now, never leave a sell working into
+        # expiry), and reduce_only caps the count to the position actually held. Entries
+        # (buys) stay good-till-canceled so a near-miss limit can still fill in the window.
+        is_reduce = (action or "").lower() == "sell"
         body = {
             "ticker": ticker,
             "client_order_id": _coid_uuid(client_order_id),  # deterministic UUID (idempotent)
             "side": v2_side,
             "count": f"{int(count):.2f}",                    # string quantity, e.g. "10.00"
             "price": price_str,                              # fixed-point dollars, e.g. "0.6500"
-            "time_in_force": "good_till_canceled",
+            "time_in_force": "immediate_or_cancel" if is_reduce else "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",  # required by the V2 endpoint
             "post_only": False,
             "cancel_order_on_pause": False,
-            "reduce_only": (action or "").lower() == "sell",  # an exit only ever reduces
+            "reduce_only": is_reduce,                         # a close only ever reduces
             "subaccount": 0,
             "exchange_index": 0,
         }

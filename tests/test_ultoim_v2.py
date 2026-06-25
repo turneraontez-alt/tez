@@ -1156,6 +1156,15 @@ def _ew_cfg_over():
                 exit_min_flip_conf=0.55, exit_watch_from_seconds=420.0)
 
 
+def test_exit_watch_from_seconds_default_is_480(monkeypatch):
+    # Data-backed default: watch from 8M so flips already present at 7M aren't clipped
+    # (n=51 live warnings, 84% correct; 11 correct exits were capped at the old 420s).
+    monkeypatch.delenv("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", raising=False)
+    assert UltoimV2Config().exit_watch_from_seconds == 480.0
+    monkeypatch.setenv("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", "420")
+    assert UltoimV2Config().exit_watch_from_seconds == 420.0
+
+
 def test_exit_warning_fires_only_on_sustained_flip(tmp_path):
     tg = _StubTelegram()
     r = _runner(tmp_path, telegram=tg, **_ew_cfg_over())

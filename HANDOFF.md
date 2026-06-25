@@ -9,9 +9,35 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1396 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1402 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped a PRIOR session — defensive-exit FIX (live-money path) + sooner exits
+**Suite 1349 / 13 skipped** (+6 tests). Branch `claude/gifted-thompson-77cd01`.
+- **Root cause (confirmed from real data, `learning-snapshots:dbs/q15_executor_orders_v1.sqlite3`):** the
+  exit-WARNING layer works (51 warnings, 84% correct, net +624c), but **every defensive SELL failed**.
+  All 4 exit orders ever placed were rejected by Kalshi HTTP 400 `reduce_only can only be used with IoC
+  orders` — the close was sent `time_in_force=good_till_canceled` with `reduce_only=true`. So 0 positions
+  were ever actually closed. (NOT the no-op/no-position theory HANDOFF previously feared — sells DID reach
+  the API; they were malformed.)
+- **Fix 1 — `executor/trading_client.py`:** a `reduce_only` (sell/close) order now goes out
+  `time_in_force="immediate_or_cancel"` (entries stay GTC). Confirmed vs Kalshi docs. IoC is correct for a
+  close anyway, and reduce_only caps the count to the held position (so over-counts from optimistic state
+  are safe — no position-tracking change needed).
+- **Fix 2 — `executor/{config,executor}.py`:** new `exit_limit_offset_cents` (env
+  `Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS`, default **3**). An IoC close at ~mid would cancel unfilled; the exit
+  now sells `offset` cents UNDER the estimated exit value to cross the resting bid and actually fill.
+- **Fix 3 — `ultoim_v2/config.py`:** `exit_watch_from_seconds` default **420→480** (watch from 8M). Live
+  data showed 11 correct flips were clipped by the 420s watch-start; watching from 8M fires already-correct
+  exits sooner (corr(time-left, recovered)=+0.31) WITHOUT touching the anti-spike gate or decisiveness bar,
+  so the 84% precision / false-alarm rate is unchanged. Env-overridable.
+- **NOT changed (deliberately):** exit_confirm_cycles/seconds and exit_min_flip_conf — the data can't measure
+  looser values (no sub-0.55 / sub-20s rows exist), and the false alarms cluster at the low-confidence edge.
+  Also scope note: the executor only ENTERED 10 of ~51 paper picks (it re-gates independently), so only
+  positions it actually holds are exitable — separate from the (broader) warning layer.
+- Tests: reduce_only⇒IoC vs buy⇒GTC; exit prices under fair value + clamps to 1c + offset=0 keeps fair;
+  config defaults (offset=3, watch=480). +6 tests, full suite green.
 
 ## ✅ Shipped THIS session — V2 conviction rules (owner-enabled, DEFAULT ON)
 **Suite 1396 / 4 skipped** (+11 tests). Two owner-chosen rules on the V2 (`ultoim_v2`) NO-only entry

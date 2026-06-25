@@ -157,6 +157,14 @@ class ExecutorConfig:
     # Limit orders by default (you set the price). Limit at the signalled ask + this offset
     # (0 = pay the ask; negative = try to fill cheaper, may not fill).
     limit_offset_cents: int = field(default_factory=lambda: _int("Q15_EXEC_LIMIT_OFFSET_CENTS", 0))
+    # Defensive-EXIT marketability. A close is sent immediate-or-cancel (see trading_client), so it
+    # only fills against liquidity ALREADY resting. The estimated exit value is ~mid, which sits BELOW
+    # the resting ask, so a mid-priced IoC close would usually cancel UNFILLED — leaving us in the very
+    # position we wanted out of. Sell this many cents UNDER the estimated exit value to cross the bid
+    # and actually close. The exit fires only on an ~84%-correct decisive flip (live n=51), so the
+    # certainty of getting out is worth a few cents of give-up. 0 = price at the raw exit value (may
+    # not fill). Set Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS.
+    exit_limit_offset_cents: int = field(default_factory=lambda: _int("Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS", 3))
     # ORDER RECORDING (default ON when the executor runs). Persists every placement + the RAW
     # broker response + a best-effort fill classification to its own sqlite, so "how many orders
     # missed (placed-but-unfilled)" is answerable from our side and the optimistic in-memory fill
