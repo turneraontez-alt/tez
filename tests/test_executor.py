@@ -23,8 +23,10 @@ def _cfg(**over):
     return ExecutorConfig(**base)
 
 
-def _pick(ticker="T-BTC", asset="BTC", side="NO", price=65, wk=1):
-    return Pick(ticker=ticker, asset=asset, side=side, price_cents=price, window_key=wk)
+def _pick(ticker="T-BTC", asset="BTC", side="NO", price=65, wk=1,
+          btc_lean=None, prior_breadth=None, stake_multiplier=1):
+    return Pick(ticker=ticker, asset=asset, side=side, price_cents=price, window_key=wk,
+                btc_lean=btc_lean, prior_breadth=prior_breadth, stake_multiplier=stake_multiplier)
 
 
 # --------------------------------------------------------------------------- #
@@ -741,3 +743,60 @@ def test_exit_limit_offset_default_is_three(monkeypatch):
     assert ExecutorConfig().exit_limit_offset_cents == 3
     monkeypatch.setenv("Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS", "5")
     assert ExecutorConfig().exit_limit_offset_cents == 5
+
+
+# --------------------------------------------------------------------------- #
+# BTC cross-asset gate — suppress alt-NO when BTC is bullish / complex risk-on,
+# EXCEPT >=3-co-trigger 10M conviction windows (stake_multiplier>1). Owner LIVE.
+# --------------------------------------------------------------------------- #
+def _st(bankroll=100_000):
+    return PortfolioState(bankroll_cents=bankroll)
+
+
+def test_btc_gate_suppresses_on_bullish_lean():
+    d = decide(_pick(price=65, btc_lean=0.60), _st(), _cfg())
+    assert d.place is False and d.reason == "BTC_GATE"
+
+
+def test_btc_gate_suppresses_on_risk_on_breadth():
+    # breadth alone trips it even when BTC's own lean is unavailable
+    d = decide(_pick(price=65, btc_lean=None, prior_breadth=0.60), _st(), _cfg())
+    assert d.place is False and d.reason == "BTC_GATE"
+
+
+def test_btc_gate_keeps_when_bearish():
+    d = decide(_pick(price=65, btc_lean=0.30, prior_breadth=0.20), _st(), _cfg())
+    assert d.place is True
+
+
+def test_btc_gate_inert_without_signal():
+    # no BTC lean and no breadth -> the gate cannot act, entry proceeds
+    d = decide(_pick(price=65, btc_lean=None, prior_breadth=None), _st(), _cfg())
+    assert d.place is True
+
+
+def test_btc_gate_exempts_10m_conviction():
+    # a >=3-co-trigger 10M conviction pick (stake_multiplier>1) runs even when BTC is very bullish
+    d = decide(_pick(price=65, btc_lean=0.95, prior_breadth=0.95, stake_multiplier=2), _st(), _cfg())
+    assert d.place is True
+
+
+def test_btc_gate_disabled_passes_through():
+    d = decide(_pick(price=65, btc_lean=0.95), _st(), _cfg(btc_gate_enabled=False))
+    assert d.place is True
+
+
+def test_btc_gate_threshold_is_configurable():
+    # raise the lean bar above the signal -> no longer gates
+    assert decide(_pick(price=65, btc_lean=0.55), _st(), _cfg()).reason == "BTC_GATE"
+    assert decide(_pick(price=65, btc_lean=0.55), _st(), _cfg(btc_gate_lean=0.60)).place is True
+
+
+def test_btc_gate_config_defaults(monkeypatch):
+    for k in ("Q15_EXEC_BTC_GATE", "Q15_EXEC_BTC_GATE_LEAN", "Q15_EXEC_BTC_GATE_BREADTH"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = ExecutorConfig()
+    assert cfg.btc_gate_enabled is True          # owner: live, default ON
+    assert cfg.btc_gate_lean == 0.5 and cfg.btc_gate_breadth == 0.5
+    monkeypatch.setenv("Q15_EXEC_BTC_GATE", "false")
+    assert ExecutorConfig().btc_gate_enabled is False   # kill switch
