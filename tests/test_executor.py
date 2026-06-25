@@ -240,6 +240,21 @@ def test_interval_allowlist_parses_env(monkeypatch):
     assert ExecutorConfig().allowed_intervals == frozenset({"10M", "7M"})
 
 
+def test_bot_trades_independently_of_external_manual_positions():
+    """The bot can take a trade even if the OWNER manually holds a position on that ticker. The
+    DUP_TICKER / MAX_OPEN / WINDOW caps are scoped to the bot's OWN in-memory state (open_tickers /
+    open_count / window_count), which ONLY the executor's own fills populate — a manual position is
+    never synced here, so it cannot block a bot entry. (The shared-account DAILY STOP is the only
+    place a manual trade interacts; tracked separately.)"""
+    cfg = _cfg(flat_stake_cents=7500)
+    # bot holds nothing of its own -> places, regardless of any manual position the owner holds.
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_pick(ticker="T-BTC"), st, cfg).place is True
+    # the cap fires ONLY on the bot's OWN recorded position, never an external one.
+    st_own = PortfolioState(bankroll_cents=100_000, open_tickers=frozenset({"T-BTC"}))
+    assert decide(_pick(ticker="T-BTC"), st_own, cfg).reason == "DUP_TICKER"
+
+
 def test_decide_dup_ticker_blocks():
     cfg = _cfg()
     st = PortfolioState(bankroll_cents=100_000, open_tickers=frozenset({"T-BTC"}))

@@ -263,6 +263,10 @@ class UltoimV2Runner:
                          cands: list[dict[str, Any]], now: float) -> None:
         cfg = self.config
         research_only = interval in cfg.research_only_intervals
+        # 12M promotion: when deliver_12m is on, 12M leaves research-only and delivers like
+        # 10M/7M (the gate then suppresses the cheap ask<floor_12m_ask slice via ASK_FLOOR_12M).
+        if interval == "12M" and getattr(cfg, "deliver_12m", False):
+            research_only = False
         evaluated: list[dict[str, Any]] = []
         for cand in cands:
             verdict = gate.evaluate(cand, cfg, interval=interval)

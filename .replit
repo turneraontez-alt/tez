@@ -95,6 +95,10 @@ Q15_ULTOIM_V2_RECORD_XFLOW = "true"
 Q15_ULTOIM_V2_DELIVER_TOP_N = "3"
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
+# 12M EXPENSIVE-NO slice -> LIVE (owner-approved): deliver 12M only for ask>=65 (the cheap <65 zone
+# is suppressed). Data: 12M ask>=65 = 90.9%/+17c/bet (n=11 THIN); same expensive-NO edge as 10M.
+# Reversible: set false to revert 12M to research-only.
+Q15_ULTOIM_V2_DELIVER_12M = "true"
 Q15_EXEC_DRY_RUN = "false"
 Q15_EXEC_ENABLED = "true"
 # PROFIT LEVER (stress-tested): concentrate stake on the proven +EV 10M engine. 10M picks stake
