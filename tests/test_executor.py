@@ -17,7 +17,8 @@ def _cfg(**over):
     base = dict(enabled=True, dry_run=True, bankroll_cents=100_000,  # $1000
                 per_pick_pct=0.04, max_picks_per_window=2, max_per_window_pct=0.08,
                 daily_loss_limit_pct=0.20, daily_loss_limit_cents=0, max_open_positions=6,
-                flat_stake_cents=0, min_price_cents=50, max_price_cents=85)
+                flat_stake_cents=0, min_price_cents=50, max_price_cents=85,
+                record_orders=False)  # order recording off by default in tests; its own tests enable it
     base.update(over)
     return ExecutorConfig(**base)
 
@@ -154,6 +155,87 @@ def test_on_fire_reports_latency():
     assert r2["placed"] is True and r2["snapshot_age_ms"] is None
 
 
+# --------------------------------------------------------------------------- #
+# order/fill recording — classify_fill + ExecutorStore (answers "how many missed")
+# --------------------------------------------------------------------------- #
+def test_classify_fill_against_real_kalshi_shapes():
+    from q15_upgrade.executor.store import classify_fill
+    # fully filled (nested order, fill_count >= requested)
+    assert classify_fill({"ok": True, "data": {"order": {"order_id": "o1", "status": "executed",
+                          "fill_count": 100}}}, 100) == ("FILLED", 100, "o1")
+    # partial
+    assert classify_fill({"ok": True, "data": {"order": {"fill_count": 40}}}, 100)[0] == "PARTIAL"
+    # rested = unfilled at placement (flat shape, fill_count 0, resting)
+    assert classify_fill({"ok": True, "data": {"order_id": "o2", "status": "resting",
+                          "fill_count": 0}}, 100) == ("RESTED", 0, "o2")
+    # canceled with 0 fills
+    assert classify_fill({"ok": True, "data": {"status": "canceled", "fill_count": 0}}, 5)[0] == "CANCELED"
+    # http failure / dry-run / unrecognized
+    assert classify_fill({"ok": False, "error": "boom"}, 5)[0] == "FAILED"
+    assert classify_fill({"ok": True, "dry_run": True}, 5)[0] == "DRY_RUN"
+    assert classify_fill({"ok": True, "data": {"weird": 1}}, 5)[0] == "UNKNOWN"
+
+
+def test_executor_store_records_and_summarizes(tmp_path):
+    from q15_upgrade.executor.store import ExecutorStore
+    db = str(tmp_path / "orders.sqlite3")
+    s = ExecutorStore(db)
+    s.record(action="entry", ticker="A", fill_status="FILLED", stake_cents=9945, requested_count=153)
+    s.record(action="entry", ticker="B", fill_status="RESTED", stake_cents=7475, requested_count=115)
+    s.record(action="entry", ticker="C", fill_status="RESTED", stake_cents=7475, requested_count=115)
+    summ = s.fill_summary()
+    assert summ["total"] == 3
+    assert summ["filled"] == 1 and summ["missed"] == 2     # 2 RESTED = missed at placement
+    assert summ["fill_rate"] == 1 / 3                       # 1 filled of 3 live orders
+
+
+def test_on_fire_records_order_to_store(tmp_path):
+    """End-to-end: a fire with recording on persists one row with a fill classification."""
+    from q15_upgrade.executor.store import ExecutorStore
+    db = str(tmp_path / "orders.sqlite3")
+    class _RecClient:
+        def get_balance_cents(self): return None
+        def place_order(self, **kw):
+            return {"ok": True, "dry_run": False, "data": {"order": {"order_id": "z9",
+                    "status": "resting", "fill_count": 0}}}   # a MISS (rested, unfilled)
+    ex = Executor(_cfg(enabled=True, dry_run=False, bankroll_cents=100_000, flat_stake_cents=7500,
+                       record_orders=True, orders_db_path=db), client=_RecClient())
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "entry_ask_cents": 65, "window_key": 1, "interval": "10M"})
+    assert r["placed"] is True and r["fill_status"] == "RESTED"
+    summ = ExecutorStore(db).fill_summary()
+    assert summ["total"] == 1 and summ["missed"] == 1       # the miss was recorded
+
+
+def test_decide_no_daily_stop_when_both_limits_zero():
+    """Owner-chosen: both limits 0 -> the daily stop never fires, even after a huge loss."""
+    cfg = _cfg(daily_loss_limit_cents=0, daily_loss_limit_pct=0)
+    st = PortfolioState(bankroll_cents=100_000, day_start_bankroll_cents=100_000,
+                        day_realized_pnl_cents=-999_999)   # would trip ANY stop
+    assert decide(_pick(price=65), st, cfg).place is True
+
+
+def test_stop_disabled_skips_balance_read():
+    """With the stop off, on_fire does NOT read the account balance (it only fed the stop) — so the
+    bot is decoupled from the shared account and a manual trade can't pause it."""
+    calls = {"n": 0}
+    class _C:
+        def get_balance_cents(self): calls["n"] += 1; return 50_000
+        def place_order(self, **kw): return {"ok": True, "dry_run": False}
+    ex = Executor(_cfg(enabled=True, dry_run=False, bankroll_cents=100_000, flat_stake_cents=7500,
+                       daily_loss_limit_cents=0, daily_loss_limit_pct=0), client=_C())
+    calls["n"] = 0   # ignore the init read; count only on_fire
+    from dataclasses import replace
+    ex.state = replace(ex.state, day_realized_pnl_cents=-1_000_000)   # would trip a stop if any existed
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "entry_ask_cents": 65, "window_key": 1})
+    assert r["placed"] is True and calls["n"] == 0
+
+
+def test_safety_summary_shows_no_stop_when_disabled():
+    assert "NO daily stop" in _cfg(daily_loss_limit_cents=0, daily_loss_limit_pct=0).safety_summary()
+
+
 def test_decide_max_open_blocks():
     cfg = _cfg(max_open_positions=2)
     st = PortfolioState(bankroll_cents=100_000, open_count=2)
@@ -185,6 +267,21 @@ def test_interval_allowlist_blocks_non_listed_interval():
 def test_interval_allowlist_parses_env(monkeypatch):
     monkeypatch.setenv("Q15_EXEC_ALLOWED_INTERVALS", "10m, 7M ")
     assert ExecutorConfig().allowed_intervals == frozenset({"10M", "7M"})
+
+
+def test_bot_trades_independently_of_external_manual_positions():
+    """The bot can take a trade even if the OWNER manually holds a position on that ticker. The
+    DUP_TICKER / MAX_OPEN / WINDOW caps are scoped to the bot's OWN in-memory state (open_tickers /
+    open_count / window_count), which ONLY the executor's own fills populate — a manual position is
+    never synced here, so it cannot block a bot entry. (The shared-account DAILY STOP is the only
+    place a manual trade interacts; tracked separately.)"""
+    cfg = _cfg(flat_stake_cents=7500)
+    # bot holds nothing of its own -> places, regardless of any manual position the owner holds.
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_pick(ticker="T-BTC"), st, cfg).place is True
+    # the cap fires ONLY on the bot's OWN recorded position, never an external one.
+    st_own = PortfolioState(bankroll_cents=100_000, open_tickers=frozenset({"T-BTC"}))
+    assert decide(_pick(ticker="T-BTC"), st_own, cfg).reason == "DUP_TICKER"
 
 
 def test_decide_dup_ticker_blocks():

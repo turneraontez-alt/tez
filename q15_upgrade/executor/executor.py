@@ -28,6 +28,15 @@ class Executor:
     def __init__(self, cfg: ExecutorConfig | None = None, client: Any | None = None):
         self.cfg = cfg or ExecutorConfig.from_env()
         self.client = client or KalshiTradingClient(self.cfg)
+        # Durable order/fill recorder (default ON; best-effort — never blocks an order).
+        self.store = None
+        if getattr(self.cfg, "record_orders", False):
+            try:
+                from .store import ExecutorStore
+                self.store = ExecutorStore(self.cfg.orders_db_path)
+            except Exception:  # noqa: BLE001 - recording is optional; never block the executor
+                logger.exception("executor store init failed (order recording disabled)")
+                self.store = None
         live_bal = None
         if self.cfg.enabled and not self.cfg.dry_run:
             live_bal = self.client.get_balance_cents()
@@ -55,6 +64,13 @@ class Executor:
         is still open the staked cash reads as a loss, so this errs toward STOPPING — the safe
         direction for a stop. No-op in dry-run/disabled (no real balance moves)."""
         if self.cfg.dry_run or not self.cfg.enabled:
+            return
+        # The balance read ONLY feeds the daily stop. When the stop is fully disabled (both the
+        # absolute and % limits are 0) skip it entirely — removes a network round-trip from the
+        # order path AND decouples the bot from the shared account balance, so the owner's manual
+        # trades can never pause it. Owner-chosen: no daily circuit breaker.
+        if (int(getattr(self.cfg, "daily_loss_limit_cents", 0) or 0) <= 0
+                and float(getattr(self.cfg, "daily_loss_limit_pct", 0) or 0) <= 0):
             return
         bal = self.client.get_balance_cents()
         if bal is None:
@@ -116,24 +132,36 @@ class Executor:
                 _age_ms = (time.time() - float(fired_at)) * 1000.0
             except (TypeError, ValueError):
                 _age_ms = None
+        # Record the placement + raw response + (immediate) fill classification, so "how many
+        # orders missed" is answerable. Best-effort; runs for failures and dry-run too.
+        fill_status, filled_count = (None, None)
+        if self.store is not None:
+            fill_status, filled_count = self.store.record_order_result(
+                action="entry", pick=p, decision=d, res=res, age_ms=_age_ms,
+                bal_ms=_bal_ms, order_ms=_order_ms,
+                client_order_id=_coid(p.window_key, p.ticker, "entry"))
         if not res.get("ok"):
             logger.error("order FAILED %s: %s", p.ticker, res.get("error"))
             return {"placed": False, "reason": "ORDER_FAILED", "detail": res,
-                    "balance_latency_ms": round(_bal_ms, 1), "order_latency_ms": round(_order_ms, 1)}
+                    "balance_latency_ms": round(_bal_ms, 1), "order_latency_ms": round(_order_ms, 1),
+                    "fill_status": fill_status}
 
-        # Commit the position to the snapshot (so window/open caps see it).
+        # Commit the position to the snapshot (so window/open caps see it). NOTE: still OPTIMISTIC
+        # (books on a successful PLACE, not a confirmed FILL); fill_status now records when that
+        # assumption diverges, pending a validated reconcile before we change the bookkeeping.
         self.state = apply_fill(self.state, p, d)
         mode = "dry-run" if res.get("dry_run") else "LIVE"
         _age_str = f"{_age_ms:.0f}ms" if _age_ms is not None else "n/a"
-        logger.info("executor timing %s w%s: snapshot_age=%s balance=%.0fms order=%.0fms total=%.0fms",
-                    p.ticker, p.window_key, _age_str, _bal_ms, _order_ms, _bal_ms + _order_ms)
+        logger.info("executor timing %s w%s: snapshot_age=%s balance=%.0fms order=%.0fms total=%.0fms fill=%s",
+                    p.ticker, p.window_key, _age_str, _bal_ms, _order_ms, _bal_ms + _order_ms, fill_status)
         logger.info("placed[%s] %s x%d @ %dc (stake %dc)", mode, p.ticker, d.count,
                     d.limit_price_cents, d.stake_cents)
         return {"placed": True, "mode": mode, "ticker": p.ticker, "count": d.count,
                 "limit_price_cents": d.limit_price_cents, "stake_cents": d.stake_cents,
                 "dry_run": bool(res.get("dry_run")), "order": res,
                 "balance_latency_ms": round(_bal_ms, 1), "order_latency_ms": round(_order_ms, 1),
-                "snapshot_age_ms": (round(_age_ms, 1) if _age_ms is not None else None)}
+                "snapshot_age_ms": (round(_age_ms, 1) if _age_ms is not None else None),
+                "fill_status": fill_status, "filled_count": filled_count}
 
     def on_exit(self, ticker: str, window_key: Any, exit_price_cents: int) -> dict[str, Any]:
         """Defensive-exit: SELL an open NO position at ``exit_price_cents``. The kill
@@ -148,10 +176,19 @@ class Executor:
             ticker=ticker, side="no", count=count, price_cents=int(exit_price_cents),
             action="sell", client_order_id=_coid(window_key, ticker, "exit"),
         )
+        fill_status = None
+        if self.store is not None:
+            from types import SimpleNamespace
+            _pick = SimpleNamespace(ticker=ticker, asset="", interval="", window_key=window_key)
+            _dec = SimpleNamespace(count=count, limit_price_cents=int(exit_price_cents), stake_cents=None)
+            fill_status, _ = self.store.record_order_result(
+                action="exit", pick=_pick, decision=_dec, res=res, age_ms=None,
+                bal_ms=None, order_ms=None, client_order_id=_coid(window_key, ticker, "exit"))
         if res.get("ok"):
             self.state = apply_exit(self.state, ticker)   # close it out of the snapshot
         return {"placed": bool(res.get("ok")), "count": count,
-                "mode": "dry-run" if res.get("dry_run") else "LIVE", "order": res}
+                "mode": "dry-run" if res.get("dry_run") else "LIVE", "order": res,
+                "fill_status": fill_status}
 
 
 _executor: Executor | None = None

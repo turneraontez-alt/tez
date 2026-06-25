@@ -95,6 +95,10 @@ Q15_ULTOIM_V2_RECORD_XFLOW = "true"
 Q15_ULTOIM_V2_DELIVER_TOP_N = "3"
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
+# 12M EXPENSIVE-NO slice -> LIVE (owner-approved): deliver 12M only for ask>=65 (the cheap <65 zone
+# is suppressed). Data: 12M ask>=65 = 90.9%/+17c/bet (n=11 THIN); same expensive-NO edge as 10M.
+# Reversible: set false to revert 12M to research-only.
+Q15_ULTOIM_V2_DELIVER_12M = "true"
 Q15_EXEC_DRY_RUN = "false"
 Q15_EXEC_ENABLED = "true"
 # PROFIT LEVER (stress-tested): concentrate stake on the proven +EV 10M engine. 10M picks stake
@@ -105,3 +109,13 @@ Q15_EXEC_ENABLED = "true"
 # 10M win rate vs the ~63.5% breakeven; a single losing 10M NO at $100 = the -$100 daily stop in one
 # trade. Remove this line to revert to flat $75 (byte-identical).
 Q15_EXEC_STAKE_BY_INTERVAL = "10M:10000"
+# FILL RELIABILITY: limit at the ask + 1c (still clamped to the 50-85c band) so a fast tick-up
+# doesn't leave the order resting unfilled. Costs at most 1c/contract; converts "missed/rested"
+# into "filled" on a marketable NO buy. Owner-approved. 0 = pay exactly the ask. Set to 0 to revert.
+Q15_EXEC_LIMIT_OFFSET_CENTS = "1"
+# DAILY STOP OFF (owner-chosen): both limits 0 -> no daily loss circuit breaker, and the per-order
+# balance read is skipped (less latency + the bot is decoupled from the shared account, so manual
+# trades never pause it). REMAINING guards: $75/$100 per-pick cap, max-6-open, 1-pick/window, and
+# the kill switch (Q15_EXEC_KILL=true). Re-enable: set Q15_EXEC_DAILY_LOSS_LIMIT_CENTS back to 10000.
+Q15_EXEC_DAILY_LOSS_LIMIT_CENTS = "0"
+Q15_EXEC_DAILY_LOSS_LIMIT_PCT = "0"

@@ -979,6 +979,54 @@ def test_delivery_selector_is_reward_risk_not_max_edge(tmp_path):
     assert len(fired2) == 1 and fired2[0]["ticker"] == "T-ETH"
 
 
+def test_deliver_12m_defaults_off():
+    cfg = UltoimV2Config()
+    assert cfg.deliver_12m is False and cfg.floor_12m_ask == 65.0
+    # default: 12M stays research-only (the cheap-zone floor is inert).
+    assert "12M" in cfg.research_only_intervals
+
+
+def test_deliver_12m_floor_blocks_cheap_delivers_expensive():
+    """12M promotion: when deliver_12m is on, a 12M NO at ask>=65 DELIVERS, while ask<65 (the
+    cheap near-strike loss zone, 33%/-17c) is suppressed from delivery but still recorded research."""
+    cfg = UltoimV2Config(enabled=True, deliver_12m=True, no_edge_waive=False)
+    expensive = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.75,
+                                         entry_ask_cents=70.0, total_cost_cents=0.0), cfg, interval="12M")
+    assert expensive["fired"] is True and "ASK_FLOOR_12M" not in expensive["reason_codes"]
+    cheap = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.75,
+                                     entry_ask_cents=60.0, total_cost_cents=0.0), cfg, interval="12M")
+    assert cheap["fired"] is False and cheap["research_fired"] is True   # blocked from delivery, kept as research
+    assert "ASK_FLOOR_12M" in cheap["reason_codes"]
+    # 10M is never touched by the 12M floor.
+    ten = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.75,
+                                   entry_ask_cents=60.0, total_cost_cents=0.0), cfg, interval="10M")
+    assert "ASK_FLOOR_12M" not in ten["reason_codes"]
+
+
+def test_deliver_12m_off_is_byte_identical_floor_inert():
+    cfg = UltoimV2Config(enabled=True)  # deliver_12m False (default)
+    cheap = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.75,
+                                     entry_ask_cents=60.0, total_cost_cents=0.0), cfg, interval="12M")
+    assert "ASK_FLOOR_12M" not in cheap["reason_codes"]
+
+
+def test_runner_delivers_12m_expensive_when_promoted(tmp_path):
+    """End-to-end: with deliver_12m on, a 12M NO at ask 70 (>=65) fires a delivered row; a cheap
+    12M NO (ask 60) is recorded research-only with ASK_FLOOR_12M."""
+    r = _runner(tmp_path, telegram=_StubTelegram(), enable_12m=True, deliver_12m=True,
+                deliver_by_reward_risk=True)
+    a = {"BTC": _analysis(side="NO", sel=0.75, ask=70.0, mkt_yes=0.25, total_cost=0.0)}
+    c = {"BTC": _canon("T-BTC", secs=720.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    btc = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10) if row["ticker"] == "T-BTC"]
+    assert btc and btc[0]["interval"] == "12M" and btc[0]["fired"] == 1
+    a2 = {"ETH": _analysis(side="NO", sel=0.75, ask=60.0, mkt_yes=0.25, total_cost=0.0)}
+    c2 = {"ETH": _canon("T-ETH", secs=720.0, close=18000.0)}
+    r._observe_sync(candidates=_extract(r, a2, c2, now=2000.0), now=2000.0)
+    eth = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10) if row["ticker"] == "T-ETH"]
+    assert eth and eth[0]["fired"] == 0 and "ASK_FLOOR_12M" in (eth[0]["reason_codes"] or "")
+
+
 def test_no_only_locked_at_gate_and_executor():
     """Rec #6: NO-only stays LOCKED at BOTH layers (v2 gate + executor). Foregone YES at the
     deliverable 50-85c band is net-negative (55.8% acc, -983c, n=120), so enabling YES would

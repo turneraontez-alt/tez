@@ -32,6 +32,11 @@ Run ON THE REPL (where the KALSHI_* secrets live):
         larger order that simply FILLED in many small pieces (which looks the same in a
         fills/activity view but is a single bet).
 
+    python3 scripts/exec_preflight.py --fills
+        READ-ONLY: answer "how many orders MISSED (placed but not filled)?" — classifies the
+        LIVE account's recent orders into filled / partial / missed, and also prints the local
+        executor_orders store summary (immediate fills, correlated to interval/asset) if present.
+
 The no-flag run now also LISTS every open position (ticker, size, long NO/YES) so you
 can eyeball whether anything is open before/after a test.
 """
@@ -295,6 +300,71 @@ def main(argv: list[str]) -> int:
             print(f"    {o.get('created_time','?')} {o.get('ticker')} side={o.get('side')} "
                   f"action={o.get('action')} count={_cnt(o)} price={px} "
                   f"status={o.get('status')} filled={o.get('fill_count')} coid={str(o.get('client_order_id'))[:18]}")
+        return 0
+
+    if "--fills" in argv:
+        # READ-ONLY: answer "how many orders MISSED (placed but not filled)?" two ways —
+        # (1) the LIVE account's order history (source of truth for FINAL fills), and
+        # (2) our local executor_orders store (immediate fills, correlated to interval/asset).
+        from collections import Counter
+        recent = cli._request("GET", "/portfolio/orders")
+        orders = (recent.get("data") or {}).get("orders") or []
+        if not recent.get("ok"):
+            print("\norders read FAILED ->", recent.get("error"))
+        else:
+            def _cnt(o):
+                for k in ("initial_count", "count", "place_count"):
+                    if o.get(k) not in (None, ""):
+                        try:
+                            return int(float(o[k]))
+                        except (TypeError, ValueError):
+                            pass
+                return None
+
+            def _filled(o):
+                try:
+                    return int(float(o.get("fill_count") or 0))
+                except (TypeError, ValueError):
+                    return 0
+            filled = partial = missed = unknown = 0
+            for o in orders:
+                c, f = _cnt(o), _filled(o)
+                if c is None:
+                    unknown += 1
+                elif f >= c and c > 0:
+                    filled += 1
+                elif f > 0:
+                    partial += 1
+                else:
+                    missed += 1
+            n = len(orders)
+            print(f"\n[FILLS] LIVE ACCOUNT — {n} recent order(s):")
+            print(f"  filled (fully):     {filled}")
+            print(f"  partial:            {partial}")
+            print(f"  MISSED (0 filled):  {missed}")
+            if unknown:
+                print(f"  unknown size:       {unknown}")
+            if n:
+                print(f"  fill rate (fully filled / total): {filled}/{n} = {100*filled/n:.0f}%")
+            print(f"  status breakdown: {dict(Counter(o.get('status') for o in orders))}")
+        # local store (if the executor has been recording)
+        try:
+            from q15_upgrade.executor.store import ExecutorStore
+            if os.path.exists(cfg.orders_db_path):
+                summ = ExecutorStore(cfg.orders_db_path).fill_summary()
+                print(f"\n[FILLS] LOCAL STORE ({cfg.orders_db_path}):")
+                print(f"  total recorded: {summ['total']}  (live {summ.get('live_orders')})")
+                print(f"  filled: {summ['filled']}  partial: {summ['partial']}  "
+                      f"MISSED-at-placement: {summ['missed']}")
+                fr = summ.get("fill_rate")
+                print(f"  immediate fill rate: {f'{100*fr:.0f}%' if fr is not None else 'n/a'}")
+                print(f"  by status: { {k: v['n'] for k, v in summ['by_status'].items()} }")
+                print("  NOTE: 'RESTED' here = unfilled AT PLACEMENT; a resting limit can still")
+                print("  fill later in the window — the LIVE ACCOUNT block above is the final word.")
+            else:
+                print(f"\n[FILLS] LOCAL STORE: none yet at {cfg.orders_db_path} (no orders recorded).")
+        except Exception as e:  # noqa: BLE001
+            print(f"\n[FILLS] local store read skipped: {e}")
         return 0
 
     if "--flatten" in argv:
