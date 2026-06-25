@@ -67,6 +67,8 @@ def _hiconv_yes_pass(cand: Mapping[str, Any], cfg: Any) -> bool:
     observability — never gates delivery (YES is NO-only)."""
     if not getattr(cfg, "hiconv_yes_record", True):
         return False
+    if str(cand.get("predicted_side") or "").upper() != "YES":
+        return False
     cal = _num(cand.get("calibrated_yes_probability"))
     mkt = _num(cand.get("market_implied_yes_probability"))
     regime = str(cand.get("regime_name") or "").upper()
@@ -428,6 +430,12 @@ class UltoimV2Runner:
         # Record-only 15M selective-entry SCREEN verdict (see fifteen_min.py). Stamped
         # on every row; all-None outside 15M-NO; NEVER read by the gate / fire path.
         s15 = fifteen_min.features(cand, interval, cfg)
+        # RECORD-ONLY high-conviction-YES marker on EVERY recorded YES row (research-yes AND the
+        # nothing-fired "record best" path), so the would-deliver YES sliver accrues a complete,
+        # gradeable out-of-sample record. Never changes delivery — YES stays NO-only.
+        reason_codes = list(verdict.get("reason_codes") or [])
+        if _hiconv_yes_pass(cand, cfg) and "HICONV_YES" not in reason_codes:
+            reason_codes.append("HICONV_YES")
         return {
             "created_at": now, "model_version": cfg.model_version,
             "asset": cand.get("asset"), "ticker": cand.get("ticker"),
@@ -465,7 +473,7 @@ class UltoimV2Runner:
             "gate_a_pass": 1 if verdict.get("gate_a") else 0,
             "gate_b_pass": 1 if verdict.get("gate_b") else 0,
             "gate_c_pass": 1 if verdict.get("gate_c") else 0,
-            "reason_codes": ",".join(verdict.get("reason_codes") or []) or None,
+            "reason_codes": ",".join(reason_codes) or None,
             "gate_min_conf": cfg.min_confidence,
             "gate_ask_lo": cfg.ask_lo,
             "gate_ask_hi": cfg.ask_hi,
@@ -561,14 +569,7 @@ class UltoimV2Runner:
         cand = entry["cand"]
         verdict = dict(entry["verdict"])
         verdict["fired"] = False  # YES never delivers, regardless of gate_a
-        # RECORD-ONLY high-conviction-YES marker: tag the rows that clear the (cal_yes / market-YES
-        # / THRESHOLD_PIN) criteria so the would-deliver YES sliver accrues a gradeable, out-of-
-        # sample record. Never changes delivery — YES stays NO-only.
-        if _hiconv_yes_pass(cand, self.config):
-            rc = list(verdict.get("reason_codes") or [])
-            if "HICONV_YES" not in rc:
-                rc.append("HICONV_YES")
-            verdict["reason_codes"] = rc
+        # (the HICONV_YES marker is stamped centrally in _build_row for every recorded YES row)
         row = self._build_row(cand, verdict, interval, mark, window_key, now,
                               record_kind="RESEARCH_YES", delivery_status="RESEARCH")
         row.pop("_best_entry_cents", None)
