@@ -115,6 +115,16 @@ class UltoimV2Config:
     # (fragile, both-halves 82%->65%). 10M is the proven anchor.
     enable_11m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_11M", True))
     enable_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_12M", True))
+    # Promote the 12M EXPENSIVE-NO slice to LIVE delivery (default OFF -> 12M stays research-only).
+    # DATA (real ledger, fired+research resolved): 12M ask>=65 NO is 90.9% / +17c/bet (n=11) and
+    # ask>=72 is 100% / +25c/bet (n=9) — the SAME expensive-NO edge that carries 10M — while 12M
+    # ask<65 is 33% / -17c/bet (n=12, the cheap near-strike loss zone). When ON, 12M is treated
+    # like 10M/7M for delivery (same gate) EXCEPT a 12M NO with ask < floor_12m_ask is suppressed
+    # from delivery (recorded research-only so it keeps accruing data). THIN sample (n=11) — owner-
+    # enabled, reversible. NOTE: if you set Q15_EXEC_ALLOWED_INTERVALS, include 12M or the executor
+    # will refuse it. Set Q15_ULTOIM_V2_DELIVER_12M=true.
+    deliver_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_12M", False))
+    floor_12m_ask: float = field(default_factory=lambda: _float("Q15_ULTOIM_V2_FLOOR_12M_ASK", 65.0))
     # Marks that may RECORD but never DELIVER (and so never TRADE — the executor only fires on a
     # delivered row), even when enabled. 11M and 12M are both here: the delivered marks are 10M
     # and 7M only (15M is skipped via skip_15m). To promote a mark to live delivery, drop it.

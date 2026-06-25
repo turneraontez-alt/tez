@@ -42,6 +42,7 @@ REASON_CODES = (
     "NEAR_STRIKE_PIN",
     "EXPENSIVE_NO_ADMIT",
     "ASK_CAP_7M",
+    "ASK_FLOOR_12M",
     "RESEARCH_ONLY_MARK",
 )
 
@@ -243,7 +244,21 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     if near_block:
         reason_codes.append("NEAR_STRIKE_PIN")
 
-    fired = gate_a and research_fired and not near_block
+    # 12M EXPENSIVE-NO delivery floor. Only active when 12M is promoted to live delivery
+    # (cfg.deliver_12m): a 12M NO with ask < floor_12m_ask is the cheap near-strike LOSS zone
+    # (33%/-17c/bet) -> suppress DELIVERY (``fired``) only; ``research_fired`` is unchanged so the
+    # cheap rows keep accruing data. With deliver_12m off (default) 12M is research-only at the
+    # runner anyway, so this is inert -> byte-identical.
+    floor_12m_block = bool(
+        getattr(cfg, "deliver_12m", False)
+        and interval == "12M"
+        and side == "NO"
+        and ask < getattr(cfg, "floor_12m_ask", 65.0)
+    )
+    if floor_12m_block:
+        reason_codes.append("ASK_FLOOR_12M")
+
+    fired = gate_a and research_fired and not near_block and not floor_12m_block
     return {
         "fired": bool(fired),
         "research_fired": bool(research_fired),

@@ -18,6 +18,15 @@ count varies with `flask`/`websockets`/cffi/crypto install state).
 telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
 config flips — the **10M=$100 profit lever** and a **1c limit offset** (Q15_EXEC_LIMIT_OFFSET_CENTS=1,
 fill reliability) — both set in `.replit [userenv.shared]`.
+- **12M expensive-NO slice -> live (gated) `ultoim_v2/{config,gate,runner}.py`**: `Q15_ULTOIM_V2_DELIVER_12M`
+  (default OFF) promotes 12M from research-only to live delivery, but ONLY ask>=`floor_12m_ask` (65);
+  the cheap <65 zone is suppressed from delivery (ASK_FLOOR_12M) and kept as research. Data: 12M ask>=65
+  is 90.9%/+17c/bet (n=11 THIN) vs ask<65 33%/-17c/bet — same expensive-NO edge as 10M. If you set
+  `Q15_EXEC_ALLOWED_INTERVALS`, include 12M. To enable: `Q15_ULTOIM_V2_DELIVER_12M=true`.
+- **Bot trades independently of manual positions (locked)**: confirmed + test — the executor's
+  DUP_TICKER/MAX_OPEN/WINDOW caps are scoped to the bot's OWN in-memory state (no get_positions sync), so
+  a manual position never blocks a bot entry. ⚠️ OPEN: the daily stop is `balance - day_start_balance`
+  (shared account), so a manual stake reads as a bot loss and can trip the $100 stop — needs a decision.
 - **Fill reconciliation `executor/store.py` (new) + `executor/{config,executor}.py` + `scripts/exec_preflight.py`**:
   every placement is recorded with the RAW Kalshi response + a defensive fill classification
   (FILLED/PARTIAL/RESTED/CANCELED/FAILED/DRY_RUN/UNKNOWN) to `data/q15_executor_orders_v1.sqlite3`
