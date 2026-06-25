@@ -273,8 +273,9 @@ class UltoimV2Config:
         default_factory=lambda: _bool("Q15_ULTOIM_V2_RESEARCH_YES", True)
     )
     # Defensive-exit / flip warning. Fires (ONLY when a paper entry was suggested
-    # earlier in the same window) if, at/after the 7M mark, the champion's call has
-    # FLIPPED to the opposite side and the flip is BOTH decisive (new-side prob >=
+    # earlier in the same window) if, at/after the watch-start (exit_watch_from_seconds,
+    # default 8M), the champion's call has FLIPPED to the opposite side and the flip is
+    # BOTH decisive (new-side prob >=
     # exit_min_flip_conf) AND sustained (held for >= exit_confirm_cycles consecutive
     # observations spanning >= exit_confirm_seconds) — so a short-lived spike never
     # triggers it. Records + grades every warning (learns whether the exit was right
@@ -282,9 +283,14 @@ class UltoimV2Config:
     exit_warnings_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARNINGS", True)
     )
-    # Watch for the flip from this many seconds remaining onward (7M = 420s).
+    # Watch for the flip from this many seconds remaining onward. Default 480 (8M), raised from
+    # 420 (7M): live exit-warning data (n=51, 84% correct) showed 11 correct flips were CLIPPED by
+    # the old 420s watch-start — the flip was already present but the watcher wasn't looking, so the
+    # exit fired later and recovered less residual value (corr(time-left, recovered)=+0.31). Watching
+    # from 8M fires those already-correct exits SOONER without touching the anti-spike gate
+    # (confirm_cycles/seconds) or the decisiveness bar, so the false-alarm rate is unchanged.
     exit_watch_from_seconds: float = field(
-        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", 420.0)
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", 480.0)
     )
     # Anti-spike: the opposite-side call must hold this many consecutive observations
     # AND span at least this many seconds before a warning fires.

@@ -689,3 +689,55 @@ def test_trading_client_live_ready_requires_all_gates():
     # signer unavailable also blocks
     cli2 = KalshiTradingClient(_cfg(dry_run=False), signer=_StubSigner(), session=sess)
     assert cli2.live_ready[0] is False
+
+
+# --------------------------------------------------------------------------- #
+# Defensive-exit order construction. The live bug: a reduce_only close was sent
+# good-till-canceled, which Kalshi rejects 400 ("reduce_only can only be used with
+# IoC orders") — so 100% of defensive sells failed and no position ever closed.
+# --------------------------------------------------------------------------- #
+def test_reduce_only_sell_is_ioc_buy_stays_gtc():
+    cli = KalshiTradingClient(_cfg(dry_run=True), signer=_StubSigner(), session=_BoomSession())
+    buy = cli.place_order(ticker="T-BTC", side="no", count=10, price_cents=65,
+                          action="buy", client_order_id="v2x-1-T-BTC-entry")["would_place"]
+    assert buy["reduce_only"] is False
+    assert buy["time_in_force"] == "good_till_canceled"
+    sell = cli.place_order(ticker="T-BTC", side="no", count=10, price_cents=30,
+                           action="sell", client_order_id="v2x-1-T-BTC-exit")["would_place"]
+    # Kalshi requires reduce_only orders be immediate-or-cancel; GTC reduce_only is rejected 400.
+    assert sell["reduce_only"] is True
+    assert sell["time_in_force"] == "immediate_or_cancel"
+
+
+def test_exit_prices_under_fair_value_to_cross_the_bid():
+    ex = _exec(exit_limit_offset_cents=3)
+    ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                "entry_price_cents": 60, "window_key": 1})
+    r = ex.on_exit("T-BTC", 1, 30)                 # estimated exit value 30c
+    assert r["placed"] is True
+    last = ex.client.orders[-1]
+    assert last["action"] == "sell"
+    assert last["price_cents"] == 27               # 30 - 3 offset -> crosses the resting bid
+
+
+def test_exit_offset_clamps_to_one_cent():
+    ex = _exec(exit_limit_offset_cents=50)
+    ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                "entry_price_cents": 60, "window_key": 1})
+    ex.on_exit("T-BTC", 1, 2)                       # 2 - 50 -> clamp to 1, never 0/negative
+    assert ex.client.orders[-1]["price_cents"] == 1
+
+
+def test_exit_offset_zero_keeps_fair_value():
+    ex = _exec(exit_limit_offset_cents=0)
+    ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                "entry_price_cents": 60, "window_key": 1})
+    ex.on_exit("T-BTC", 1, 30)
+    assert ex.client.orders[-1]["price_cents"] == 30
+
+
+def test_exit_limit_offset_default_is_three(monkeypatch):
+    monkeypatch.delenv("Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS", raising=False)
+    assert ExecutorConfig().exit_limit_offset_cents == 3
+    monkeypatch.setenv("Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS", "5")
+    assert ExecutorConfig().exit_limit_offset_cents == 5
