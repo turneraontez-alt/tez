@@ -13,6 +13,25 @@ Tests: `python3 -m pytest tests/ -q` → **1304 passed / 13 skipped here** (8 ap
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## ✅ Shipped THIS session — slow-cycle log attribution (diagnostic)
+**Suite 1343 / 13 skipped** (+5 tests). On branch `claude/gifted-thompson-77cd01` (draft PR; NOT
+merged to main — owner asked for a safe change that can't touch the live money path).
+- **Why:** owner's logs showed repeated slow refresh cycles (~10–14s vs the ~1s target; last 14.43s,
+  ~5.6s from the 20s "Predictions pause" pager) with the watchdog only naming the opaque top-level
+  `run_cycle ~5.5s`. run_cycle's rich internal split already exists (`parent_chain`, `v95_analysis`
+  + `v95_sub`, `market_reconcile`, `other`, plus `parent_chain_timing`) but only in `/api/health`,
+  which is hard to catch at the exact slow moment.
+- **Change (`q15_upgrade/checkpoint_v95.py`):** added `_format_run_cycle_breakdown()` (pure) and a
+  throttled WARNING (`slow run_cycle …`, once/60s, keyed `slow_run_cycle`) emitted when
+  `_t["total"] >= Q15_V95_SLOW_CYCLE_SECONDS` (default 10s). Diagnostic-only — no decision, alert,
+  delivery, or settlement path touched. +5 tests (`tests/test_q15_v95_slow_cycle_log.py`).
+- **Open root cause (NOT yet fixed):** run_cycle is ~5.5s on *every* sampled cycle (not the 1-in-30
+  reconcile spike), pointing at per-cycle cost — most likely the remote-Postgres round-trips in the
+  v94→v91 parent chain (`checkpoint_v91.py:590/595/619/620`) and/or synchronous Kalshi REST. The
+  new log will name it live. Next safe fixes (deferred, need owner sign-off as they touch hot paths):
+  move the every-30s settlement reconcile off the run_cycle thread (`checkpoint_v95.py:2833-2847`,
+  mirror the polymarket/ultoim off-thread shadows) and make the Telegram first-send async.
+
 ## ✅ Shipped THIS session — V2 audit fixes + live-execution hardening
 **Suite 1322 / 13 skipped** (+18 tests). Plus, on top of the 7 audit recs below: executor latency
 telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
