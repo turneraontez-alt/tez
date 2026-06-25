@@ -1,4 +1,35 @@
 import os
+import sys
+import shutil
+
+# --- interpreter guard (bootstrap only; NOT trading logic) ---
+# This app requires Python 3.11. Only 3.11 has a working psycopg2 and the
+# cffi/cryptography backend needed to sign live Kalshi orders. A bare `python3`
+# can resolve to 3.12 (missing _cffi_backend + psycopg2._psycopg), which boots
+# the app in a degraded, cannot-sign state while still serving HTTP 200s. If we
+# were launched on anything other than 3.11, re-exec under python3.11. This guard
+# FAILS CLOSED: if 3.11 cannot be reached we abort rather than run degraded, so a
+# live-money process never starts unable to sign.
+if sys.version_info[:2] != (3, 11):
+    if os.environ.get("Q15_INTERP_REEXEC") == "1":
+        sys.stderr.write(
+            "FATAL: interpreter guard re-exec did not land on Python 3.11; "
+            "refusing to start to avoid a degraded (cannot-sign) boot.\n")
+        raise SystemExit(70)
+    _py311 = shutil.which("python3.11")
+    if not _py311:
+        sys.stderr.write(
+            "FATAL: Python 3.11 is required but 'python3.11' was not found on "
+            "PATH; refusing to start to avoid a degraded (cannot-sign) boot.\n")
+        raise SystemExit(70)
+    os.environ["Q15_INTERP_REEXEC"] = "1"
+    try:
+        os.execv(_py311, [_py311, *sys.argv])
+    except OSError as _exc:
+        sys.stderr.write(f"FATAL: failed to re-exec under {_py311}: {_exc}\n")
+        raise SystemExit(70)
+# --- end interpreter guard ---
+
 import atexit
 import time
 import threading
