@@ -408,6 +408,16 @@ class UltoimV2Runner:
         # Record-only 15M selective-entry SCREEN verdict (see fifteen_min.py). Stamped
         # on every row; all-None outside 15M-NO; NEVER read by the gate / fire path.
         s15 = fifteen_min.features(cand, interval, cfg)
+        # Record-only SETTLEMENT-STREAK signal (default ON): the asset's signed consecutive
+        # same-outcome settled-window run as of now (no lookahead). Pure record-only; a
+        # failure here must never break the recording path, so it falls back to None.
+        streak = None
+        if getattr(cfg, "streak_signal_enabled", True):
+            try:
+                streak = self.ledger.settlement_streak(
+                    cfg.model_version, str(cand.get("asset") or ""), int(window_key))
+            except Exception:  # noqa: BLE001 - record-only; never break recording
+                streak = None
         return {
             "created_at": now, "model_version": cfg.model_version,
             "asset": cand.get("asset"), "ticker": cand.get("ticker"),
@@ -442,6 +452,7 @@ class UltoimV2Runner:
             "pin_break_drift": cand.get("pin_break_drift"),
             "threshold_interaction": cand.get("threshold_interaction"),
             "champion_flow": cand.get("champion_flow"),
+            "settlement_streak": streak,
             "gate_a_pass": 1 if verdict.get("gate_a") else 0,
             "gate_b_pass": 1 if verdict.get("gate_b") else 0,
             "gate_c_pass": 1 if verdict.get("gate_c") else 0,
@@ -744,6 +755,8 @@ class UltoimV2Runner:
                 mv, pin_sigma=self.config.distance_pin_sigma)
             sb["flow_research"] = self.ledger.flow_research_scoreboard(
                 mv, flow_threshold=self.config.flow_against_no_threshold)
+            # Record-only: does a YES/NO settlement streak predict the next window? (graded)
+            sb["streak_research"] = self.ledger.streak_research_scoreboard(mv)
             recent = self.ledger.recent_rows(mv, limit=10)
             losses = self.ledger.loss_rows(mv, limit=10)
             text = panel.build_recap(sb, recent, losses, self.config)

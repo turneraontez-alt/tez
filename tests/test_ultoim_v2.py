@@ -1607,3 +1607,77 @@ def test_pin_break_columns_migrate_and_roundtrip(tmp_path):
     assert rows["P2"]["pin_break_drift"] is None
     assert rows["P2"]["threshold_interaction"] is None
     led.close()
+
+
+# --------------------------------------------------------------------------- #
+# settlement-streak signal (observational; records the per-asset YES/NO run and
+# grades whether it predicts the next window — never gates a decision)
+# --------------------------------------------------------------------------- #
+def test_settlement_streak_computation(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    mv = "ultoim-v2"
+
+    def settle(asset, wk, result):
+        tk = f"T-{asset}-{wk}"
+        led.record_decision(_row(asset=asset, ticker=tk, window_key=wk, interval="10M"))
+        led.resolve(mv, tk, result, 9500.0)
+
+    # adjacent YES run -> +N (counts only windows strictly before the query window)
+    for wk in (100, 101, 102):
+        settle("BTC", wk, "YES")
+    assert led.settlement_streak(mv, "BTC", 103) == 3
+    assert led.settlement_streak(mv, "BTC", 102) == 2
+    # a NO inside the history breaks the run from the top: 102,101 YES then 100 NO -> +2
+    for wk, res in ((100, "NO"), (101, "YES"), (102, "YES")):
+        settle("ETH", wk, res)
+    assert led.settlement_streak(mv, "ETH", 103) == 2
+    # a missing window (101) breaks time-adjacency -> only 102 counts -> +1
+    settle("SOL", 100, "YES")
+    settle("SOL", 102, "YES")
+    assert led.settlement_streak(mv, "SOL", 103) == 1
+    # NO run -> negative
+    for wk in (50, 51, 52):
+        settle("XRP", wk, "NO")
+    assert led.settlement_streak(mv, "XRP", 53) == -3
+    # no history -> 0; and NO lookahead (a later settled window is ignored)
+    assert led.settlement_streak(mv, "DOGE", 5) == 0
+    settle("DOGE", 10, "YES")
+    assert led.settlement_streak(mv, "DOGE", 9) == 0
+    led.close()
+
+
+def test_settlement_streak_persisted_on_record(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    led.record_decision(_row(ticker="S1", settlement_streak=3))
+    led.record_decision(_row(ticker="S2"))   # legacy-style row: column defaults NULL
+    rows = {r["ticker"]: r for r in led.recent_rows("ultoim-v2", limit=10)}
+    assert rows["S1"]["settlement_streak"] == 3
+    assert rows["S2"]["settlement_streak"] is None
+    led.close()
+
+
+def test_streak_research_scoreboard_buckets(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    mv = "ultoim-v2"
+
+    def rec(asset, wk, streak, result):
+        tk = f"T-{asset}-{wk}"
+        led.record_decision(_row(asset=asset, ticker=tk, window_key=wk,
+                                 interval="10M", settlement_streak=streak))
+        led.resolve(mv, tk, result, 9500.0)
+
+    # three windows that followed a 3+ YES run: 2 settle YES, 1 NO -> P(YES)=2/3
+    rec("BTC", 1, 3, "YES")
+    rec("ETH", 2, 4, "YES")
+    rec("SOL", 3, 3, "NO")
+    # one window after a 3+ NO run -> settles YES (the reversion case)
+    rec("XRP", 4, -3, "YES")
+
+    sb = led.streak_research_scoreboard(mv)
+    assert sb["available"] is True
+    assert sb["base"]["n"] == 4
+    y3 = sb["yes_run_3plus"]
+    assert y3["n"] == 3 and y3["yes"] == 2 and y3["accuracy"] == pytest.approx(2 / 3)
+    n3 = sb["no_run_3plus"]
+    assert n3["n"] == 1 and n3["yes"] == 1
+    led.close()
