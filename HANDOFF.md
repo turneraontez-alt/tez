@@ -13,6 +13,27 @@ Tests: `python3 -m pytest tests/ -q` → **1411 passed / 4 skipped here** (8 app
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## ✅ Shipped THIS session — BTC cross-asset entry GATE (LIVE real-money, default ON)
+**Suite 1392 / 13 skipped** (+10 tests). Owner-directed LIVE executor gate (not observational — owner
+chose "active immediately"). Suppresses an alt-NO entry when **BTC is contemporaneously bullish
+(lean≥0.50) OR the complex is risk-on (prior-window breadth≥0.50)** — the regime where alt-NO fails
+because the alts co-move up with BTC (P(alt YES|BTC YES)≈65–88%, breadth 76%). **EXEMPTS ≥3-co-trigger
+10M conviction windows** (`stake_multiplier>1`) — those run ~100% and are protected by the defensive
+exit. New refusal reason `BTC_GATE`.
+- **Plumbing:** `runner._observe_sync` computes per-window `(btc_lean, prior_breadth)` into
+  `self._gate_ctx` (BTC's contemporaneous market-implied-YES from the cross-asset candidates + new
+  `ledger.prior_window_breadth(wk)`), attached to the executor pick in `_maybe_execute`. `executor.on_fire`
+  → `Pick.btc_lean/prior_breadth` → `risk.decide` gate. **No same-window-settlement lookahead.**
+- **Config (`executor/config.py`):** `btc_gate_enabled` (env `Q15_EXEC_BTC_GATE`, **default True**),
+  `btc_gate_lean` (0.50), `btc_gate_breadth` (0.50). Pinned `Q15_EXEC_BTC_GATE="true"` in `.replit` with
+  the KILL SWITCH note (`=false` disables instantly, no code change). Shows in `safety_summary()`.
+- **Evidence/caveats:** backtest in-sample ~2.6 days (~560 windows): kept-book accuracy 78→90%, trims
+  the BTC-up co-settling losers; a $1000 / 10%-per-bet compounding sim ran $1051 (baseline) → $4753 (rule)
+  but that magnitude is an **in-sample, path-dependent, compounding artifact — NOT an expectation**. The
+  gate only acts on a PRESENT signal (~47% of alt windows have a BTC read; breadth covers the rest) and is
+  one regime. Validate across BTC-down days; `=false` to revert. +10 tests (gate cases, conviction exempt,
+  thresholds, prior_window_breadth, runner plumbing).
+
 ## ✅ Shipped THIS session — settlement-streak signal (observational, +3 tests)
 Owner asked "does 3 YES in a row = uptrend?" Live data: weak/noise-level (after 3 YES, next-YES 67%
 n=12, CI [39,86] overlaps the 42% base; 3-NO run flips the other way). So added it the disciplined way —

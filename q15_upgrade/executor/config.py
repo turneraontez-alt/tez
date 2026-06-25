@@ -173,6 +173,16 @@ class ExecutorConfig:
     # certainty of getting out is worth a few cents of give-up. 0 = price at the raw exit value (may
     # not fill). Set Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS.
     exit_limit_offset_cents: int = field(default_factory=lambda: _int("Q15_EXEC_EXIT_LIMIT_OFFSET_CENTS", 3))
+    # BTC CROSS-ASSET ENTRY GATE — owner LIVE, default ON. Suppress an alt-NO entry when BTC is
+    # contemporaneously bullish (btc_lean >= btc_gate_lean) OR the complex is risk-on (prior-window
+    # breadth >= btc_gate_breadth) — the regime where alt-NO fails because the alts co-move up with
+    # BTC. EXEMPTS >=3-co-trigger 10M conviction windows (stake_multiplier>1), which are ~100%
+    # accurate and protected by the defensive exit, so they run at full size. Only acts on a present
+    # signal; no same-window-settlement lookahead. Backtest (in-sample ~2 days, ~560 windows): lifts
+    # kept-book accuracy and P&L. KILL SWITCH: set Q15_EXEC_BTC_GATE=false to disable instantly.
+    btc_gate_enabled: bool = field(default_factory=lambda: _bool("Q15_EXEC_BTC_GATE", True))
+    btc_gate_lean: float = field(default_factory=lambda: _float("Q15_EXEC_BTC_GATE_LEAN", 0.5))
+    btc_gate_breadth: float = field(default_factory=lambda: _float("Q15_EXEC_BTC_GATE_BREADTH", 0.5))
     # ORDER RECORDING (default ON when the executor runs). Persists every placement + the RAW
     # broker response + a best-effort fill classification to its own sqlite, so "how many orders
     # missed (placed-but-unfilled)" is answerable from our side and the optimistic in-memory fill
@@ -208,6 +218,8 @@ class ExecutorConfig:
             stop = f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%"
         else:
             stop = "NO daily stop (no circuit breaker)"
+        gate = (f"BTC-gate ON (lean>={self.btc_gate_lean:.2f}/breadth>={self.btc_gate_breadth:.2f}, "
+                f"conviction-exempt)" if self.btc_gate_enabled else "BTC-gate OFF")
         return (f"EXECUTOR ENABLED — {mode}; size {size}, "
                 f"<= {self.max_picks_per_window} pick(s)/window, <= {self.max_per_window_pct*100:.0f}%/window, "
-                f"{stop}")
+                f"{stop}; {gate}")

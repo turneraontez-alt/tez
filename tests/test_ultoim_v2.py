@@ -1708,3 +1708,39 @@ def test_streak_research_scoreboard_buckets(tmp_path):
     n3 = sb["no_run_3plus"]
     assert n3["n"] == 1 and n3["yes"] == 1
     led.close()
+
+
+# --------------------------------------------------------------------------- #
+# BTC cross-asset gate plumbing — prior-window breadth + runner attaches the
+# gate context (btc_lean / prior_breadth) to the executor pick
+# --------------------------------------------------------------------------- #
+def test_prior_window_breadth(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    mv = "ultoim-v2"
+    # window 99 (the window before 100): 3 settle YES, 1 NO -> breadth 0.75
+    for a, res in (("BTC", "YES"), ("ETH", "YES"), ("SOL", "YES"), ("XRP", "NO")):
+        tk = f"T-{a}-99"
+        led.record_decision(_row(asset=a, ticker=tk, window_key=99, interval="10M"))
+        led.resolve(mv, tk, res, 9500.0)
+    assert led.prior_window_breadth(100) == pytest.approx(0.75)
+    assert led.prior_window_breadth(50) is None   # no prior-window data
+    led.close()
+
+
+def test_runner_attaches_btc_gate_context_to_pick(tmp_path, monkeypatch):
+    r = _runner(tmp_path)
+    captured = {}
+
+    class _Ex:
+        def on_fire(self, pick):
+            captured.update(pick)
+            return {"placed": False}
+
+    import q15_upgrade.executor as ex_mod
+    monkeypatch.setattr(ex_mod, "get_executor", lambda: _Ex())
+    r._gate_ctx = {7: (0.62, 0.71)}
+    r._maybe_execute({"ticker": "T-ETH", "asset": "ETH", "predicted_side": "NO",
+                      "entry_ask_cents": 65.0}, 60, 7, "10M", 1000.0, stake_multiplier=1)
+    assert captured.get("btc_lean") == 0.62
+    assert captured.get("prior_breadth") == 0.71
+    assert captured.get("stake_multiplier") == 1

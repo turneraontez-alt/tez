@@ -92,6 +92,9 @@ class UltoimV2Runner:
         # Debounce state for the defensive-exit warning, keyed by (ticker, window).
         # Mutated ONLY on the worker thread (in _observe_sync), so no lock needed.
         self._exit_state: dict[tuple[str, int], dict[str, float]] = {}
+        # Per-cycle cross-asset gate context (window_key -> (btc_lean, prior_breadth)) handed to
+        # the executor's BTC gate. Rebuilt every _observe_sync; worker-thread only, no lock.
+        self._gate_ctx: dict[int, tuple[float | None, float | None]] = {}
 
     # -- worker plumbing ------------------------------------------------------
     def _ensure_worker(self) -> None:
@@ -248,7 +251,17 @@ class UltoimV2Runner:
         for cand in candidates:
             wk = _window_key(cand.get("close_time"), now)
             windows.setdefault(wk, []).append(cand)
+        # Cross-asset gate context for the executor's BTC gate, per window: BTC's contemporaneous
+        # market-implied P(YES) (from BTC's candidate this cycle, at-or-before any alt decision) and
+        # the prior-window settled breadth. Rebuilt each cycle; consumed in _maybe_execute.
+        self._gate_ctx = {}
         for window_key, cands in windows.items():
+            btc_lean = None
+            for cc in cands:
+                if str(cc.get("asset") or "").upper() == "BTC":
+                    btc_lean = _num(cc.get("market_implied_yes_probability"))
+                    break
+            self._gate_ctx[window_key] = (btc_lean, self.ledger.prior_window_breadth(window_key))
             for interval, mark in INTERVAL_MARKS.items():
                 # Skip the weak/money-losing 15M bin when configured (default OFF).
                 # 10M/7M behaviour is untouched.
@@ -557,6 +570,7 @@ class UltoimV2Runner:
             ex = get_executor()
             if ex is None:
                 return
+            _btc_lean, _prior_breadth = getattr(self, "_gate_ctx", {}).get(window_key, (None, None))
             ex.on_fire({
                 "ticker": cand.get("ticker"),
                 "asset": cand.get("asset"),
@@ -567,6 +581,8 @@ class UltoimV2Runner:
                 "interval": interval,   # backstops the executor's optional interval allowlist
                 "fired_at": now,        # cycle wall-clock -> executor measures snapshot->order age
                 "stake_multiplier": stake_multiplier,  # conviction size hint (2x on >=3 10M)
+                "btc_lean": _btc_lean,             # BTC contemporaneous lean -> executor BTC gate
+                "prior_breadth": _prior_breadth,   # prior-window complex breadth -> executor BTC gate
             })
         except Exception:  # never let execution disrupt the paper system
             logger.exception("executor on_fire hook failed (non-fatal)")

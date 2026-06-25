@@ -739,6 +739,23 @@ class UltoimV2Ledger:
             return 0
         return streak if last_side == "YES" else -streak
 
+    def prior_window_breadth(self, window_key: int) -> float | None:
+        """Fraction of the complex that SETTLED YES in the window immediately before
+        ``window_key`` (window_key-1), across all assets — a cross-asset 'risk-on' input for
+        the executor's BTC gate. ``None`` if no prior-window settlement is known yet. No
+        lookahead: the prior window closes a full 15 minutes before this one opens."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT asset, MAX(official_result) res FROM ultoim_v2_predictions "
+                "WHERE official_result IS NOT NULL AND window_key=? GROUP BY asset",
+                (int(window_key) - 1,),
+            ).fetchall()
+        vals = [str(r["res"] or "").upper() for r in rows]
+        vals = [v for v in vals if v in ("YES", "NO")]
+        if not vals:
+            return None
+        return sum(1 for v in vals if v == "YES") / len(vals)
+
     def streak_research_scoreboard(self, model_version: str) -> dict[str, Any]:
         """Read-only grading of the SETTLEMENT-STREAK signal: among settled windows, does
         the asset's prior consecutive-outcome run predict THIS window's settlement? Buckets
