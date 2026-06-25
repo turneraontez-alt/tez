@@ -236,6 +236,10 @@ class UltoimV2Runner:
                 # 10M/7M behaviour is untouched.
                 if cfg.skip_15m and interval == "15M":
                     continue
+                # Skip the 7M bin when configured (owner: 7M ran net-negative on a day; it is
+                # ~break-even overall). Default OFF -> byte-identical. Exits are unaffected.
+                if getattr(cfg, "skip_7m", False) and interval == "7M":
+                    continue
                 # 11M/12M are MEASURE-FIRST marks: inert unless explicitly enabled, so the
                 # added INTERVAL_MARKS entries are byte-identical no-ops by default.
                 if interval == "11M" and not cfg.enable_11m:

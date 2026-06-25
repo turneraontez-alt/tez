@@ -90,6 +90,11 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
+    # Skip the 7M (420s) checkpoint. DEFAULT OFF. 7M is a delivered mark; on the live sample it
+    # is roughly break-even (all-time ~+36c, n=62) but had a -137c day (06-24). Enable to drop 7M
+    # ENTRIES entirely (no screen, no alert, no trade) and run 10M-only. Exit warnings on already-
+    # open positions are unaffected. Set Q15_ULTOIM_V2_SKIP_7M=true.
+    skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", False))
     # --- Net-improvement levers (workflow-verified; all reversible).
     # 7M ASK CAP — DEFAULT OFF (flipped from ON). At the 7M mark only, do not admit a NO whose
     # ask > cap_7m_ask_max. NON-STATIONARY SIGNAL: the cap was originally enabled when an EARLIER,
