@@ -158,6 +158,35 @@ def apply_fill(state: PortfolioState, pick: Pick, decision: Decision) -> Portfol
     )
 
 
+def prune_settled(state: PortfolioState, current_window_key: int) -> PortfolioState:
+    """Release positions whose 15-min settlement window has already passed (``window_key`` strictly
+    older than the current pick's). Those contracts settled on the exchange, so they must NOT keep
+    counting toward the open-position / per-window / dup-ticker caps.
+
+    Without this the OPTIMISTIC in-memory ``open_count`` / ``open_tickers`` only ever GROW (apply_fill
+    adds; only the rare defensive ``apply_exit`` removes) — so ``open_count`` pins at
+    ``max_open_positions`` and every fired asset trips ``DUP_TICKER`` after its first entry, silently
+    halting all new entries until a restart. window_key = close_time//900 is monotonic with time, so
+    any window strictly older than the incoming pick's has settled. Pure; returns a NEW state."""
+    keep = {wk for wk in state.window_tickers if wk >= int(current_window_key)}
+    if len(keep) == len(state.window_tickers):
+        return state
+    kept: set[str] = set()
+    for wk in keep:
+        kept |= set(state.window_tickers.get(wk, frozenset()))
+    return PortfolioState(
+        bankroll_cents=state.bankroll_cents,
+        day_start_bankroll_cents=state.day_start_bankroll_cents,
+        day_realized_pnl_cents=state.day_realized_pnl_cents,
+        open_count=len(kept),
+        open_tickers=frozenset(kept),
+        positions={t: c for t, c in state.positions.items() if t in kept},
+        window_count={wk: v for wk, v in state.window_count.items() if wk in keep},
+        window_committed_cents={wk: v for wk, v in state.window_committed_cents.items() if wk in keep},
+        window_tickers={wk: v for wk, v in state.window_tickers.items() if wk in keep},
+    )
+
+
 def apply_exit(state: PortfolioState, ticker: str) -> PortfolioState:
     """Return a NEW state with ``ticker`` closed out (after a sell)."""
     if ticker not in state.positions:
