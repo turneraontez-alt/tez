@@ -150,6 +150,30 @@ class UltoimV2Config:
     deliver_by_reward_risk: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)
     )
+    # --- CONVICTION rules keyed on how many assets trigger NO in the SAME 15-min window
+    # (the count of would-fire NO entries at one (interval, window) this cycle — known at
+    # bet time, no look-ahead, top_n-independent). Derived from the settled alert ledger:
+    #   * 12M is a weak delivering interval EXCEPT when >=3 assets co-trigger (broad pin);
+    #     the lone/pair 12M alerts lose money. So SKIP 12M unless it clears the threshold.
+    #   * 10M with >=3 co-triggers ran materially better (settled cohort ~86% vs ~74%), so
+    #     SIZE UP (2x) on those. NOTE: this is leverage keyed on COUNT, not correctness —
+    #     it WILL sometimes double a losing window (a market-wide YES sweep). Owner-chosen
+    #     default-ON; the evidence is thin (~3 days), so the staked P&L is tracked live.
+    skip_12m_unless_min: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_12M_UNLESS_MIN", True)
+    )
+    min_triggers_12m: int = field(
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_MIN_TRIGGERS_12M", 3.0)))
+    )
+    double_10m_on_min: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_DOUBLE_10M_ON_MIN", True)
+    )
+    min_triggers_10m: int = field(
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_MIN_TRIGGERS_10M", 3.0)))
+    )
+    double_stake: int = field(
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DOUBLE_STAKE", 2.0)))
+    )
     # --- 15M selective-entry research SCREEN thresholds (record-only; fifteen_min.py).
     # Scoped to 15M NO candidates ONLY; NEVER gates fire/delivery and never affects the
     # 10M/7M marks. The runner stamps, for every 15M NO row, whether this SELECTIVE gate

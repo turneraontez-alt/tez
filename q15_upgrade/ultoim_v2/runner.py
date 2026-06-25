@@ -289,6 +289,27 @@ class UltoimV2Runner:
                 abstained_stale = True
             evaluated.append({"cand": cand, "verdict": verdict, "stale": abstained_stale})
 
+        # -- CONVICTION rules, keyed on how many assets would FIRE a NO at this
+        # (interval, window) THIS cycle (qualifiers). The count is known right now — all
+        # co-settling assets are in-band together — so there is no look-ahead, and it is
+        # independent of deliver_top_n. See config (skip_12m_unless_min / double_10m_on_min).
+        qualifiers = sum(1 for e in evaluated if e["verdict"]["fired"])
+        conviction_reason: str | None = None
+        # Rule A: SKIP 12M delivery unless >=min assets co-trigger. Below the threshold the
+        # 12M picks are downgraded to research (recorded + graded, but never alerted, fired,
+        # or executed). Only meaningful when 12M is in delivery mode (deliver_12m on).
+        if (interval == "12M" and not research_only and cfg.skip_12m_unless_min
+                and qualifiers < cfg.min_triggers_12m):
+            research_only = True
+            conviction_reason = "SKIP_12M_UNDER_MIN"
+        # Rule B: conviction-DOUBLE the 10M stake when >=min assets co-trigger. This is
+        # leverage on the COUNT, not on correctness — it will sometimes double a losing
+        # window (a market-wide YES sweep). Owner-chosen default-ON; staked P&L is tracked.
+        stake = 1
+        if (interval == "10M" and cfg.double_10m_on_min
+                and qualifiers >= cfg.min_triggers_10m):
+            stake = cfg.double_stake
+
         # -- MEASURE-FIRST path (11M/12M): record the would-FIRE favourites but NEVER
         # deliver. We force fired=False (no alert, no alert-lock claim) while leaving
         # research_fired intact so the row grades on settlement. We pick the would-fire
@@ -321,6 +342,8 @@ class UltoimV2Runner:
                 rc = list(v.get("reason_codes") or [])
                 if "RESEARCH_ONLY_MARK" not in rc:
                     rc.append("RESEARCH_ONLY_MARK")
+                if conviction_reason and conviction_reason not in rc:
+                    rc.append(conviction_reason)
                 v["reason_codes"] = rc
                 self._record_and_maybe_alert({**e, "verdict": v}, interval, mark, window_key, now)
             return
@@ -346,7 +369,8 @@ class UltoimV2Runner:
                     fired, key=lambda e: -(_num(e["verdict"]["net_edge_cents"]) or -1e9))
             for e in ordered[:n]:
                 delivered_tickers.add(str(e["cand"].get("ticker") or ""))
-                self._record_and_maybe_alert(e, interval, mark, window_key, now)
+                self._record_and_maybe_alert({**e, "stake_multiplier": stake},
+                                             interval, mark, window_key, now)
         elif evaluated:
             # nothing fired -> record the single best for research (unchanged).
             best = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
@@ -367,7 +391,7 @@ class UltoimV2Runner:
 
     def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
                    mark: int, window_key: int, now: float, *, record_kind: str,
-                   delivery_status: str) -> dict[str, Any]:
+                   delivery_status: str, stake_multiplier: int = 1) -> dict[str, Any]:
         cfg = self.config
         sel = _num(cand.get("selected_probability"))
         ask = _num(cand.get("entry_ask_cents"))
@@ -439,6 +463,7 @@ class UltoimV2Runner:
             "s15_codes": s15["s15_codes"],
             "s15_cal_drift": s15["s15_cal_drift"],
             "s15_version": s15["s15_version"],
+            "stake_multiplier": int(stake_multiplier),
             "_best_entry_cents": display,
         }
 
@@ -447,8 +472,10 @@ class UltoimV2Runner:
         cfg = self.config
         cand = chosen["cand"]
         verdict = chosen["verdict"]
+        stake = int(chosen.get("stake_multiplier", 1) or 1)
         row = self._build_row(cand, verdict, interval, mark, window_key, now,
-                              record_kind="DELIVERED_CANDIDATE", delivery_status="PENDING")
+                              record_kind="DELIVERED_CANDIDATE", delivery_status="PENDING",
+                              stake_multiplier=stake)
         display = row.pop("_best_entry_cents", None)
         row_id = self.ledger.record_decision(row)
         if row_id is None:
@@ -481,10 +508,11 @@ class UltoimV2Runner:
         # this is a byte-identical no-op by default; even when enabled it is dry-run by
         # default. v2 NEVER places an order itself — it only emits the pick. Failures here
         # are swallowed so the executor can never disrupt the read-only paper path.
-        self._maybe_execute(cand, display, window_key, interval, now)
+        self._maybe_execute(cand, display, window_key, interval, now, stake_multiplier=stake)
 
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
-                       window_key: int, interval: str, now: float) -> None:
+                       window_key: int, interval: str, now: float,
+                       *, stake_multiplier: int = 1) -> None:
         try:
             from q15_upgrade.executor import get_executor
             ex = get_executor()
@@ -499,6 +527,7 @@ class UltoimV2Runner:
                 "window_key": window_key,
                 "interval": interval,   # backstops the executor's optional interval allowlist
                 "fired_at": now,        # cycle wall-clock -> executor measures snapshot->order age
+                "stake_multiplier": stake_multiplier,  # conviction size hint (2x on >=3 10M)
             })
         except Exception:  # never let execution disrupt the paper system
             logger.exception("executor on_fire hook failed (non-fatal)")

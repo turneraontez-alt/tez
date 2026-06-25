@@ -9,9 +9,28 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1385 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1396 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — V2 conviction rules (owner-enabled, DEFAULT ON)
+**Suite 1396 / 4 skipped** (+11 tests). Two owner-chosen rules on the V2 (`ultoim_v2`) NO-only entry
+system, keyed on how many assets co-trigger a NO in the SAME 15-min window this cycle (count of
+would-fire entries — known at bet time, **no look-ahead**, top_n-independent). Derived from a
+hand-audit of the settled alert ledger (3 days, thin) cross-checked by two workflows:
+- **Rule A — `Q15_ULTOIM_V2_SKIP_12M_UNLESS_MIN` (default ON, MIN=3)** `ultoim_v2/runner.py`: skip 12M
+  delivery unless >=3 co-trigger; below that the picks downgrade to research (graded, never
+  alerted/fired/executed, reason `SKIP_12M_UNDER_MIN`). Purely defensive — 12M loses money as a whole
+  (62.5%, −85c) and the lone/pair 12M alerts are the losers. This one genuinely cuts losses.
+- **Rule B — `Q15_ULTOIM_V2_DOUBLE_10M_ON_MIN` (default ON, MIN=3, stake 2)** `ultoim_v2/runner.py`: 2x
+  the 10M stake when >=3 co-trigger (settled cohort ~86% vs ~74%). **LEVERAGE on the COUNT, not
+  correctness — it doubles a losing window too** (a market-wide YES sweep; e.g. yesterday a −193c 10M
+  window would become −386c). New `stake_multiplier` column (default 1, migrated); `hypothetical_pnl_cents`
+  is now scored at the size taken so the ledger tracks staked P&L (legacy rows stake 1 = unchanged). The
+  alert shows `🔥 2× CONVICTION` so the owner (manual sizer) doubles; executor payload carries the size hint.
+- Honesty caveats carried in code + `.env.example`: evidence is ~3 days/thin; in-sample backtest showed
+  +1242c→+2286c (+84%) but ~28% of that (12M) rests on 2 windows. Both reversible via their `Q15_*` vars.
+  In-sample on the bad-window check, Rule A cut losses; Rule B amplified them — owner accepted the leverage.
 
 ## ✅ Shipped THIS session — YES-prediction edge audit + 3 gated knobs
 **Suite 1385 / 4 skipped** (+10 tests). Merged to `main` via PR #52 (branch

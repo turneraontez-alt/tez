@@ -93,6 +93,12 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     ]
     if flow_warn is not None:
         body.insert(3, flow_warn)  # directly under the BEST ENTRY headline
+    # Conviction sizing: 2x on >=min co-triggering 10M alerts this window. Surfaced so the
+    # owner (who sizes manually off the alert) doubles. Leverage on COUNT, not correctness.
+    stake_mult = int(_num(pick.get("stake_multiplier")) or 1)
+    if stake_mult >= 2:
+        body.insert(3, f"🔥 {stake_mult}× CONVICTION — {stake_mult}× size "
+                       f"(≥{getattr(cfg, 'min_triggers_10m', 3)} NO co-triggers this window)")
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
 
 

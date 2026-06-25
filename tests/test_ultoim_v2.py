@@ -197,6 +197,11 @@ def test_owner_default_config_is_aggressive():
     # ...but BOTH record-only now: 12M reverted from delivery after the ~42h replay showed the
     # delivered 12M slice runs net-negative. Delivered marks are 10M + 7M only.
     assert cfg.research_only_intervals == frozenset({"11M", "12M"})
+    # Owner-enabled CONVICTION rules (default ON; reversible via their Q15_* env vars):
+    # skip 12M unless >=3 co-trigger, and 2x-size 10M on >=3 co-triggers.
+    assert cfg.skip_12m_unless_min is True and cfg.min_triggers_12m == 3
+    assert cfg.double_10m_on_min is True and cfg.min_triggers_10m == 3
+    assert cfg.double_stake == 2
 
 
 def test_gate_missing_data():
@@ -1013,8 +1018,10 @@ def test_deliver_12m_off_is_byte_identical_floor_inert():
 def test_runner_delivers_12m_expensive_when_promoted(tmp_path):
     """End-to-end: with deliver_12m on, a 12M NO at ask 70 (>=65) fires a delivered row; a cheap
     12M NO (ask 60) is recorded research-only with ASK_FLOOR_12M."""
+    # Isolate the deliver_12m mechanic: pin the conviction filter OFF so a lone 12M
+    # entry still delivers (the >=3-co-trigger rule is exercised in test_q15_v2_conviction).
     r = _runner(tmp_path, telegram=_StubTelegram(), enable_12m=True, deliver_12m=True,
-                deliver_by_reward_risk=True)
+                deliver_by_reward_risk=True, skip_12m_unless_min=False)
     a = {"BTC": _analysis(side="NO", sel=0.75, ask=70.0, mkt_yes=0.25, total_cost=0.0)}
     c = {"BTC": _canon("T-BTC", secs=720.0, close=9000.0)}
     r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
