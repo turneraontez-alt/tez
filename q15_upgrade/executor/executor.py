@@ -182,15 +182,20 @@ class Executor:
         count = self.state.positions.get(ticker, 0)
         if count < 1:
             return {"placed": False, "reason": "NO_POSITION"}
+        # Price the close to actually fill: it goes out immediate-or-cancel (reduce_only), so a
+        # mid-priced sell would cancel unfilled. Sell exit_limit_offset_cents UNDER the estimated
+        # exit value to cross the resting bid. Clamp to a tradeable cent (the side/price mapper
+        # clamps the wire price into [1,99] as well).
+        limit_px = max(1, int(exit_price_cents) - int(self.cfg.exit_limit_offset_cents))
         res = self.client.place_order(
-            ticker=ticker, side="no", count=count, price_cents=int(exit_price_cents),
+            ticker=ticker, side="no", count=count, price_cents=limit_px,
             action="sell", client_order_id=_coid(window_key, ticker, "exit"),
         )
         fill_status = None
         if self.store is not None:
             from types import SimpleNamespace
             _pick = SimpleNamespace(ticker=ticker, asset="", interval="", window_key=window_key)
-            _dec = SimpleNamespace(count=count, limit_price_cents=int(exit_price_cents), stake_cents=None)
+            _dec = SimpleNamespace(count=count, limit_price_cents=limit_px, stake_cents=None)
             fill_status, _ = self.store.record_order_result(
                 action="exit", pick=_pick, decision=_dec, res=res, age_ms=None,
                 bal_ms=None, order_ms=None, client_order_id=_coid(window_key, ticker, "exit"))
