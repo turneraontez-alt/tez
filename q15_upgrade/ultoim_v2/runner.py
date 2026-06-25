@@ -424,6 +424,24 @@ class UltoimV2Runner:
                 if str(best_yes["cand"].get("ticker") or "") not in delivered_tickers:
                     self._record_research_yes(best_yes, interval, mark, window_key, now)
 
+        # -- LIVE "YES BOT" path (ISOLATED; default-OFF). The data-backed inverse-v2 rule:
+        # when the champion leans YES AND BTC is contemporaneously bullish AND the asset isn't
+        # excluded, route the YES candidate(s) to the SEPARATE yes-executor for a REAL YES buy +
+        # a LIVE order alert. This block is ADDITIVE and reads only `evaluated` / self._gate_ctx —
+        # it never mutates NO-path state (no NO ledger row, no NO alert/report lock, separate
+        # executor instance + order store + client_order_id namespace). The yes-executor enforces
+        # the hard P(YES)/BTC-lean/excluded-asset gates and the sizing per pick; the runner only
+        # decides WHICH YES candidates to offer (highest market-implied P(YES) first — NOT net_edge,
+        # which is inverse for the NO book). Errors are swallowed in _maybe_execute_yes.
+        if (getattr(cfg, "yes_live_enabled", False)
+                and interval in getattr(cfg, "yes_live_intervals", frozenset())):
+            yes_live = [e for e in evaluated
+                        if str(e["cand"].get("predicted_side") or "").upper() == "YES"]
+            for e in sorted(yes_live,
+                            key=lambda e: _num(e["cand"].get("market_implied_yes_probability")) or -1.0,
+                            reverse=True):
+                self._maybe_execute_yes(e["cand"], window_key, interval, now)
+
     def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
                    mark: int, window_key: int, now: float, *, record_kind: str,
                    delivery_status: str, stake_multiplier: int = 1) -> dict[str, Any]:
@@ -591,6 +609,49 @@ class UltoimV2Runner:
             })
         except Exception:  # never let execution disrupt the paper system
             logger.exception("executor on_fire hook failed (non-fatal)")
+
+    def _maybe_execute_yes(self, cand: Mapping[str, Any], window_key: int,
+                           interval: str, now: float) -> None:
+        """Route one YES candidate to the SEPARATE live yes-executor and, on a placement,
+        send ONE live order alert. Fully isolated from the NO/paper path:
+          * its own executor instance (get_yes_executor) — separate state/order-store/coid prefix;
+          * a YES-NAMESPACED alert lock (ticker+'|YES') that can never collide with the NO lock;
+          * writes NO v2 ledger row (the existing RESEARCH_YES row already grades the outcome).
+        Idempotent across the ~1s cycles in a window: once placed+claimed, the alert_locked guard
+        short-circuits. Errors are swallowed so the YES bot can never disrupt the read-only system.
+        """
+        cfg = self.config
+        try:
+            from q15_upgrade.executor import get_yes_executor
+            ex = get_yes_executor()
+            if ex is None:
+                return
+            ticker = str(cand.get("ticker") or "")
+            if not ticker:
+                return
+            # Already placed+alerted this contract this window? (YES-namespaced lock) -> done.
+            if self.ledger.alert_locked(cfg.model_version, ticker + "|YES", window_key):
+                return
+            btc_lean, _prior_breadth = getattr(self, "_gate_ctx", {}).get(window_key, (None, None))
+            res = ex.on_fire({
+                "ticker": ticker,
+                "asset": cand.get("asset"),
+                "predicted_side": "YES",
+                "entry_ask_cents": cand.get("entry_ask_cents"),  # the YES buy price (predicted-side ask)
+                "window_key": window_key,
+                "interval": interval,
+                "fired_at": now,
+                "yes_prob": cand.get("market_implied_yes_probability"),  # -> YES_PROB_FLOOR gate
+                "btc_lean": btc_lean,                                    # -> BTC_LEAN_FLOOR gate
+            })
+            if not (res and res.get("placed")):
+                return  # refused (a gate, dup, or window-full): no alert, retry next cycle
+            # Placed (LIVE or dry-run): claim the YES alert lock ONCE and send the live order card.
+            if self.ledger.claim_alert(cfg.model_version, ticker + "|YES", window_key, now):
+                text = panel.build_yes_live_alert(cand, res, cfg)
+                self.telegram.send(text)
+        except Exception:  # never let the YES bot disrupt the paper system
+            logger.exception("yes-executor hook failed (non-fatal)")
 
     def _record_research_yes(self, entry: dict[str, Any], interval: str, mark: int,
                              window_key: int, now: float) -> None:

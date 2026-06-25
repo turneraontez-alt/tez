@@ -102,6 +102,44 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
     return header + "\n<pre>" + "\n".join(body) + "</pre>"
 
 
+def build_yes_live_alert(pick: Mapping[str, Any], result: Mapping[str, Any], cfg: Any) -> str:
+    """Render the live "YES bot" order alert. Unlike build_entry_alert (which is a PAPER card
+    saying 'no orders placed'), this fires ONLY after the separate yes-executor actually placed an
+    order, so it states the order plainly and truthfully — LIVE vs DRY-RUN per the executor result.
+    Marker-safe by construction: carries NONE of the live suppression/routing strings
+    ('V9.5 CHECK', 'ENTRY RECOMMENDED', 'NO ENTRY YET', 'Hourly Report —', 'TOP 3 PICKS')."""
+    res = result or {}
+    asset = _esc(pick.get("asset"))
+    ticker = _esc(pick.get("ticker"))
+    interval = _esc(pick.get("interval"))
+    window = _esc(pick.get("window_key"))
+    pyes = _pct1(pick.get("market_implied_yes_probability"))
+    ask = _num(pick.get("entry_ask_cents"))
+    ask_txt = "—" if ask is None else f"{ask:.0f}¢"
+    live = str(res.get("mode") or "").upper() == "LIVE"
+    count = res.get("count")
+    count_txt = "—" if count is None else f"{int(count)}"
+    limit = _num(res.get("limit_price_cents"))
+    limit_txt = "—" if limit is None else f"{limit:.0f}¢"
+    stake = _num(res.get("stake_cents"))
+    stake_txt = "—" if stake is None else f"${stake / 100:.0f}"
+    banner = ("🟢 <b>ULTOIM YES BOT · LIVE ORDER PLACED</b>" if live
+              else "🟡 <b>ULTOIM YES BOT · DRY-RUN (no order sent)</b>")
+    body = [
+        ("REAL YES buy placed on Kalshi." if live
+         else "DRY-RUN — would place this YES buy (no money moved)."),
+        "",
+        f"🟢 BUY YES — {asset}",
+        f"Ticker: {ticker}",
+        f"Interval: {interval} · Window: {window}",
+        f"P(YES): {pyes} · YES ask: {ask_txt}",
+        f"Order: {count_txt} contracts @ {limit_txt} · stake {stake_txt}",
+        "Rule: v2 leans YES + BTC bullish + asset not excluded (10M)",
+        "Ultoim YES bot · isolated from the paper book",
+    ]
+    return banner + "\n<pre>" + "\n".join(body) + "</pre>"
+
+
 def build_exit_warning(warning: Mapping[str, Any], scoreboard: Mapping[str, Any],
                        cfg: Any) -> str:
     """Render a defensive-exit / flip warning: the model has reversed on a pick it

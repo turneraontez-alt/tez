@@ -9,12 +9,12 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1435 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1448 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
 ## ✅ Shipped THIS session — executor latency: order before Telegram (fill-rate fix)
-**Suite 1435 / 4 skipped** (+4 tests). Diagnosis (11-agent workflow, all hops cited file:line): real orders
+**Suite 1448 / 4 skipped** (+4 tests). Diagnosis (11-agent workflow, all hops cited file:line): real orders
 were built on a **5.4s-avg (8.1s max) stale price** (`snapshot_age_ms`), so the limit stopped crossing and
 **~59% of entries RESTED unfilled** (13 FILLED/12 RESTED/4 PARTIAL/3 FAILED of 32). The HTTP order POST
 (~136ms) and balance GET (~0ms, skipped) are NOT the bottleneck — the lag was upstream. Root cause: in
@@ -28,8 +28,37 @@ was separately confirmed CORRECT (buy NO = sell YES per Kalshi duality; fills la
 book). NOT yet done (follow-ups): Fix B async/off-worker Telegram, Fix D fresh re-quote in on_fire (re-gated),
 price-aware entry offset bump (1->3 only for ask>=75c), and the deeper snapshot-latency cut.
 
-## ✅ Shipped THIS session — BTC cross-asset entry GATE (LIVE real-money, default ON)
-Owner-directed LIVE executor gate (not observational — owner
+## ✅ Shipped THIS session — LIVE "YES BOT" (separate, isolated real-money YES executor)
+**Suite 1412 / 13 skipped** (+15 tests). Owner-directed LIVE: a SECOND executor that trades the **YES**
+side (the inverse-v2 rule) **fully isolated from the NO book** — its own `Executor` instance,
+`PortfolioState`, orders DB (`data/q15_executor_yes_orders_v1.sqlite3`), `client_order_id` prefix
+(`v2xy-`), and alert-lock namespace (`<ticker>|YES`). An adversarial isolation audit (5-agent workflow)
++ a byte-identical-NO test confirm the NO path is unchanged. **THE RULE (10M only):** place a flat **$150**
+YES buy when the champion leans YES AND v2 market-implied **P(YES) ≥ 0.55** AND **BTC contemporaneously
+bullish (lean ≥ 0.55)** AND asset **≠ BNB** — up to **2 picks/window ($300), NO conviction doubling**.
+Sends a clearly-labelled **LIVE order** Telegram alert on each placement.
+- **Why these thresholds:** in-sample (~2.6d) the set ran **96% (n=25) / +$1.4k** flat-$150. The two
+  loser patterns (BTC head-fake; BNB decoupling) are exactly what `min_btc_lean=0.55` (HARD, no breadth
+  override) and the BNB exclusion remove. ⚠️ **THIN / in-sample** — watch across regimes.
+- **Executor (`executor/{config,risk,executor,__init__}.py`):** 3 new `risk.decide()` gates
+  (`YES_PROB_FLOOR`/`BTC_LEAN_FLOOR`/`ASSET_EXCLUDED`), **inert at default config** so NO `decide()` is
+  byte-identical; they **fail closed** (missing signal → refuse). `Pick.yes_prob` added. `on_fire` now
+  places `side=pick.side` (NO still→`no`) with a per-executor `coid_prefix` (audit fix: side-agnostic
+  `_coid` could dedupe a NO+YES order at Kalshi). New `yes_config_from_env()` + `get_yes_executor()`
+  singleton. **`dry_run` reads ONLY `Q15_EXEC_YES_DRY_RUN`** (never inherits the NO book's flag — audit fix).
+- **Runner (`ultoim_v2/{runner,config,panel}.py`):** additive default-OFF block in `_decide_interval`
+  (after the RESEARCH-YES block) routes the highest-P(YES) 10M YES candidate(s) to `get_yes_executor()`
+  via new `_maybe_execute_yes` (reads only `evaluated`/`_gate_ctx`; writes NO NO-path ledger/lock/report
+  state; swallows errors). `panel.build_yes_live_alert` (marker-safe LIVE card). `config.yes_live_enabled`
+  (= `Q15_EXEC_YES_ENABLED`) + `yes_live_intervals` (default `{10M}`).
+- **`.replit` (LIVE):** `Q15_EXEC_YES_ENABLED="true"`, `Q15_EXEC_YES_DRY_RUN="false"`. KILL SWITCH:
+  `Q15_EXEC_YES_KILL="true"` (or global `Q15_EXEC_KILL`). Dry-run shakeout: set `Q15_EXEC_YES_DRY_RUN="true"`.
+- **+15 tests:** 3 gates incl. fail-closed, byte-identical-NO, side=`yes` + distinct coid, isolation
+  (YES on_fire doesn't touch NO state), dry-run independence, factory-None-when-disabled, high-favorite
+  band, runner route + YES-namespaced alert, default-OFF no-route.
+
+## ✅ Shipped a prior session — BTC cross-asset entry GATE (LIVE real-money, default ON)
+**Suite 1392 / 13 skipped** (+10 tests). Owner-directed LIVE executor gate (not observational — owner
 chose "active immediately"). Suppresses an alt-NO entry when **BTC is contemporaneously bullish
 (lean≥0.50) OR the complex is risk-on (prior-window breadth≥0.50)** — the regime where alt-NO fails
 because the alts co-move up with BTC (P(alt YES|BTC YES)≈65–88%, breadth 76%). **EXEMPTS ≥3-co-trigger
