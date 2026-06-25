@@ -1,0 +1,42 @@
+python3 - <<'PY'
+import os, sqlite3
+from q15_upgrade.executor import get_yes_executor, yes_config_from_env
+
+cfg = yes_config_from_env()
+live = cfg.enabled and not cfg.dry_run
+print("=== YES BOT CONFIG ===")
+print(f"  enabled : {cfg.enabled}   dry_run: {cfg.dry_run}   -> {'LIVE (real orders)' if live else 'DRY-RUN/OFF'}")
+print(f"  rule    : P(YES)>={cfg.min_yes_prob}  BTC lean>={cfg.min_btc_lean}  exclude={set(cfg.excluded_assets)}  intervals={set(cfg.allowed_intervals)}")
+print(f"  sizing  : ${cfg.flat_stake_cents/100:.0f}/pick, up to {cfg.max_picks_per_window}/window")
+print(f"  routing : Q15_EXEC_YES_ENABLED={os.environ.get('Q15_EXEC_YES_ENABLED')!r}")
+print(f"  armed?  : {'YES — get_yes_executor() returns a live instance' if get_yes_executor() else 'NO — disabled'}")
+
+print("\n=== YES ORDERS PLACED (separate orders db) ===")
+db = cfg.orders_db_path
+if os.path.exists(db):
+    c = sqlite3.connect(db)
+    n = c.execute("select count(*) from executor_orders").fetchone()[0]
+    print(f"  {db}: {n} order rows")
+    for r in c.execute("select datetime(created_at,'unixepoch') t, action, asset, ticker, "
+                       "requested_count, limit_price_cents, mode, fill_status "
+                       "from executor_orders order by created_at desc limit 8"):
+        print("   ", tuple(r))
+    if n == 0:
+        print("   (armed but no qualifying YES window has occurred yet — not an error)")
+else:
+    print(f"  {db} not created yet -> no YES order placed so far (no qualifying setup yet, or not live)")
+
+print("\n=== RECENT YES SETUPS in the v2 ledger (did the bot have chances?) ===")
+led = os.environ.get("Q15_ULTOIM_V2_DB") or "data/q15_ultoim_v2_v1.sqlite3"
+if os.path.exists(led):
+    c = sqlite3.connect(led)
+    q = ("select datetime(created_at,'unixepoch') t, asset, "
+         "round(market_implied_yes_probability,2) pyes, entry_ask_cents, official_result "
+         "from ultoim_v2_predictions where predicted_side='YES' and interval='10M' "
+         "and market_implied_yes_probability>=0.55 order by created_at desc limit 8")
+    rows = list(c.execute(q))
+    print(f"  {len(rows)} recent 10M YES candidates clearing P(YES)>=0.55 (bot also needs BTC bullish + not BNB):")
+    for r in rows: print("   ", tuple(r))
+else:
+    print(f"  ledger {led} not found at this path")
+PY
