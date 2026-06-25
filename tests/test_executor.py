@@ -390,6 +390,37 @@ def test_second_pick_floor_does_not_loosen_window_cap():
     assert decide(_pick(wk=1, price=70), st, cfg).reason == "WINDOW_FULL"
 
 
+def test_entry_ask_floor_default_off_is_byte_identical():
+    # min_entry_ask defaults to 0 -> the gate `price >= 0` is always true, so even a 52c FIRST pick
+    # places. Default-OFF must be byte-identical to having no floor.
+    cfg = _cfg()  # min_entry_ask unset -> 0
+    assert cfg.min_entry_ask == 0
+    st = PortfolioState(bankroll_cents=100_000)
+    d = decide(_pick(wk=1, price=52), st, cfg)  # cheap first pick still placed
+    assert d.place is True
+
+
+def test_entry_ask_floor_blocks_cheap_first_pick():
+    # With the GLOBAL floor at 58c: a pick below 58 is refused ENTRY_ASK_FLOOR, while a pick at the
+    # floor (and above) places. Unlike second_pick_min_ask, this gates the FIRST pick of a window.
+    cfg = _cfg(min_entry_ask=58)
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_pick(wk=1, price=55), st, cfg).reason == "ENTRY_ASK_FLOOR"
+    assert decide(_pick(wk=1, price=57), st, cfg).reason == "ENTRY_ASK_FLOOR"
+    assert decide(_pick(wk=1, price=58), st, cfg).place is True   # at the floor -> places
+    assert decide(_pick(wk=1, price=65), st, cfg).place is True   # above the floor -> places
+
+
+def test_entry_ask_floor_applies_to_first_pick_unlike_second_pick_floor():
+    # Distinguishes the global floor from second_pick_min_ask: with NO second-pick floor set but a
+    # global floor of 58, the very FIRST pick of an empty window below 58 is refused — proving the
+    # global floor is not the 2nd-pick-only gate.
+    cfg = _cfg(min_entry_ask=58, second_pick_min_ask=0)
+    st = PortfolioState(bankroll_cents=100_000)  # empty window, this is the 1st pick
+    assert st.window_count.get(1, 0) == 0
+    assert decide(_pick(wk=1, price=55), st, cfg).reason == "ENTRY_ASK_FLOOR"
+
+
 def test_decide_window_cap_clamps_stake():
     # per_pick 4% = 4000c, but only 1000c of the 8000c window cap remains -> clamp.
     cfg = _cfg()

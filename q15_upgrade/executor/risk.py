@@ -9,6 +9,7 @@ Guards (a refusal short-circuits with a single reason code):
   WRONG_SIDE      — not the NO side (no_only)
   INTERVAL_BLOCKED— interval not in the (optional) allowlist
   PRICE_BAND      — price outside [min,max]
+  ENTRY_ASK_FLOOR — entry ask below the (optional) GLOBAL ask floor (applies to ALL picks)
   DAILY_STOP      — day realized P&L past the loss limit (circuit breaker)
   MAX_OPEN        — already at max open positions
   DUP_TICKER      — already hold / already traded this ticker+window
@@ -73,6 +74,12 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     price = int(pick.price_cents)
     if not (cfg.min_price_cents <= price <= cfg.max_price_cents):
         return Decision(False, "PRICE_BAND")
+    # GLOBAL entry ask floor — applies to EVERY pick (incl. the 1st), unlike second_pick_min_ask.
+    # Default 0 => `price >= 0` always true => byte-identical. When set, refuse a fired NO whose
+    # entry ask is below the floor (the net-negative cheap-NO zone; recommended 58, default-OFF).
+    floor = int(getattr(cfg, "min_entry_ask", 0) or 0)
+    if price < floor:
+        return Decision(False, "ENTRY_ASK_FLOOR")
 
     # Daily circuit breaker: stop NEW entries once down the limit on the day. An ABSOLUTE
     # dollar stop (daily_loss_limit_cents) GOVERNS when set; otherwise the % of day-start

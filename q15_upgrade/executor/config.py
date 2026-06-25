@@ -126,6 +126,19 @@ class ExecutorConfig:
     # listed keep flat_stake_cents. Set Q15_EXEC_STAKE_BY_INTERVAL.
     stake_by_interval: dict = field(default_factory=lambda: _stake_map("Q15_EXEC_STAKE_BY_INTERVAL"))
 
+    # GLOBAL entry ask floor (applies to EVERY pick, incl. the 1st — distinct from
+    # second_pick_min_ask which gates only 2nd-or-later picks, and from the min_price_cents sanity
+    # band). DEFAULT 0 = OFF (the gate is `price >= 0`, always true -> byte-identical). When > 0,
+    # refuse any fired NO whose entry ask < this many cents (ENTRY_ASK_FLOOR). Data: full-sample,
+    # fired NO at ask<60 is net-NEGATIVE (n=43, 46% win, -300c) and a flat floor 60 lifts the kept
+    # book +300c full-sample. BUT that benefit is concentrated in the single June-24 19-23 UTC
+    # regime evening; out-of-evening the cheap band is POSITIVE (ask<60 +196c/30) and every floor
+    # REDUCES the kept book. The only evening-INDEPENDENT loss band is [55,58) (-146c/8, thin), and
+    # 10M cheap NO is break-even. Recommended floor if used: 58. Verdict on the lever was WEAK, so
+    # this stays default-OFF; a regime/breadth circuit-breaker — not a price floor — is the real
+    # lever for the bad windows. Set Q15_EXEC_MIN_ENTRY_ASK.
+    min_entry_ask: int = field(default_factory=lambda: _int("Q15_EXEC_MIN_ENTRY_ASK", 0))
+
     # --- Order sanity band (refuse anything outside it — defence in depth vs a bad signal) ---
     min_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MIN_PRICE_CENTS", 50))
     max_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PRICE_CENTS", 85))
