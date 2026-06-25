@@ -14,7 +14,18 @@ import sqlite3
 import time
 from typing import Any, Iterable, Mapping
 
+from .config import ChallengerConfig
 from .mathx import clamp, wilson_interval
+
+# The live challenger model_version (env Q15_CHALLENGER_MODEL_VERSION, default
+# "challenger-v5"). Reporting and marker methods default to THIS so an ad-hoc,
+# export, or review caller that omits the version scores the rows that actually
+# exist. The previous hardcoded "challenger-v1" default matched zero rows once
+# the live version advanced past v1, silently reporting resolved=0 — and the
+# curated learning snapshot inherited it (tools/learning_export.py calls
+# scoreboard() with no version). Resolved at import; the long-running runner
+# always threads cfg.model_version explicitly, so only bare callers rely on this.
+_DEFAULT_MODEL_VERSION = ChallengerConfig().model_version
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS shadow_predictions (
@@ -151,7 +162,7 @@ class ShadowLedger:
 
     # ---- "Your System" sent-before-close marker (official grading rule) ----
     def mark_native_sent(self, contract: str, checkpoint: str,
-                         model_version: str = "challenger-v1",
+                         model_version: str = _DEFAULT_MODEL_VERSION,
                          delivered_at: float | None = None) -> bool:
         """Flag the native (Your System) prediction for (contract, checkpoint) as
         delivered before close, so it counts in the VISIBLE record. Also stamps the
@@ -169,7 +180,7 @@ class ShadowLedger:
         return cur.rowcount > 0
 
     def mark_native_delivery_failed(self, contract: str, checkpoint: str, error: str,
-                                    model_version: str = "challenger-v1",
+                                    model_version: str = _DEFAULT_MODEL_VERSION,
                                     failed_at: float | None = None) -> bool:
         """Record that Your System GENERATED a prediction for (contract, checkpoint)
         but the official send FAILED. The row stays background (native_sent=0, never
@@ -187,7 +198,7 @@ class ShadowLedger:
         return cur.rowcount > 0
 
     def mark_native_pending(self, contract: str, checkpoint: str, delivery_key: str,
-                            model_version: str = "challenger-v1") -> bool:
+                            model_version: str = _DEFAULT_MODEL_VERSION) -> bool:
         """Tag Your System's pick for (contract, checkpoint) with the official
         report's idempotency key, WITHOUT deciding sent/failed yet. The send was
         durably queued in the outbox; the true outcome (a sync or worker delivery,
@@ -205,7 +216,7 @@ class ShadowLedger:
         return cur.rowcount > 0
 
     def reconcile_native_delivery(self, status_lookup: Any,
-                                  model_version: str = "challenger-v1") -> dict[str, int]:
+                                  model_version: str = _DEFAULT_MODEL_VERSION) -> dict[str, int]:
         """Resolve every still-pending native pick from the outbox's TRUE status.
 
         ``status_lookup(key)`` returns the outbox row status for an official
@@ -254,7 +265,7 @@ class ShadowLedger:
             self._conn.commit()
         return {"promoted": promoted, "failed": failed}
 
-    def delivery_audit(self, model_version: str = "challenger-v1") -> dict[str, int]:
+    def delivery_audit(self, model_version: str = _DEFAULT_MODEL_VERSION) -> dict[str, int]:
         """Counts of native delivery outcomes for observability: how many generated
         Your System picks were SENT, failed (DELIVERY_FAILED), or are still pending
         (no status yet — generated this window, not yet sent/closed)."""
@@ -321,7 +332,7 @@ class ShadowLedger:
         settlement_source: str | None = None,
         created_at: float | None = None,
         close_time: float | None = None,
-        model_version: str = "challenger-v1",
+        model_version: str = _DEFAULT_MODEL_VERSION,
         lineage: dict | None = None,
         snapshot_id: str | None = None,
     ) -> int | None:
@@ -393,7 +404,7 @@ class ShadowLedger:
 
     # ---- settlement ----
     def resolve(self, contract: str, checkpoint: str, official_result: str,
-                settled_at: float | None = None, model_version: str = "challenger-v1") -> bool:
+                settled_at: float | None = None, model_version: str = _DEFAULT_MODEL_VERSION) -> bool:
         official_result = str(official_result).upper()
         if official_result not in {"YES", "NO"}:
             return False
@@ -421,7 +432,7 @@ class ShadowLedger:
         return True
 
     # ---- read / scoring ----
-    def training_samples(self, checkpoint: str | None = None, model_version: str = "challenger-v1"):
+    def training_samples(self, checkpoint: str | None = None, model_version: str = _DEFAULT_MODEL_VERSION):
         q = ("SELECT created_at, feature_json, official_result FROM shadow_predictions "
              "WHERE model_version=? AND official_result IS NOT NULL AND feature_json IS NOT NULL")
         args: list[Any] = [model_version]
@@ -442,7 +453,7 @@ class ShadowLedger:
             y.append(1 if str(row["official_result"]).upper() == "YES" else 0)
         return ts, feats, y
 
-    def scoreboard(self, model_version: str = "challenger-v1") -> dict[str, Any]:
+    def scoreboard(self, model_version: str = _DEFAULT_MODEL_VERSION) -> dict[str, Any]:
         rows = list(self._conn.execute(
             "SELECT challenger_prob_yes, control_prob_yes, native_prob_yes, "
             "official_result, recommendation, "
@@ -576,7 +587,7 @@ class ShadowLedger:
                        "side_key": "native_predicted_side", "rank_key": "native_rank"},
         }
 
-    def ranked_comparison(self, model_version: str = "challenger-v1", top_k: int = 3,
+    def ranked_comparison(self, model_version: str = _DEFAULT_MODEL_VERSION, top_k: int = 3,
                           native_sent_only: bool = True) -> dict[str, Any]:
         """Top-1/2/3 correctness for both models, scored per rank (no double count).
 
@@ -615,7 +626,7 @@ class ShadowLedger:
                 "challenger": _finish(stats["challenger"]),
                 "native": _finish(stats["native"])}
 
-    def ranked_by_checkpoint(self, model_version: str = "challenger-v1", top_k: int = 3,
+    def ranked_by_checkpoint(self, model_version: str = _DEFAULT_MODEL_VERSION, top_k: int = 3,
                              checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS,
                              native_sent_only: bool = True) -> dict[str, Any]:
         """All-time per-interval, per-rank correctness for BOTH systems.
@@ -671,7 +682,7 @@ class ShadowLedger:
             out["by_checkpoint"][cp] = cp_out
         return out
 
-    def latest_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3,
+    def latest_window_cases(self, model_version: str = _DEFAULT_MODEL_VERSION, top_k: int = 3,
                             native_sent_only: bool = True) -> dict[str, Any]:
         """Per-checkpoint top-k picks (both models) for the most recent settled
         close window — for the human-readable example block in the report. The
@@ -696,7 +707,7 @@ class ShadowLedger:
             }
         return out
 
-    def best_filled_window_cases(self, model_version: str = "challenger-v1", top_k: int = 3,
+    def best_filled_window_cases(self, model_version: str = _DEFAULT_MODEL_VERSION, top_k: int = 3,
                                  native_sent_only: bool = True) -> dict[str, Any]:
         """Per-checkpoint ranked top-k picks (both models) from the settled window
         that best FILLS the ranks — so the END-RESULT grid 'tries its best' on every
@@ -733,7 +744,7 @@ class ShadowLedger:
             }
         return out
 
-    def latest_window_end_results(self, model_version: str = "challenger-v1",
+    def latest_window_end_results(self, model_version: str = _DEFAULT_MODEL_VERSION,
                                   checkpoints: tuple[str, ...] = REPORT_CHECKPOINTS,
                                   native_sent_only: bool = True) -> dict[str, Any]:
         """For the most recent settled 15-min window, each model's END-RESULT call
@@ -803,7 +814,7 @@ class ShadowLedger:
         return {"close": close_ts, "checkpoints": list(checkpoints),
                 "assets": sorted(by_asset.values(), key=lambda x: x["asset"])}
 
-    def comparison(self, model_version: str = "challenger-v1",
+    def comparison(self, model_version: str = _DEFAULT_MODEL_VERSION,
                    native_sent_only: bool = True) -> dict[str, Any]:
         """Paired challenger-vs-control accuracy, overall and by checkpoint.
 
@@ -849,7 +860,7 @@ class ShadowLedger:
         return out
 
     # ---- one-time repair for rows recorded before native-decision capture ----
-    def backfill_native_decisions(self, lookup, model_version: str = "challenger-v1") -> dict[str, int]:
+    def backfill_native_decisions(self, lookup, model_version: str = _DEFAULT_MODEL_VERSION) -> dict[str, int]:
         """Stamp production's captured decision (predicted_side, calibrated prob,
         rank) onto existing rows that predate decision capture, so the historical
         record is re-graded by the side production ACTUALLY sent rather than the raw
