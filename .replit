@@ -132,13 +132,12 @@ Q15_EXEC_SECOND_PICK_MIN_ASK = "60"
 # Q15_EXEC_BTC_GATE="false" to disable instantly. Thresholds: Q15_EXEC_BTC_GATE_LEAN / _BREADTH.
 Q15_EXEC_BTC_GATE = "true"
 # 1ST-PICK ASK FLOOR (owner-approved, data-backed): EVERY pick (incl. the 1st/main pick) must have
-# ask>=55c. The 2nd-pick floor (60c above) already covered 2nd picks; this closes the gap where the
-# main pick could be a losing cheap-NO. Data (ultoim_v2 live, n=230 fired NO resolved): the loss is
-# concentrated at ask<=51 (-356c combined); ask>=52 is a positive plateau (52->60 all ~+1600c, within
-# noise). 55 sits at the low edge of that plateau (keeps a touch more volume than 56-58; the real loss
-# zone is ask<=51). Protects the $100 10M stake first (10M at ask<58 was -7c/pick). 0 = no floor.
-# Reversible. (Lowered 56->55 per owner.)
-Q15_EXEC_MIN_ENTRY_ASK = "55"
+# ask>=59c. Closes the cheap-NO loss zone: on the fuller fired-NO sample the whole 55-58c band is
+# net-negative (55c 17%/-230c, 57c 0%/-114c; 55-58 combined ~-282c over n=14) while 59c+ is the clean
+# 84% / +1541c plateau. 59 keeps the 59c winners (n small, +41c) and the entire 60c+ plateau while
+# cutting 55-58. The old 55 floor let the worst single cent (55c, -230c) straight through. Protects the
+# 10M stake first (10M at ask<58 was -7c/pick). 0 = no floor. Reversible. (Raised 55->59 per owner.)
+Q15_EXEC_MIN_ENTRY_ASK = "59"
 # DAILY STOP OFF (owner-chosen): both limits 0 -> no daily loss circuit breaker, and the per-order
 # balance read is skipped (less latency + the bot is decoupled from the shared account, so manual
 # trades never pause it). REMAINING guards: $75/$100 per-pick cap, max-6-open, 1-pick/window, and

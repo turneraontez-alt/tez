@@ -189,5 +189,84 @@ def test_rule_a_off_delivers_lone_12m(tmp_path):
     assert len(rows) == 1 and rows[0]["fired"] == 1
 
 
+# --------------------------------------------------------------------------- #
+# High-conviction YES marker (RECORD-ONLY; YES stays NO-only)
+# --------------------------------------------------------------------------- #
+from q15_upgrade.ultoim_v2.runner import _hiconv_yes_pass
+
+
+def _yes_cand(cal, mkt, regime="THRESHOLD_PIN", side="YES"):
+    return {"predicted_side": side, "calibrated_yes_probability": cal,
+            "market_implied_yes_probability": mkt, "regime_name": regime}
+
+
+def test_hiconv_yes_defaults():
+    cfg = UltoimV2Config()
+    assert cfg.hiconv_yes_record is True
+    assert cfg.hiconv_yes_cal_min == 0.70 and cfg.hiconv_yes_market_min == 0.60
+
+
+def test_hiconv_yes_pass_criteria():
+    cfg = UltoimV2Config()
+    assert _hiconv_yes_pass(_yes_cand(0.75, 0.65), cfg) is True
+    assert _hiconv_yes_pass(_yes_cand(0.69, 0.65), cfg) is False             # below cal floor
+    assert _hiconv_yes_pass(_yes_cand(0.75, 0.55), cfg) is False             # fights the market
+    assert _hiconv_yes_pass(_yes_cand(0.75, 0.65, "HIGH_VOLATILITY"), cfg) is False  # wrong regime
+    assert _hiconv_yes_pass(_yes_cand(0.75, 0.65, side="NO"), cfg) is False           # NO side never marked
+
+
+def test_hiconv_yes_disabled_by_flag():
+    import os
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("Q15_ULTOIM_V2_HICONV_YES", "false")
+        cfg = UltoimV2Config()
+    assert _hiconv_yes_pass(_yes_cand(0.75, 0.65), cfg) is False
+
+
+def test_hiconv_yes_marker_recorded_on_research_row(tmp_path):
+    """End-to-end: a qualifying YES is recorded RESEARCH_YES (never fired) with HICONV_YES;
+    a non-qualifying YES (fights the market) is recorded without it."""
+    r = _runner(tmp_path)  # record_research_yes defaults ON
+    no = {"asset": "ETH", "ticker": "T-NO", "predicted_side": "NO", "selected_probability": 0.65,
+          "entry_ask_cents": 60.0, "total_cost_cents": 0.0, "close_time": 9000.0,
+          "regime_name": "THRESHOLD_PIN"}
+    yes = {"asset": "BTC", "ticker": "T-YES", "predicted_side": "YES", "selected_probability": 0.75,
+           "entry_ask_cents": 65.0, "total_cost_cents": 0.0, "close_time": 9000.0,
+           "calibrated_yes_probability": 0.75, "market_implied_yes_probability": 0.65,
+           "regime_name": "THRESHOLD_PIN"}
+    r._decide_interval("10M", MARK["10M"], 1, [no, yes], now=1000.0)
+    yrows = r.ledger._conn.execute(
+        "SELECT fired, reason_codes FROM ultoim_v2_predictions WHERE record_kind='RESEARCH_YES'"
+    ).fetchall()
+    assert yrows and yrows[0]["fired"] == 0
+    assert "HICONV_YES" in (yrows[0]["reason_codes"] or "")
+
+    # A YES that fights the market gets NO marker.
+    r2 = _runner(tmp_path / "b")
+    yes_bad = {**yes, "ticker": "T-YES2", "market_implied_yes_probability": 0.50}
+    r2._decide_interval("10M", MARK["10M"], 2, [no, yes_bad], now=2000.0)
+    y2 = r2.ledger._conn.execute(
+        "SELECT reason_codes FROM ultoim_v2_predictions WHERE record_kind='RESEARCH_YES'"
+    ).fetchall()
+    assert y2 and "HICONV_YES" not in (y2[0]["reason_codes"] or "")
+
+
+def test_hiconv_yes_marker_on_nothing_fired_best_yes(tmp_path):
+    """When nothing fires and the best candidate is a qualifying YES, it's recorded
+    (DELIVERED_CANDIDATE, fired=0) and STILL gets HICONV_YES — the marker lives in
+    _build_row so it covers every recorded YES row, not just the research-yes path."""
+    r = _runner(tmp_path)
+    yes = {"asset": "BTC", "ticker": "T-Y", "predicted_side": "YES", "selected_probability": 0.75,
+           "entry_ask_cents": 65.0, "total_cost_cents": 0.0, "close_time": 9000.0,
+           "calibrated_yes_probability": 0.75, "market_implied_yes_probability": 0.65,
+           "regime_name": "THRESHOLD_PIN"}
+    r._decide_interval("10M", MARK["10M"], 1, [yes], now=1000.0)
+    rows = r.ledger._conn.execute(
+        "SELECT fired, predicted_side, reason_codes FROM ultoim_v2_predictions"
+    ).fetchall()
+    assert rows and rows[0]["predicted_side"] == "YES" and rows[0]["fired"] == 0
+    assert "HICONV_YES" in (rows[0]["reason_codes"] or "")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

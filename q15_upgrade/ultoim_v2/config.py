@@ -90,6 +90,11 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
+    # Skip the 7M (420s) checkpoint. DEFAULT OFF. 7M is a delivered mark; on the live sample it
+    # is roughly break-even (all-time ~+36c, n=62) but had a -137c day (06-24). Enable to drop 7M
+    # ENTRIES entirely (no screen, no alert, no trade) and run 10M-only. Exit warnings on already-
+    # open positions are unaffected. Set Q15_ULTOIM_V2_SKIP_7M=true.
+    skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", False))
     # --- Net-improvement levers (workflow-verified; all reversible).
     # 7M ASK CAP — DEFAULT OFF (flipped from ON). At the 7M mark only, do not admit a NO whose
     # ask > cap_7m_ask_max. NON-STATIONARY SIGNAL: the cap was originally enabled when an EARLIER,
@@ -295,6 +300,21 @@ class UltoimV2Config:
     # Default ON when the overlay is enabled; the whole overlay is still default-OFF.
     record_research_yes: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_RESEARCH_YES", True)
+    )
+    # HIGH-CONVICTION YES marker (RECORD-ONLY; never delivers/trades — YES stays NO-only). Stamps
+    # reason code HICONV_YES on a RESEARCH_YES row when it clears the criteria the live data flagged
+    # as the only profitable YES sliver at 10M (17/20=85%): V2 calibrated_yes >= hiconv_yes_cal_min
+    # AND market-implied YES >= hiconv_yes_market_min (don't fight the market) AND THRESHOLD_PIN. Lets
+    # a clean out-of-sample record accrue (filter: record_kind='RESEARCH_YES' AND reason_codes LIKE
+    # '%HICONV_YES%') before any YES delivery is ever considered. Default ON; pure observability.
+    hiconv_yes_record: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_HICONV_YES", True)
+    )
+    hiconv_yes_cal_min: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_HICONV_YES_CAL_MIN", 0.70)
+    )
+    hiconv_yes_market_min: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_HICONV_YES_MARKET_MIN", 0.60)
     )
     # Defensive-exit / flip warning. Fires (ONLY when a paper entry was suggested
     # earlier in the same window) if, at/after the watch-start (exit_watch_from_seconds,
