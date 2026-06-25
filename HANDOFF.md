@@ -13,11 +13,21 @@ Tests: `python3 -m pytest tests/ -q` → **1304 passed / 13 skipped here** (8 ap
 in this container from a broken `cryptography`/pyo3 binding — env issue, not the diff; skip/error
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
-## ✅ Shipped THIS session — V2 audit fixes (6 stress-tested recs, all gated/default-OFF)
-**Suite 1313 / 13 skipped** (+9 tests). A multi-agent audit + adversarial stress-test of V2's
-live-money path (189 fired NO, 74.6%, +977c) surfaced 2 confirmed live-money defects + 4 backstops.
-All 6 survivors shipped (rejected: BTC gate / evidence floor / ceiling 78→85 / flip-veto / recal —
-HURTS or thin). Deploy-pending. Each reversible via its `Q15_*` env var.
+## ✅ Shipped THIS session — V2 audit fixes (7 stress-tested recs, all gated/default-OFF)
+**Suite 1317 / 13 skipped** (+13 tests). A multi-agent audit + adversarial stress-test of V2's
+live-money path (189 fired NO, 74.6%, +977c) surfaced 2 confirmed live-money defects + 4 backstops,
+and a follow-up probe of the recent session found 1 profit lever (interval sizing). All survivors
+shipped (rejected: BTC gate / evidence floor / ceiling 78→85 / flip-veto / recal / time-of-day block /
+60c ask-floor / first-fire selector / exit-on-every-warning — HURTS, thin, or one-day overfit).
+Deploy-pending. Each reversible via its `Q15_*` env var.
+- **Rec #7 (PROFIT lever) `executor/{config,risk}.py`**: interval-conditioned stake
+  (`Q15_EXEC_STAKE_BY_INTERVAL`, e.g. `10M:10000` -> $100 on 10M; default empty = flat $75 for all,
+  byte-identical). The override is the stake AND the per-pick ceiling for that interval (supersedes the
+  $75 cap), still gated by the $100 daily stop (checked before sizing). Concentrates capital on the only
+  +EV-over-breakeven interval (10M 80.6%/+1171c n=103). Probe verdict: +16.2% session, +126c full-sample
+  (full lift EXCEEDS session = anti-overfit), +$0.62 on a 23-window out-of-sample holdout. ⚠️ a single
+  losing 10M NO at $100 = the -$100 daily stop in one trade (deliberate, gated). 7M downsize NOT shipped
+  (net-negative in isolation). Owner chose "10M=$100 only".
 - **Rec #1 `ultoim_v2/config.py` + `gate.py`**: `cap_7m_ask` default **True→False**. The 7M ask cap was
   INVERTED on the fuller 189-sample (vetoed ask>72 winners 82.5%/+98c n=40, kept ask<=72 losers
   55.6%/-174c n=27); flipped OFF + reconciled the stale gate.py "DEFAULT OFF" comment. Re-enable via

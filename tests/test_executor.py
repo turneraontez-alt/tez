@@ -241,6 +241,43 @@ def test_flat_stake_overrides_pct_sizing():
     assert d.count == 7500 // 65 == 115
 
 
+def test_stake_by_interval_default_empty_is_flat():
+    """Rec #7: default empty stake_by_interval -> every interval stakes flat $75 (byte-identical)."""
+    cfg = ExecutorConfig()
+    assert cfg.stake_by_interval == {}
+    cfg2 = _cfg(flat_stake_cents=7500)
+    st = PortfolioState(bankroll_cents=100_000)
+    d = decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg2)
+    assert d.count == 7500 // 65 == 115            # flat $75 regardless of interval
+
+
+def test_stake_by_interval_upsizes_10m_only():
+    """Rec #7: 10M=$100 override stakes ~$100 on 10M (above the $75 flat AND the $75 per-pick cap)
+    while 7M stays at flat $75. Concentrates capital on the proven +EV 10M engine."""
+    cfg = _cfg(flat_stake_cents=7500, max_stake_per_pick_cents=7500, max_picks_per_window=1,
+               stake_by_interval={"10M": 10_000})
+    st = PortfolioState(bankroll_cents=100_000)
+    d10 = decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg)
+    assert d10.place is True and d10.stake_cents == (10_000 // 65) * 65   # ~$100 of whole contracts
+    assert d10.count == 10_000 // 65 == 153                              # above the $75 cap
+    d7 = decide(Pick("T-ETH", "ETH", "NO", 65, 2, interval="7M"), st, cfg)
+    assert d7.count == 7500 // 65 == 115                                  # 7M unchanged at flat $75
+
+
+def test_stake_by_interval_still_gated_by_daily_stop():
+    """Rec #7: a bigger 10M stake cannot bypass the $100 circuit breaker — the daily stop is
+    checked BEFORE sizing, so a -$100 day refuses the $100 10M entry too."""
+    cfg = _cfg(flat_stake_cents=7500, daily_loss_limit_cents=10_000, stake_by_interval={"10M": 10_000})
+    st = PortfolioState(bankroll_cents=34_000, day_start_bankroll_cents=34_000,
+                        day_realized_pnl_cents=-10_000)        # exactly -$100
+    assert decide(Pick("T-BTC", "BTC", "NO", 65, 1, interval="10M"), st, cfg).reason == "DAILY_STOP"
+
+
+def test_stake_by_interval_parses_env(monkeypatch):
+    monkeypatch.setenv("Q15_EXEC_STAKE_BY_INTERVAL", "10m:10000, 7M:5000 ,bad,x:y")
+    assert ExecutorConfig().stake_by_interval == {"10M": 10_000, "7M": 5_000}
+
+
 def test_flat_stake_one_pick_per_window_blocks_second():
     cfg = _cfg(flat_stake_cents=7500, max_picks_per_window=1)
     st = PortfolioState(bankroll_cents=100_000)

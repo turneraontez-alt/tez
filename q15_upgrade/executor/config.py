@@ -44,6 +44,24 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _stake_map(name: str) -> dict:
+    """Parse "INTERVAL:CENTS[,INTERVAL:CENTS...]" (e.g. "10M:10000,7M:5000") into
+    {interval -> cents}. Empty / malformed entries are skipped; default empty = no override."""
+    out: dict[str, int] = {}
+    for part in (os.environ.get(name, "") or "").split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        key, _, val = part.partition(":")
+        try:
+            cents = int(float(val))
+        except (TypeError, ValueError):
+            continue
+        if cents > 0:
+            out[key.strip().upper()] = cents
+    return out
+
+
 @dataclass(frozen=True)
 class ExecutorConfig:
     # MASTER SWITCH — default OFF. With this unset the executor never loads a signer,
@@ -89,6 +107,16 @@ class ExecutorConfig:
     # max_picks_per_window=1 -> a flat $75 on the single best pick each window. Set
     # Q15_EXEC_FLAT_STAKE_CENTS=0 to fall back to per_pick_pct % sizing.
     flat_stake_cents: int = field(default_factory=lambda: _int("Q15_EXEC_FLAT_STAKE_CENTS", 7500))
+    # INTERVAL-CONDITIONED stake override in CENTS, e.g. "10M:10000" -> $100 on 10M picks. DEFAULT
+    # empty = flat_stake_cents for every interval (byte-identical). When set for a pick's interval,
+    # that amount is BOTH the stake AND the per-pick ceiling for that interval (it supersedes
+    # flat_stake_cents and max_stake_per_pick_cents) — concentrating capital on the proven +EV
+    # interval (10M: 80.6%/+1171c, n=103; the only interval with a positive margin over breakeven).
+    # Still bounded by the bankroll on hand and the $100 daily stop (checked BEFORE sizing), so a
+    # bigger 10M stake cannot bypass the circuit breaker. NOTE: a single losing 10M NO at $100 is
+    # exactly the -$100 daily stop in one trade — deliberate concentration, gated. Intervals not
+    # listed keep flat_stake_cents. Set Q15_EXEC_STAKE_BY_INTERVAL.
+    stake_by_interval: dict = field(default_factory=lambda: _stake_map("Q15_EXEC_STAKE_BY_INTERVAL"))
 
     # --- Order sanity band (refuse anything outside it — defence in depth vs a bad signal) ---
     min_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MIN_PRICE_CENTS", 50))
@@ -125,6 +153,9 @@ class ExecutorConfig:
             size = f"FLAT ${self.flat_stake_cents/100:.0f}/pick ({cap})"
         else:
             size = f"{self.per_pick_pct*100:.0f}%/pick ({cap})"
+        if self.stake_by_interval:
+            by = ",".join(f"{k}=${v/100:.0f}" for k, v in sorted(self.stake_by_interval.items()))
+            size += f"; by-interval {by}"
         stop = (f"stop -${self.daily_loss_limit_cents/100:.0f}" if self.daily_loss_limit_cents > 0
                 else f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%")
         return (f"EXECUTOR ENABLED — {mode}; size {size}, "

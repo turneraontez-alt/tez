@@ -98,12 +98,20 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if bankroll <= 0:
         return Decision(False, "BANKROLL")
 
-    # Per-pick stake. FLAT mode (flat_stake_cents > 0) stakes a fixed dollar amount per pick,
-    # overriding the % sizing; its per-window budget is flat * max_picks. Otherwise size as a
-    # % of bankroll. Either way the window total is then CLAMPED to the per-window budget (the
-    # correlation guard — picks in a window co-settle).
+    # Per-pick stake. An INTERVAL override (stake_by_interval) wins first: that exact amount is the
+    # stake AND the per-pick ceiling for this interval (it supersedes both flat and the hard cap),
+    # so a 10M pick can stake $100 while the global cap stays $75. Else FLAT mode stakes a fixed
+    # amount per pick; else size as a % of bankroll. The window total is then CLAMPED to the
+    # per-window budget (the correlation guard — picks in a window co-settle).
     flat = int(getattr(cfg, "flat_stake_cents", 0) or 0)
-    if flat > 0:
+    by_interval = getattr(cfg, "stake_by_interval", None) or {}
+    interval_stake = by_interval.get((pick.interval or "").upper())
+    per_pick_cap = int(getattr(cfg, "max_stake_per_pick_cents", 0) or 0)
+    if interval_stake and int(interval_stake) > 0:
+        stake = int(interval_stake)
+        window_cap = int(interval_stake) * max(1, cfg.max_picks_per_window)
+        per_pick_cap = int(interval_stake)   # the override is the ceiling for this interval
+    elif flat > 0:
         stake = flat
         window_cap = flat * max(1, cfg.max_picks_per_window)
     else:
@@ -115,8 +123,8 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
         return Decision(False, "WINDOW_FULL")
     stake = min(stake, remaining)
     # HARD per-pick dollar ceiling — the absolute cap on one trade's risk.
-    if cfg.max_stake_per_pick_cents > 0:
-        stake = min(stake, cfg.max_stake_per_pick_cents)
+    if per_pick_cap > 0:
+        stake = min(stake, per_pick_cap)
     # Never stake more than the bankroll actually on hand.
     stake = min(stake, bankroll)
 
