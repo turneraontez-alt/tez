@@ -1019,6 +1019,71 @@ def _manipulation_phrase(manip: Mapping[str, Any]) -> str:
     return text
 
 
+def _yes_decision_threshold(checkpoint: Any) -> float:
+    """Calibrated-YES probability needed to call the YES side.
+
+    Default 0.5 — the symmetric cut, byte-identical to the frozen behavior.
+
+    Default-OFF experimental knob, scoped to the **15M** checkpoint, where the
+    entire YES deficit lives: in the resolved ledger the champion's YES recall at
+    15M is 0.385 vs NO 0.671, and it issues YES only ~35% of the time vs a ~46%
+    settle-YES base rate — yet by 7M YES and NO are at parity. 10M and 7M always
+    use the symmetric 0.5 cut. Lowering below 0.5 admits more 15M YES (raises
+    recall, risks precision on the near-coin-flip 15M band, AUC≈0.5); raising
+    above 0.5 abstains from weak 15M YES. The frozen model weights are unchanged
+    — only the side-selection cut at this one checkpoint moves — so this is an
+    observational lever to A/B before any promotion.
+    """
+    if str(checkpoint).upper() != "15M":
+        return 0.5
+    return _env_float("Q15_V95_YES_DECISION_THRESHOLD_15M", 0.5, 0.40, 0.60)
+
+
+# The out-of-sample challenger beats the NO-leaning champion on YES recall in a
+# specific matched-row pocket — the late checkpoints (10M/7M) on BNB/HYPE/XRP/
+# DOGE (e.g. BNB +0.206, HYPE +0.124 YES recall vs v95). The challenger is
+# GLOBALLY worse (Brier 0.214 vs 0.205) and must never drive a live decision, so
+# this is recorded as an inactive marker by default and, even when enabled, stays
+# observational: it only flags where the challenger would call YES while the
+# champion leans NO, without touching the champion's side or the alert.
+_CHALLENGER_YES_ASSIST_ASSETS = frozenset({"BNB", "HYPE", "XRP", "DOGE"})
+_CHALLENGER_YES_ASSIST_CHECKPOINTS = frozenset({"10M", "7M"})
+
+
+def _challenger_yes_assist(asset: Any, checkpoint: Any, champion_side: Any,
+                           challenger_yes: float) -> dict[str, Any]:
+    """Observational-only marker for the challenger-beats-champion-on-YES cells.
+
+    Default-OFF (``Q15_V95_CHALLENGER_YES_ASSIST``). Returns ``{"active": False}``
+    unless explicitly enabled AND the prediction falls in the validated pocket
+    (10M/7M, BNB/HYPE/XRP/DOGE) where the champion leans NO but the challenger's
+    probability says YES. It never changes ``predicted_side`` or the alert — it is
+    surfaced in the snapshot purely so the disagreement can be tracked and the
+    edge re-validated before any (gated, significance-tested) promotion.
+    """
+    if not _env_bool("Q15_V95_CHALLENGER_YES_ASSIST", False):
+        return {"active": False}
+    asset_u = str(asset).upper()
+    checkpoint_u = str(checkpoint).upper()
+    eligible = (
+        asset_u in _CHALLENGER_YES_ASSIST_ASSETS
+        and checkpoint_u in _CHALLENGER_YES_ASSIST_CHECKPOINTS
+        and str(champion_side).upper() == "NO"
+        and challenger_yes >= 0.5
+    )
+    if not eligible:
+        return {"active": False}
+    return {
+        "active": True,
+        "challenger_side": "YES",
+        "champion_side": "NO",
+        "challenger_yes_probability": round(float(challenger_yes), 4),
+        "asset": asset_u,
+        "checkpoint": checkpoint_u,
+        "note": "challenger disagrees YES where champion leans NO (observational)",
+    }
+
+
 def analyse_v95(
     snapshot: Mapping[str, Any],
     canonical: CanonicalSnapshot,
@@ -1120,13 +1185,19 @@ def analyse_v95(
         market_anchor["coinflip_shrink"] = coinflip_shrink
     challenger_weights = _timed(prof, "challenger_weights", ledger.challenger_weights, canonical.checkpoint, regime.get("name")) if ledger else CHAMPION_WEIGHTS
     challenger_yes, challenger_contributions = _timed(prof, "model_challenger", _model_probability, structural, feature_values, feature_quality, challenger_weights, regime, data_quality)
-    provisional_side = "YES" if calibrated_yes >= 0.5 else "NO"
+    yes_threshold = _yes_decision_threshold(canonical.checkpoint)
+    provisional_side = "YES" if calibrated_yes >= yes_threshold else "NO"
     pattern = _timed(prof, "pattern_similarity", ledger.pattern_similarity, feature_values, provisional_side, canonical.checkpoint) if ledger else {"active": False, "shadow_adjustment": 0.0}
     shadow_pattern_adjustment = float(pattern.get("shadow_adjustment") or 0.0)
     challenger_yes = _clamp(challenger_yes + (shadow_pattern_adjustment if provisional_side == "YES" else -shadow_pattern_adjustment), 0.01, 0.99)
     # Anchor the challenger identically so champion-vs-challenger compares weights, not anchoring.
     challenger_yes, _ = _market_anchored_probability(challenger_yes, market_implied_yes, data_quality, evidence_quality, anchor_strength)
     side = provisional_side
+    # Observational only: flag where the out-of-sample challenger would call YES
+    # while the champion leans NO, in the late-checkpoint/asset pocket where the
+    # challenger's YES recall genuinely beats v95. Never alters `side` or the alert.
+    challenger_yes_assist = _challenger_yes_assist(
+        canonical.asset, canonical.checkpoint, side, challenger_yes)
     selected = calibrated_yes if side == "YES" else 1.0 - calibrated_yes
     uncertainty = 0.018 + (1.0 - data_quality) * 0.12 + float(regime.get("uncertainty", 0.08)) * 0.25
     divergence = _num(exchange_d.get("divergence_bps"), 0.0) or 0.0
@@ -1255,6 +1326,7 @@ def analyse_v95(
         "market_anchor": market_anchor,
         "baseline_yes_probability": float(structural["yes_probability"]),
         "challenger_yes_probability": challenger_yes,
+        "challenger_yes_assist": challenger_yes_assist,
         "selected_probability": selected,
         "conservative_probability": conservative,
         "confidence_grade": grade,
