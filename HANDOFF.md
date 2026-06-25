@@ -9,9 +9,26 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1402 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1411 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — executor sizing: $150/pick + conviction doubling (LIVE real-money)
+**Suite 1411 / 4 skipped** (+9 tests). Owner-directed live sizing change on PR #55 (with the V2
+conviction rules below). The executor is LIVE (`Q15_EXEC_ENABLED=true`, `DRY_RUN=false`), so this is
+REAL money. ⚠️ Leverage on thin (~3-day) data; **no daily circuit breaker is set**, so per-trade size
+is the main risk control.
+- **`.replit` (live config):** flat per-pick stake **$75→$150** (`Q15_EXEC_FLAT_STAKE_CENTS=15000`),
+  hard per-pick cap **$75→$300** (`Q15_EXEC_MAX_STAKE_PER_PICK_CENTS=30000`), and the old
+  `Q15_EXEC_STAKE_BY_INTERVAL="10M:10000"` ($100 10M lever) **removed** so 10M is the uniform $150 too.
+- **Conviction doubling (`executor/{risk,config,executor}.py`, `Q15_EXEC_CONVICTION_SIZING` default ON):**
+  a v2 pick from a >=3-co-trigger 10M window carries `stake_multiplier=2` (threaded `on_fire`→`Pick`→
+  `decide`). Owner rule: **"first $150, extras double"** — the LEAD pick of a window stays $150; only the
+  **2nd-or-later** pick of a >=3 window doubles to $300 (gated on `window_count>=1`). The per-window budget
+  scales with the multiplier so the extra isn't clamped; the hard per-pick cap is **absolute** (NOT scaled)
+  so it still ceilings the doubled extra. A 2-pick conviction window commits up to **$450**.
+- Reversible: `Q15_EXEC_FLAT_STAKE_CENTS=7500` / `Q15_EXEC_CONVICTION_SIZING=false`. Note: the executor's
+  `max_picks_per_window=2` (live) is what makes a 2nd pick — hence any doubling — possible.
 
 ## ✅ Shipped a PRIOR session — defensive-exit FIX (live-money path) + sooner exits
 **Suite 1349 / 13 skipped** (+6 tests). Branch `claude/gifted-thompson-77cd01`.
