@@ -14,10 +14,18 @@ in this container from a broken `cryptography`/pyo3 binding — env issue, not t
 count varies with `flask`/`websockets`/cffi/crypto install state).
 
 ## ✅ Shipped THIS session — V2 audit fixes + live-execution hardening
-**Suite 1321 / 13 skipped** (+17 tests). Plus, on top of the 7 audit recs below: executor latency
+**Suite 1322 / 13 skipped** (+18 tests). Plus, on top of the 7 audit recs below: executor latency
 telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
 config flips — the **10M=$100 profit lever** and a **1c limit offset** (Q15_EXEC_LIMIT_OFFSET_CENTS=1,
 fill reliability) — both set in `.replit [userenv.shared]`.
+- **Exit-fill visibility — `scripts/exec_preflight.py --fills` (PR #50)**: the diagnostic called
+  `fill_summary()` with no action filter, so it lumped entry buys and defensive-exit sells together and
+  could NOT answer "did a defensive SELL fire and fill?". Now splits the local-store summary by action —
+  prints `ENTRIES (buys)` and `DEFENSIVE EXITS (sells)` separately, with an explicit "no exit-sell orders
+  recorded yet" branch (brand-new store, or real exits predating it). Read-only; executor order path
+  untouched. +1 test (fill_summary action partition). Verified exit code path is live-wired
+  (`runner.py:647 → executor.on_exit` real sell) and that placed orders fill (live store: 4/4, 100%);
+  the open item is catching a real exit sell in the store via a Repl re-run.
 - **CRITICAL FIX — executor position leak halted the bot `executor/risk.py` + `executor.py`**: optimistic
   `apply_fill` incremented `open_count`/`open_tickers` on every placement but only the rare defensive
   `apply_exit` ever removed them — so positions settled on the exchange every 15 min but were NEVER released
