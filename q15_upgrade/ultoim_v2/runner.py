@@ -59,6 +59,24 @@ def _regime_directional(market_implied_yes: float | None) -> str:
     return "BALANCED"
 
 
+def _hiconv_yes_pass(cand: Mapping[str, Any], cfg: Any) -> bool:
+    """Whether a YES candidate clears the high-conviction criteria (RECORD-ONLY marker).
+    The live 10M data showed YES only pays when V2 AND the market both strongly say YES on a
+    near-strike pin (cal_yes >= ~0.70 won 17/20=85%; the 3 losers all had market-YES < 0.60 or
+    HIGH_VOLATILITY). So: high model conviction AND market agreement AND THRESHOLD_PIN. Pure
+    observability — never gates delivery (YES is NO-only)."""
+    if not getattr(cfg, "hiconv_yes_record", True):
+        return False
+    if str(cand.get("predicted_side") or "").upper() != "YES":
+        return False
+    cal = _num(cand.get("calibrated_yes_probability"))
+    mkt = _num(cand.get("market_implied_yes_probability"))
+    regime = str(cand.get("regime_name") or "").upper()
+    return (cal is not None and cal >= cfg.hiconv_yes_cal_min
+            and mkt is not None and mkt >= cfg.hiconv_yes_market_min
+            and regime == "THRESHOLD_PIN")
+
+
 class UltoimV2Runner:
     def __init__(self, config: UltoimV2Config) -> None:
         self.config = config
@@ -236,6 +254,10 @@ class UltoimV2Runner:
                 # 10M/7M behaviour is untouched.
                 if cfg.skip_15m and interval == "15M":
                     continue
+                # Skip the 7M bin when configured (owner: 7M ran net-negative on a day; it is
+                # ~break-even overall). Default OFF -> byte-identical. Exits are unaffected.
+                if getattr(cfg, "skip_7m", False) and interval == "7M":
+                    continue
                 # 11M/12M are MEASURE-FIRST marks: inert unless explicitly enabled, so the
                 # added INTERVAL_MARKS entries are byte-identical no-ops by default.
                 if interval == "11M" and not cfg.enable_11m:
@@ -408,6 +430,12 @@ class UltoimV2Runner:
         # Record-only 15M selective-entry SCREEN verdict (see fifteen_min.py). Stamped
         # on every row; all-None outside 15M-NO; NEVER read by the gate / fire path.
         s15 = fifteen_min.features(cand, interval, cfg)
+        # RECORD-ONLY high-conviction-YES marker on EVERY recorded YES row (research-yes AND the
+        # nothing-fired "record best" path), so the would-deliver YES sliver accrues a complete,
+        # gradeable out-of-sample record. Never changes delivery — YES stays NO-only.
+        reason_codes = list(verdict.get("reason_codes") or [])
+        if _hiconv_yes_pass(cand, cfg) and "HICONV_YES" not in reason_codes:
+            reason_codes.append("HICONV_YES")
         # Record-only SETTLEMENT-STREAK signal (default ON): the asset's signed consecutive
         # same-outcome settled-window run as of now (no lookahead). Pure record-only; a
         # failure here must never break the recording path, so it falls back to None.
@@ -456,7 +484,7 @@ class UltoimV2Runner:
             "gate_a_pass": 1 if verdict.get("gate_a") else 0,
             "gate_b_pass": 1 if verdict.get("gate_b") else 0,
             "gate_c_pass": 1 if verdict.get("gate_c") else 0,
-            "reason_codes": ",".join(verdict.get("reason_codes") or []) or None,
+            "reason_codes": ",".join(reason_codes) or None,
             "gate_min_conf": cfg.min_confidence,
             "gate_ask_lo": cfg.ask_lo,
             "gate_ask_hi": cfg.ask_hi,
@@ -552,6 +580,7 @@ class UltoimV2Runner:
         cand = entry["cand"]
         verdict = dict(entry["verdict"])
         verdict["fired"] = False  # YES never delivers, regardless of gate_a
+        # (the HICONV_YES marker is stamped centrally in _build_row for every recorded YES row)
         row = self._build_row(cand, verdict, interval, mark, window_key, now,
                               record_kind="RESEARCH_YES", delivery_status="RESEARCH")
         row.pop("_best_entry_cents", None)

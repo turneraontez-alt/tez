@@ -1487,6 +1487,33 @@ def test_skip_15m_suppresses_15m_but_keeps_10m(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# skip_7m (default OFF): drop the ~break-even 7M bin, keep 10M untouched
+# --------------------------------------------------------------------------- #
+def test_skip_7m_default_off_fires_at_7m(tmp_path):
+    # Default config (skip_7m False) still records/fires at the 7M mark.
+    r = _runner(tmp_path, telegram=_StubTelegram())
+    assert r.config.skip_7m is False
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=420.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1580.0), now=1580.0)
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    assert [row["interval"] for row in rows] == ["7M"]
+
+
+def test_skip_7m_suppresses_7m_but_keeps_10m(tmp_path):
+    r = _runner(tmp_path, telegram=_StubTelegram(), skip_7m=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    # 10M band (600s): records & fires normally.
+    c10 = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c10, now=1300.0), now=1300.0)
+    # 7M band (420s), same contract/window: with skip_7m on, NOTHING new is recorded.
+    c7 = {"BTC": _canon("T-BTC", secs=420.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c7, now=1580.0), now=1580.0)
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    assert [row["interval"] for row in rows] == ["10M"]
+
+
+# --------------------------------------------------------------------------- #
 # record_xflow (default OFF): observe-only cross-asset market flow column
 # --------------------------------------------------------------------------- #
 def test_record_xflow_off_by_default_is_null(tmp_path):
