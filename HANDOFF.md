@@ -30,6 +30,15 @@ is the main risk control.
 - Reversible: `Q15_EXEC_FLAT_STAKE_CENTS=7500` / `Q15_EXEC_CONVICTION_SIZING=false`. Note: the executor's
   `max_picks_per_window=2` (live) is what makes a 2nd pick — hence any doubling — possible.
 
+## ✅ Shipped a PRIOR session — 1st-pick ask floor (live config, owner-approved)
+**`.replit` only — no code change** (the `ENTRY_ASK_FLOOR` gate already exists in `risk.py` and is tested,
+`test_executor.py:414-441`). Set `Q15_EXEC_MIN_ENTRY_ASK = "56"` so EVERY pick (incl. the 1st/main) must
+have ask≥56c. Previously only the 2nd pick was floored (`SECOND_PICK_MIN_ASK=60`); the main pick had no
+floor, so a losing cheap-NO could be the primary bet. Data (ultoim_v2 live, n=230 fired NO resolved):
+the loss is concentrated at **ask≤51 (−356c)**; ask≥52 is a positive plateau (52→60 all ≈+1600c, within
+noise). 56 sits in that plateau with margin. Protects the **$100 10M stake first** — 10M at ask<58 was
+−7c/pick, the one zone 10M loses. Reversible (set 0). Owner picked 56 from the {52 lowest / 55 / 58} menu.
+
 ## ✅ Shipped a PRIOR session — defensive-exit FIX (live-money path) + sooner exits
 **Suite 1349 / 13 skipped** (+6 tests). Branch `claude/gifted-thompson-77cd01`.
 - **Root cause (confirmed from real data, `learning-snapshots:dbs/q15_executor_orders_v1.sqlite3`):** the
