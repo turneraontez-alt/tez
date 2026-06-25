@@ -66,7 +66,36 @@ class Executor:
         # two instances are wire-isolated at the exchange.
         self.entry_side = "no" if self.cfg.no_only else "yes"
         self.coid_prefix = "v2x" if self.cfg.no_only else "v2xy"
+        # DURABILITY: window_count/window_tickers (the per-window cap + dup-ticker guard) live ONLY
+        # in self.state (in-memory) and would reset to 0 on a process restart — so a restart
+        # mid-window could admit MORE than max_picks_per_window entries in one settlement window.
+        # Rehydrate them from the durable orders store so the cap survives a restart. Best-effort:
+        # if recording is off or the store is empty/unavailable, behaviour is unchanged.
+        self._rehydrate_window_cap()
         logger.info("executor init: %s | bankroll=%dc", self.cfg.safety_summary(), bankroll)
+
+    def _rehydrate_window_cap(self) -> None:
+        """Seed window_count/window_tickers from the orders store so the per-window cap and the
+        dup-ticker guard survive a process restart (otherwise an in-memory-only counter resets to
+        0 and over-places). Older windows are pruned on the next on_fire by prune_settled, so
+        rehydrating recent windows is safe. Never raises."""
+        if self.store is None:
+            return
+        try:
+            recent = self.store.recent_window_entries(since_seconds=7200.0)
+        except Exception:  # noqa: BLE001 - best-effort; never block init
+            logger.exception("window-cap rehydrate failed (cap falls back to in-memory)")
+            return
+        if not recent:
+            return
+        from dataclasses import replace
+        wt = {int(wk): frozenset(tks) for wk, tks in recent.items() if tks}
+        if not wt:
+            return
+        wc = {wk: len(tks) for wk, tks in wt.items()}
+        self.state = replace(self.state, window_count=wc, window_tickers=wt)
+        logger.info("executor rehydrated per-window cap from store: %s",
+                    {wk: n for wk, n in sorted(wc.items())})
 
     def _initial_bankroll(self, live_bal: int | None = None) -> int:
         if self.cfg.bankroll_cents > 0:

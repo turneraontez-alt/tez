@@ -13,6 +13,24 @@ Tests: `python3 -m pytest tests/ -q` → **1448 passed / 4 skipped here** (8 app
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## ✅ Shipped THIS session — DURABLE per-window cap (restart-reset over-placement fix, BOTH books)
+**Suite 1414 / 13 skipped** (+2 tests). A 5-agent audit (triggered by an owner "4 ETH trades instead of 2"
+report — which turned out BENIGN: 6 NO-book ETH trades across 6 different windows) confirmed a real latent
+durability bug in the SHARED executor: `max_picks_per_window` was enforced only from the in-memory
+`PortfolioState.window_count`, which resets to 0 on a process restart. A restart mid-window (Repl
+redeploy/crash) + a rolled at-the-money strike could admit >2 entries in one settlement window. Affects the
+NO book and the YES bot identically (shared `Executor`).
+- **Fix (`executor/{executor,store}.py`):** `Executor.__init__` now calls `_rehydrate_window_cap()`, which
+  seeds `window_count`/`window_tickers` from the durable orders store (`ExecutorStore.recent_window_entries`,
+  successful `http_ok=1` entries in the last 2h) so the per-window cap AND the dup-ticker guard survive a
+  restart. Also closes the place-before-claim gap (the order is recorded in `on_fire` before the runner's
+  persistent alert-lock claim, so a crash in between is still counted). Best-effort: store off/empty ⇒
+  unchanged behaviour. One change in the shared `__init__` ⇒ both books fixed.
+- **+2 tests:** restart-survives-cap (2 entries → fresh Executor on same store refuses the 3rd WINDOW_FULL,
+  different window still allowed) and rehydrate-noop-without-store.
+- NOT rehydrated (minor, noted): `window_committed_cents` (per-window $ budget) and `open_count` — the
+  count cap is the binding guard for the over-placement bug.
+
 ## ✅ Shipped THIS session — executor latency: order before Telegram (fill-rate fix)
 **Suite 1448 / 4 skipped** (+4 tests). Diagnosis (11-agent workflow, all hops cited file:line): real orders
 were built on a **5.4s-avg (8.1s max) stale price** (`snapshot_age_ms`), so the limit stopped crossing and
