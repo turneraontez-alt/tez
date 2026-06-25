@@ -617,6 +617,36 @@ def test_executor_dup_ticker_blocked():
     assert ex.on_fire(dict(base))["reason"] == "DUP_TICKER"
 
 
+def test_window_cap_survives_restart(tmp_path):
+    """Durability fix: the per-window cap must survive a process restart. After 2 entries in a
+    window, a fresh Executor sharing the same orders store rehydrates the count and still refuses a
+    3rd — a restart can no longer reset window_count to 0 and over-place (the 4-in-one-window bug).
+    Applies to BOTH books (the fix lives in the shared Executor.__init__)."""
+    db = str(tmp_path / "orders.sqlite3")
+    over = dict(record_orders=True, orders_db_path=db, max_picks_per_window=2)
+    ex = Executor(_cfg(**over), client=_StubClient())
+    for tk in ("T-ETH-A", "T-ETH-B"):
+        assert ex.on_fire({"ticker": tk, "asset": "ETH", "predicted_side": "NO",
+                           "entry_price_cents": 70, "window_key": 42})["placed"] is True
+    assert ex.state.window_count.get(42) == 2
+    # Simulate a RESTART: a brand-new Executor pointed at the SAME durable orders store.
+    ex2 = Executor(_cfg(**over), client=_StubClient())
+    assert ex2.state.window_count.get(42) == 2                       # rehydrated from the store
+    assert "T-ETH-A" in ex2.state.window_tickers.get(42, frozenset())
+    r = ex2.on_fire({"ticker": "T-ETH-C", "asset": "ETH", "predicted_side": "NO",
+                     "entry_price_cents": 70, "window_key": 42})
+    assert r["placed"] is False and r["reason"] == "WINDOW_FULL"     # cap survived the restart
+    # a DIFFERENT (later) window is unaffected:
+    assert ex2.on_fire({"ticker": "T-ETH-D", "asset": "ETH", "predicted_side": "NO",
+                        "entry_price_cents": 70, "window_key": 43})["placed"] is True
+
+
+def test_window_cap_rehydrate_noop_without_store():
+    """When order recording is off (store is None) rehydrate is a no-op — byte-identical to before."""
+    ex = Executor(_cfg(record_orders=False), client=_StubClient())
+    assert ex.state.window_count == {} and ex.state.window_tickers == {}
+
+
 def test_executor_yes_side_never_executes():
     ex = _exec()
     r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "YES",

@@ -126,6 +126,32 @@ class ExecutorStore:
         except Exception:  # noqa: BLE001 - recording is best-effort; never disrupt the order
             logger.exception("executor order record failed (ignored)")
 
+    def recent_window_entries(self, since_seconds: float = 7200.0) -> dict[int, set[str]]:
+        """Per settlement ``window_key``, the set of tickers with a SUCCESSFUL entry placement
+        (``http_ok=1`` — the same placements that incremented the in-memory ``window_count``) in
+        the last ``since_seconds``. The executor uses this to REHYDRATE the per-window cap after a
+        process restart: ``window_count`` otherwise lives only in memory, so a restart mid-window
+        would reset it to 0 and admit MORE than ``max_picks_per_window`` entries in one window.
+        Best-effort: any failure returns ``{}`` and the executor keeps its fresh in-memory state."""
+        out: dict[int, set[str]] = {}
+        try:
+            import time as _time
+            cutoff = _time.time() - float(since_seconds)
+            rows = self._conn.execute(
+                "SELECT window_key, ticker FROM executor_orders "
+                "WHERE action='entry' AND http_ok=1 AND created_at >= ? "
+                "AND window_key IS NOT NULL AND ticker IS NOT NULL",
+                (cutoff,)).fetchall()
+        except Exception:  # noqa: BLE001 - best-effort; never block executor init
+            logger.exception("recent_window_entries failed (cap rehydrate skipped)")
+            return {}
+        for wk, tk in rows:
+            try:
+                out.setdefault(int(wk), set()).add(str(tk))
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def fill_summary(self, *, action: str | None = None) -> dict[str, Any]:
         """Counts by fill_status (+ missed / filled / fill_rate). Empty dict-shape on error."""
         try:
