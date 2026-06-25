@@ -189,6 +189,26 @@ def test_executor_store_records_and_summarizes(tmp_path):
     assert summ["fill_rate"] == 1 / 3                       # 1 filled of 3 live orders
 
 
+def test_fill_summary_partitions_entry_vs_exit(tmp_path):
+    """The preflight --fills diagnostic answers 'did a defensive SELL fire and fill?' by
+    calling fill_summary(action='exit'). Verify the action filter partitions cleanly so the
+    exit row count is never contaminated by entry buys (and vice-versa)."""
+    from q15_upgrade.executor.store import ExecutorStore
+    s = ExecutorStore(str(tmp_path / "orders.sqlite3"))
+    s.record(action="entry", ticker="A", fill_status="FILLED", stake_cents=10000, requested_count=153)
+    s.record(action="entry", ticker="B", fill_status="RESTED", stake_cents=7475, requested_count=115)
+    s.record(action="exit",  ticker="A", fill_status="FILLED", stake_cents=0, requested_count=153)
+    assert s.fill_summary()["total"] == 3                       # aggregate lumps both
+    entries = s.fill_summary(action="entry")
+    exits = s.fill_summary(action="exit")
+    assert entries["total"] == 2 and entries["filled"] == 1 and entries["missed"] == 1
+    assert exits["total"] == 1 and exits["filled"] == 1 and exits["missed"] == 0
+    # a store with no exits yet must report exactly zero (the 'NO exit-sell orders' branch)
+    empty = ExecutorStore(str(tmp_path / "empty.sqlite3"))
+    empty.record(action="entry", ticker="Z", fill_status="FILLED", stake_cents=10000, requested_count=1)
+    assert empty.fill_summary(action="exit")["total"] == 0
+
+
 def test_on_fire_records_order_to_store(tmp_path):
     """End-to-end: a fire with recording on persists one row with a fill classification."""
     from q15_upgrade.executor.store import ExecutorStore

@@ -351,7 +351,8 @@ def main(argv: list[str]) -> int:
         try:
             from q15_upgrade.executor.store import ExecutorStore
             if os.path.exists(cfg.orders_db_path):
-                summ = ExecutorStore(cfg.orders_db_path).fill_summary()
+                store = ExecutorStore(cfg.orders_db_path)
+                summ = store.fill_summary()
                 print(f"\n[FILLS] LOCAL STORE ({cfg.orders_db_path}):")
                 print(f"  total recorded: {summ['total']}  (live {summ.get('live_orders')})")
                 print(f"  filled: {summ['filled']}  partial: {summ['partial']}  "
@@ -359,6 +360,18 @@ def main(argv: list[str]) -> int:
                 fr = summ.get("fill_rate")
                 print(f"  immediate fill rate: {f'{100*fr:.0f}%' if fr is not None else 'n/a'}")
                 print(f"  by status: { {k: v['n'] for k, v in summ['by_status'].items()} }")
+                # ENTRY vs EXIT split — the defensive-sell path is action='exit'. The aggregate
+                # above lumps both, so it can't answer "did a defensive SELL fire and fill?".
+                for act, lab in (("entry", "ENTRIES (buys) "), ("exit", "DEFENSIVE EXITS (sells)")):
+                    a = store.fill_summary(action=act)
+                    afr = a.get("fill_rate")
+                    rate = f", fill rate {100*afr:.0f}%" if afr is not None else ""
+                    print(f"  {lab}: recorded {a['total']} (live {a['live_orders']}) -> "
+                          f"filled {a['filled']}, partial {a['partial']}, missed {a['missed']}{rate}")
+                if store.fill_summary(action="exit")["total"] == 0:
+                    print("  -> NO exit-sell orders recorded yet: either no flip-warning has fired on a")
+                    print("     position the EXECUTOR held since the store began recording, or the real")
+                    print("     exits predate the store (the store is newer than the live history).")
                 print("  NOTE: 'RESTED' here = unfilled AT PLACEMENT; a resting limit can still")
                 print("  fill later in the window — the LIVE ACCOUNT block above is the final word.")
             else:
