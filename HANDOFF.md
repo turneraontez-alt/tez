@@ -18,6 +18,12 @@ count varies with `flask`/`websockets`/cffi/crypto install state).
 telemetry, ORDER/FILL RECORDING (answers "how many orders missed"), and two owner-approved live
 config flips — the **10M=$100 profit lever** and a **1c limit offset** (Q15_EXEC_LIMIT_OFFSET_CENTS=1,
 fill reliability) — both set in `.replit [userenv.shared]`.
+- **Daily stop REMOVED (owner-chosen) `executor/{executor,config}.py` + `.replit`**: both
+  `Q15_EXEC_DAILY_LOSS_LIMIT_CENTS=0` and `_PCT=0` -> no daily loss circuit breaker. `_refresh_daily_pnl`
+  now SKIPS the per-order balance GET when the stop is disabled (removes latency + decouples the bot from
+  the shared account so manual trades can't pause it). safety_summary prints "NO daily stop (no circuit
+  breaker)". ⚠️ remaining guards: $75/$100 per-pick cap, max-6-open, 1-pick/window, kill switch. Re-enable
+  by setting the CENTS env back to 10000.
 - **12M expensive-NO slice -> live (gated) `ultoim_v2/{config,gate,runner}.py`**: `Q15_ULTOIM_V2_DELIVER_12M`
   (default OFF) promotes 12M from research-only to live delivery, but ONLY ask>=`floor_12m_ask` (65);
   the cheap <65 zone is suppressed from delivery (ASK_FLOOR_12M) and kept as research. Data: 12M ask>=65

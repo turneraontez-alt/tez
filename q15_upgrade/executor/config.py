@@ -165,8 +165,12 @@ class ExecutorConfig:
         if self.stake_by_interval:
             by = ",".join(f"{k}=${v/100:.0f}" for k, v in sorted(self.stake_by_interval.items()))
             size += f"; by-interval {by}"
-        stop = (f"stop -${self.daily_loss_limit_cents/100:.0f}" if self.daily_loss_limit_cents > 0
-                else f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%")
+        if self.daily_loss_limit_cents > 0:
+            stop = f"stop -${self.daily_loss_limit_cents/100:.0f}"
+        elif self.daily_loss_limit_pct > 0:
+            stop = f"daily-stop -{self.daily_loss_limit_pct*100:.0f}%"
+        else:
+            stop = "NO daily stop (no circuit breaker)"
         return (f"EXECUTOR ENABLED — {mode}; size {size}, "
                 f"<= {self.max_picks_per_window} pick(s)/window, <= {self.max_per_window_pct*100:.0f}%/window, "
                 f"{stop}")

@@ -65,6 +65,13 @@ class Executor:
         direction for a stop. No-op in dry-run/disabled (no real balance moves)."""
         if self.cfg.dry_run or not self.cfg.enabled:
             return
+        # The balance read ONLY feeds the daily stop. When the stop is fully disabled (both the
+        # absolute and % limits are 0) skip it entirely — removes a network round-trip from the
+        # order path AND decouples the bot from the shared account balance, so the owner's manual
+        # trades can never pause it. Owner-chosen: no daily circuit breaker.
+        if (int(getattr(self.cfg, "daily_loss_limit_cents", 0) or 0) <= 0
+                and float(getattr(self.cfg, "daily_loss_limit_pct", 0) or 0) <= 0):
+            return
         bal = self.client.get_balance_cents()
         if bal is None:
             return

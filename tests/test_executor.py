@@ -207,6 +207,35 @@ def test_on_fire_records_order_to_store(tmp_path):
     assert summ["total"] == 1 and summ["missed"] == 1       # the miss was recorded
 
 
+def test_decide_no_daily_stop_when_both_limits_zero():
+    """Owner-chosen: both limits 0 -> the daily stop never fires, even after a huge loss."""
+    cfg = _cfg(daily_loss_limit_cents=0, daily_loss_limit_pct=0)
+    st = PortfolioState(bankroll_cents=100_000, day_start_bankroll_cents=100_000,
+                        day_realized_pnl_cents=-999_999)   # would trip ANY stop
+    assert decide(_pick(price=65), st, cfg).place is True
+
+
+def test_stop_disabled_skips_balance_read():
+    """With the stop off, on_fire does NOT read the account balance (it only fed the stop) — so the
+    bot is decoupled from the shared account and a manual trade can't pause it."""
+    calls = {"n": 0}
+    class _C:
+        def get_balance_cents(self): calls["n"] += 1; return 50_000
+        def place_order(self, **kw): return {"ok": True, "dry_run": False}
+    ex = Executor(_cfg(enabled=True, dry_run=False, bankroll_cents=100_000, flat_stake_cents=7500,
+                       daily_loss_limit_cents=0, daily_loss_limit_pct=0), client=_C())
+    calls["n"] = 0   # ignore the init read; count only on_fire
+    from dataclasses import replace
+    ex.state = replace(ex.state, day_realized_pnl_cents=-1_000_000)   # would trip a stop if any existed
+    r = ex.on_fire({"ticker": "T-BTC", "asset": "BTC", "predicted_side": "NO",
+                    "entry_ask_cents": 65, "window_key": 1})
+    assert r["placed"] is True and calls["n"] == 0
+
+
+def test_safety_summary_shows_no_stop_when_disabled():
+    assert "NO daily stop" in _cfg(daily_loss_limit_cents=0, daily_loss_limit_pct=0).safety_summary()
+
+
 def test_decide_max_open_blocks():
     cfg = _cfg(max_open_positions=2)
     st = PortfolioState(bankroll_cents=100_000, open_count=2)

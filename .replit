@@ -113,3 +113,9 @@ Q15_EXEC_STAKE_BY_INTERVAL = "10M:10000"
 # doesn't leave the order resting unfilled. Costs at most 1c/contract; converts "missed/rested"
 # into "filled" on a marketable NO buy. Owner-approved. 0 = pay exactly the ask. Set to 0 to revert.
 Q15_EXEC_LIMIT_OFFSET_CENTS = "1"
+# DAILY STOP OFF (owner-chosen): both limits 0 -> no daily loss circuit breaker, and the per-order
+# balance read is skipped (less latency + the bot is decoupled from the shared account, so manual
+# trades never pause it). REMAINING guards: $75/$100 per-pick cap, max-6-open, 1-pick/window, and
+# the kill switch (Q15_EXEC_KILL=true). Re-enable: set Q15_EXEC_DAILY_LOSS_LIMIT_CENTS back to 10000.
+Q15_EXEC_DAILY_LOSS_LIMIT_CENTS = "0"
+Q15_EXEC_DAILY_LOSS_LIMIT_PCT = "0"
