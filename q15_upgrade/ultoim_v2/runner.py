@@ -59,6 +59,22 @@ def _regime_directional(market_implied_yes: float | None) -> str:
     return "BALANCED"
 
 
+def _hiconv_yes_pass(cand: Mapping[str, Any], cfg: Any) -> bool:
+    """Whether a YES candidate clears the high-conviction criteria (RECORD-ONLY marker).
+    The live 10M data showed YES only pays when V2 AND the market both strongly say YES on a
+    near-strike pin (cal_yes >= ~0.70 won 17/20=85%; the 3 losers all had market-YES < 0.60 or
+    HIGH_VOLATILITY). So: high model conviction AND market agreement AND THRESHOLD_PIN. Pure
+    observability — never gates delivery (YES is NO-only)."""
+    if not getattr(cfg, "hiconv_yes_record", True):
+        return False
+    cal = _num(cand.get("calibrated_yes_probability"))
+    mkt = _num(cand.get("market_implied_yes_probability"))
+    regime = str(cand.get("regime_name") or "").upper()
+    return (cal is not None and cal >= cfg.hiconv_yes_cal_min
+            and mkt is not None and mkt >= cfg.hiconv_yes_market_min
+            and regime == "THRESHOLD_PIN")
+
+
 class UltoimV2Runner:
     def __init__(self, config: UltoimV2Config) -> None:
         self.config = config
@@ -545,6 +561,14 @@ class UltoimV2Runner:
         cand = entry["cand"]
         verdict = dict(entry["verdict"])
         verdict["fired"] = False  # YES never delivers, regardless of gate_a
+        # RECORD-ONLY high-conviction-YES marker: tag the rows that clear the (cal_yes / market-YES
+        # / THRESHOLD_PIN) criteria so the would-deliver YES sliver accrues a gradeable, out-of-
+        # sample record. Never changes delivery — YES stays NO-only.
+        if _hiconv_yes_pass(cand, self.config):
+            rc = list(verdict.get("reason_codes") or [])
+            if "HICONV_YES" not in rc:
+                rc.append("HICONV_YES")
+            verdict["reason_codes"] = rc
         row = self._build_row(cand, verdict, interval, mark, window_key, now,
                               record_kind="RESEARCH_YES", delivery_status="RESEARCH")
         row.pop("_best_entry_cents", None)

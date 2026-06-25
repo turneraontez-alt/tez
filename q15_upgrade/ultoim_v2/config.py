@@ -301,6 +301,21 @@ class UltoimV2Config:
     record_research_yes: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_RESEARCH_YES", True)
     )
+    # HIGH-CONVICTION YES marker (RECORD-ONLY; never delivers/trades — YES stays NO-only). Stamps
+    # reason code HICONV_YES on a RESEARCH_YES row when it clears the criteria the live data flagged
+    # as the only profitable YES sliver at 10M (17/20=85%): V2 calibrated_yes >= hiconv_yes_cal_min
+    # AND market-implied YES >= hiconv_yes_market_min (don't fight the market) AND THRESHOLD_PIN. Lets
+    # a clean out-of-sample record accrue (filter: record_kind='RESEARCH_YES' AND reason_codes LIKE
+    # '%HICONV_YES%') before any YES delivery is ever considered. Default ON; pure observability.
+    hiconv_yes_record: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_HICONV_YES", True)
+    )
+    hiconv_yes_cal_min: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_HICONV_YES_CAL_MIN", 0.70)
+    )
+    hiconv_yes_market_min: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_HICONV_YES_MARKET_MIN", 0.60)
+    )
     # Defensive-exit / flip warning. Fires (ONLY when a paper entry was suggested
     # earlier in the same window) if, at/after the watch-start (exit_watch_from_seconds,
     # default 8M), the champion's call has FLIPPED to the opposite side and the flip is
