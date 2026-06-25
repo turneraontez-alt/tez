@@ -10,6 +10,9 @@ Guards (a refusal short-circuits with a single reason code):
   INTERVAL_BLOCKED— interval not in the (optional) allowlist
   PRICE_BAND      — price outside [min,max]
   ENTRY_ASK_FLOOR — entry ask below the (optional) GLOBAL ask floor (applies to ALL picks)
+  YES_PROB_FLOOR  — YES bot: v2 P(YES) below min_yes_prob (or missing) — inert when min_yes_prob=0
+  BTC_LEAN_FLOOR  — YES bot: BTC not bullish enough (btc_lean < min_btc_lean, or missing) — inert at 0
+  ASSET_EXCLUDED  — YES bot: asset in excluded_assets (e.g. BNB) — inert when the set is empty
   DAILY_STOP      — day realized P&L past the loss limit (circuit breaker)
   MAX_OPEN        — already at max open positions
   DUP_TICKER      — already hold / already traded this ticker+window
@@ -37,6 +40,7 @@ class Pick:
     # Cross-asset gate inputs (from v2, at-or-before this pick's decision; None when unavailable):
     btc_lean: float | None = None        # BTC's contemporaneous market-implied P(YES) this window
     prior_breadth: float | None = None   # fraction of the complex that settled YES in window_key-1
+    yes_prob: float | None = None        # v2 market-implied P(YES) for THIS contract (live YES bot gate)
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,26 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
         brd_thr = float(getattr(cfg, "btc_gate_breadth", 0.5) or 0.5)
         if (lean is not None and float(lean) >= lean_thr) or (brd is not None and float(brd) >= brd_thr):
             return Decision(False, "BTC_GATE")
+
+    # YES-SIDE ADMISSION GATES — used ONLY by the separate live "YES bot" executor instance
+    # (q15_upgrade.executor.config.yes_config_from_env). INERT by default: min_yes_prob and
+    # min_btc_lean default 0.0 and excluded_assets defaults empty, so for the NO executor (and
+    # any default ExecutorConfig) all three short-circuit to no-ops and decide() is byte-identical.
+    # They FAIL CLOSED — a missing required signal REFUSES the entry: we never buy YES without a
+    # confirmed v2 P(YES) (yes_prob) and a confirmed contemporaneously-bullish BTC read (btc_lean).
+    min_pyes = float(getattr(cfg, "min_yes_prob", 0.0) or 0.0)
+    if min_pyes > 0.0:
+        yp = getattr(pick, "yes_prob", None)
+        if yp is None or float(yp) < min_pyes:
+            return Decision(False, "YES_PROB_FLOOR")
+    min_lean = float(getattr(cfg, "min_btc_lean", 0.0) or 0.0)
+    if min_lean > 0.0:
+        bl = getattr(pick, "btc_lean", None)
+        if bl is None or float(bl) < min_lean:
+            return Decision(False, "BTC_LEAN_FLOOR")
+    excluded = getattr(cfg, "excluded_assets", frozenset()) or frozenset()
+    if excluded and (pick.asset or "").upper() in excluded:
+        return Decision(False, "ASSET_EXCLUDED")
 
     # Daily circuit breaker: stop NEW entries once down the limit on the day. An ABSOLUTE
     # dollar stop (daily_loss_limit_cents) GOVERNS when set; otherwise the % of day-start

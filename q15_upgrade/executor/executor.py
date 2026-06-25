@@ -13,15 +13,18 @@ import logging
 import time
 from typing import Any, Mapping
 
-from .config import ExecutorConfig
+from .config import ExecutorConfig, yes_config_from_env
 from .risk import Pick, PortfolioState, decide, apply_fill, apply_exit, prune_settled
 from .trading_client import KalshiTradingClient
 
 logger = logging.getLogger("q15.executor")
 
 
-def _coid(window_key: Any, ticker: str, kind: str) -> str:
-    return f"v2x-{window_key}-{ticker}-{kind}"
+def _coid(window_key: Any, ticker: str, kind: str, prefix: str = "v2x") -> str:
+    # The prefix namespaces the idempotency key PER EXECUTOR (NO="v2x", YES="v2xy") so a NO and a
+    # YES order on the SAME contract+window can never collide at Kalshi (the exchange dedupes on
+    # client_order_id, which separate order DBs would NOT protect against).
+    return f"{prefix}-{window_key}-{ticker}-{kind}"
 
 
 def _opt_float(v: Any) -> float | None:
@@ -58,6 +61,11 @@ class Executor:
             bankroll_cents=bankroll,
             day_start_bankroll_cents=self._day_start_balance,
         )
+        # Side this executor trades. The NO executor (no_only=True) buys/sells "no"; the YES bot
+        # (no_only=False) trades "yes". Drives on_exit and the client_order_id namespace, so the
+        # two instances are wire-isolated at the exchange.
+        self.entry_side = "no" if self.cfg.no_only else "yes"
+        self.coid_prefix = "v2x" if self.cfg.no_only else "v2xy"
         logger.info("executor init: %s | bankroll=%dc", self.cfg.safety_summary(), bankroll)
 
     def _initial_bankroll(self, live_bal: int | None = None) -> int:
@@ -133,6 +141,7 @@ class Executor:
                 stake_multiplier=int(pick.get("stake_multiplier") or 1),
                 btc_lean=_opt_float(pick.get("btc_lean")),
                 prior_breadth=_opt_float(pick.get("prior_breadth")),
+                yes_prob=_opt_float(pick.get("yes_prob")),
             )
         except (TypeError, ValueError):
             return {"placed": False, "reason": "BAD_PICK"}
@@ -143,10 +152,12 @@ class Executor:
             return {"placed": False, "reason": d.reason}
 
         _t1 = time.perf_counter()
+        # Side is the PICK's side (NO picks carry "NO" -> "no", byte-identical to the prior
+        # hardcoded value; a YES bot pick carries "YES" -> "yes"). coid prefix is per-executor.
         res = self.client.place_order(
-            ticker=p.ticker, side="no", count=d.count,
+            ticker=p.ticker, side=(p.side or self.entry_side).lower(), count=d.count,
             price_cents=d.limit_price_cents, action="buy",
-            client_order_id=_coid(p.window_key, p.ticker, "entry"),
+            client_order_id=_coid(p.window_key, p.ticker, "entry", self.coid_prefix),
         )
         _order_ms = (time.perf_counter() - _t1) * 1000.0
         _age_ms = None
@@ -162,7 +173,7 @@ class Executor:
             fill_status, filled_count = self.store.record_order_result(
                 action="entry", pick=p, decision=d, res=res, age_ms=_age_ms,
                 bal_ms=_bal_ms, order_ms=_order_ms,
-                client_order_id=_coid(p.window_key, p.ticker, "entry"))
+                client_order_id=_coid(p.window_key, p.ticker, "entry", self.coid_prefix))
         if not res.get("ok"):
             logger.error("order FAILED %s: %s", p.ticker, res.get("error"))
             return {"placed": False, "reason": "ORDER_FAILED", "detail": res,
@@ -201,8 +212,8 @@ class Executor:
         # clamps the wire price into [1,99] as well).
         limit_px = max(1, int(exit_price_cents) - int(self.cfg.exit_limit_offset_cents))
         res = self.client.place_order(
-            ticker=ticker, side="no", count=count, price_cents=limit_px,
-            action="sell", client_order_id=_coid(window_key, ticker, "exit"),
+            ticker=ticker, side=self.entry_side, count=count, price_cents=limit_px,
+            action="sell", client_order_id=_coid(window_key, ticker, "exit", self.coid_prefix),
         )
         fill_status = None
         if self.store is not None:
@@ -211,7 +222,8 @@ class Executor:
             _dec = SimpleNamespace(count=count, limit_price_cents=limit_px, stake_cents=None)
             fill_status, _ = self.store.record_order_result(
                 action="exit", pick=_pick, decision=_dec, res=res, age_ms=None,
-                bal_ms=None, order_ms=None, client_order_id=_coid(window_key, ticker, "exit"))
+                bal_ms=None, order_ms=None,
+                client_order_id=_coid(window_key, ticker, "exit", self.coid_prefix))
         if res.get("ok"):
             self.state = apply_exit(self.state, ticker)   # close it out of the snapshot
         return {"placed": bool(res.get("ok")), "count": count,
@@ -220,10 +232,11 @@ class Executor:
 
 
 _executor: Executor | None = None
+_yes_executor: Executor | None = None
 
 
 def get_executor() -> Executor | None:
-    """Return the singleton executor, or None when disabled (default)."""
+    """Return the singleton NO executor, or None when disabled (default)."""
     global _executor
     cfg = ExecutorConfig.from_env()
     if not cfg.enabled:
@@ -233,6 +246,23 @@ def get_executor() -> Executor | None:
     return _executor
 
 
+def get_yes_executor() -> Executor | None:
+    """Return the singleton live "YES bot" executor, or None when disabled (default).
+
+    A SEPARATE instance from get_executor(): its own ExecutorConfig (yes_config_from_env, with
+    no_only=False + the YES admission gates), its own PortfolioState, its own orders db, and its
+    own client_order_id prefix ("v2xy") — so it shares NO mutable state with the NO executor and
+    cannot collide with it at the exchange. Gated on Q15_EXEC_YES_ENABLED (default off)."""
+    global _yes_executor
+    cfg = yes_config_from_env()
+    if not cfg.enabled:
+        return None
+    if _yes_executor is None:
+        _yes_executor = Executor(cfg)
+    return _yes_executor
+
+
 def reset_executor_for_tests() -> None:
-    global _executor
+    global _executor, _yes_executor
     _executor = None
+    _yes_executor = None

@@ -5,11 +5,12 @@ operator sets Q15_EXEC_ENABLED=true AND Q15_EXEC_DRY_RUN=false AND provides Kals
 keys AND leaves the kill switch off. v2 itself remains read-only; this is the only
 package that talks to the trading endpoints.
 """
-from .config import ExecutorConfig
-from .executor import Executor, get_executor, reset_executor_for_tests
+from .config import ExecutorConfig, yes_config_from_env
+from .executor import Executor, get_executor, get_yes_executor, reset_executor_for_tests
 from .risk import Pick, PortfolioState, Decision, decide, apply_fill
 
 __all__ = [
-    "ExecutorConfig", "Executor", "get_executor", "reset_executor_for_tests",
+    "ExecutorConfig", "yes_config_from_env", "Executor", "get_executor",
+    "get_yes_executor", "reset_executor_for_tests",
     "Pick", "PortfolioState", "Decision", "decide", "apply_fill",
 ]
