@@ -9,13 +9,13 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1381 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1385 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
 ## ✅ Shipped THIS session — YES-prediction edge audit + 3 gated knobs
-**Suite 1381 / 4 skipped** (+10 tests). Branch `claude/intelligent-mccarthy-c1gi38` (draft PR), NOT
-merged to main. Deep audit (real `learning-snapshots` data @ 972f92f, 24-agent workflow, all 14 numeric
+**Suite 1385 / 4 skipped** (+10 tests). Merged to `main` via PR #52 (branch
+`claude/intelligent-mccarthy-c1gi38`). Deep audit (real `learning-snapshots` data @ 972f92f, 24-agent workflow, all 14 numeric
 claims independently re-verified) of why YES underperforms NO and where YES pulls ahead. Key finding:
 **YES is NOT less accurate than NO overall (0.673 vs 0.677, n=3164)** — the deficit is a 15M
 issuance/selection problem (YES recall 0.385 vs 0.671; model issues YES 35% vs ~46% base rate) that
@@ -42,6 +42,25 @@ frozen-champion-safe knobs landed (every prior test byte-identical):
 Open follow-ups: R4 (class-balanced Platt fit, calibration-side) and R5 (V2 7M YES delivery — likely
 net-negative, recommend research-only) were NOT implemented. 15M high-confidence YES is data-thin
 (n=10 @ selected≥0.7) — collect before trusting any 15M threshold relaxation.
+
+## ✅ Shipped a PRIOR session — slow-cycle log attribution (diagnostic)
+**Suite 1343 / 13 skipped** (+5 tests). On branch `claude/gifted-thompson-77cd01` (draft PR; NOT
+merged to main — owner asked for a safe change that can't touch the live money path).
+- **Why:** owner's logs showed repeated slow refresh cycles (~10–14s vs the ~1s target; last 14.43s,
+  ~5.6s from the 20s "Predictions pause" pager) with the watchdog only naming the opaque top-level
+  `run_cycle ~5.5s`. run_cycle's rich internal split already exists (`parent_chain`, `v95_analysis`
+  + `v95_sub`, `market_reconcile`, `other`, plus `parent_chain_timing`) but only in `/api/health`,
+  which is hard to catch at the exact slow moment.
+- **Change (`q15_upgrade/checkpoint_v95.py`):** added `_format_run_cycle_breakdown()` (pure) and a
+  throttled WARNING (`slow run_cycle …`, once/60s, keyed `slow_run_cycle`) emitted when
+  `_t["total"] >= Q15_V95_SLOW_CYCLE_SECONDS` (default 10s). Diagnostic-only — no decision, alert,
+  delivery, or settlement path touched. +5 tests (`tests/test_q15_v95_slow_cycle_log.py`).
+- **Open root cause (NOT yet fixed):** run_cycle is ~5.5s on *every* sampled cycle (not the 1-in-30
+  reconcile spike), pointing at per-cycle cost — most likely the remote-Postgres round-trips in the
+  v94→v91 parent chain (`checkpoint_v91.py:590/595/619/620`) and/or synchronous Kalshi REST. The
+  new log will name it live. Next safe fixes (deferred, need owner sign-off as they touch hot paths):
+  move the every-30s settlement reconcile off the run_cycle thread (`checkpoint_v95.py:2833-2847`,
+  mirror the polymarket/ultoim off-thread shadows) and make the Telegram first-send async.
 
 ## ✅ Shipped a PRIOR session — V2 audit fixes + live-execution hardening
 **Suite 1322 / 13 skipped** (+18 tests). Plus, on top of the 7 audit recs below: executor latency

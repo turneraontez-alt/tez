@@ -1822,6 +1822,49 @@ def _checkpoint_expired(checkpoint: str, seconds_left: float | None) -> bool:
     return seconds_left <= _checkpoint_expiry_seconds(checkpoint)
 
 
+def _format_run_cycle_breakdown(timing: Mapping[str, Any], chain_timing: Mapping[str, Any]) -> str:
+    """One-line attribution of a slow ``run_cycle``'s internal stages, for the log.
+
+    The watchdog only names the opaque top-level ``run_cycle`` stage; the rich
+    per-sub-stage split already lives in ``/api/health`` but is easy to miss at the
+    exact slow moment. Logging it when a cycle is slow names the dominant sub-stage
+    directly — the remote-Postgres parent chain (``v91_pre_enrich`` /
+    ``v91_finalize_all``) vs the v95 analysis (``record`` / ``analyse``) vs the
+    periodic settlement reconcile — so the real cause is visible without catching
+    the health JSON live. Diagnostic only; it never changes a decision."""
+    def _g(d: Mapping[str, Any], k: str) -> float:
+        try:
+            return float(d.get(k) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    parts = [
+        f"total={_g(timing, 'total'):.2f}s",
+        f"parent_chain={_g(timing, 'parent_chain'):.2f}s",
+        f"v95_analysis={_g(timing, 'v95_analysis'):.2f}s",
+    ]
+    chain_bits = [
+        f"{k}={_g(chain_timing, k):.2f}s"
+        for k in ("v94_super_chain", "v91_pre_enrich", "v91_finalize_all")
+        if k in chain_timing
+    ]
+    if chain_bits:
+        parts.append("parent[" + " ".join(chain_bits) + "]")
+    v95_sub = timing.get("v95_sub")
+    if isinstance(v95_sub, Mapping):
+        sub_bits = [
+            f"{k}={_g(v95_sub, k):.2f}s"
+            for k in ("record", "analyse", "build", "deepcopy")
+            if k in v95_sub
+        ]
+        if sub_bits:
+            parts.append("v95[" + " ".join(sub_bits) + "]")
+    for k in ("market_reconcile", "signal_store_reconcile", "other"):
+        if k in timing:
+            parts.append(f"{k}={_g(timing, k):.2f}s")
+    return " ".join(parts)
+
+
 def _iso_from_epoch(epoch: float) -> str:
     """UTC ISO-8601 timestamp for a unix epoch (the prediction's wall-clock)."""
     try:
@@ -3090,6 +3133,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     "run_cycle_timing": copy.deepcopy(_t),
                     "parent_chain_timing": copy.deepcopy(getattr(self, "_chain_timing", {})),
                 }
+            if _t["total"] >= threshold:
+                # Surface the slow cycle's internal attribution in the LOGS — the
+                # watchdog only names the opaque top-level run_cycle stage, and the
+                # same breakdown in /api/health is easy to miss live. Throttled so a
+                # sustained slow patch surfaces once per window, not every cycle.
+                # Diagnostic only; never changes a decision.
+                self._throttled_warn(
+                    "slow_run_cycle",
+                    "slow run_cycle %s",
+                    _format_run_cycle_breakdown(_t, getattr(self, "_chain_timing", {})),
+                    now=now,
+                )
             return output
         except Exception as exc:
             self._errors += 1
