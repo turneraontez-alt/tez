@@ -747,6 +747,69 @@ def test_runner_fires_executor_hook_on_delivered_no(tmp_path, monkeypatch):
     assert calls[0]["window_key"] is not None
 
 
+def test_runner_routes_qualifying_10m_yes_to_yes_executor(tmp_path, monkeypatch):
+    """A 10M YES candidate with a bullish BTC lean is routed to the SEPARATE yes-executor and a
+    LIVE order alert is sent under a YES-NAMESPACED lock that never touches the NO alert lock.
+    Proves the live YES bot is wired AND isolated from the NO/paper path."""
+    from q15_upgrade.ultoim_v2.ledger import _window_key
+
+    calls = []
+
+    class _YesExStub:
+        def on_fire(self, pick):
+            calls.append(pick)
+            return {"placed": True, "mode": "dry-run", "count": 2,
+                    "limit_price_cents": 61, "stake_cents": 15000}
+        def on_exit(self, *a, **k): return {"placed": False}
+
+    import q15_upgrade.executor as exmod
+    monkeypatch.setattr(exmod, "get_yes_executor", lambda: _YesExStub())
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, yes_live_enabled=True,
+                yes_live_intervals=frozenset({"10M"}))
+    # BTC carries a bullish market-implied lean (feeds _gate_ctx) but does NOT fire (low conf/edge),
+    # so it is not itself a YES candidate; SOL leans YES with P(YES)=0.60 and is the routed pick.
+    a = {"BTC": _analysis(side="NO", sel=0.50, ask=60.0, net_edge=-5.0, mkt_yes=0.60),
+         "SOL": _analysis(side="YES", sel=0.62, ask=60.0, net_edge=3.0, mkt_yes=0.60)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0),     # 10M, same window as SOL
+         "SOL": _canon("T-SOL", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+
+    assert len(calls) == 1
+    p = calls[0]
+    assert p["ticker"] == "T-SOL" and p["predicted_side"] == "YES"
+    assert p["yes_prob"] == 0.60 and p["btc_lean"] == 0.60     # the YES rule's two signals
+    # exactly one LIVE YES order alert, clearly a YES-bot card, free of the live suppression markers:
+    yes_alerts = [t for t in tg.sent if "YES BOT" in t]
+    assert len(yes_alerts) == 1
+    for forbidden in ("V9.5 CHECK", "ENTRY RECOMMENDED", "NO ENTRY YET", "Hourly Report —", "TOP 3 PICKS"):
+        assert forbidden not in yes_alerts[0]
+    # the YES-namespaced lock is claimed; the NO alert lock for the same ticker is UNAFFECTED:
+    wk = _window_key(9000.0, 1000.0)
+    assert r.ledger.alert_locked("ultoim-v2", "T-SOL|YES", wk) is True
+    assert r.ledger.alert_locked("ultoim-v2", "T-SOL", wk) is False
+
+
+def test_runner_yes_live_disabled_by_default_no_route(tmp_path, monkeypatch):
+    """With yes_live_enabled off (default), a YES candidate routes nowhere and sends no alert —
+    the NO/paper path is untouched."""
+    calls = []
+
+    class _YesExStub:
+        def on_fire(self, pick): calls.append(pick); return {"placed": True}
+        def on_exit(self, *a, **k): return {"placed": False}
+
+    import q15_upgrade.executor as exmod
+    monkeypatch.setattr(exmod, "get_yes_executor", lambda: _YesExStub())
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg)   # yes_live_enabled defaults False
+    a = {"SOL": _analysis(side="YES", sel=0.62, ask=60.0, net_edge=3.0, mkt_yes=0.60)}
+    c = {"SOL": _canon("T-SOL", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    assert calls == []
+    assert [t for t in tg.sent if "YES BOT" in t] == []
+
+
 def test_gate_research_fired_yes_side_never_delivers():
     cfg = UltoimV2Config(enabled=True)  # no_only=True
     v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.65,

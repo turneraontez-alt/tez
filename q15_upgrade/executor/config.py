@@ -183,6 +183,13 @@ class ExecutorConfig:
     btc_gate_enabled: bool = field(default_factory=lambda: _bool("Q15_EXEC_BTC_GATE", True))
     btc_gate_lean: float = field(default_factory=lambda: _float("Q15_EXEC_BTC_GATE_LEAN", 0.5))
     btc_gate_breadth: float = field(default_factory=lambda: _float("Q15_EXEC_BTC_GATE_BREADTH", 0.5))
+    # YES-SIDE ADMISSION GATES — consumed by risk.decide(), set ONLY by the separate live "YES bot"
+    # config (yes_config_from_env). INERT plain defaults (0.0/0.0/empty) and DELIBERATELY NOT read
+    # from env here, so a default ExecutorConfig() (the NO executor) always has these off regardless
+    # of any Q15_EXEC_YES_* env — keeping NO decide() byte-identical and preventing env cross-read.
+    min_yes_prob: float = 0.0          # require v2 P(YES) >= this (YES bot: 0.55); 0 = inert
+    min_btc_lean: float = 0.0          # require BTC contemporaneously bullish, lean >= this (0.55); 0 = inert
+    excluded_assets: frozenset = frozenset()   # refuse these assets outright (YES bot: {"BNB"}); empty = inert
     # ORDER RECORDING (default ON when the executor runs). Persists every placement + the RAW
     # broker response + a best-effort fill classification to its own sqlite, so "how many orders
     # missed (placed-but-unfilled)" is answerable from our side and the optimistic in-memory fill
@@ -223,3 +230,56 @@ class ExecutorConfig:
         return (f"EXECUTOR ENABLED — {mode}; size {size}, "
                 f"<= {self.max_picks_per_window} pick(s)/window, <= {self.max_per_window_pct*100:.0f}%/window, "
                 f"{stop}; {gate}")
+
+
+def _csv_set(name: str, default: str) -> frozenset:
+    """Parse a CSV env (e.g. "BNB" or "10M,7M") into an upper-cased frozenset."""
+    raw = os.environ.get(name)
+    src = default if raw is None else raw
+    return frozenset(s.strip().upper() for s in src.split(",") if s.strip())
+
+
+def yes_config_from_env() -> ExecutorConfig:
+    """Build the SEPARATE live "YES bot" executor config from the Q15_EXEC_YES_* env namespace.
+
+    This is a DISTINCT ExecutorConfig instance (own state, own orders db, own client_order_id
+    prefix via Executor) that never shares mutable state with the NO executor. Defaults encode the
+    data-backed inverse-v2 10M YES rule: take a YES bet when v2 leans YES AND BTC is contemporaneously
+    bullish (lean>=0.55) AND v2 P(YES)>=0.55 AND the asset is not excluded (BNB) — flat $150/pick,
+    up to 2 picks/window ($300), NO conviction doubling.
+
+    SAFETY: dry_run defaults TRUE and is read ONLY from Q15_EXEC_YES_DRY_RUN — it NEVER inherits the
+    NO book's Q15_EXEC_DRY_RUN. Going live is a deliberate, separate flip of Q15_EXEC_YES_DRY_RUN=false.
+    The kill switch honours EITHER the YES-specific or the global panic button.
+    """
+    return ExecutorConfig(
+        enabled=_bool("Q15_EXEC_YES_ENABLED", False),
+        dry_run=_bool("Q15_EXEC_YES_DRY_RUN", True),
+        kill_switch=_bool("Q15_EXEC_YES_KILL", False) or _bool("Q15_EXEC_KILL", False),
+        base_url=os.environ.get("Q15_EXEC_BASE_URL") or BASE_URL,
+        no_only=False,                        # the whole point: YES is allowed
+        # Sizing: flat $150/pick, up to 2/window ($300), hard $150 per-pick cap, NO doubling.
+        bankroll_cents=_int("Q15_EXEC_YES_BANKROLL_CENTS", 0),   # 0 -> read live balance (live mode)
+        flat_stake_cents=_int("Q15_EXEC_YES_FLAT_STAKE_CENTS", 15000),
+        max_stake_per_pick_cents=_int("Q15_EXEC_YES_MAX_STAKE_PER_PICK_CENTS", 15000),
+        max_picks_per_window=_int("Q15_EXEC_YES_MAX_PICKS_PER_WINDOW", 2),
+        conviction_sizing=False,              # owner: "no double just yet"
+        # Daily stop OFF (parity with the NO book's current posture); per-pick + per-window are the guards.
+        daily_loss_limit_cents=_int("Q15_EXEC_YES_DAILY_LOSS_LIMIT_CENTS", 0),
+        daily_loss_limit_pct=_float("Q15_EXEC_YES_DAILY_LOSS_LIMIT_PCT", 0.0),
+        max_open_positions=_int("Q15_EXEC_YES_MAX_OPEN_POSITIONS", 6),
+        # Price band wide enough for the YES favourites in the rule (the 96% set ran 56–97¢; a
+        # 50–85 band would silently drop the 92–97¢ winners). YES ask is the buy price.
+        min_price_cents=_int("Q15_EXEC_YES_MIN_PRICE_CENTS", 50),
+        max_price_cents=_int("Q15_EXEC_YES_MAX_PRICE_CENTS", 99),
+        limit_offset_cents=_int("Q15_EXEC_YES_LIMIT_OFFSET_CENTS", 1),
+        # Defence-in-depth interval allowlist (the runner already only routes 10M here).
+        allowed_intervals=_csv_set("Q15_EXEC_YES_ALLOWED_INTERVALS", "10M"),
+        btc_gate_enabled=False,               # the NO-side BTC SUPPRESSION gate is irrelevant to YES
+        # THE YES RULE — the three admission gates (fail-closed):
+        min_yes_prob=_float("Q15_EXEC_YES_MIN_PYES", 0.55),
+        min_btc_lean=_float("Q15_EXEC_YES_MIN_BTC_LEAN", 0.55),
+        excluded_assets=_csv_set("Q15_EXEC_YES_EXCLUDE_ASSETS", "BNB"),
+        record_orders=_bool("Q15_EXEC_YES_RECORD_ORDERS", True),
+        orders_db_path=os.environ.get("Q15_EXEC_YES_ORDERS_DB") or "data/q15_executor_yes_orders_v1.sqlite3",
+    )

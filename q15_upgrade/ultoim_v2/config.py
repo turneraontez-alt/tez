@@ -316,6 +316,20 @@ class UltoimV2Config:
     hiconv_yes_market_min: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_HICONV_YES_MARKET_MIN", 0.60)
     )
+    # LIVE "YES BOT" routing switch (default OFF). When ON, _decide_interval routes the best YES
+    # candidate(s) at the listed interval(s) to the SEPARATE yes-executor (q15_upgrade.executor.
+    # get_yes_executor) and sends a LIVE order alert on a placement. This ONLY enables the routing;
+    # the yes-executor itself is double-gated (Q15_EXEC_YES_ENABLED + Q15_EXEC_YES_DRY_RUN) and
+    # enforces the actual YES rule (P(YES)>=0.55, BTC lean>=0.55, exclude BNB, sizing). Shares the
+    # SAME env flag as the executor so one switch turns the whole YES bot on. Isolated from the NO/
+    # paper path: reads only `evaluated`/_gate_ctx, writes no NO ledger/lock/report state.
+    yes_live_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_EXEC_YES_ENABLED", False)
+    )
+    yes_live_intervals: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            s.strip().upper() for s in
+            os.environ.get("Q15_EXEC_YES_ALLOWED_INTERVALS", "10M").split(",") if s.strip()))
     # Defensive-exit / flip warning. Fires (ONLY when a paper entry was suggested
     # earlier in the same window) if, at/after the watch-start (exit_watch_from_seconds,
     # default 8M), the champion's call has FLIPPED to the opposite side and the flip is

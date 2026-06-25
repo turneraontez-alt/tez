@@ -633,6 +633,122 @@ def test_executor_disabled_blocks_and_factory_returns_none(monkeypatch):
     assert executor_mod.get_executor() is None
 
 
+# --------------------------------------------------------------------------- #
+# LIVE "YES BOT" — the separate, isolated YES executor (config + gates + side)
+# --------------------------------------------------------------------------- #
+from q15_upgrade.executor.config import yes_config_from_env  # noqa: E402
+from q15_upgrade.executor.executor import get_yes_executor    # noqa: E402
+
+
+def _yescfg(**over):
+    """Config mirroring yes_config_from_env's defaults, but constructed directly (no env) so the
+    YES gates are exercised deterministically. flat $150/pick, 2/window, band 50-99, the 3 gates on."""
+    base = dict(enabled=True, dry_run=True, bankroll_cents=100_000, no_only=False,
+                flat_stake_cents=15000, max_stake_per_pick_cents=15000, max_picks_per_window=2,
+                conviction_sizing=False, daily_loss_limit_cents=0, daily_loss_limit_pct=0.0,
+                max_open_positions=6, min_price_cents=50, max_price_cents=99,
+                limit_offset_cents=1, allowed_intervals=frozenset({"10M"}), btc_gate_enabled=False,
+                min_yes_prob=0.55, min_btc_lean=0.55, excluded_assets=frozenset({"BNB"}),
+                record_orders=False)
+    base.update(over)
+    return ExecutorConfig(**base)
+
+
+def _yespick(ticker="T-SOL", asset="SOL", price=60, wk=1, yes_prob=0.60, btc_lean=0.60, interval="10M"):
+    return Pick(ticker=ticker, asset=asset, side="YES", price_cents=price, window_key=wk,
+                interval=interval, yes_prob=yes_prob, btc_lean=btc_lean)
+
+
+def test_yes_fields_inert_by_default_on_no_config():
+    """The 3 new ExecutorConfig fields default INERT so the NO executor is byte-identical."""
+    c = ExecutorConfig()
+    assert c.min_yes_prob == 0.0 and c.min_btc_lean == 0.0 and c.excluded_assets == frozenset()
+    assert c.no_only is True
+
+
+def test_no_decide_byte_identical_with_inert_yes_fields():
+    """A NO pick under a default cfg must NOT trip any of the new YES gates, and existing
+    reason codes are unchanged. In particular a NO pick on BNB / with yes_prob unset is fine."""
+    cfg = _cfg()  # NO config: min_yes_prob=0, min_btc_lean=0, excluded_assets empty
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_pick(price=65), st, cfg).reason == "OK"
+    assert decide(_pick(price=90), st, cfg).reason == "PRICE_BAND"      # above band, unchanged
+    # NO on BNB with no yes_prob/btc_lean -> NOT ASSET_EXCLUDED / YES_PROB_FLOOR / BTC_LEAN_FLOOR:
+    d = decide(_pick(asset="BNB", price=65), st, cfg)
+    assert d.reason == "OK" and d.place is True
+
+
+def test_yes_gate_admits_qualifying_pick():
+    assert decide(_yespick(), PortfolioState(bankroll_cents=100_000), _yescfg()).reason == "OK"
+
+
+def test_yes_gate_pyes_floor_blocks_low_and_missing():
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_yespick(yes_prob=0.50), st, _yescfg()).reason == "YES_PROB_FLOOR"
+    assert decide(_yespick(yes_prob=None), st, _yescfg()).reason == "YES_PROB_FLOOR"  # fail-closed
+
+
+def test_yes_gate_btc_lean_floor_blocks_bearish_and_missing():
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_yespick(btc_lean=0.50), st, _yescfg()).reason == "BTC_LEAN_FLOOR"
+    assert decide(_yespick(btc_lean=None), st, _yescfg()).reason == "BTC_LEAN_FLOOR"  # fail-closed
+
+
+def test_yes_gate_excludes_bnb():
+    st = PortfolioState(bankroll_cents=100_000)
+    assert decide(_yespick(asset="BNB", ticker="T-BNB"), st, _yescfg()).reason == "ASSET_EXCLUDED"
+
+
+def test_yes_gate_keeps_high_favorite_in_band():
+    """The 96% set ran 56-97c; the YES ask is the BUY price, so a 96c favourite must clear the
+    50-99 band (a 50-85 band would have silently dropped the winners)."""
+    d = decide(_yespick(price=96, yes_prob=0.95), PortfolioState(bankroll_cents=100_000), _yescfg())
+    assert d.place is True and d.reason == "OK"
+    assert d.limit_price_cents == 97  # ask 96 + 1 offset, inside band
+
+
+def test_yes_executor_places_side_yes_with_distinct_coid():
+    ex = Executor(_yescfg(), client=_StubClient())
+    r = ex.on_fire({"ticker": "T-SOL", "asset": "SOL", "predicted_side": "YES",
+                    "entry_ask_cents": 60, "window_key": 1, "interval": "10M",
+                    "yes_prob": 0.60, "btc_lean": 0.60})
+    assert r["placed"] is True
+    o = ex.client.orders[0]
+    assert o["side"] == "yes" and o["action"] == "buy"
+    assert o["client_order_id"].startswith("v2xy-")          # distinct from the NO "v2x-" prefix
+    # and the NO executor still uses the plain "v2x-" prefix (no collision at the exchange):
+    no_ex = _exec()
+    no_ex.on_fire({"ticker": "T-SOL", "asset": "SOL", "predicted_side": "NO",
+                   "entry_price_cents": 60, "window_key": 1})
+    no_coid = no_ex.client.orders[0]["client_order_id"]
+    assert no_coid.startswith("v2x-") and not no_coid.startswith("v2xy-")
+
+
+def test_yes_executor_isolated_from_no_state():
+    """A YES on_fire must NOT mutate the NO executor's portfolio (separate instances/state)."""
+    no_ex = _exec()
+    yes_ex = Executor(_yescfg(), client=_StubClient())
+    yes_ex.on_fire({"ticker": "T-SOL", "asset": "SOL", "predicted_side": "YES",
+                    "entry_ask_cents": 60, "window_key": 1, "interval": "10M",
+                    "yes_prob": 0.60, "btc_lean": 0.60})
+    assert yes_ex.state.open_count == 1
+    assert no_ex.state.open_count == 0 and no_ex.state.open_tickers == frozenset()
+
+
+def test_yes_dry_run_does_not_inherit_no_live_flag(monkeypatch):
+    """SAFETY (audit fix #1): the YES bot's dry_run is read ONLY from Q15_EXEC_YES_DRY_RUN — it
+    must default TRUE even when the NO book's Q15_EXEC_DRY_RUN is 'false'."""
+    monkeypatch.setenv("Q15_EXEC_DRY_RUN", "false")
+    monkeypatch.delenv("Q15_EXEC_YES_DRY_RUN", raising=False)
+    assert yes_config_from_env().dry_run is True
+
+
+def test_get_yes_executor_none_when_disabled(monkeypatch):
+    monkeypatch.delenv("Q15_EXEC_YES_ENABLED", raising=False)
+    executor_mod.reset_executor_for_tests()
+    assert get_yes_executor() is None
+
+
 def test_executor_exit_sells_full_position_and_closes_out():
     ex = _exec()
     assert ex.on_exit("T-BTC", 1, 30)["reason"] == "NO_POSITION"
