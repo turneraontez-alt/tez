@@ -90,13 +90,18 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
-    # --- Net-improvement levers (workflow-verified; owner-enabled LIVE, all reversible).
-    # 7M ASK CAP — DEFAULT ON (owner-enabled). At the 7M mark only, do not admit a NO whose
-    # ask > cap_7m_ask_max. The DELIVERED v2 book shows 7M asks >72c are live net-NEGATIVE
-    # (-57c over 21 bets, -2.7c/bet) vs +26c/bet for <=72c; research shows that slice both-
-    # halves sign-flips. Suppresses BOTH delivery and research for the over-cap 7M NO; 10M and
-    # the YES side are untouched. Read-only. Set =false to restore the uncapped band.
-    cap_7m_ask: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_CAP_7M_ASK", True))
+    # --- Net-improvement levers (workflow-verified; all reversible).
+    # 7M ASK CAP — DEFAULT OFF (flipped from ON). At the 7M mark only, do not admit a NO whose
+    # ask > cap_7m_ask_max. NON-STATIONARY SIGNAL: the cap was originally enabled when an EARLIER,
+    # smaller delivered sample showed 7M asks >72c net-NEGATIVE (-57c over 21 bets). On the fuller
+    # 189-fired sample the slice REVERSED — 7M ask>72c is +98c over 40 bets (82.5% win) while
+    # ask<=72c is -174c over 27 bets (55.6% win), so the cap was vetoing the winners and keeping
+    # the losers (the genuinely toxic [60,72) zone it does NOT touch). Default OFF avoids
+    # suppressing the now-positive expensive-7M slice; the gain is THIN (the live-deliverable
+    # (72,78] band the expensive-NO admit toggles is +65c over n=15). Set =true to restore the
+    # cap if the >72c slice reverts to negative on a larger sample. Read-only; suppresses BOTH
+    # delivery and research for the over-cap 7M NO; 10M and the YES side are untouched.
+    cap_7m_ask: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_CAP_7M_ASK", False))
     cap_7m_ask_max: int = field(
         default_factory=lambda: int(_float("Q15_ULTOIM_V2_CAP_7M_ASK_MAX", 72.0))
     )
@@ -227,6 +232,15 @@ class UltoimV2Config:
     # stale feed is recorded as an abstain (STALE_FEED) instead of delivered.
     max_spot_stale_seconds: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_MAX_STALE", 8.0)
+    )
+    # Fail-CLOSED on an UNKNOWN spot-staleness. DEFAULT OFF (fail-open, byte-identical): when the
+    # champion exposes no staleness age, _spot_stale_age returns None and the freshness check is
+    # skipped (a would-be fire still fires). With this ON, a None/missing staleness is treated as
+    # STALE and the fire abstains — so the LIVE-MONEY path never places blind to feed freshness.
+    # Gated + default-OFF because today the staleness column is unpopulated (always 0.0/None);
+    # turn this on only once the feed reliably reports an age. Set Q15_ULTOIM_V2_STALE_FAIL_CLOSED.
+    stale_fail_closed: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_STALE_FAIL_CLOSED", False)
     )
     # Suppress the headline accuracy % below this resolved-N (CI is too wide to
     # report a number honestly).

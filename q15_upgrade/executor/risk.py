@@ -7,6 +7,7 @@ guard is deterministically testable. All money is INTEGER CENTS (no float drift)
 Guards (a refusal short-circuits with a single reason code):
   KILL            — kill switch on
   WRONG_SIDE      — not the NO side (no_only)
+  INTERVAL_BLOCKED— interval not in the (optional) allowlist
   PRICE_BAND      — price outside [min,max]
   DAILY_STOP      — day realized P&L past the loss limit (circuit breaker)
   MAX_OPEN        — already at max open positions
@@ -29,6 +30,7 @@ class Pick:
     side: str            # "NO" / "YES"
     price_cents: int     # the signalled ask (what we'd pay per contract)
     window_key: int
+    interval: str = ""   # "10M" / "7M" / ... — informational; gates the allowlist, NOT the coid
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,11 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
         return Decision(False, "KILL")
     if cfg.no_only and side != "NO":
         return Decision(False, "WRONG_SIDE")
+    # Interval allowlist (default empty = allow-all -> this guard is inert). When set, refuse a
+    # fire whose interval is not listed — a backstop against a structurally -EV 15M/12M order.
+    allowed = getattr(cfg, "allowed_intervals", frozenset())
+    if allowed and (pick.interval or "").upper() not in allowed:
+        return Decision(False, "INTERVAL_BLOCKED")
     price = int(pick.price_cents)
     if not (cfg.min_price_cents <= price <= cfg.max_price_cents):
         return Decision(False, "PRICE_BAND")

@@ -268,9 +268,14 @@ class UltoimV2Runner:
             verdict = gate.evaluate(cand, cfg, interval=interval)
             stale = _num(cand.get("spot_stale_age_seconds"))
             abstained_stale = False
-            if verdict["fired"] and stale is not None and stale > cfg.max_spot_stale_seconds:
-                # FRESHNESS: a would-be fire on a stale spot does not fire; record an
-                # abstain row tagged STALE_FEED instead of alerting on a bad feed.
+            # FRESHNESS: a would-be fire on a stale spot does not fire. Default is fail-OPEN —
+            # an UNKNOWN staleness (None) is treated as fresh. With stale_fail_closed (gated,
+            # default OFF) a None/missing age is treated as STALE so the live path never fires
+            # blind to feed freshness.
+            too_stale = stale is not None and stale > cfg.max_spot_stale_seconds
+            unknown_stale = stale is None and getattr(cfg, "stale_fail_closed", False)
+            if verdict["fired"] and (too_stale or unknown_stale):
+                # record an abstain row tagged STALE_FEED instead of alerting on a bad feed.
                 verdict = dict(verdict)
                 verdict["fired"] = False
                 reasons = list(verdict.get("reason_codes") or [])
@@ -472,10 +477,10 @@ class UltoimV2Runner:
         # this is a byte-identical no-op by default; even when enabled it is dry-run by
         # default. v2 NEVER places an order itself — it only emits the pick. Failures here
         # are swallowed so the executor can never disrupt the read-only paper path.
-        self._maybe_execute(cand, display, window_key)
+        self._maybe_execute(cand, display, window_key, interval)
 
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
-                       window_key: int) -> None:
+                       window_key: int, interval: str) -> None:
         try:
             from q15_upgrade.executor import get_executor
             ex = get_executor()
@@ -488,6 +493,7 @@ class UltoimV2Runner:
                 "best_entry_cents": best_entry_cents,
                 "entry_ask_cents": cand.get("entry_ask_cents"),
                 "window_key": window_key,
+                "interval": interval,   # backstops the executor's optional interval allowlist
             })
         except Exception:  # never let execution disrupt the paper system
             logger.exception("executor on_fire hook failed (non-fatal)")

@@ -95,6 +95,16 @@ class ExecutorConfig:
     max_price_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PRICE_CENTS", 85))
     # Only the NO side is traded (matches v2). YES fires are never executed.
     no_only: bool = field(default_factory=lambda: _bool("Q15_EXEC_NO_ONLY", True))
+    # Interval allowlist — DEFAULT empty = ALLOW-ALL (byte-identical). A defence-in-depth
+    # backstop independent of v2's own skip_15m / research_only gating: if set (e.g.
+    # "10M,7M"), the executor REFUSES a fire whose interval is not listed, so a regression in
+    # v2's interval gating cannot leak a structurally -EV 15M/12M order onto real money. The
+    # interval is informational only — it NEVER enters the client_order_id (idempotency keys on
+    # window+ticker+kind), so adding it cannot break dedup. Set Q15_EXEC_ALLOWED_INTERVALS.
+    allowed_intervals: frozenset = field(
+        default_factory=lambda: frozenset(
+            s.strip().upper() for s in os.environ.get("Q15_EXEC_ALLOWED_INTERVALS", "").split(",")
+            if s.strip()))
     # Limit orders by default (you set the price). Limit at the signalled ask + this offset
     # (0 = pay the ask; negative = try to fill cheaper, may not fill).
     limit_offset_cents: int = field(default_factory=lambda: _int("Q15_EXEC_LIMIT_OFFSET_CENTS", 0))
