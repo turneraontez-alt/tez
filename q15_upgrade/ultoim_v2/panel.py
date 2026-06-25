@@ -349,6 +349,17 @@ def build_recap(scoreboard: Mapping[str, Any], recent_picks: Sequence[Mapping[st
         body.append(f"  regime proxy — keep   : {_screen_line(flow.get('regime_keep'))}")
         body.append(f"  regime proxy — abstain: {_screen_line(flow.get('regime_abstain'))}")
 
+    # Settlement-streak SHADOW: does an N-in-a-row settled run predict the next window?
+    # The % is P(next settles YES), so compare each row against the base. Record-only.
+    streak = (scoreboard or {}).get("streak_research") or {}
+    if streak.get("available") and int((streak.get("base") or {}).get("n") or 0) > 0:
+        body.append("")
+        body.append("Settlement-streak (SHADOW · record-only · %=P(next settles YES)):")
+        body.append(f"  base (all)   : {_screen_line(streak.get('base'))}")
+        body.append(f"  after 3+ YES : {_screen_line(streak.get('yes_run_3plus'))}")
+        body.append(f"  after 2 YES  : {_screen_line(streak.get('yes_run_2'))}")
+        body.append(f"  after 3+ NO  : {_screen_line(streak.get('no_run_3plus'))}")
+
     body.append("")
     body.append("Ultoim V2 · research/paper · not advice · no orders placed")
     return header + "\n<pre>" + "\n".join(body) + "</pre>"

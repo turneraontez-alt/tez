@@ -14,6 +14,21 @@ can't collect here from a broken `cryptography`/pyo3 binding until `cffi` is for
 they collect — PR #52 measured 1385/4 before this session's +6 exit tests. Env issue, not the diff;
 skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## ✅ Shipped THIS session — settlement-streak signal (observational, +3 tests)
+Owner asked "does 3 YES in a row = uptrend?" Live data: weak/noise-level (after 3 YES, next-YES 67%
+n=12, CI [39,86] overlaps the 42% base; 3-NO run flips the other way). So added it the disciplined way —
+**record + grade, never gates a trade** (champion stays frozen). Files: `ultoim_v2/{config,ledger,runner,panel}.py`.
+- `ledger.settlement_streak(mv, asset, before_wk)`: signed consecutive same-outcome SETTLED-window run
+  as of prediction time (+N YES / −N NO, time-adjacent only, no lookahead). New nullable column
+  `settlement_streak` (migration + `_COLS`).
+- `runner._build_row` stamps it on every recorded prediction (guarded; `Q15_ULTOIM_V2_STREAK_SIGNAL`,
+  default ON; record-only, a failure never breaks recording).
+- `ledger.streak_research_scoreboard(mv)` grades P(next settles YES) by streak bucket (Wilson CI);
+  surfaced in the hourly RESEARCH RECAP (`_recap_sync` → `sb["streak_research"]`, rendered in `panel`)
+  alongside the other shadow research signals. NOT in the per-trade alert; never changes `side`/entries.
+- Promotion path: if "after 3+ YES → YES" holds up over a few hundred more windows, it can graduate to
+  influence entries — same as how flow/s15/distance research signals validate before gating.
+
 ## ✅ Shipped THIS session — 1st-pick ask floor (live config, owner-approved)
 **`.replit` only — no code change** (the `ENTRY_ASK_FLOOR` gate already exists in `risk.py` and is tested,
 `test_executor.py:414-441`). Set `Q15_EXEC_MIN_ENTRY_ASK = "55"` so EVERY pick (incl. the 1st/main) must
