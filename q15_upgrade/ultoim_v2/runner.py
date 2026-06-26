@@ -255,13 +255,20 @@ class UltoimV2Runner:
         # market-implied P(YES) (from BTC's candidate this cycle, at-or-before any alt decision) and
         # the prior-window settled breadth. Rebuilt each cycle; consumed in _maybe_execute.
         self._gate_ctx = {}
+        # BTC's contemporaneous CALIBRATED P(YES) per window -> the DEFAULT-OFF BTC-confirmation
+        # delivery gate (gate.evaluate(btc_yes_prob=...)). None when BTC has no candidate this
+        # cycle -> the gate fails open. Distinct from the executor's market-implied btc_lean above.
+        self._btc_confirm_yes = {}
         for window_key, cands in windows.items():
             btc_lean = None
+            btc_confirm_yes = None
             for cc in cands:
                 if str(cc.get("asset") or "").upper() == "BTC":
                     btc_lean = _num(cc.get("market_implied_yes_probability"))
+                    btc_confirm_yes = _num(cc.get("calibrated_yes_probability"))
                     break
             self._gate_ctx[window_key] = (btc_lean, self.ledger.prior_window_breadth(window_key))
+            self._btc_confirm_yes[window_key] = btc_confirm_yes
             for interval, mark in INTERVAL_MARKS.items():
                 # Skip the weak/money-losing 15M bin when configured (default OFF).
                 # 10M/7M behaviour is untouched.
@@ -302,9 +309,12 @@ class UltoimV2Runner:
         # 10M/7M (the gate then suppresses the cheap ask<floor_12m_ask slice via ASK_FLOOR_12M).
         if interval == "12M" and getattr(cfg, "deliver_12m", False):
             research_only = False
+        # BTC's calibrated P(YES) for this window feeds the DEFAULT-OFF BTC-confirmation gate
+        # (None -> the gate fails open). Same value for every candidate in the window.
+        btc_yes = getattr(self, "_btc_confirm_yes", {}).get(window_key)
         evaluated: list[dict[str, Any]] = []
         for cand in cands:
-            verdict = gate.evaluate(cand, cfg, interval=interval)
+            verdict = gate.evaluate(cand, cfg, interval=interval, btc_yes_prob=btc_yes)
             stale = _num(cand.get("spot_stale_age_seconds"))
             abstained_stale = False
             # FRESHNESS: a would-be fire on a stale spot does not fire. Default is fail-OPEN —
@@ -588,6 +598,13 @@ class UltoimV2Runner:
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
                        window_key: int, interval: str, now: float,
                        *, stake_multiplier: int = 1) -> None:
+        # NO-ONLY EXECUTION GUARD. This live hook is the NO executor; with the YES harvest on
+        # (cfg.no_only=False) the delivered path can carry a fired YES card, which is PAPER-ONLY
+        # by design. A YES must never reach a real order here: the executor would place a BUY YES
+        # via the NO instance if its own no_only were ever relaxed (risk.py side guard). Belt-and-
+        # braces -- the YES live path is the separate, off-by-default yes-executor (_maybe_execute_yes).
+        if str(cand.get("predicted_side") or "").upper() != "NO":
+            return
         try:
             from q15_upgrade.executor import get_executor
             ex = get_executor()

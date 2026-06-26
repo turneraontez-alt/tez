@@ -67,6 +67,7 @@ def _runner(tmp_path, **over):
         recap_every_seconds=0.0, max_spot_stale_seconds=8.0, min_scoreboard_n=30,
         # pin legacy defaults (owner live-defaults asserted in test_ultoim_v2.py)
         skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
+        no_only=True, btc_confirm_enabled=False, require_inverse_edge=False, skip_7m=False,
     )
     base.update(over)
     cfg = UltoimV2Config(**base)

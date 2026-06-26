@@ -70,9 +70,14 @@ class UltoimV2Config:
     min_edge_cents: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_MIN_EDGE", 2.0)
     )
-    # NO-only by default: the live record favours the NO side for these binaries,
-    # and the paper system starts conservative. Set false to admit YES entries.
-    no_only: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_ONLY", True))
+    # YES HARVEST (default OFF = admit YES; owner-enabled). The unified BTC-confirmation gate
+    # (btc_confirm_enabled, below) makes both sides safe: a YES delivers ONLY when BTC is
+    # decisively YES at the checkpoint, and the inverse-edge gate drops the positive-edge
+    # coin-flips. On the real ledger the BTC-gated YES leg scored 89.3% (n=75) and the combined
+    # NO+YES book 86.2% (n=188) -- so NO-only would leave the strongest leg undelivered. Delivery
+    # of a YES is PAPER-ONLY: _maybe_execute (the live NO executor) is guarded NO-only, so a YES
+    # card never places a real order. Set Q15_ULTOIM_V2_NO_ONLY=true to restore NO-only delivery.
+    no_only: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_NO_ONLY", False))
     # Edge gate (gate_c) for the NO side. DEFAULT: ENFORCED (no_edge_waive=False). History: it
     # was briefly WAIVED — the inverse-edge finding lifted TOTAL gross P&L on a smaller/earlier
     # sample. But a 13-agent ROI sweep + adversarial verification over the fuller ~42h capture
@@ -90,11 +95,12 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
-    # Skip the 7M (420s) checkpoint. DEFAULT OFF. 7M is a delivered mark; on the live sample it
-    # is roughly break-even (all-time ~+36c, n=62) but had a -137c day (06-24). Enable to drop 7M
-    # ENTRIES entirely (no screen, no alert, no trade) and run 10M-only. Exit warnings on already-
-    # open positions are unaffected. Set Q15_ULTOIM_V2_SKIP_7M=true.
-    skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", False))
+    # Skip the 7M (420s) checkpoint. DEFAULT ON (owner-enabled): the live book now runs
+    # 10M-ONLY. 7M is roughly break-even (all-time ~+36c, n=62) and adds correlated near-close
+    # exposure; the owner concentrates on the proven 10M anchor (both YES and NO via the unified
+    # BTC-confirmation gate). With this on, 7M fires no screen/alert/trade; exit warnings on
+    # already-open 10M positions are unaffected. Set Q15_ULTOIM_V2_SKIP_7M=false to restore 7M.
+    skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", True))
     # --- Net-improvement levers (workflow-verified; all reversible).
     # 7M ASK CAP — DEFAULT OFF (flipped from ON). At the 7M mark only, do not admit a NO whose
     # ask > cap_7m_ask_max. NON-STATIONARY SIGNAL: the cap was originally enabled when an EARLIER,
@@ -239,6 +245,36 @@ class UltoimV2Config:
     expensive_no_ask_hi: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI", 78.0)
     )
+    # --- Cross-asset BTC-CONFIRMATION gate. DEFAULT OFF. When ON, a candidate DELIVERS
+    # only if BTC's contemporaneous calibrated P(YES) at this checkpoint DECISIVELY AGREES
+    # with the candidate's side: a NO needs BTC calibrated-yes <= 0.5 - btc_confirm_margin
+    # (BTC decisively below its own strike), a YES needs >= 0.5 + btc_confirm_margin. The
+    # mushy middle (BTC pinned near its strike) and the disagreeing side are suppressed from
+    # DELIVERY only -- ``research_fired`` is UNCHANGED so the recap keeps measuring them.
+    # Basis (validated on the real ledger, holds full-history AND last-48h): the alts settle
+    # WITH BTC ~80%, but only when BTC has decisively left its strike; when BTC is itself
+    # pinned the whole complex chops and every side is a coin-flip. FAIL-OPEN when BTC's lean
+    # is unavailable (no cross-asset context) -> byte-identical. This is the lever that makes
+    # the YES harvest safe: pair with ``no_only=false`` to admit YES ONLY when BTC decisively
+    # confirms it. Read-only; never places/modifies/cancels a real order. Set
+    # Q15_ULTOIM_V2_BTC_CONFIRM=true.
+    btc_confirm_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_BTC_CONFIRM", True)
+    )
+    btc_confirm_margin: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN", 0.15)
+    )
+    # --- Inverse-edge DELIVERY gate. DEFAULT OFF. When ON, a candidate whose stated net edge
+    # is >= 0 is suppressed from DELIVERY (``research_fired`` UNCHANGED). For these binaries the
+    # model's stated edge is INVERSE near the strike: positive-edge (cheap, near-strike) entries
+    # are coin-flips that lose, while negative-edge (expensive, market-confident) entries win.
+    # Distinct from ``expensive_no`` (which ADMITS the >ask_hi band): this REMOVES the
+    # positive-edge tail. FAIL-OPEN when net edge is unknown (the MISSING_DATA short-circuit
+    # already abstains). Read-only; never places/modifies/cancels a real order. Set
+    # Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE=true.
+    require_inverse_edge: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE", True)
+    )
     # Flow-against-NO research SCREEN threshold (record-only; surfaced by the recap via
     # ledger.flow_research_scoreboard). The champion's per-asset directional flow factor
     # (feature_values["flow"]) recorded as `champion_flow`: a NO bet placed against
@@ -341,14 +377,16 @@ class UltoimV2Config:
     exit_warnings_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARNINGS", True)
     )
-    # Watch for the flip from this many seconds remaining onward. Default 480 (8M), raised from
-    # 420 (7M): live exit-warning data (n=51, 84% correct) showed 11 correct flips were CLIPPED by
-    # the old 420s watch-start — the flip was already present but the watcher wasn't looking, so the
-    # exit fired later and recovered less residual value (corr(time-left, recovered)=+0.31). Watching
-    # from 8M fires those already-correct exits SOONER without touching the anti-spike gate
-    # (confirm_cycles/seconds) or the decisiveness bar, so the false-alarm rate is unchanged.
+    # Watch for the flip from this many seconds remaining onward. Default 600 (10M), raised from
+    # 480 (8M): with the book now 10M-ONLY, the watcher should cover an open 10M entry's WHOLE life.
+    # The 10M counterfactual on the real exit-warning ledger found ~23/86 true flips were already
+    # visible at the 10M/9M checkpoints but CLIPPED by the old 8M watch-start (avg ~216s of earlier
+    # exit left on the table). Watching from 10M fires those already-correct exits sooner; the
+    # anti-spike gate (confirm_cycles/seconds) + the decisiveness bar still guard against transient
+    # spikes (watch the false-alarm rate as the earlier window admits more chop). Set
+    # Q15_ULTOIM_V2_EXIT_WATCH_SECONDS=480 to restore the 8M watch-start.
     exit_watch_from_seconds: float = field(
-        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", 480.0)
+        default_factory=lambda: _float("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", 600.0)
     )
     # Anti-spike: the opposite-side call must hold this many consecutive observations
     # AND span at least this many seconds before a warning fires.

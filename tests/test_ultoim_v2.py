@@ -83,9 +83,12 @@ def _config(tmp_path, **over):
         max_spot_stale_seconds=8.0, min_scoreboard_n=30,
         # Pin the LEGACY defaults so these tests isolate the original behaviour; the
         # owner-enabled live defaults (top-1 reward:risk, skip-15M, NO edge-waive, 7M cap,
-        # 12M delivery) are asserted in test_owner_default_config_is_aggressive. Overrides win.
+        # 12M delivery, the unified BTC-confirm + inverse-edge gates, YES harvest, 10M-only,
+        # 10M exit-watch) are asserted in test_owner_default_config_is_aggressive. Overrides win.
         skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
         cap_7m_ask=False, enable_11m=False, enable_12m=False,
+        btc_confirm_enabled=False, require_inverse_edge=False, skip_7m=False,
+        exit_watch_from_seconds=420.0,
     )
     base.update(over)
     return UltoimV2Config(**base)
@@ -111,7 +114,7 @@ def _candidate(**over):
 # gate.evaluate
 # --------------------------------------------------------------------------- #
 def test_gate_fires_clean_no():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     # Clean NO at conf .65 / ask 60 / cost 0 -> net edge 0.65*100-60 = 5 >= 2 -> fires.
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.65,
                                  entry_ask_cents=60.0, total_cost_cents=0.0), cfg)
@@ -122,21 +125,21 @@ def test_gate_fires_clean_no():
 
 
 def test_gate_blocks_yes_side():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.65), cfg)
     assert v["fired"] is False
     assert "WRONG_SIDE_YES" in v["reason_codes"]
 
 
 def test_gate_blocks_low_confidence():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     v = gate.evaluate(_candidate(selected_probability=0.50, entry_ask_cents=48.0), cfg)
     assert v["fired"] is False
     assert "CONF_BELOW_MIN" in v["reason_codes"]
 
 
 def test_gate_blocks_ask_below_band():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=45.0), cfg)
     assert "ASK_BELOW_BAND" in v["reason_codes"] and v["fired"] is False
 
@@ -144,19 +147,19 @@ def test_gate_blocks_ask_below_band():
 def test_gate_blocks_ask_above_band():
     # With the expensive-NO admit ON (default), the NO ceiling is expensive_no_ask_hi=78
     # (ROI-sweep tightened), so an ask ABOVE that is still blocked (here 90 on a non-15M interval).
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     v = gate.evaluate(_candidate(selected_probability=0.95, entry_ask_cents=90.0),
                       cfg, interval="10M")
     assert "ASK_ABOVE_BAND" in v["reason_codes"] and v["fired"] is False
     # With the admit OFF, the plain ceiling (ask_hi=72) blocks ask 80 as before.
     off = gate.evaluate(_candidate(selected_probability=0.85, entry_ask_cents=80.0),
-                        UltoimV2Config(enabled=True, expensive_no_enabled=False))
+                        UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, expensive_no_enabled=False))
     assert "ASK_ABOVE_BAND" in off["reason_codes"] and off["fired"] is False
 
 
 def test_gate_blocks_edge_below_min():
     # edge gate in isolation: pin the waive OFF (owner default is ON, tested below).
-    cfg = UltoimV2Config(enabled=True, no_edge_waive=False)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=False)
     # edge = 60 - 59 - 0 = 1.0 < 2.0
     v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=59.0,
                                  total_cost_cents=0.0), cfg)
@@ -166,7 +169,7 @@ def test_gate_blocks_edge_below_min():
 def test_no_edge_waive_fires_sub_min_edge_no():
     # The WAIVE behaviour (now opt-in; production default is ENFORCED after the ROI sweep): with
     # the waive ON, a NO with sub-min stated edge in the [ask_lo, ask_hi] band FIRES. Pinned ON here.
-    cfg = UltoimV2Config(enabled=True, no_edge_waive=True)   # pin the waive ON to test it
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=True)   # pin the waive ON to test it
     v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=59.0,
                                  total_cost_cents=0.0), cfg)        # edge 1.0 < 2.0
     assert v["fired"] is True and v["gate_c"] is True
@@ -202,10 +205,17 @@ def test_owner_default_config_is_aggressive():
     assert cfg.skip_12m_unless_min is True and cfg.min_triggers_12m == 3
     assert cfg.double_10m_on_min is True and cfg.min_triggers_10m == 3
     assert cfg.double_stake == 2
+    # Unified 86.2%-book live defaults (owner-enabled; each reversible via its Q15_* env var):
+    assert cfg.btc_confirm_enabled is True          # deliver only when BTC decisively agrees
+    assert cfg.btc_confirm_margin == 0.15
+    assert cfg.require_inverse_edge is True          # drop the positive-edge coin-flips
+    assert cfg.no_only is False                      # YES harvest on (paper; BTC-gated)
+    assert cfg.skip_7m is True                       # 10M-only book
+    assert cfg.exit_watch_from_seconds == 600.0      # exit-watch from the 10M mark
 
 
 def test_gate_missing_data():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     assert gate.evaluate(_candidate(entry_ask_cents=None), cfg)["reason_codes"] == ["MISSING_DATA"]
     assert gate.evaluate(_candidate(selected_probability=None), cfg)["reason_codes"] == ["MISSING_DATA"]
     none_v = gate.evaluate(_candidate(entry_ask_cents=None), cfg)
@@ -213,7 +223,7 @@ def test_gate_missing_data():
 
 
 def test_gate_inclusive_bounds():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     # ask exactly 50 (lo) passes the band; conf high enough; edge ok
     lo = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=50.0,
                                   total_cost_cents=0.0), cfg)
@@ -236,7 +246,7 @@ def test_gate_inclusive_bounds():
 # best_entry_cents / display_entry
 # --------------------------------------------------------------------------- #
 def test_best_entry_cents_floor_and_clamp():
-    cfg = UltoimV2Config(enabled=True)  # ask_lo 50, ask_hi 72, min_edge 2
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)  # ask_lo 50, ask_hi 72, min_edge 2
     # 0.655*100 - 1.0 - 2.0 = 62.5 -> floor 62, within band
     assert gate.best_entry_cents(0.655, 1.0, cfg) == 62
     # very high -> clamped to ask_hi (72)
@@ -246,7 +256,7 @@ def test_best_entry_cents_floor_and_clamp():
 
 
 def test_display_entry_never_above_ask():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     # best=72 (clamped) but ask is 60 -> display is 60
     assert gate.display_entry(0.99, 0.0, 60.0, cfg) == 60
     # best below ask -> shows best
@@ -375,7 +385,7 @@ _FORBIDDEN = ("V9.5 CHECK", "ENTRY RECOMMENDED", "Hourly Report —", "TOP 3 PIC
 
 
 def test_build_entry_alert_grammar_and_no_collision():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     pick = {
         "asset": "BTC", "predicted_side": "NO", "ticker": "T-BTC", "interval": "10M",
         "window_key": 5, "selected_probability": 0.62, "entry_ask_cents": 60.0,
@@ -394,7 +404,7 @@ def test_entry_alert_flow_against_no_is_informational_only():
     warning (so it's visible) but is still SENT and never gates/grades. The line
     appears only for NO + champion_flow >= threshold; never for YES, low flow, or
     a missing flow (no crash)."""
-    cfg = UltoimV2Config(enabled=True, flow_against_no_threshold=0.6)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, flow_against_no_threshold=0.6)
     base = {
         "asset": "BTC", "ticker": "T-BTC", "interval": "10M", "window_key": 5,
         "selected_probability": 0.62, "entry_ask_cents": 60.0,
@@ -418,7 +428,7 @@ def test_entry_alert_flow_against_no_is_informational_only():
 
 
 def test_build_recap_insufficient_data():
-    cfg = UltoimV2Config(enabled=True, min_scoreboard_n=30)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_scoreboard_n=30)
     sb = {
         "min_n": 30, "resolved": 3, "total_recorded": 5,
         "delivery_counts": {"SENT": 3, "RECORDED": 2},
@@ -576,7 +586,7 @@ def _extract(runner, analyses, canonicals, now):
 def test_gate_edge_float_boundary_admits_true_two_cent_edge():
     """0.58*100 - 56 == 1.999999999999993 in binary float; the inclusive 2.0¢ bar
     must still admit a mathematically-exact 2.0¢ edge (the one fitted knob)."""
-    cfg = UltoimV2Config(enabled=True, no_edge_waive=False)   # isolate the edge bar
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=False)   # isolate the edge bar
     assert 0.58 * 100.0 - 56.0 < 2.0  # the float underflow is real
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.58,
                                  entry_ask_cents=56.0, total_cost_cents=0.0), cfg)
@@ -589,7 +599,7 @@ def test_gate_edge_float_boundary_admits_true_two_cent_edge():
 
 
 def test_gate_rejects_bool_as_missing_data():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     for bad in ({"predicted_side": "NO", "selected_probability": True, "entry_ask_cents": 60.0},
                 {"predicted_side": "NO", "selected_probability": 0.6, "entry_ask_cents": False}):
         v = gate.evaluate(bad, cfg)
@@ -598,7 +608,7 @@ def test_gate_rejects_bool_as_missing_data():
 
 
 def test_display_entry_floors_and_reclamps_into_band():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     # int(49.9)==49 would advertise a price BELOW the ask_lo=50 band floor.
     assert gate.display_entry(0.99, 0.0, 49.9, cfg) == 50
     # normal: best-entry below ask shows the best-entry.
@@ -623,6 +633,42 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
     assert "EXPENSIVE_NO_ADMIT" in (row["reason_codes"] or "")
 
 
+# ETH is the cheaper (higher reward:risk / higher stated edge) alt so it is the
+# single-best recorded pick even when nothing fires; BTC only supplies the lean.
+def test_btc_confirm_suppresses_alt_delivery_when_btc_mushy(tmp_path):
+    """Wiring: with the BTC-confirmation gate ON, the alt 10M NO is RECORDED but DELIVERY is
+    suppressed (BTC_UNCONFIRMED) when BTC is pinned near its own strike (calibrated yes 0.45,
+    inside 0.35..0.65). Proves BTC's calibrated-yes plumbs observe() -> _decide_interval ->
+    gate.evaluate(btc_yes_prob=...) and gates a DIFFERENT asset's entry."""
+    r = _runner(tmp_path, btc_confirm_enabled=True, deliver_top_n=2)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=62.0, yes=0.45, mkt_yes=0.45),
+         "ETH": _analysis(side="NO", sel=0.65, ask=58.0, yes=0.45, mkt_yes=0.45)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0),    # 600s -> 10M mark
+         "ETH": _canon("T-ETH", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["ticker"] == "T-ETH" and row["interval"] == "10M"]
+    assert len(rows) == 1
+    assert rows[0]["fired"] == 0
+    assert "BTC_UNCONFIRMED" in (rows[0]["reason_codes"] or "")
+
+
+def test_btc_confirm_admits_alt_delivery_when_btc_decisive(tmp_path):
+    """Same window, but BTC is decisively NO (calibrated yes 0.30 <= 0.5 - 0.15): the alt 10M
+    NO now DELIVERS (fired=1) with no BTC_UNCONFIRMED marker."""
+    r = _runner(tmp_path, btc_confirm_enabled=True, deliver_top_n=2)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=62.0, yes=0.30, mkt_yes=0.30),
+         "ETH": _analysis(side="NO", sel=0.65, ask=58.0, yes=0.30, mkt_yes=0.30)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0),
+         "ETH": _canon("T-ETH", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["ticker"] == "T-ETH" and row["interval"] == "10M"]
+    assert len(rows) == 1
+    assert rows[0]["fired"] == 1
+    assert "BTC_UNCONFIRMED" not in (rows[0]["reason_codes"] or "")
+
+
 # --------------------------------------------------------------------------- #
 # Net-improvement levers: 7M ask cap + 11M/12M measure-first capture.
 # --------------------------------------------------------------------------- #
@@ -637,7 +683,7 @@ def test_cap_7m_ask_defaults_off():
 
 def test_cap_7m_ask_off_admits_expensive_7m_no():
     """Cap OFF (now the default) -> byte-identical: a 7M NO at ask 80 is still admitted via expensive_no."""
-    cfg = UltoimV2Config(enabled=True, cap_7m_ask=False, expensive_no_ask_hi=85.0)   # cap off (now default); pin band 85
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, cap_7m_ask=False, expensive_no_ask_hi=85.0)   # cap off (now default); pin band 85
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
                                  entry_ask_cents=80.0, total_cost_cents=0.0),
                       cfg, interval="7M")
@@ -646,7 +692,7 @@ def test_cap_7m_ask_off_admits_expensive_7m_no():
 
 
 def test_cap_7m_ask_on_vetoes_expensive_7m_no_interval_scoped():
-    cfg = UltoimV2Config(enabled=True, cap_7m_ask=True, expensive_no_ask_hi=85.0)  # cap_max 72; pin band 85
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, cap_7m_ask=True, expensive_no_ask_hi=85.0)  # cap_max 72; pin band 85
     # 7M NO at 80c (>72): capped -> neither delivers NOR records-as-research.
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.78,
                                  entry_ask_cents=80.0, total_cost_cents=0.0),
@@ -811,7 +857,7 @@ def test_runner_yes_live_disabled_by_default_no_route(tmp_path, monkeypatch):
 
 
 def test_gate_research_fired_yes_side_never_delivers():
-    cfg = UltoimV2Config(enabled=True)  # no_only=True
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)  # no_only=True
     v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.65,
                                  entry_ask_cents=60.0, total_cost_cents=2.0), cfg)
     assert v["fired"] is False                       # NO-only delivery
@@ -820,7 +866,7 @@ def test_gate_research_fired_yes_side_never_delivers():
 
 
 def test_gate_collects_every_failing_reason():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.40,
                                  entry_ask_cents=45.0, total_cost_cents=0.0), cfg)
     assert set(v["reason_codes"]) == {
@@ -1057,7 +1103,7 @@ def test_deliver_12m_defaults_off():
 def test_deliver_12m_floor_blocks_cheap_delivers_expensive():
     """12M promotion: when deliver_12m is on, a 12M NO at ask>=65 DELIVERS, while ask<65 (the
     cheap near-strike loss zone, 33%/-17c) is suppressed from delivery but still recorded research."""
-    cfg = UltoimV2Config(enabled=True, deliver_12m=True, no_edge_waive=False)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, deliver_12m=True, no_edge_waive=False)
     expensive = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.75,
                                          entry_ask_cents=70.0, total_cost_cents=0.0), cfg, interval="12M")
     assert expensive["fired"] is True and "ASK_FLOOR_12M" not in expensive["reason_codes"]
@@ -1072,7 +1118,7 @@ def test_deliver_12m_floor_blocks_cheap_delivers_expensive():
 
 
 def test_deliver_12m_off_is_byte_identical_floor_inert():
-    cfg = UltoimV2Config(enabled=True)  # deliver_12m False (default)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)  # deliver_12m False (default)
     cheap = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.75,
                                      entry_ask_cents=60.0, total_cost_cents=0.0), cfg, interval="12M")
     assert "ASK_FLOOR_12M" not in cheap["reason_codes"]
@@ -1097,13 +1143,13 @@ def test_runner_delivers_12m_expensive_when_promoted(tmp_path):
     assert eth and eth[0]["fired"] == 0 and "ASK_FLOOR_12M" in (eth[0]["reason_codes"] or "")
 
 
-def test_no_only_locked_at_gate_and_executor():
-    """Rec #6: NO-only stays LOCKED at BOTH layers (v2 gate + executor). Foregone YES at the
-    deliverable 50-85c band is net-negative (55.8% acc, -983c, n=120), so enabling YES would
-    import a losing book onto the live executor. Confirmatory guard — flips here are deliberate."""
+def test_no_only_unlocked_at_v2_gate_executor_stays_no_only():
+    """YES HARVEST: v2 now admits YES (no_only=False) so the BTC-confirmed YES leg (89.3%, n=75)
+    delivers as PAPER cards. The live NO executor stays NO-only (its OWN no_only is unchanged) and
+    _maybe_execute is guarded NO-only, so a delivered YES never places a real order."""
     from q15_upgrade.executor.config import ExecutorConfig
-    assert UltoimV2Config().no_only is True
-    assert ExecutorConfig().no_only is True
+    assert UltoimV2Config().no_only is False        # v2 delivers YES (paper, BTC-gated)
+    assert ExecutorConfig().no_only is True         # the live NO executor never trades YES
 
 
 def test_stale_fail_closed_default_off_fires_on_unknown_staleness(tmp_path):
@@ -1174,7 +1220,7 @@ def _recap_sb(*, n, right, ci_low, base_rate, min_n=30, yes_n=0, yes_prone_n=0):
 
 
 def test_recap_promotion_insufficient():
-    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_promote_n=50)
     text = panel.build_recap(_recap_sb(n=11, right=10, ci_low=0.6, base_rate=0.5), [], [], cfg)
     assert "PROMOTION: INSUFFICIENT DATA (N<50)" in text
     for m in _FORBIDDEN_FULL:
@@ -1182,7 +1228,7 @@ def test_recap_promotion_insufficient():
 
 
 def test_recap_promotion_not_separable():
-    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_promote_n=50)
     text = panel.build_recap(_recap_sb(n=60, right=33, ci_low=0.45, base_rate=0.5), [], [], cfg)
     assert "PROMOTION: NOT SEPARABLE FROM BASE RATE" in text
     assert "BEATS BASE RATE" not in text
@@ -1191,7 +1237,7 @@ def test_recap_promotion_not_separable():
 
 
 def test_recap_promotion_beats_with_unproven_qualifier():
-    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_promote_n=50)
     # overall beats, but YES side / YES-prone still empty -> qualifier appended.
     text = panel.build_recap(
         _recap_sb(n=1000, right=700, ci_low=0.671, base_rate=0.5, yes_n=0, yes_prone_n=0),
@@ -1203,7 +1249,7 @@ def test_recap_promotion_beats_with_unproven_qualifier():
 
 
 def test_recap_shows_side_and_regime_sections():
-    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_promote_n=50)
     text = panel.build_recap(_recap_sb(n=40, right=34, ci_low=0.7, base_rate=0.5,
                                        yes_n=5, yes_prone_n=3), [], [], cfg)
     assert "By side:" in text and "(research-only)" in text
@@ -1219,11 +1265,11 @@ def _ew_cfg_over():
                 exit_min_flip_conf=0.55, exit_watch_from_seconds=420.0)
 
 
-def test_exit_watch_from_seconds_default_is_480(monkeypatch):
+def test_exit_watch_from_seconds_default_is_600(monkeypatch):
     # Data-backed default: watch from 8M so flips already present at 7M aren't clipped
     # (n=51 live warnings, 84% correct; 11 correct exits were capped at the old 420s).
     monkeypatch.delenv("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", raising=False)
-    assert UltoimV2Config().exit_watch_from_seconds == 480.0
+    assert UltoimV2Config().exit_watch_from_seconds == 600.0
     monkeypatch.setenv("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", "420")
     assert UltoimV2Config().exit_watch_from_seconds == 420.0
 
@@ -1330,7 +1376,7 @@ def test_find_fired_entry(tmp_path):
 
 
 def test_build_exit_warning_grammar_and_markers():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     w = {"asset": "BTC", "ticker": "T-BTC", "entry_side": "NO", "flipped_to_side": "YES",
          "entry_ask_cents": 60.0, "entry_interval": "10M", "warn_seconds_remaining": 410.0,
          "flip_calibrated_yes": 0.66, "flip_selected_probability": 0.66,
@@ -1344,7 +1390,7 @@ def test_build_exit_warning_grammar_and_markers():
 
 
 def test_recap_shows_exit_warning_section():
-    cfg = UltoimV2Config(enabled=True, min_promote_n=50, min_scoreboard_n=30)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_promote_n=50, min_scoreboard_n=30)
     sb = _recap_sb(n=5, right=3, ci_low=0.4, base_rate=0.5)
     sb["exit_warnings"] = {"total": 4, "resolved": 4, "correct": 3, "false_alarms": 1,
                            "precision": 0.75, "recovered_cents": 180.0,
@@ -1357,7 +1403,7 @@ def test_recap_shows_exit_warning_section():
 
 
 def test_entry_card_caveat_is_derived_not_hardcoded():
-    cfg = UltoimV2Config(enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
     pick = {"asset": "BTC", "predicted_side": "NO", "ticker": "T-BTC", "interval": "10M",
             "window_key": 5, "selected_probability": 0.62, "entry_ask_cents": 60.0,
             "best_entry_cents": 58, "net_edge_cents": 2.5}
@@ -1501,7 +1547,7 @@ def test_runner_stamps_shadow_score_without_affecting_fire(tmp_path):
 
 
 def test_recap_shows_shadow_line_and_is_marker_safe():
-    cfg = UltoimV2Config(enabled=True, min_promote_n=50)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, min_promote_n=50)
     sb = _recap_sb(n=40, right=34, ci_low=0.7, base_rate=0.5)
     sb["blowup_shadow"] = {
         "available": True, "verdict": validate.SHADOW_ONLY, "n_scored": 40,
@@ -1807,3 +1853,23 @@ def test_runner_attaches_btc_gate_context_to_pick(tmp_path, monkeypatch):
     assert captured.get("btc_lean") == 0.62
     assert captured.get("prior_breadth") == 0.71
     assert captured.get("stake_multiplier") == 1
+
+
+def test_maybe_execute_no_only_guard_blocks_yes(tmp_path, monkeypatch):
+    """Paper-only YES: _maybe_execute (the live NO-executor hook) skips a non-NO cand so a
+    delivered YES card never places a real order, even when no_only=False admits YES delivery."""
+    r = _runner(tmp_path)
+    calls = []
+
+    class _Ex:
+        def on_fire(self, pick):
+            calls.append(pick)
+            return {"placed": True}
+
+    monkeypatch.setattr("q15_upgrade.executor.get_executor", lambda: _Ex())
+    r._maybe_execute({"predicted_side": "YES", "ticker": "T-ETH", "asset": "ETH"},
+                     60, 1, "10M", 1000.0)
+    assert calls == []                                       # YES never reaches the executor
+    r._maybe_execute({"predicted_side": "NO", "ticker": "T-ETH", "asset": "ETH"},
+                     60, 1, "10M", 1000.0)
+    assert [p["predicted_side"] for p in calls] == ["NO"]    # NO does

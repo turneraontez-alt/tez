@@ -44,6 +44,8 @@ REASON_CODES = (
     "ASK_CAP_7M",
     "ASK_FLOOR_12M",
     "RESEARCH_ONLY_MARK",
+    "BTC_UNCONFIRMED",
+    "POSITIVE_EDGE_BLOCK",
 )
 
 # Tolerance for the inclusive edge comparator — absorbs float-repr slack only
@@ -110,7 +112,8 @@ def display_entry(selected: float, cost_cents: float, ask: float, cfg: Any,
     return int(capped)
 
 
-def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = None) -> dict[str, Any]:
+def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = None,
+             btc_yes_prob: float | None = None) -> dict[str, Any]:
     """Evaluate one candidate against the three gates.
 
     Returns a dict with: fired(bool), research_fired(bool), reason_codes(list[str]),
@@ -138,6 +141,20 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     The two are mutually exclusive (one is 15M-only, the other non-15M). The YES side
     is never affected by either. With both flags off behaviour is byte-identical to
     the plain three-gate verdict.
+
+    ``btc_yes_prob`` (keyword-only, default None) feeds two further DEFAULT-OFF DELIVERY
+    gates (both suppress ``fired`` only; ``research_fired`` is UNCHANGED):
+
+      * the BTC-confirmation gate (``cfg.btc_confirm_enabled``): deliver only when BTC's
+        contemporaneous calibrated P(YES) decisively agrees with the side (NO <= 0.5 -
+        ``btc_confirm_margin``; YES >= 0.5 + margin), tagging ``BTC_UNCONFIRMED``;
+        FAIL-OPEN when ``btc_yes_prob`` is None;
+
+      * the inverse-edge gate (``cfg.require_inverse_edge``): suppress delivery on a
+        non-negative stated edge, tagging ``POSITIVE_EDGE_BLOCK``.
+
+    Both are off by default -> byte-identical. The BTC-confirmation gate is what makes the
+    YES harvest safe (pair with ``no_only=false`` to admit YES only on a decisive BTC YES).
     """
     side = str(candidate.get("predicted_side") or "").upper()
     sel = _clean_num(candidate.get("selected_probability"))
@@ -258,7 +275,38 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     if floor_12m_block:
         reason_codes.append("ASK_FLOOR_12M")
 
-    fired = gate_a and research_fired and not near_block and not floor_12m_block
+    # Cross-asset BTC-CONFIRMATION gate (DEFAULT OFF). Suppresses DELIVERY (``fired``)
+    # only -- ``research_fired`` is UNCHANGED so the recap keeps measuring. A candidate
+    # delivers only when BTC's contemporaneous calibrated P(YES) (``btc_yes_prob``)
+    # DECISIVELY agrees with its side: NO requires btc_yes_prob <= 0.5 - margin, YES
+    # requires >= 0.5 + margin. The mushy middle (BTC pinned) and the disagreeing side are
+    # blocked. FAIL-OPEN when ``btc_yes_prob`` is None (no cross-asset context) -> unchanged.
+    # For a BTC candidate the runner passes BTC's own calibrated-yes -> a self-decisiveness
+    # check (decisive BTC reads are the reliable ones; the mushy middle is a coin-flip).
+    btc_unconfirmed = False
+    if getattr(cfg, "btc_confirm_enabled", False) and btc_yes_prob is not None:
+        margin = getattr(cfg, "btc_confirm_margin", 0.15)
+        if side == "NO":
+            btc_unconfirmed = not (btc_yes_prob <= 0.5 - margin)
+        elif side == "YES":
+            btc_unconfirmed = not (btc_yes_prob >= 0.5 + margin)
+    if btc_unconfirmed:
+        reason_codes.append("BTC_UNCONFIRMED")
+
+    # Inverse-edge DELIVERY gate (DEFAULT OFF). Suppress DELIVERY (``fired``) for a
+    # non-negative stated edge; ``research_fired`` UNCHANGED. The model's edge is INVERSE
+    # near the strike -- positive-edge entries are the cheap near-strike coin-flips that
+    # lose, while negative-edge (expensive, market-confident) entries win. A missing edge
+    # already short-circuits to MISSING_DATA above, so this only fires on a real >= 0 edge.
+    positive_edge_block = bool(
+        getattr(cfg, "require_inverse_edge", False)
+        and net_edge >= 0.0
+    )
+    if positive_edge_block:
+        reason_codes.append("POSITIVE_EDGE_BLOCK")
+
+    fired = (gate_a and research_fired and not near_block and not floor_12m_block
+             and not btc_unconfirmed and not positive_edge_block)
     return {
         "fired": bool(fired),
         "research_fired": bool(research_fired),

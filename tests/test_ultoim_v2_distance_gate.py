@@ -33,7 +33,7 @@ def _cand(**over):
 # 1a. DEFAULT-ON (owner-enabled): a 15M near-strike NO abstains by default.
 # --------------------------------------------------------------------------- #
 def test_distance_gate_default_on_abstains_near_strike():
-    cfg = UltoimV2Config(enabled=True)  # distance_gate_enabled now defaults True
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)  # distance_gate_enabled now defaults True
     assert cfg.distance_gate_enabled is True
     v = gate.evaluate(_cand(distance_sigma=0.05), cfg, interval="15M")
     assert v["fired"] is False
@@ -45,7 +45,7 @@ def test_distance_gate_default_on_abstains_near_strike():
 # 1b. Opt-out escape hatch: explicitly disabled -> byte-identical no-gate.
 # --------------------------------------------------------------------------- #
 def test_distance_gate_explicit_off_is_byte_identical():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=False)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=False)
     v = gate.evaluate(_cand(distance_sigma=0.05), cfg, interval="15M")
     assert v["fired"] is True
     assert v["research_fired"] is True
@@ -56,7 +56,7 @@ def test_distance_gate_explicit_off_is_byte_identical():
 # 2. Enabled, 15M, NO, NEAR the strike -> ABSTAIN (delivery only).
 # --------------------------------------------------------------------------- #
 def test_distance_gate_enabled_15m_no_near_abstains():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=True)
     v = gate.evaluate(_cand(distance_sigma=0.05), cfg, interval="15M")
     assert v["fired"] is False
     # research_fired UNCHANGED — measurement keeps accruing.
@@ -68,7 +68,7 @@ def test_distance_gate_enabled_15m_no_near_abstains():
 # 3. Enabled, 15M, NO, FAR from the strike -> fires (not a pin).
 # --------------------------------------------------------------------------- #
 def test_distance_gate_enabled_15m_no_far_fires():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=True)
     v = gate.evaluate(_cand(distance_sigma=0.30), cfg, interval="15M")
     assert v["fired"] is True
     assert v["research_fired"] is True
@@ -79,7 +79,7 @@ def test_distance_gate_enabled_15m_no_far_fires():
 # 4. Enabled, 10M, NO, NEAR -> fires (scope is 15M-only; 10M untouched).
 # --------------------------------------------------------------------------- #
 def test_distance_gate_scope_is_15m_only_10m_near_fires():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=True)
     v = gate.evaluate(_cand(distance_sigma=0.05), cfg, interval="10M")
     assert v["fired"] is True
     assert v["research_fired"] is True
@@ -90,7 +90,7 @@ def test_distance_gate_scope_is_15m_only_10m_near_fires():
 # 5. Enabled, 15M, YES, NEAR -> blocked by SIDE, not the distance gate (NO-only).
 # --------------------------------------------------------------------------- #
 def test_distance_gate_is_no_only_yes_near_blocked_by_side():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=True)
     v = gate.evaluate(_cand(predicted_side="YES", distance_sigma=0.05), cfg, interval="15M")
     assert v["fired"] is False  # blocked, but because it is YES
     assert "WRONG_SIDE_YES" in v["reason_codes"]
@@ -103,7 +103,7 @@ def test_distance_gate_is_no_only_yes_near_blocked_by_side():
 # 6. Enabled, 15M, NO, distance_sigma None -> fail-open (cannot prove "near").
 # --------------------------------------------------------------------------- #
 def test_distance_gate_fail_open_on_missing_distance():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=True)
     v = gate.evaluate(_cand(distance_sigma=None), cfg, interval="15M")
     assert v["fired"] is True
     assert v["research_fired"] is True
@@ -114,7 +114,7 @@ def test_distance_gate_fail_open_on_missing_distance():
 # 7. Boundary: distance_sigma == pin -> FAR (strict <), fires.
 # --------------------------------------------------------------------------- #
 def test_distance_gate_boundary_equal_pin_is_far():
-    cfg = UltoimV2Config(enabled=True, distance_gate_enabled=True)
+    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, distance_gate_enabled=True)
     assert cfg.distance_pin_sigma == 0.15
     v = gate.evaluate(_cand(distance_sigma=0.15), cfg, interval="15M")
     assert v["fired"] is True
