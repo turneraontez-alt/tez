@@ -13,6 +13,38 @@ Tests: `python3 -m pytest tests/ -q` → **1448 passed / 4 skipped here** (8 app
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
+## ✅ Shipped THIS session — V2 account auditor (`tools/v2_audit.py`) — read-only, deploy-N/A
+**Suite 1485 / 13 skipped** (+38 tests, `tests/test_v2_audit.py`). Branch `claude/v2-account-audit-system-i2tzcx`,
+**draft PR #66, CI green**. A deterministic, self-checking auditor for the V2 (`ultoim_v2`) paper account —
+**read-only on every ledger** (opens `mode=ro`, MIRRORS the money math, never calls `resolve()`; DB md5
+byte-identical after a run). Pure tool, no live-path change → nothing to deploy.
+- **Why:** a naive `SUM(hypothetical_pnl_cents)` double-counts windows fired at both 10M & 7M and mixes in
+  the research-only 12M/15M marks (reads −390¢). The tool fixes the population and makes the number provable.
+- **Features:** 3-way P&L reconciliation (ledger-stored vs Decimal-recompute vs `interval_captures`) with
+  discrepancy flags · EV per trade (Decimal) · canonical dedup = one trade per TICKER graded only at its
+  10M-then-7M checkpoint (no look-ahead, no dup 15-min window; group by ticker, NOT (ticker,window_key), to
+  survive divergent stored window_keys) · chart-data extension replaying the **real** `gate.evaluate` +
+  `from_env()` (current config; separate labeled would-have book, never merged) · **C5 fingerprint** +
+  `--strict-c5` (verified the dataclass defaults == live `.replit` C5 on all 29 gate fields) · before/after
+  snapshot diff (`--save-snapshot`) · **captures namespace fix** (`interval_captures` are
+  `interval-research-v1`, NOT `ultoim-v2` — querying with the wrong one silently matched 0 rows) ·
+  `--delivered-only` (SENT/actionable book) · `--per-window` (one buy per 15-min window — the owner's real
+  unit; manual pick ⇒ reports the best/worst envelope + by-rule picks) · always-on `--flag-asset HYPE` drag ·
+  **GROSS and NET (ledger's OWN `total_cost_cents`, ~2¢ entry fee — hold-to-settlement, not 3¢ round-trip)
+  reported STAKED and per-contract FLAT-1**.
+- **CLAUDE.md:** added the owner directive **"V2 analysis policy — always evaluate the FULL current config
+  (every gate added), never a solo subset"** (delivered book + per-window unit; `from_env` = all configs,
+  `--strict-c5` = the narrower C5 pin).
+- **Real-ledger findings (delivered NO @10M+7M, n=284, from `learning-snapshots`):** GROSS staked **+295¢**,
+  NET staked **−292.72¢**, GROSS flat-1 **+677¢**, NET flat-1 **+119.93¢**, CLEAN (flat-1, no HYPE) NET
+  **+984¢ (+4¢/ct)**. The net-negative is **self-inflicted: the 2× conviction doubling (`double_10m_on_min`,
+  −382¢ gross) + HYPE (−667¢) + fees**, NOT the core edge. 10M & 7M NO are both ~break-even net-of-fee
+  (CIs span 0); OOS it's 10M (not 7M) that's decaying — so **PR #67's `SKIP_7M_NO` rationale did NOT
+  reproduce; recommend holding that flag**. Strongest profit lever = disable the 2× doubling (default-OFF,
+  test-backed) — not yet implemented (owner to choose).
+- ⚠️ **PR #67 (other session) collides:** it also adds `tools/v2_audit.py` + `tests/test_v2_audit.py`
+  (a different, config-gate tool) — they cannot both merge; rename #67's to e.g. `tools/v2_gate_audit.py`.
+
 ## ✅ Shipped THIS session — DURABLE per-window cap (restart-reset over-placement fix, BOTH books)
 **Suite 1414 / 13 skipped** (+2 tests). A 5-agent audit (triggered by an owner "4 ETH trades instead of 2"
 report — which turned out BENIGN: 6 NO-book ETH trades across 6 different windows) confirmed a real latent

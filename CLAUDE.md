@@ -89,6 +89,17 @@ syncs it to/from the Repl). Procedure:
 Only merge when tests are green and the data-safety guard passes; otherwise stay
 on the branch and report why.
 
+## V2 analysis policy (owner directive — every session)
+**When analyzing V2 (`ultoim_v2`), ALWAYS evaluate the FULL current config — every
+gate currently added — never a partial/"solo" subset.** Concretely: run V2's real
+`UltoimV2Config.from_env()` / the live `.replit` config and route candidates through
+the real `gate.evaluate` (not hand-rolled slices that ignore gates), so the analysis
+reflects what the deployed system actually does. The delivered (`delivery_status='SENT'`)
+book already embodies the full gate stack; prefer it for account/P&L questions. For
+`tools/v2_audit.py` this means the default (`from_env`) full-config mode covers "all
+configs currently added"; `--strict-c5` is only the narrower C5-pin subset. The unit
+the owner trades is ONE buy per 15-minute window (`--per-window`), not one per asset.
+
 ## Invariants (do not break)
 - Read-only. Nothing touches a real exchange order.
 - Production "champion" model weights are FROZEN. Only the observational shadow
