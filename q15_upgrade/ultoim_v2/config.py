@@ -239,6 +239,36 @@ class UltoimV2Config:
     expensive_no_ask_hi: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_EXPENSIVE_NO_ASK_HI", 78.0)
     )
+    # --- Cross-asset BTC-CONFIRMATION gate. DEFAULT OFF. When ON, a candidate DELIVERS
+    # only if BTC's contemporaneous calibrated P(YES) at this checkpoint DECISIVELY AGREES
+    # with the candidate's side: a NO needs BTC calibrated-yes <= 0.5 - btc_confirm_margin
+    # (BTC decisively below its own strike), a YES needs >= 0.5 + btc_confirm_margin. The
+    # mushy middle (BTC pinned near its strike) and the disagreeing side are suppressed from
+    # DELIVERY only -- ``research_fired`` is UNCHANGED so the recap keeps measuring them.
+    # Basis (validated on the real ledger, holds full-history AND last-48h): the alts settle
+    # WITH BTC ~80%, but only when BTC has decisively left its strike; when BTC is itself
+    # pinned the whole complex chops and every side is a coin-flip. FAIL-OPEN when BTC's lean
+    # is unavailable (no cross-asset context) -> byte-identical. This is the lever that makes
+    # the YES harvest safe: pair with ``no_only=false`` to admit YES ONLY when BTC decisively
+    # confirms it. Read-only; never places/modifies/cancels a real order. Set
+    # Q15_ULTOIM_V2_BTC_CONFIRM=true.
+    btc_confirm_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_BTC_CONFIRM", False)
+    )
+    btc_confirm_margin: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN", 0.15)
+    )
+    # --- Inverse-edge DELIVERY gate. DEFAULT OFF. When ON, a candidate whose stated net edge
+    # is >= 0 is suppressed from DELIVERY (``research_fired`` UNCHANGED). For these binaries the
+    # model's stated edge is INVERSE near the strike: positive-edge (cheap, near-strike) entries
+    # are coin-flips that lose, while negative-edge (expensive, market-confident) entries win.
+    # Distinct from ``expensive_no`` (which ADMITS the >ask_hi band): this REMOVES the
+    # positive-edge tail. FAIL-OPEN when net edge is unknown (the MISSING_DATA short-circuit
+    # already abstains). Read-only; never places/modifies/cancels a real order. Set
+    # Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE=true.
+    require_inverse_edge: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE", False)
+    )
     # Flow-against-NO research SCREEN threshold (record-only; surfaced by the recap via
     # ledger.flow_research_scoreboard). The champion's per-asset directional flow factor
     # (feature_values["flow"]) recorded as `champion_flow`: a NO bet placed against

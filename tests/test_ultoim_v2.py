@@ -623,6 +623,42 @@ def test_expensive_no_admit_fires_end_to_end_via_runner(tmp_path):
     assert "EXPENSIVE_NO_ADMIT" in (row["reason_codes"] or "")
 
 
+# ETH is the cheaper (higher reward:risk / higher stated edge) alt so it is the
+# single-best recorded pick even when nothing fires; BTC only supplies the lean.
+def test_btc_confirm_suppresses_alt_delivery_when_btc_mushy(tmp_path):
+    """Wiring: with the BTC-confirmation gate ON, the alt 10M NO is RECORDED but DELIVERY is
+    suppressed (BTC_UNCONFIRMED) when BTC is pinned near its own strike (calibrated yes 0.45,
+    inside 0.35..0.65). Proves BTC's calibrated-yes plumbs observe() -> _decide_interval ->
+    gate.evaluate(btc_yes_prob=...) and gates a DIFFERENT asset's entry."""
+    r = _runner(tmp_path, btc_confirm_enabled=True, deliver_top_n=2)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=62.0, yes=0.45, mkt_yes=0.45),
+         "ETH": _analysis(side="NO", sel=0.65, ask=58.0, yes=0.45, mkt_yes=0.45)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0),    # 600s -> 10M mark
+         "ETH": _canon("T-ETH", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["ticker"] == "T-ETH" and row["interval"] == "10M"]
+    assert len(rows) == 1
+    assert rows[0]["fired"] == 0
+    assert "BTC_UNCONFIRMED" in (rows[0]["reason_codes"] or "")
+
+
+def test_btc_confirm_admits_alt_delivery_when_btc_decisive(tmp_path):
+    """Same window, but BTC is decisively NO (calibrated yes 0.30 <= 0.5 - 0.15): the alt 10M
+    NO now DELIVERS (fired=1) with no BTC_UNCONFIRMED marker."""
+    r = _runner(tmp_path, btc_confirm_enabled=True, deliver_top_n=2)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=62.0, yes=0.30, mkt_yes=0.30),
+         "ETH": _analysis(side="NO", sel=0.65, ask=58.0, yes=0.30, mkt_yes=0.30)}
+    c = {"BTC": _canon("T-BTC", secs=600.0, close=9000.0),
+         "ETH": _canon("T-ETH", secs=600.0, close=9000.0)}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["ticker"] == "T-ETH" and row["interval"] == "10M"]
+    assert len(rows) == 1
+    assert rows[0]["fired"] == 1
+    assert "BTC_UNCONFIRMED" not in (rows[0]["reason_codes"] or "")
+
+
 # --------------------------------------------------------------------------- #
 # Net-improvement levers: 7M ask cap + 11M/12M measure-first capture.
 # --------------------------------------------------------------------------- #
