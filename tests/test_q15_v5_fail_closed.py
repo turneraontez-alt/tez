@@ -146,6 +146,21 @@ def test_apply_snapshot_freshness_flags_crossed_book():
     assert "crossed_orderbook" in out["v5_data_invalid_reasons"]
 
 
+def test_ws_freshness_requires_ticker_orderbook_timestamp():
+    now = 1000.0
+    raw = {
+        "source": "ws",
+        "book_source": "ws",
+        "spot": {"ok": True, "ts": now},
+        "trades": [],
+    }
+    health = {"last_orderbook_at": now, "last_message_at": now}
+    out = apply_snapshot_freshness(_fresh_book(now), raw, now, ws_health=health)
+    assert out["v5_data_valid"] is False
+    assert "orderbook_timestamp_missing" in out["v5_data_invalid_reasons"]
+    assert out["orderbook_event_ts"] is None
+
+
 def _fresh_book(now):
     # A valid, two-sided, fresh orderbook so the only failing axis is the spot.
     return {"yes_bid": 40.0, "yes_ask": 60.0}

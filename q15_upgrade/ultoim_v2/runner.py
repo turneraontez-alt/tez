@@ -12,6 +12,7 @@ exception-isolated, and the worker logs+continues on any job error.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import logging
 import queue
@@ -312,9 +313,15 @@ class UltoimV2Runner:
         # BTC's calibrated P(YES) for this window feeds the DEFAULT-OFF BTC-confirmation gate
         # (None -> the gate fails open). Same value for every candidate in the window.
         btc_yes = getattr(self, "_btc_confirm_yes", {}).get(window_key)
+        gate_cfg = self._gate_config_for_interval(interval)
+        btc_yes_for_gate = btc_yes
+        if (interval == "10M" and getattr(cfg, "ten_m_selective_enabled", False)
+                and getattr(cfg, "ten_m_ignore_btc_confirm", False)):
+            btc_yes_for_gate = None
         evaluated: list[dict[str, Any]] = []
         for cand in cands:
-            verdict = gate.evaluate(cand, cfg, interval=interval, btc_yes_prob=btc_yes)
+            verdict = gate.evaluate(cand, gate_cfg, interval=interval,
+                                    btc_yes_prob=btc_yes_for_gate)
             stale = _num(cand.get("spot_stale_age_seconds"))
             abstained_stale = False
             # FRESHNESS: a would-be fire on a stale spot does not fire. Default is fail-OPEN —
@@ -354,6 +361,8 @@ class UltoimV2Runner:
         if (interval == "10M" and cfg.double_10m_on_min
                 and qualifiers >= cfg.min_triggers_10m):
             stake = cfg.double_stake
+        if interval == "10M" and getattr(cfg, "ten_m_selective_enabled", False):
+            stake = 1
 
         # -- MEASURE-FIRST path (11M/12M): record the would-FIRE favourites but NEVER
         # deliver. We force fired=False (no alert, no alert-lock claim) while leaving
@@ -391,6 +400,10 @@ class UltoimV2Runner:
                     rc.append(conviction_reason)
                 v["reason_codes"] = rc
                 self._record_and_maybe_alert({**e, "verdict": v}, interval, mark, window_key, now)
+            return
+
+        if interval == "10M" and getattr(cfg, "ten_m_selective_enabled", False):
+            self._decide_10m_selective(evaluated, interval, mark, window_key, now, stake)
             return
 
         # -- DELIVERED path: the top-N candidates per (interval, window), NO-only alerts.
@@ -475,16 +488,100 @@ class UltoimV2Runner:
                             reverse=True):
                 self._maybe_execute_yes(e["cand"], window_key, interval, now)
 
+    def _gate_config_for_interval(self, interval: str) -> UltoimV2Config:
+        cfg = self.config
+        if interval == "10M" and getattr(cfg, "ten_m_selective_enabled", False):
+            return replace(
+                cfg,
+                expensive_no_ask_hi=getattr(
+                    cfg, "ten_m_expensive_no_ask_hi", cfg.expensive_no_ask_hi),
+                hiconv_yes_market_min=getattr(
+                    cfg, "ten_m_yes_market_min", cfg.hiconv_yes_market_min),
+            )
+        return cfg
+
+    @staticmethod
+    def _reward_risk_key(entry: dict[str, Any]) -> tuple[float, float]:
+        ask = _num(entry["cand"].get("entry_ask_cents"))
+        selected = _num(entry["cand"].get("selected_probability"))
+        return (ask if ask is not None else 1e9,
+                -(selected if selected is not None else -1e9))
+
+    @staticmethod
+    def _with_reason(verdict: Mapping[str, Any], *codes: str,
+                     fired: bool | None = None) -> dict[str, Any]:
+        out = dict(verdict)
+        if fired is not None:
+            out["fired"] = bool(fired)
+        reasons = list(out.get("reason_codes") or [])
+        for code in codes:
+            if code and code not in reasons:
+                reasons.append(code)
+        out["reason_codes"] = reasons
+        return out
+
+    def _decide_10m_selective(self, evaluated: list[dict[str, Any]], interval: str,
+                              mark: int, window_key: int, now: float, stake: int) -> None:
+        """One 10M pick max per settlement window, using only pre-result gate data."""
+        cfg = self.config
+        excluded = {str(a).upper() for a in getattr(cfg, "ten_m_excluded_assets", frozenset())}
+
+        def side(entry: dict[str, Any]) -> str:
+            return str(entry["cand"].get("predicted_side") or "").upper()
+
+        def allowed(entry: dict[str, Any]) -> bool:
+            return str(entry["cand"].get("asset") or "").upper() not in excluded
+
+        candidates = [
+            e for e in evaluated
+            if allowed(e) and (
+                (side(e) == "NO" and e["verdict"].get("fired"))
+                or (side(e) == "YES" and e["verdict"].get("yes_notify"))
+            )
+        ]
+
+        delivered_tickers: set[str] = set()
+        if candidates:
+            chosen = sorted(candidates, key=self._reward_risk_key)[0]
+            verdict = self._with_reason(
+                chosen["verdict"], "TEN_M_ONE_PICK",
+                fired=(side(chosen) == "YES" or bool(chosen["verdict"].get("fired"))),
+            )
+            delivered_tickers.add(str(chosen["cand"].get("ticker") or ""))
+            self._record_and_maybe_alert(
+                {**chosen, "verdict": verdict, "stake_multiplier": stake},
+                interval, mark, window_key, now,
+            )
+        elif evaluated:
+            best = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
+            verdict = self._with_reason(best["verdict"], "TEN_M_SELECTOR_NO_PICK", fired=False)
+            self._record_and_maybe_alert({**best, "verdict": verdict},
+                                         interval, mark, window_key, now)
+
+        if cfg.record_research_yes:
+            yes = [e for e in evaluated if side(e) == "YES"]
+            if yes:
+                best_yes = max(yes, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
+                if str(best_yes["cand"].get("ticker") or "") not in delivered_tickers:
+                    self._record_research_yes(best_yes, interval, mark, window_key, now)
+
+        if (candidates and side(sorted(candidates, key=self._reward_risk_key)[0]) == "YES"
+                and getattr(cfg, "yes_live_enabled", False)
+                and interval in getattr(cfg, "yes_live_intervals", frozenset())):
+            self._maybe_execute_yes(sorted(candidates, key=self._reward_risk_key)[0]["cand"],
+                                    window_key, interval, now)
+
     def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
                    mark: int, window_key: int, now: float, *, record_kind: str,
                    delivery_status: str, stake_multiplier: int = 1) -> dict[str, Any]:
         cfg = self.config
+        gate_cfg = self._gate_config_for_interval(interval)
         sel = _num(cand.get("selected_probability"))
         ask = _num(cand.get("entry_ask_cents"))
         cost = _num(cand.get("total_cost_cents")) or 0.0
         display = None
         if sel is not None and ask is not None:
-            display = gate.display_entry(sel, cost, ask, cfg,
+            display = gate.display_entry(sel, cost, ask, gate_cfg,
                                          expensive_no=bool(verdict.get("expensive_no")))
         regime_dir = _regime_directional(_num(cand.get("market_implied_yes_probability")))
         # Record-only blowup SHADOW score, derived from decision-time fields already
@@ -498,7 +595,7 @@ class UltoimV2Runner:
         # nothing-fired "record best" path), so the would-deliver YES sliver accrues a complete,
         # gradeable out-of-sample record. Never changes delivery — YES stays NO-only.
         reason_codes = list(verdict.get("reason_codes") or [])
-        if _hiconv_yes_pass(cand, cfg) and "HICONV_YES" not in reason_codes:
+        if _hiconv_yes_pass(cand, gate_cfg) and "HICONV_YES" not in reason_codes:
             reason_codes.append("HICONV_YES")
         # Record-only SETTLEMENT-STREAK signal (default ON): the asset's signed consecutive
         # same-outcome settled-window run as of now (no lookahead). Pure record-only; a

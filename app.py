@@ -244,6 +244,15 @@ def _parse_volume(market):
         return 0
 
 
+def _normalize_book_source(value):
+    raw = str(value or "").strip().lower()
+    if raw in {"ws", "websocket"}:
+        return "ws"
+    if raw in {"rest", "rest-fallback"}:
+        return "rest"
+    return None
+
+
 def fetch_asset_raw(asset, market, now, last_trade_ts):
     """Network worker that preserves source timestamps for freshness gates.
 
@@ -274,8 +283,12 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
         )
 
     book_event_ts = None
+    book_source = None
     if isinstance(ob_raw, dict):
-        for key in ("updated_at", "event_ts", "ts", "timestamp"):
+        book_source = _normalize_book_source(
+            ob_raw.get("_hybrid_source") or ob_raw.get("_source") or ob_raw.get("source")
+        )
+        for key in ("_updated_at", "updated_at", "event_ts", "ts", "timestamp"):
             try:
                 value = ob_raw.get(key)
                 if value is not None:
@@ -283,6 +296,8 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
                     break
             except (TypeError, ValueError):
                 pass
+    if book_source is None:
+        book_source = "rest" if not market_data.is_connected() else "unknown"
 
     return {
         "asset": asset,
@@ -290,7 +305,8 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
         "ob_raw": ob_raw,
         "trades": trades,
         "spot": spot,
-        "source": "ws" if market_data.is_connected() else "rest",
+        "source": book_source,
+        "book_source": book_source,
         "fetch_started_at": started,
         "fetch_completed_at": completed,
         "fetch_latency_seconds": round(completed - started, 4),

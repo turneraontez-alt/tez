@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Iterable
 
 
@@ -62,9 +63,21 @@ class HybridMarketData:
             book = self.ws.get_orderbook(ticker)
             if book is not None:
                 self._ticker_sources.setdefault(ticker, {})["book"] = "ws"
+                if isinstance(book, dict):
+                    out = dict(book)
+                    out["_hybrid_source"] = "ws"
+                    if out.get("_updated_at") is None:
+                        out["_updated_at"] = out.get("updated_at")
+                    return out
                 return book
         self._ticker_sources.setdefault(ticker, {})["book"] = "rest"
-        return self.rest.get_orderbook(ticker)
+        book = self.rest.get_orderbook(ticker)
+        if isinstance(book, dict):
+            out = dict(book)
+            out["_hybrid_source"] = "rest"
+            out["_updated_at"] = time.time()
+            return out
+        return book
 
     def get_trades(self, ticker, min_ts=None):
         connected = self._sync_connection_state()

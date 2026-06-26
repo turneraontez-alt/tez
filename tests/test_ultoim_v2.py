@@ -542,6 +542,66 @@ def test_deliver_top_n_caps_at_available_and_holds_alert_lock(tmp_path):
     assert len(tg.sent) == 3
 
 
+def test_10m_selective_delivers_one_non_hype_cheapest_no(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(
+        tmp_path, telegram=tg,
+        ten_m_selective_enabled=True, ten_m_expensive_no_ask_hi=85.0,
+        ten_m_excluded_assets=frozenset({"HYPE"}), btc_confirm_enabled=True,
+        require_inverse_edge=True, no_only=False, yes_notify_enabled=True,
+        deliver_top_n=5, deliver_by_reward_risk=True,
+    )
+    a = {
+        "BTC": _analysis(side="NO", sel=0.54, ask=60.0, yes=0.30, mkt_yes=0.30,
+                         total_cost=0.0),
+        "HYPE": _analysis(side="NO", sel=0.70, ask=73.0, yes=0.30, mkt_yes=0.30,
+                          total_cost=0.0),
+        "SOL": _analysis(side="NO", sel=0.70, ask=74.0, yes=0.30, mkt_yes=0.30,
+                         total_cost=0.0),
+        "ETH": _analysis(side="NO", sel=0.76, ask=80.0, yes=0.24, mkt_yes=0.24,
+                         total_cost=0.0),
+    }
+    c = {asset: _canon(f"T-{asset}", secs=600.0, close=9000.0) for asset in a}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+
+    rows = r.ledger.recent_rows("ultoim-v2", limit=10)
+    fired = [row for row in rows if row["fired"] == 1]
+    assert len(fired) == 1
+    assert fired[0]["ticker"] == "T-SOL"
+    assert "TEN_M_ONE_PICK" in (fired[0]["reason_codes"] or "")
+    assert len(tg.sent) == 1 and "SOL" in tg.sent[0]
+    assert "HYPE" not in tg.sent[0] and "ETH" not in tg.sent[0]
+
+
+def test_10m_selective_can_deliver_single_btc_confirmed_yes(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(
+        tmp_path, telegram=tg,
+        ten_m_selective_enabled=True, ten_m_yes_market_min=0.70,
+        btc_confirm_enabled=True, require_inverse_edge=True,
+        no_only=False, yes_notify_enabled=True, deliver_top_n=5,
+    )
+    a = {
+        "BTC": _analysis(side="YES", sel=0.54, ask=55.0, yes=0.70, mkt_yes=0.70,
+                         total_cost=0.0),
+        "ETH": _analysis(side="YES", sel=0.78, ask=72.0, yes=0.78, mkt_yes=0.72,
+                         total_cost=0.0),
+        "SOL": _analysis(side="YES", sel=0.76, ask=75.0, yes=0.76, mkt_yes=0.75,
+                         total_cost=0.0),
+    }
+    c = {asset: _canon(f"T-{asset}", secs=600.0, close=9000.0) for asset in a}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+
+    fired = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+             if row["fired"] == 1]
+    assert len(fired) == 1
+    assert fired[0]["ticker"] == "T-ETH"
+    assert fired[0]["predicted_side"] == "YES"
+    assert "YES_NOTIFY" in (fired[0]["reason_codes"] or "")
+    assert "TEN_M_ONE_PICK" in (fired[0]["reason_codes"] or "")
+    assert len(tg.sent) == 1 and "ETH" in tg.sent[0]
+
+
 def test_runner_reconcile_grades_against_resolver(tmp_path):
     tg = _StubTelegram()
     r = _runner(tmp_path, telegram=tg)

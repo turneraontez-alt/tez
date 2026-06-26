@@ -92,20 +92,24 @@ Q15_POLYMARKET_ENABLED = "true"
 LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
-Q15_ULTOIM_V2_DELIVER_TOP_N = "3"  # C5: cap-3 (3+-co-trigger windows run ~100%)
+Q15_ULTOIM_V2_DELIVER_TOP_N = "1"  # one 10M pick max per 15-min window
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
-# --- Unified 86.2%-book live config (owner-enabled, in-sample edge — watch it). 10M-ONLY,
-# both YES and NO, gated by the cross-asset BTC-confirmation gate + the inverse-edge gate.
-# YES is PAPER-ONLY (the live NO executor is NO-only guarded in _maybe_execute); the old
-# standalone YES bot is turned OFF below. Each reversible via its Q15_* env var.
+# --- 10M selective book (owner-enabled, in-sample edge -- watch it).
+# One 10M pick max per 15-min window; both YES and NO are gated by BTC confirmation
+# + inverse-edge. YES is PAPER-ONLY; the live NO executor is NO-only guarded.
+# Each reversible via its Q15_* env var.
 Q15_ULTOIM_V2_NO_ONLY = "false"
 Q15_ULTOIM_V2_BTC_CONFIRM = "true"
 Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN_YES = "0.10"  # C5: asymmetric YES cutoff (BTC>=0.60)
 Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE = "true"
-Q15_ULTOIM_V2_SKIP_7M = "false"  # keep 7M PROCESSING on so the YES harvest at 7M (strong, +10c) runs
-# NO-7M drop is shipped as a ready lever but LEFT OFF for now (owner: activate YES only). 7M NO keeps
-# firing as before; flip to "true" later to drop the break-even 7M NO that dilutes the 10M edge.
+Q15_ULTOIM_V2_SKIP_7M = "true"  # 10M-only book: no 7M delivery
+Q15_ULTOIM_V2_10M_SELECTIVE = "true"
+Q15_ULTOIM_V2_10M_IGNORE_BTC_CONFIRM = "false"
+Q15_ULTOIM_V2_10M_EXCLUDE_ASSETS = "HYPE"
+Q15_ULTOIM_V2_10M_YES_MARKET_MIN = "0.70"
+Q15_ULTOIM_V2_10M_EXPENSIVE_NO_ASK_HI = "85"
+# 7M is skipped globally in the 10M-only book; this NO-only lever stays as a separate fallback.
 Q15_ULTOIM_V2_SKIP_7M_NO = "false"
 Q15_ULTOIM_V2_YES_NOTIFY = "true"  # paper YES Telegram notifications (hiconv + BTC-confirm); NEVER an order
 Q15_ULTOIM_V2_EXIT_WATCH_SECONDS = "600"

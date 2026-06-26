@@ -36,6 +36,11 @@ def _str(name: str, default: str) -> str:
     return os.environ.get(name, default) or default
 
 
+def _csv_set(name: str, default: str = "") -> frozenset[str]:
+    raw = os.environ.get(name, default) or ""
+    return frozenset(part.strip().upper() for part in raw.split(",") if part.strip())
+
+
 # The entry-research intervals and their fire mark (seconds before settlement).
 # Matches the champion's three live checkpoints so the paper entry card lines up
 # 1:1 with the live 15M / 10M / 7M cards it visually resembles.
@@ -169,6 +174,30 @@ class UltoimV2Config:
     )
     deliver_by_reward_risk: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)
+    )
+    # 10M SELECTIVE picker (default OFF). When enabled, 10M delivery is collapsed to
+    # ONE paper pick per settlement window across the NO and high-conviction YES pools:
+    # choose the cheapest qualifying NO first; if none exists, choose the cheapest
+    # qualifying YES. This mirrors the manual "one 10M pick each 15-min window" workflow
+    # and prevents the normal NO top-N + additive YES notification blocks from sending
+    # multiple correlated cards in the same window. The selector can also run the tested
+    # 10M-specific knobs without changing other intervals: optionally ignore BTC-confirm
+    # for the 10M gate, exclude listed assets from delivery, raise the 10M expensive-NO
+    # ceiling, and require a stronger YES market floor. Research rows still accrue.
+    ten_m_selective_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_10M_SELECTIVE", False)
+    )
+    ten_m_ignore_btc_confirm: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_10M_IGNORE_BTC_CONFIRM", False)
+    )
+    ten_m_excluded_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_ULTOIM_V2_10M_EXCLUDE_ASSETS", "HYPE")
+    )
+    ten_m_yes_market_min: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_10M_YES_MARKET_MIN", 0.70)
+    )
+    ten_m_expensive_no_ask_hi: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_10M_EXPENSIVE_NO_ASK_HI", 85.0)
     )
     # --- CONVICTION rules keyed on how many assets trigger NO in the SAME 15-min window
     # (the count of would-fire NO entries at one (interval, window) this cycle — known at

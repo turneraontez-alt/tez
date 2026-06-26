@@ -36,6 +36,7 @@ def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=N
     raw = raw_result or {}
     health = ws_health or {}
     source = raw.get("source") or "unknown"
+    book_source = raw.get("book_source") or source
     spot = raw.get("spot") or {}
 
     spot_ts = _num(spot.get("ts"))
@@ -53,13 +54,8 @@ def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=N
     if trade_ts is None:
         trade_ts = latest_trade_ts(raw.get("trades"))
 
-    if source == "ws":
-        book_ts = _num(raw.get("book_event_ts"))
-        if book_ts is None:
-            book_ts = _num(health.get("last_orderbook_at"))
-        if book_ts is None:
-            book_ts = _num(health.get("last_message_at"))
-    else:
+    book_ts = _num(raw.get("book_event_ts"))
+    if book_source != "ws" and book_ts is None:
         book_ts = _num(raw.get("fetch_completed_at"), now)
 
     spot_age = max(0.0, now - spot_ts) if spot_ts is not None else None
@@ -93,6 +89,7 @@ def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=N
 
     snap.update({
         "source_mode": source,
+        "orderbook_source": book_source,
         "spot_event_ts": spot_ts,
         "latest_trade_event_ts": trade_ts,
         "orderbook_event_ts": book_ts,

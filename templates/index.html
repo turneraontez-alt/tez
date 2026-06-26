@@ -224,7 +224,7 @@ function buildLiveScaffold(asset){
   el.className = 'card';
   el.innerHTML = `
     <div class="card-header">
-      <div><div class="asset-name">${asset}</div><div class="ticker" data-r="ticker">–</div></div>
+      <div><div class="asset-name">${esc(asset)}</div><div class="ticker" data-r="ticker">–</div></div>
       <div class="countdown"><div class="countdown-time" data-r="cd">–:––</div><div class="countdown-label">to close</div></div>
     </div>
     <div class="card-body">
@@ -332,7 +332,7 @@ function buildSimpleScaffold(asset){
   const el = document.createElement('div');
   el.className = 'card';
   el.innerHTML = `<div class="card-header">
-      <div><div class="asset-name">${asset}</div><div class="ticker" data-r="ticker">–</div></div>
+      <div><div class="asset-name">${esc(asset)}</div><div class="ticker" data-r="ticker">–</div></div>
       <div class="countdown"><div class="countdown-time" data-r="cd">–:––</div><div class="countdown-label" data-r="cdLabel">to close</div></div>
     </div>
     <div data-r="body"></div>`;
@@ -398,8 +398,8 @@ function updateLiveCard(mgr, d){
   renderPrediction(R, d);
 
   // kv
-  R.underlying.innerHTML = fmtUsd(d.underlying_current) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${d.underlying_source}</span>`:'');
-  R.target.innerHTML = (d.target_value?fmtUsd(d.target_value):(d.target||'–')) + ` <span style="font-size:11px" class="${d.target_distance_pct>0?'change-pos':d.target_distance_pct<0?'change-neg':'change-neu'}">${fmtPct(d.target_distance_pct)}</span>`;
+  R.underlying.innerHTML = esc(fmtUsd(d.underlying_current)) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${esc(d.underlying_source)}</span>`:'');
+  R.target.innerHTML = esc(d.target_value?fmtUsd(d.target_value):(d.target||'–')) + ` <span style="font-size:11px" class="${d.target_distance_pct>0?'change-pos':d.target_distance_pct<0?'change-neg':'change-neu'}">${esc(fmtPct(d.target_distance_pct))}</span>`;
 
   // pattern
   const dir = d.pattern_direction;
@@ -420,7 +420,7 @@ function updateLiveCard(mgr, d){
 
   // confirmations
   const reasons = d.confirmation_reasons||[];
-  R.confirms.innerHTML = reasons.length ? reasons.map(r=>`<span class="confirm-chip">${r}</span>`).join('')
+  R.confirms.innerHTML = reasons.length ? reasons.map(r=>`<span class="confirm-chip">${esc(r)}</span>`).join('')
     : '<span class="confirm-none">No confirmations yet</span>';
 
   // flow
@@ -451,19 +451,24 @@ function updateLiveCard(mgr, d){
 
   // trades
   const trades = d.recent_trades||[];
-  R.trades.innerHTML = trades.length ? trades.slice(0,7).map(t=>`
+  R.trades.innerHTML = trades.length ? trades.slice(0,7).map(t=>{
+    const side = String(t.taker_side||'').toLowerCase();
+    const sideCls = side==='yes' ? 'side-yes' : side==='no' ? 'side-no' : '';
+    const sideText = side ? ('taker '+side.toUpperCase()) : '';
+    return `
     <div class="trade-row ${t.is_large?'trade-large':''}">
       <span class="trade-cnt">${fmt(t.contracts,0)}</span>
       <span class="trade-price-yes">${fmtCents(t.yes_price)}</span>
-      <span class="trade-side ${t.taker_side==='yes'?'side-yes':'side-no'}">${t.taker_side?('taker '+t.taker_side.toUpperCase()):''}</span>
+      <span class="trade-side ${sideCls}">${esc(sideText)}</span>
       ${t.is_large?'<span class="large-badge">LG</span>':''}
       ${t.is_block?'<span class="block-badge">BLK</span>':''}
       <span class="trade-time">${fmtClock(t.time)}</span>
-    </div>`).join('') : '<div class="no-trades">No trades in window</div>';
+    </div>`;
+  }).join('') : '<div class="no-trades">No trades in window</div>';
 
   // warnings
   const w = d.data_quality_warnings||[];
-  R.warnWrap.innerHTML = w.length ? `<div class="section-title">Data quality</div><div class="warns">${w.map(x=>`<div class="warn">⚠ ${x}</div>`).join('')}</div>` : '';
+  R.warnWrap.innerHTML = w.length ? `<div class="section-title">Data quality</div><div class="warns">${w.map(x=>`<div class="warn">⚠ ${esc(x)}</div>`).join('')}</div>` : '';
 
   mgr.el.className = 'card ' + (isStale(d)?'stale':'');
   updateChart(mgr, d);
@@ -486,12 +491,12 @@ function updateSimpleCard(mgr, d){
     R.cdLabel.textContent = 'cycling';
     R.body.innerHTML = `<div class="cycling-body">
       <div class="upcoming-msg"><span class="cycling-dot"></span> Finding next 15-min market…</div>
-      <div class="upcoming-sub">${d.ticker?('Was: '+d.ticker):''}</div>
+      <div class="upcoming-sub">${d.ticker?esc('Was: '+d.ticker):''}</div>
     </div>`;
   } else {
     R.cd.textContent = '–';
     R.cdLabel.textContent = '';
-    R.body.innerHTML = `<div class="upcoming-body"><div class="upcoming-sub">${d.error||'No market'}</div></div>`;
+    R.body.innerHTML = `<div class="upcoming-body"><div class="upcoming-sub">${esc(d.error||'No market')}</div></div>`;
   }
 }
 
@@ -544,7 +549,7 @@ async function fetchData(){
     document.getElementById('last-refresh').textContent = 'Error: '+e.message;
     if(!lastData.length){
       document.getElementById('cards').innerHTML =
-        '<div class="loading-card"><div style="font-size:16px">⚠ Could not load data</div><div style="font-size:12px;opacity:.7;margin-top:8px">'+e.message+'</div></div>';
+        '<div class="loading-card"><div style="font-size:16px">⚠ Could not load data</div><div style="font-size:12px;opacity:.7;margin-top:8px">'+esc(e.message)+'</div></div>';
     }
   }
 }

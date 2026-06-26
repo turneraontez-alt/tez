@@ -182,6 +182,13 @@ class FakeRest:
 
 
 class TestHybridTickerSourcesPrune(unittest.TestCase):
+    def test_connected_ws_rest_book_fallback_is_marked_rest(self):
+        hd = HybridMarketData(FakeRest(), FakeWs(connected=True))
+        book = hd.get_orderbook("A")
+        self.assertEqual(book["_hybrid_source"], "rest")
+        self.assertEqual(hd._ticker_sources["A"]["book"], "rest")
+        self.assertIn("_updated_at", book)
+
     def test_subscribe_prunes_ticker_sources_to_wanted(self):
         hd = HybridMarketData(FakeRest(), FakeWs())
         # Populate diagnostic source metadata for A, B, C (as get_orderbook would).
