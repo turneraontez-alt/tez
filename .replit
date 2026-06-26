@@ -92,7 +92,7 @@ Q15_POLYMARKET_ENABLED = "true"
 LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
-Q15_ULTOIM_V2_DELIVER_TOP_N = "2"
+Q15_ULTOIM_V2_DELIVER_TOP_N = "3"  # C5: cap-3 (3+-co-trigger windows run ~100%)
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
 # --- Unified 86.2%-book live config (owner-enabled, in-sample edge — watch it). 10M-ONLY,
@@ -101,8 +101,9 @@ Q15_ULTOIM_V2_SKIP_15M = "true"
 # standalone YES bot is turned OFF below. Each reversible via its Q15_* env var.
 Q15_ULTOIM_V2_NO_ONLY = "false"
 Q15_ULTOIM_V2_BTC_CONFIRM = "true"
+Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN_YES = "0.10"  # C5: asymmetric YES cutoff (BTC>=0.60)
 Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE = "true"
-Q15_ULTOIM_V2_SKIP_7M = "true"
+Q15_ULTOIM_V2_SKIP_7M = "false"  # C5: 10M+7M (7M is strong UNDER the new gates)
 Q15_ULTOIM_V2_EXIT_WATCH_SECONDS = "600"
 # 12M EXPENSIVE-NO slice -> LIVE (owner-approved): deliver 12M only for ask>=65 (the cheap <65 zone
 # is suppressed). Data: 12M ask>=65 = 90.9%/+17c/bet (n=11 THIN); same expensive-NO edge as 10M.

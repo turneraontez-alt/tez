@@ -76,6 +76,17 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
         else None
     )
 
+    # RISK TIER (from the gate's record-only label, carried on reason_codes): the ~95% bracket
+    # (decisive BTC + tight book) vs the ~81% bracket (borderline BTC or wide spread — more
+    # likely to turn). Label only; never changes the call. Absent on rows with no BTC context.
+    rc = pick.get("reason_codes") or ""
+    if "RISK_LOW" in rc:
+        risk_line = "Risk: Low ✅ — decisive BTC + tight book (~95% bracket)"
+    elif "RISK_HIGH" in rc:
+        risk_line = "Risk: High ⚠️ — borderline BTC or wide spread (~81%; watch for a turn)"
+    else:
+        risk_line = None
+
     header = f"🧪 <b>ULTOIM V2 · {interval} · PAPER ENTRY</b>"
     body = [
         "RESEARCH SIGNAL — paper only, NOT a live call. No orders placed.",
@@ -84,6 +95,7 @@ def build_entry_alert(pick: Mapping[str, Any], scoreboard_summary: Mapping[str, 
         f"Ticker: {ticker}",
         f"Interval: {interval} · Window: {window}",
         f"Confidence: {_pct1(sel)}",
+        *( [risk_line] if risk_line else [] ),
         f"Best entry: {display_txt} or lower",
         f"Current ask: {ask_txt}",
         f"Net edge: {_signed_cents(net_edge)}",
