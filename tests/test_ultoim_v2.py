@@ -573,6 +573,46 @@ def test_10m_selective_delivers_one_non_hype_cheapest_no(tmp_path):
     assert "HYPE" not in tg.sent[0] and "ETH" not in tg.sent[0]
 
 
+def test_10m_selective_can_show_top_two_manual_choices(tmp_path, monkeypatch):
+    tg = _StubTelegram()
+    r = _runner(
+        tmp_path, telegram=tg,
+        ten_m_selective_enabled=True, ten_m_selective_top_n=2,
+        ten_m_expensive_no_ask_hi=85.0, ten_m_excluded_assets=frozenset({"HYPE"}),
+        btc_confirm_enabled=True, require_inverse_edge=True, no_only=False,
+        yes_notify_enabled=True, deliver_top_n=1, deliver_by_reward_risk=True,
+    )
+    exec_calls = []
+    monkeypatch.setattr(r, "_maybe_execute", lambda *args, **kwargs: exec_calls.append(args))
+    a = {
+        "BTC": _analysis(side="NO", sel=0.54, ask=60.0, yes=0.30, mkt_yes=0.30,
+                         total_cost=0.0),
+        "HYPE": _analysis(side="NO", sel=0.70, ask=73.0, yes=0.30, mkt_yes=0.30,
+                          total_cost=0.0),
+        "SOL": _analysis(side="NO", sel=0.70, ask=74.0, yes=0.30, mkt_yes=0.30,
+                         total_cost=0.0),
+        "ETH": _analysis(side="NO", sel=0.76, ask=80.0, yes=0.24, mkt_yes=0.24,
+                         total_cost=0.0),
+    }
+    c = {asset: _canon(f"T-{asset}", secs=600.0, close=9000.0) for asset in a}
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+
+    fired = {
+        row["ticker"]: row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+        if row["fired"] == 1
+    }
+    assert set(fired) == {"T-SOL", "T-ETH"}
+    assert "TEN_M_TOP2_CHOICE" in (fired["T-SOL"]["reason_codes"] or "")
+    assert "TEN_M_RANK_1" in (fired["T-SOL"]["reason_codes"] or "")
+    assert "TEN_M_RANK_2" in (fired["T-ETH"]["reason_codes"] or "")
+    assert "TEN_M_MANUAL_CHOICE" in (fired["T-SOL"]["reason_codes"] or "")
+    body = " ".join(tg.sent)
+    assert len(tg.sent) == 2
+    assert exec_calls == []
+    assert "SOL" in body and "ETH" in body
+    assert "HYPE" not in body
+
+
 def test_10m_selective_can_deliver_single_btc_confirmed_yes(tmp_path):
     tg = _StubTelegram()
     r = _runner(

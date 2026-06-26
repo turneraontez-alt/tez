@@ -92,11 +92,11 @@ Q15_POLYMARKET_ENABLED = "true"
 LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
-Q15_ULTOIM_V2_DELIVER_TOP_N = "1"  # one 10M pick max per 15-min window
+Q15_ULTOIM_V2_DELIVER_TOP_N = "2"  # show top 2 10M choices per 15-min window
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
 # --- 10M selective book (owner-enabled, in-sample edge -- watch it).
-# One 10M pick max per 15-min window; both YES and NO are gated by BTC confirmation
+# Show top 2 10M choices per 15-min window; both YES and NO are gated by BTC confirmation
 # + inverse-edge. YES is PAPER-ONLY; the live NO executor is NO-only guarded.
 # Each reversible via its Q15_* env var.
 Q15_ULTOIM_V2_NO_ONLY = "false"
@@ -105,6 +105,7 @@ Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN_YES = "0.10"  # C5: asymmetric YES cutoff (BTC>
 Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE = "true"
 Q15_ULTOIM_V2_SKIP_7M = "true"  # 10M-only book: no 7M delivery
 Q15_ULTOIM_V2_10M_SELECTIVE = "true"
+Q15_ULTOIM_V2_10M_SELECTIVE_TOP_N = "2"
 Q15_ULTOIM_V2_10M_IGNORE_BTC_CONFIRM = "false"
 Q15_ULTOIM_V2_10M_EXCLUDE_ASSETS = "HYPE"
 Q15_ULTOIM_V2_10M_YES_MARKET_MIN = "0.70"

@@ -522,9 +522,10 @@ class UltoimV2Runner:
 
     def _decide_10m_selective(self, evaluated: list[dict[str, Any]], interval: str,
                               mark: int, window_key: int, now: float, stake: int) -> None:
-        """One 10M pick max per settlement window, using only pre-result gate data."""
+        """Bounded 10M manual-choice list, using only pre-result gate data."""
         cfg = self.config
         excluded = {str(a).upper() for a in getattr(cfg, "ten_m_excluded_assets", frozenset())}
+        top_n = max(1, int(getattr(cfg, "ten_m_selective_top_n", 1) or 1))
 
         def side(entry: dict[str, Any]) -> str:
             return str(entry["cand"].get("predicted_side") or "").upper()
@@ -542,16 +543,23 @@ class UltoimV2Runner:
 
         delivered_tickers: set[str] = set()
         if candidates:
-            chosen = sorted(candidates, key=self._reward_risk_key)[0]
-            verdict = self._with_reason(
-                chosen["verdict"], "TEN_M_ONE_PICK",
-                fired=(side(chosen) == "YES" or bool(chosen["verdict"].get("fired"))),
-            )
-            delivered_tickers.add(str(chosen["cand"].get("ticker") or ""))
-            self._record_and_maybe_alert(
-                {**chosen, "verdict": verdict, "stake_multiplier": stake},
-                interval, mark, window_key, now,
-            )
+            chosen_rows = sorted(candidates, key=self._reward_risk_key)[:top_n]
+            for rank, chosen in enumerate(chosen_rows, start=1):
+                codes = [f"TEN_M_TOP{top_n}_CHOICE", f"TEN_M_RANK_{rank}"]
+                if top_n == 1:
+                    codes.append("TEN_M_ONE_PICK")
+                else:
+                    codes.append("TEN_M_MANUAL_CHOICE")
+                verdict = self._with_reason(
+                    chosen["verdict"], *codes,
+                    fired=(side(chosen) == "YES" or bool(chosen["verdict"].get("fired"))),
+                )
+                delivered_tickers.add(str(chosen["cand"].get("ticker") or ""))
+                self._record_and_maybe_alert(
+                    {**chosen, "verdict": verdict, "stake_multiplier": stake,
+                     "suppress_executor": top_n > 1},
+                    interval, mark, window_key, now,
+                )
         elif evaluated:
             best = max(evaluated, key=lambda e: _num(e["verdict"]["net_edge_cents"]) or -1e9)
             verdict = self._with_reason(best["verdict"], "TEN_M_SELECTOR_NO_PICK", fired=False)
@@ -565,11 +573,12 @@ class UltoimV2Runner:
                 if str(best_yes["cand"].get("ticker") or "") not in delivered_tickers:
                     self._record_research_yes(best_yes, interval, mark, window_key, now)
 
-        if (candidates and side(sorted(candidates, key=self._reward_risk_key)[0]) == "YES"
-                and getattr(cfg, "yes_live_enabled", False)
+        live_yes = sorted(candidates, key=self._reward_risk_key)[:top_n]
+        if (live_yes and getattr(cfg, "yes_live_enabled", False)
                 and interval in getattr(cfg, "yes_live_intervals", frozenset())):
-            self._maybe_execute_yes(sorted(candidates, key=self._reward_risk_key)[0]["cand"],
-                                    window_key, interval, now)
+            for chosen in live_yes:
+                if side(chosen) == "YES":
+                    self._maybe_execute_yes(chosen["cand"], window_key, interval, now)
 
     def _build_row(self, cand: dict[str, Any], verdict: dict[str, Any], interval: str,
                    mark: int, window_key: int, now: float, *, record_kind: str,
@@ -700,7 +709,9 @@ class UltoimV2Runner:
         # gated, so the reorder changes only WHEN the existing order POSTs, never which/whether.
         # get_executor() is None unless Q15_EXEC_ENABLED, so it is a byte-identical no-op by
         # default; failures are swallowed so the executor can never disrupt the paper path.
-        self._maybe_execute(cand, display, window_key, interval, now, stake_multiplier=stake)
+        if not chosen.get("suppress_executor"):
+            self._maybe_execute(cand, display, window_key, interval, now,
+                                stake_multiplier=stake)
         alert_row = dict(row)
         alert_row["best_entry_cents"] = display
         summary = self._alert_summary()

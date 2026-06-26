@@ -176,16 +176,15 @@ class UltoimV2Config:
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)
     )
     # 10M SELECTIVE picker (default OFF). When enabled, 10M delivery is collapsed to
-    # ONE paper pick per settlement window across the NO and high-conviction YES pools:
-    # choose the cheapest qualifying NO first; if none exists, choose the cheapest
-    # qualifying YES. This mirrors the manual "one 10M pick each 15-min window" workflow
-    # and prevents the normal NO top-N + additive YES notification blocks from sending
-    # multiple correlated cards in the same window. The selector can also run the tested
-    # 10M-specific knobs without changing other intervals: optionally ignore BTC-confirm
-    # for the 10M gate, exclude listed assets from delivery, raise the 10M expensive-NO
-    # ceiling, and require a stronger YES market floor. Research rows still accrue.
+    # a bounded manual-choice list across the NO and high-conviction YES pools, ordered
+    # by cheapest qualifying ask. This mirrors the manual workflow: show the top choices
+    # for the settlement window, but keep the tested BTC-confirm/inverse-edge guardrails.
+    # Research rows still accrue.
     ten_m_selective_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_10M_SELECTIVE", False)
+    )
+    ten_m_selective_top_n: int = field(
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_10M_SELECTIVE_TOP_N", 1.0)))
     )
     ten_m_ignore_btc_confirm: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_10M_IGNORE_BTC_CONFIRM", False)
