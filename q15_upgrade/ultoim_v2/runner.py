@@ -598,6 +598,13 @@ class UltoimV2Runner:
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
                        window_key: int, interval: str, now: float,
                        *, stake_multiplier: int = 1) -> None:
+        # NO-ONLY EXECUTION GUARD. This live hook is the NO executor; with the YES harvest on
+        # (cfg.no_only=False) the delivered path can carry a fired YES card, which is PAPER-ONLY
+        # by design. A YES must never reach a real order here: the executor would place a BUY YES
+        # via the NO instance if its own no_only were ever relaxed (risk.py side guard). Belt-and-
+        # braces -- the YES live path is the separate, off-by-default yes-executor (_maybe_execute_yes).
+        if str(cand.get("predicted_side") or "").upper() != "NO":
+            return
         try:
             from q15_upgrade.executor import get_executor
             ex = get_executor()

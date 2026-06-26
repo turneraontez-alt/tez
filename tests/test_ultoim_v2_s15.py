@@ -21,7 +21,8 @@ from q15_upgrade.ultoim_v2.runner import UltoimV2Runner
 
 def _cfg(**over):
     return UltoimV2Config(enabled=True, model_version="ultoim-v2",
-                          telegram_chat_id="", **over)
+                          telegram_chat_id="", no_only=True, btc_confirm_enabled=False,
+                          require_inverse_edge=False, skip_7m=False, **over)
 
 
 def _cand(**over):

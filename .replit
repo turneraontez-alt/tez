@@ -92,13 +92,22 @@ Q15_POLYMARKET_ENABLED = "true"
 LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
-Q15_ULTOIM_V2_DELIVER_TOP_N = "3"
+Q15_ULTOIM_V2_DELIVER_TOP_N = "2"
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
+# --- Unified 86.2%-book live config (owner-enabled, in-sample edge — watch it). 10M-ONLY,
+# both YES and NO, gated by the cross-asset BTC-confirmation gate + the inverse-edge gate.
+# YES is PAPER-ONLY (the live NO executor is NO-only guarded in _maybe_execute); the old
+# standalone YES bot is turned OFF below. Each reversible via its Q15_* env var.
+Q15_ULTOIM_V2_NO_ONLY = "false"
+Q15_ULTOIM_V2_BTC_CONFIRM = "true"
+Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE = "true"
+Q15_ULTOIM_V2_SKIP_7M = "true"
+Q15_ULTOIM_V2_EXIT_WATCH_SECONDS = "600"
 # 12M EXPENSIVE-NO slice -> LIVE (owner-approved): deliver 12M only for ask>=65 (the cheap <65 zone
 # is suppressed). Data: 12M ask>=65 = 90.9%/+17c/bet (n=11 THIN); same expensive-NO edge as 10M.
 # Reversible: set false to revert 12M to research-only.
-Q15_ULTOIM_V2_DELIVER_12M = "true"
+Q15_ULTOIM_V2_DELIVER_12M = "false"   # 10M-ONLY book: 12M no longer delivers (reverted)
 Q15_EXEC_DRY_RUN = "true"
 Q15_EXEC_ENABLED = "true"
 # SIZING (owner-set): flat $150 (15000c) per pick on EVERY interval — the prior 10M=$100 lever is
@@ -155,7 +164,7 @@ Q15_EXEC_DAILY_LOSS_LIMIT_PCT = "0"
 # conviction doubling. In-sample (~2.6d) this set ran 96% (n=25) / +$1.4k flat-$150; it is THIN /
 # in-sample — watch it. Sends a LIVE order Telegram alert on each placement.
 #   ENABLE both the routing (runner) and the executor:
-Q15_EXEC_YES_ENABLED = "true"
+Q15_EXEC_YES_ENABLED = "false"  # OLD YES bot OFF — replaced by the BTC-gated paper YES harvest (no_only=false)
 Q15_EXEC_YES_DRY_RUN = "true"
 #   The rule's tunables (defaults shown; uncomment to change). Sizing/caps/band are baked in code.
 # Q15_EXEC_YES_MIN_PYES = "0.55"

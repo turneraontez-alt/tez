@@ -30,8 +30,8 @@ def _cand(**over):
 # --------------------------------------------------------------------------- #
 # 1. DEFAULT OFF -> byte-identical: a positive-edge NO still fires.
 # --------------------------------------------------------------------------- #
-def test_inverse_edge_default_off_positive_edge_fires():
-    cfg = UltoimV2Config(enabled=True)
+def test_inverse_edge_explicit_off_positive_edge_fires():
+    cfg = UltoimV2Config(enabled=True, require_inverse_edge=False)
     assert cfg.require_inverse_edge is False
     v = gate.evaluate(_cand(), cfg, interval="10M")
     assert v["fired"] is True

@@ -36,6 +36,7 @@ def _runner(tmp_path, log, **tg):
         enabled=True, model_version="ultoim-v2", db_path=str(tmp_path / "v2.sqlite3"),
         telegram_chat_id="", min_confidence=0.55, ask_lo=50.0, ask_hi=72.0,
         min_edge_cents=2.0, mark_band_seconds=90.0, deliver_top_n=3,
+        no_only=True, btc_confirm_enabled=False, require_inverse_edge=False, skip_7m=False,
     )
     r = UltoimV2Runner(cfg)
     r.telegram = _Tg(log, **tg)

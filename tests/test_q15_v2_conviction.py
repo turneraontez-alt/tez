@@ -41,6 +41,7 @@ def _runner(tmp_path, **over):
         db_path=str(tmp_path / "v2.sqlite3"), telegram_chat_id="",
         min_confidence=0.55, ask_lo=50.0, ask_hi=72.0, min_edge_cents=2.0,
         mark_band_seconds=90.0, max_spot_stale_seconds=8.0, deliver_top_n=3,
+        no_only=True, btc_confirm_enabled=False, require_inverse_edge=False, skip_7m=False,
     )
     base.update(over)
     r = UltoimV2Runner(UltoimV2Config(**base))

@@ -27,7 +27,8 @@ def _cfg(**over):
     # so PIN expensive_no_ask_hi=85.0 here (the production default was later tightened to 78 by the
     # ROI sweep — see config.py — but the band logic is identical, just the ceiling moved). Pin
     # no_edge_waive=False AND cap_7m_ask=False to isolate the expensive-NO / edge-gate path.
-    base = dict(enabled=True, no_edge_waive=False, cap_7m_ask=False, expensive_no_ask_hi=85.0)
+    base = dict(enabled=True, no_edge_waive=False, cap_7m_ask=False, expensive_no_ask_hi=85.0,
+                no_only=True, btc_confirm_enabled=False, require_inverse_edge=False)
     base.update(over)
     return UltoimV2Config(**base)
 
