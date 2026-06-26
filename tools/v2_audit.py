@@ -287,14 +287,17 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def _fetch_v2_rows(conn: sqlite3.Connection, model_version: str) -> list[dict[str, Any]]:
+def _fetch_v2_rows(conn: sqlite3.Connection, model_version: str,
+                   *, delivered_only: bool = False) -> list[dict[str, Any]]:
     """Every prediction row for the model (read-only). Plain dicts so nothing
-    downstream depends on a live cursor."""
-    rows = conn.execute(
-        "SELECT * FROM ultoim_v2_predictions WHERE model_version=? "
-        "ORDER BY window_key ASC, ticker ASC, interval ASC, id ASC",
-        (model_version,),
-    ).fetchall()
+    downstream depends on a live cursor. ``delivered_only`` restricts to the
+    actually-sent (alerted) book — the owner's actionable account — instead of all
+    gate-passing ``fired`` rows."""
+    q = "SELECT * FROM ultoim_v2_predictions WHERE model_version=?"
+    if delivered_only:
+        q += " AND delivery_status='SENT'"
+    q += " ORDER BY window_key ASC, ticker ASC, interval ASC, id ASC"
+    rows = conn.execute(q, (model_version,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -647,6 +650,68 @@ def aggregate_account(trades: Sequence[CanonicalTrade], min_n: int) -> dict[str,
     }
 
 
+def _trade_pwin(t: CanonicalTrade) -> Decimal | None:
+    """Chosen-side win probability for a trade (for 'highest confidence' per-window
+    selection). None when the calibrated prob or side is missing."""
+    if t.calibrated_yes is None or (t.predicted_side or "") not in ("YES", "NO"):
+        return None
+    return side_p_win(t.predicted_side, t.calibrated_yes)
+
+
+def aggregate_per_window(trades: Sequence[CanonicalTrade], min_n: int) -> dict[str, Any]:
+    """One-buy-per-15-minute-window account. Across all assets a 15-min window
+    yields several candidates, but the owner takes ONE buy — so the per-ticker
+    rollup over-counts (n is windows, not ticker-trades). This collapses to one
+    trade per ``window_key`` and, because the owner selects MANUALLY, reports the
+    ENVELOPE (best / worst realized pick per window) plus the by-rule reference
+    points (cheapest ask, most expensive, highest confidence) rather than a single
+    false-precision number. Only graded trades count."""
+    graded = [t for t in trades if t.recomputed_pnl is not None]
+    windows: dict[int, list[CanonicalTrade]] = {}
+    for t in graded:
+        windows.setdefault(t.window_key, []).append(t)
+    for ws in windows.values():  # deterministic tie-break
+        ws.sort(key=lambda t: t.ticker)
+
+    def _pick(keyfn, *, want_max: bool) -> list[CanonicalTrade]:
+        picks: list[CanonicalTrade] = []
+        for ws in windows.values():
+            cand = [t for t in ws if keyfn(t) is not None] or ws
+            picks.append((max if want_max else min)(cand, key=keyfn))
+        return picks
+
+    rules = {
+        "best_case": _pick(lambda t: t.recomputed_pnl, want_max=True),
+        "worst_case": _pick(lambda t: t.recomputed_pnl, want_max=False),
+        "cheapest_ask": _pick(lambda t: t.ask_cents, want_max=False),
+        "most_expensive_ask": _pick(lambda t: t.ask_cents, want_max=True),
+        "highest_confidence": _pick(_trade_pwin, want_max=True),
+    }
+    out: dict[str, Any] = {"windows": len(windows), "min_n": min_n}
+    for name, picks in rules.items():
+        out[name] = _agg_cell(picks, min_n)
+    return out
+
+
+def asset_flag_summary(trades: Sequence[CanonicalTrade], asset: str) -> dict[str, Any]:
+    """Always-on drag callout for one asset (the owner keeps HYPE in the book but
+    wants its drag flagged on every audit). Reports the asset's standalone graded
+    book, the windows it appears in, and the book with that asset removed."""
+    a = (asset or "").upper()
+    hits = [t for t in trades
+            if (t.asset or t.ticker or "").upper() == a and t.recomputed_pnl is not None]
+    without = [t for t in trades if (t.asset or t.ticker or "").upper() != a]
+    cell = _agg_cell(hits, 0)
+    return {
+        "asset": a,
+        "n_trades": cell["n"],
+        "n_windows": len({t.window_key for t in hits}),
+        "win_rate": cell["win_rate"],
+        "pnl_total_cents": cell["pnl_total_cents"],
+        "book_excluding_asset_cents": _agg_cell(without, 0)["pnl_total_cents"],
+    }
+
+
 def collect_discrepancies(trades: Sequence[CanonicalTrade]) -> list[dict[str, Any]]:
     """Every flagged trade as a compact record — the deliverable that answers
     'are the numbers right?'."""
@@ -964,6 +1029,8 @@ def run_audit(*, db_path: str, captures_path: str, model_version: str,
               grade_intervals: Sequence[str], min_n: int,
               snapshot_path: str, extend: bool,
               captures_model_version: str = DEFAULT_CAPTURES_MODEL_VERSION,
+              delivered_only: bool = False, per_window: bool = False,
+              flag_asset: str = "",
               cfg: Any = None, gate_evaluate=None,
               strict_c5: bool = False) -> dict[str, Any]:
     """End-to-end read-only audit. Returns the full report dict. Never writes a
@@ -987,14 +1054,15 @@ def run_audit(*, db_path: str, captures_path: str, model_version: str,
             "db_path": db_path,
         }
     try:
-        v2_rows = _fetch_v2_rows(conn, model_version)
+        v2_rows = _fetch_v2_rows(conn, model_version, delivered_only=delivered_only)
     finally:
         conn.close()
 
     if not v2_rows:
+        pop = "delivered (SENT)" if delivered_only else "fired"
         return {
             "available": False,
-            "reason": f"no rows for model_version={model_version} in {db_path}",
+            "reason": f"no {pop} rows for model_version={model_version} in {db_path}",
             "model_version": model_version,
             "db_path": db_path,
         }
@@ -1039,6 +1107,7 @@ def run_audit(*, db_path: str, captures_path: str, model_version: str,
         "captures_available": captures_available,
         "captures_model_version": captures_model_version,
         "captures_rows_matched": len(capture_rows),
+        "population": "delivered" if delivered_only else "fired",
         "grade_intervals": list(grade_intervals),
         "min_scoreboard_n": min_n,
         "trade_count": len(trades),
@@ -1052,6 +1121,13 @@ def run_audit(*, db_path: str, captures_path: str, model_version: str,
         "snapshot": snapshot,
         "trades": [t.as_dict() for t in trades],
     }
+
+    # One-buy-per-15-min-window account (the owner takes one buy per window).
+    if per_window:
+        report["per_window_account"] = aggregate_per_window(trades, min_n)
+    # Always-on drag callout for a flagged asset (e.g. HYPE: kept but flagged).
+    if flag_asset:
+        report["asset_flag"] = asset_flag_summary(trades, flag_asset)
 
     if extend:
         if not captures_available:
@@ -1100,6 +1176,8 @@ def render_report(report: Mapping[str, Any]) -> str:
     overall = acct["overall"]
     lines.append("V2 ACCOUNT AUDIT — ultoim_v2")
     lines.append(f"  model_version: {report['model_version']}")
+    lines.append(f"  population: {report.get('population', 'fired')}"
+                 f"{' (SENT/alerted only — actionable book)' if report.get('population') == 'delivered' else ' (all gate-passing rows)'}")
     lines.append(f"  grade intervals (priority): {', '.join(report['grade_intervals'])}")
 
     # C5 config fingerprint — strict status + loud divergence warning.
@@ -1161,6 +1239,33 @@ def render_report(report: Mapping[str, Any]) -> str:
         lines.append(f"  {sd}: n={cell['n']}{tag}  win={_fmt_pct(cell['win_rate'])}  "
                      f"P&L={_fmt_cents(cell['pnl_total_cents'])}")
     lines.append("")
+
+    # One-buy-per-15-min-window account (manual pick -> show the envelope + rules).
+    pw = report.get("per_window_account")
+    if pw:
+        lines.append("PER-WINDOW ACCOUNT (one buy per 15-min window; you pick manually):")
+        lines.append(f"  windows: {pw['windows']}  (vs {report['trade_count']} per-asset trades)")
+        order = [("best_case", "best-case pick"), ("highest_confidence", "highest-confidence"),
+                 ("most_expensive_ask", "most-expensive ask"), ("cheapest_ask", "cheapest ask (C5 reward:risk)"),
+                 ("worst_case", "worst-case pick")]
+        for k, label in order:
+            cell = pw.get(k) or {}
+            tag = " [INSUFFICIENT]" if cell.get("insufficient") else ""
+            lines.append(f"  {label:30s} n={cell.get('n')}{tag}  win={_fmt_pct(cell.get('win_rate'))}  "
+                         f"P&L={_fmt_cents(cell.get('pnl_total_cents'))}  "
+                         f"avg/win={_fmt_cents((cell.get('pnl_total_cents') or 0)/cell['n']) if cell.get('n') else '—'}")
+        lines.append("  (best/worst bracket what a manual pick could achieve; the rules are reference points)")
+        lines.append("")
+
+    # Always-on flagged-asset drag callout (HYPE kept but flagged).
+    af = report.get("asset_flag")
+    if af and af.get("n_trades"):
+        lines.append(f"FLAGGED ASSET — {af['asset']} (kept in book, drag shown):")
+        lines.append(f"  n={af['n_trades']} trades / {af['n_windows']} windows  "
+                     f"win={_fmt_pct(af['win_rate'])}  P&L={_fmt_cents(af['pnl_total_cents'])}")
+        lines.append(f"  book WITHOUT {af['asset']}: {_fmt_cents(af['book_excluding_asset_cents'])} "
+                     f"(vs {_fmt_cents(overall['pnl_total_cents'])} with it)")
+        lines.append("")
 
     disc = report["discrepancies"]
     lines.append(f"DISCREPANCIES: {len(disc)}")
@@ -1242,6 +1347,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Canonical checkpoint priority, comma-separated (default 10M,7M).")
     p.add_argument("--min-n", type=int, default=None,
                    help="INSUFFICIENT threshold (default = V2 min_scoreboard_n / 30).")
+    p.add_argument("--delivered-only", action="store_true",
+                   help="Audit only the SENT/alerted book (your actionable account) "
+                        "instead of all gate-passing fired rows.")
+    p.add_argument("--per-window", action="store_true",
+                   help="Add the one-buy-per-15-min-window account (envelope + "
+                        "selection rules) — the unit you actually trade.")
+    p.add_argument("--flag-asset", default="HYPE",
+                   help="Always surface this asset's drag separately (default HYPE; "
+                        "empty to disable).")
     p.add_argument("--extend-with-chart", action="store_true",
                    help="Add a SEPARATE modeled would-have book via the real gate.")
     p.add_argument("--strict-c5", action="store_true",
@@ -1279,6 +1393,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         snapshot_path=args.snapshot,
         extend=args.extend_with_chart,
         captures_model_version=args.captures_model_version,
+        delivered_only=args.delivered_only,
+        per_window=args.per_window,
+        flag_asset=args.flag_asset,
         cfg=None if args.strict_c5 else cfg,
         strict_c5=args.strict_c5,
     )

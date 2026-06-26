@@ -41,7 +41,7 @@ GRADE = ("10M", "7M")
 # --------------------------------------------------------------------------- #
 def _row(ticker, interval, window_key, *, side="NO", ask=60.0, cal_yes=0.40,
          net_edge=3.0, fired=1, close_time=1000.0, asset=None, stake=1,
-         total_cost=2.0, spread=2.0, distance=1.2):
+         total_cost=2.0, spread=2.0, distance=1.2, delivery_status="SENT"):
     """A minimal but schema-valid V2 prediction row for record_decision()."""
     return {
         "created_at": 1.0,
@@ -64,7 +64,7 @@ def _row(ticker, interval, window_key, *, side="NO", ask=60.0, cal_yes=0.40,
         "stake_multiplier": stake,
         "gate_b_pass": 1,
         "gate_c_pass": 1,
-        "delivery_status": "SENT",
+        "delivery_status": delivery_status,
         "session_id": "sess-1",
     }
 
@@ -126,7 +126,8 @@ def _hermetic_cfg():
 
 
 def _audit(db_path, captures_path, tmp_path, *, extend=False, min_n=30,
-           snapshot=None, strict_c5=False, captures_model=MODEL):
+           snapshot=None, strict_c5=False, captures_model=MODEL,
+           delivered_only=False, per_window=False, flag_asset=""):
     return v2_audit.run_audit(
         db_path=db_path,
         captures_path=captures_path or str(tmp_path / "missing_captures.sqlite3"),
@@ -136,6 +137,9 @@ def _audit(db_path, captures_path, tmp_path, *, extend=False, min_n=30,
         min_n=min_n,
         snapshot_path=snapshot or str(tmp_path / "snap.json"),
         extend=extend,
+        delivered_only=delivered_only,
+        per_window=per_window,
+        flag_asset=flag_asset,
         cfg=_hermetic_cfg() if extend else None,
         gate_evaluate=gate_evaluate if extend else None,
         strict_c5=strict_c5,
@@ -672,6 +676,58 @@ def test_chart_extension_uses_captures_namespace(tmp_path):
     assert ext["available"] is True
     assert ext["trade_count"] >= 1
     assert any(t["ticker"] == "ETH-A" for t in ext["trades"])
+
+
+# --------------------------------------------------------------------------- #
+# delivered-only population + per-window account + flagged-asset drag
+# (owner: "only one buy counts per 15 min" and "keep HYPE but flag it")
+# --------------------------------------------------------------------------- #
+def test_delivered_only_restricts_to_sent(tmp_path):
+    db = _build_v2(tmp_path, [
+        _row("BTC-A", "10M", 100, side="NO", ask=60.0, delivery_status="SENT"),
+        _row("ETH-A", "10M", 100, side="NO", ask=60.0, delivery_status="RECORDED"),
+    ], resolutions={"BTC-A": "NO", "ETH-A": "NO"})
+    full = _audit(db, None, tmp_path)
+    deliv = _audit(db, None, tmp_path, delivered_only=True)
+    assert full["trade_count"] == 2 and full["population"] == "fired"
+    assert deliv["trade_count"] == 1 and deliv["population"] == "delivered"
+    assert deliv["trades"][0]["ticker"] == "BTC-A"
+
+
+def test_per_window_account_one_buy_per_window(tmp_path):
+    # Two assets settle in the SAME 15-min window (window_key=100): one buy counts.
+    # BTC NO wins (settles NO), ETH NO loses (settles YES). Different asks/probs so
+    # the selection rules diverge.
+    db = _build_v2(tmp_path, [
+        _row("BTC-A", "10M", 100, side="NO", ask=62.0, cal_yes=0.30),  # high conf NO, wins
+        _row("ETH-A", "10M", 100, side="NO", ask=55.0, cal_yes=0.45),  # cheaper, lower conf, loses
+        _row("SOL-A", "10M", 101, side="NO", ask=70.0, cal_yes=0.20),  # other window, wins
+    ], resolutions={"BTC-A": "NO", "ETH-A": "YES", "SOL-A": "NO"})
+    rep = _audit(db, None, tmp_path, per_window=True, min_n=1)
+    pw = rep["per_window_account"]
+    assert pw["windows"] == 2          # two distinct 15-min windows, not 3 trades
+    # best-case takes the winner in window 100 (BTC +38) + SOL (+30) = +68
+    assert pw["best_case"]["pnl_total_cents"] == pytest.approx(68.0)
+    # worst-case takes the loser in window 100 (ETH -55) + SOL (+30) = -25
+    assert pw["worst_case"]["pnl_total_cents"] == pytest.approx(-25.0)
+    # highest-confidence in window 100 is BTC (p_win 0.70 > 0.55) -> winner
+    assert pw["highest_confidence"]["pnl_total_cents"] == pytest.approx(68.0)
+    # cheapest ask in window 100 is ETH (55<62) -> the loser
+    assert pw["cheapest_ask"]["pnl_total_cents"] == pytest.approx(-25.0)
+    assert pw["best_case"]["n"] == 2 and pw["worst_case"]["n"] == 2
+
+
+def test_flagged_asset_drag_always_shown(tmp_path):
+    db = _build_v2(tmp_path, [
+        _row("HYPE-A", "10M", 100, side="NO", ask=70.0),   # loses (settles YES)
+        _row("BTC-A", "10M", 101, side="NO", ask=60.0),    # wins
+    ], resolutions={"HYPE-A": "YES", "BTC-A": "NO"})
+    rep = _audit(db, None, tmp_path, flag_asset="HYPE", min_n=1)
+    af = rep["asset_flag"]
+    assert af["asset"] == "HYPE"
+    assert af["n_trades"] == 1 and af["n_windows"] == 1
+    assert af["pnl_total_cents"] == pytest.approx(-70.0)          # HYPE drag
+    assert af["book_excluding_asset_cents"] == pytest.approx(40.0)  # BTC alone (+40)
 
 
 def test_stake_two_doubles_pnl(tmp_path):
