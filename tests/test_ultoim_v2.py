@@ -190,7 +190,7 @@ def test_owner_default_config_is_aggressive():
     assert cfg.no_edge_waive is False      # ROI-sweep: enforcing the edge gate maximizes ROI
     assert cfg.expensive_no_ask_hi == 78.0 # ROI-sweep: tightened from 85
     assert cfg.skip_15m is True
-    assert cfg.deliver_top_n == 2          # top-2 by reward:risk per mark (matches 2-picks/window)
+    assert cfg.deliver_top_n == 3          # C5: cap-3 (3+-co-trigger windows run ~100%)
     assert cfg.deliver_by_reward_risk is True
     # Owner-enabled net levers, LIVE by default (each reversible via its Q15_* env var):
     assert cfg.cap_7m_ask is False         # flipped OFF: inverted on the fuller 189-sample
@@ -208,9 +208,10 @@ def test_owner_default_config_is_aggressive():
     # Unified 86.2%-book live defaults (owner-enabled; each reversible via its Q15_* env var):
     assert cfg.btc_confirm_enabled is True          # deliver only when BTC decisively agrees
     assert cfg.btc_confirm_margin == 0.15
+    assert cfg.btc_confirm_margin_yes == 0.10  # asymmetric YES cutoff (BTC>=0.60)
     assert cfg.require_inverse_edge is True          # drop the positive-edge coin-flips
     assert cfg.no_only is False                      # YES harvest on (paper; BTC-gated)
-    assert cfg.skip_7m is True                       # 10M-only book
+    assert cfg.skip_7m is False                      # C5: 10M+7M (7M strong under the gates)
     assert cfg.exit_watch_from_seconds == 600.0      # exit-watch from the 10M mark
 
 

@@ -46,6 +46,8 @@ REASON_CODES = (
     "RESEARCH_ONLY_MARK",
     "BTC_UNCONFIRMED",
     "POSITIVE_EDGE_BLOCK",
+    "RISK_LOW",
+    "RISK_HIGH",
 )
 
 # Tolerance for the inclusive edge comparator — absorbs float-repr slack only
@@ -284,14 +286,30 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     # For a BTC candidate the runner passes BTC's own calibrated-yes -> a self-decisiveness
     # check (decisive BTC reads are the reliable ones; the mushy middle is a coin-flip).
     btc_unconfirmed = False
+    risk_tier: str | None = None
     if getattr(cfg, "btc_confirm_enabled", False) and btc_yes_prob is not None:
-        margin = getattr(cfg, "btc_confirm_margin", 0.15)
+        past = None
         if side == "NO":
-            btc_unconfirmed = not (btc_yes_prob <= 0.5 - margin)
+            cutoff = 0.5 - getattr(cfg, "btc_confirm_margin", 0.15)
+            btc_unconfirmed = not (btc_yes_prob <= cutoff)
+            past = cutoff - btc_yes_prob                # how far PAST the NO cutoff (decisiveness)
         elif side == "YES":
-            btc_unconfirmed = not (btc_yes_prob >= 0.5 + margin)
+            cutoff = 0.5 + getattr(cfg, "btc_confirm_margin_yes",
+                                   getattr(cfg, "btc_confirm_margin", 0.15))
+            btc_unconfirmed = not (btc_yes_prob >= cutoff)
+            past = btc_yes_prob - cutoff                # how far PAST the YES cutoff
+        # RISK TIER (record-only) for confirmed entries: LOW (~95% bracket) iff BTC clears the
+        # cutoff by >= risk_low_btc_margin AND the book is tight (spread < risk_low_max_spread);
+        # else HIGH (~81% bracket — borderline BTC or wide spread, the prime turn/early-exit set).
+        if past is not None and not btc_unconfirmed:
+            spread = _clean_num(candidate.get("spread_cents"))
+            decisive = past >= getattr(cfg, "risk_low_btc_margin", 0.10)
+            tight = spread is None or spread < getattr(cfg, "risk_low_max_spread", 3.0)
+            risk_tier = "LOW" if (decisive and tight) else "HIGH"
     if btc_unconfirmed:
         reason_codes.append("BTC_UNCONFIRMED")
+    if risk_tier is not None:
+        reason_codes.append("RISK_LOW" if risk_tier == "LOW" else "RISK_HIGH")
 
     # Inverse-edge DELIVERY gate (DEFAULT OFF). Suppress DELIVERY (``fired``) for a
     # non-negative stated edge; ``research_fired`` UNCHANGED. The model's edge is INVERSE
@@ -316,6 +334,7 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
         "gate_c": bool(gate_c),
         "expensive_no": bool(expensive_no),
         "net_edge_cents": net_edge,
+        "risk_tier": risk_tier,
         "best_entry_cents": best_entry_cents(sel, cost, cfg,
                                              ask_hi=(exp_ask_hi if expensive_no else None)),
     }

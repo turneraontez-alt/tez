@@ -95,12 +95,11 @@ class UltoimV2Config:
     # assets cross-ledger), vs strong, priced-in 10M/7M; the frozen champion already
     # disables its own 15M alerts. v2 fires only at 10M/7M. Set false to restore 15M.
     skip_15m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_15M", True))
-    # Skip the 7M (420s) checkpoint. DEFAULT ON (owner-enabled): the live book now runs
-    # 10M-ONLY. 7M is roughly break-even (all-time ~+36c, n=62) and adds correlated near-close
-    # exposure; the owner concentrates on the proven 10M anchor (both YES and NO via the unified
-    # BTC-confirmation gate). With this on, 7M fires no screen/alert/trade; exit warnings on
-    # already-open 10M positions are unaffected. Set Q15_ULTOIM_V2_SKIP_7M=false to restore 7M.
-    skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", True))
+    # Skip the 7M (420s) checkpoint. DEFAULT OFF (owner-enabled, C5): the book runs 10M+7M.
+    # 7M was weak UNGATED, but under the unified BTC-confirm + inverse-edge gates it is strong
+    # (real ledger: 7M NO 83%, 7M YES 92%) and roughly DOUBLES daily profit — BTC reads its own
+    # 7M settlement more reliably than at 10M. Set Q15_ULTOIM_V2_SKIP_7M=true to run 10M-only.
+    skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", False))
     # --- Net-improvement levers (workflow-verified; all reversible).
     # 7M ASK CAP — DEFAULT OFF (flipped from ON). At the 7M mark only, do not admit a NO whose
     # ask > cap_7m_ask_max. NON-STATIONARY SIGNAL: the cap was originally enabled when an EARLIER,
@@ -156,7 +155,7 @@ class UltoimV2Config:
     # top_n 2: ROI 23.4%, win 80.8%, n=73, +$11.2@$1, both time-halves positive. Set TOP_N=1 for a
     # strictly single pick/window; >2 widens correlated exposure + alert volume.
     deliver_top_n: int = field(
-        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 2.0)))
+        default_factory=lambda: max(1, int(_float("Q15_ULTOIM_V2_DELIVER_TOP_N", 3.0)))
     )
     deliver_by_reward_risk: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_BY_RR", True)
@@ -263,6 +262,24 @@ class UltoimV2Config:
     )
     btc_confirm_margin: float = field(
         default_factory=lambda: _float("Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN", 0.15)
+    )
+    # ASYMMETRIC YES margin (C5). YES is the minority outcome, so even a milder BTC-YES lean is
+    # decisive enough: the 0.60-0.65 BTC band still settles YES ~85% (vs the 0.35-0.40 NO band
+    # which craters to 61%, so NO keeps the strict 0.15). Default 0.10 -> YES fires when BTC's
+    # calibrated-yes >= 0.60. Set Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN_YES.
+    btc_confirm_margin_yes: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN_YES", 0.10)
+    )
+    # RISK TIER (record-only label surfaced on the entry card; NEVER gates/sizes by itself).
+    # An entry is RISK_LOW (the ~95% bracket) when BTC clears the side's gate cutoff by at least
+    # risk_low_btc_margin AND the book spread is tighter than risk_low_max_spread; otherwise
+    # RISK_HIGH (the ~81% bracket -- borderline BTC or a wide/illiquid book, the prime turn/early-
+    # exit candidates). Thresholds from the real ledger split (spread + BTC decisiveness).
+    risk_low_btc_margin: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_RISK_LOW_BTC_MARGIN", 0.10)
+    )
+    risk_low_max_spread: float = field(
+        default_factory=lambda: _float("Q15_ULTOIM_V2_RISK_LOW_MAX_SPREAD", 3.0)
     )
     # --- Inverse-edge DELIVERY gate. DEFAULT OFF. When ON, a candidate whose stated net edge
     # is >= 0 is suppressed from DELIVERY (``research_fired`` UNCHANGED). For these binaries the
