@@ -328,6 +328,7 @@ class CanonicalTrade:
     correct_stored: int | None
     side_matches_result: bool | None
     ask_cents: Decimal | None
+    cost_cents: Decimal | None
     stake: Decimal
     stored_pnl: Decimal | None
     recomputed_pnl: Decimal | None
@@ -355,6 +356,7 @@ class CanonicalTrade:
             "correct_stored": self.correct_stored,
             "side_matches_result": self.side_matches_result,
             "ask_cents": _f(self.ask_cents),
+            "cost_cents": _f(self.cost_cents),
             "stake": _f(self.stake),
             "stored_pnl_cents": _f(self.stored_pnl),
             "recomputed_pnl_cents": _f(self.recomputed_pnl),
@@ -438,6 +440,12 @@ def reconcile_trade(row: Mapping[str, Any], model_version: str,
     resolved = official is not None
 
     ask = _dec(row.get("entry_ask_cents"))
+    # The ledger's OWN recorded entry cost (Kalshi fee + slippage), per contract —
+    # use it for net-of-fee rather than guessing a flat fee. total_cost_cents is the
+    # all-in cost; fall back to fee_cents; None when neither was recorded.
+    cost = _dec(row.get("total_cost_cents"))
+    if cost is None:
+        cost = _dec(row.get("fee_cents"))
     stake = _stake(row.get("stake_multiplier"))
     calibrated_yes = _dec(row.get("calibrated_yes_probability"))
     net_edge = _dec(row.get("net_edge_cents"))
@@ -504,6 +512,7 @@ def reconcile_trade(row: Mapping[str, Any], model_version: str,
         correct_stored=correct_stored,
         side_matches_result=side_matches,
         ask_cents=ask,
+        cost_cents=cost,
         stake=stake,
         stored_pnl=stored_pnl,
         recomputed_pnl=recomputed_pnl,
@@ -587,17 +596,28 @@ def _agg_cell(trades: Sequence[CanonicalTrade], min_n: int) -> dict[str, Any]:
     graded = [t for t in trades if t.recomputed_pnl is not None]
     n = len(graded)
     right = sum(1 for t in graded if t.side_matches_result)
-    pnl_total = _ZERO
+    pnl_total = _ZERO          # staked GROSS (mirrors the ledger)
+    pnl_flat1_total = _ZERO    # per-contract GROSS (stake stripped)
+    fee_total = _ZERO          # staked fee (ledger's own cost x stake)
+    fee_flat1_total = _ZERO    # per-contract fee
     ev_total = _ZERO
     staked_total = _ZERO
     ev_n = 0
     for t in graded:
         pnl_total += t.recomputed_pnl
+        # per-contract gross = the unit payoff (recomputed_pnl with stake removed).
+        unit = (t.recomputed_pnl / t.stake) if t.stake != _ZERO else t.recomputed_pnl
+        pnl_flat1_total += unit
+        if t.cost_cents is not None:
+            fee_total += t.cost_cents * t.stake
+            fee_flat1_total += t.cost_cents
         if t.ask_cents is not None:
             staked_total += t.ask_cents * t.stake
         if t.ev is not None:
             ev_total += t.ev
             ev_n += 1
+    net_total = pnl_total - fee_total
+    net_flat1_total = pnl_flat1_total - fee_flat1_total
     p, lo, hi = _wilson(right, n)
     roi = None
     if staked_total != _ZERO:
@@ -614,6 +634,10 @@ def _agg_cell(trades: Sequence[CanonicalTrade], min_n: int) -> dict[str, Any]:
         "win_rate_ci_high": hi,
         "insufficient": n < min_n,
         "pnl_total_cents": _f(pnl_total),
+        "fee_total_cents": _f(fee_total),
+        "net_pnl_cents": _f(net_total),
+        "pnl_flat1_cents": _f(pnl_flat1_total),
+        "net_flat1_cents": _f(net_flat1_total),
         "ev_total_cents": _f(ev_total) if ev_n else None,
         "ev_n": ev_n,
         "staked_cents": _f(staked_total),
@@ -1213,11 +1237,18 @@ def render_report(report: Mapping[str, Any]) -> str:
     insuff = " [INSUFFICIENT]" if overall["insufficient"] else ""
     lines.append(f"  n={overall['n']}{insuff}  win={_fmt_pct(overall['win_rate'])} "
                  f"(CI {_fmt_pct(overall['win_rate_ci_low'])}–{_fmt_pct(overall['win_rate_ci_high'])})")
-    lines.append(f"  realized P&L: {_fmt_cents(overall['pnl_total_cents'])}   "
-                 f"EV: {_fmt_cents(overall['ev_total_cents'])}   "
-                 f"staked: {_fmt_cents(overall['staked_cents'])}")
+    # GROSS and NET (ledger's own recorded fee), staked and per-contract (flat-1),
+    # so the stake/fee axes that make the headline move are all on one panel.
+    lines.append(f"  GROSS staked: {_fmt_cents(overall['pnl_total_cents'])}   "
+                 f"− fee {_fmt_cents(overall['fee_total_cents'])}   "
+                 f"= NET staked: {_fmt_cents(overall['net_pnl_cents'])}")
+    lines.append(f"  GROSS flat-1: {_fmt_cents(overall['pnl_flat1_cents'])}   "
+                 f"= NET flat-1: {_fmt_cents(overall['net_flat1_cents'])}  "
+                 f"(per-contract, conviction-2x removed)")
     roi = overall["roi"]
-    lines.append(f"  ROI: {_fmt_pct(roi) if roi is not None else '—'}   "
+    lines.append(f"  EV: {_fmt_cents(overall['ev_total_cents'])}   staked: "
+                 f"{_fmt_cents(overall['staked_cents'])}   ROI(gross): "
+                 f"{_fmt_pct(roi) if roi is not None else '—'}   "
                  f"edge realization (P&L−EV): {_fmt_cents(overall['edge_realization_cents'])}")
     lines.append("")
     lines.append("BY INTERVAL:")

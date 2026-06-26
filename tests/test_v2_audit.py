@@ -730,6 +730,24 @@ def test_flagged_asset_drag_always_shown(tmp_path):
     assert af["book_excluding_asset_cents"] == pytest.approx(40.0)  # BTC alone (+40)
 
 
+def test_net_of_fee_and_flat1_vs_staked(tmp_path):
+    # One window doubled (stake=2) that LOSES, one flat winner. Verifies gross/net
+    # (using the ledger's own total_cost_cents) and flat-1 vs staked, the axes that
+    # made the headline move. cost=2c/contract on each.
+    db = _build_v2(tmp_path, [
+        _row("BTC-A", "10M", 100, side="NO", ask=60.0, stake=2, total_cost=2.0),  # loses: -60*2 gross
+        _row("ETH-A", "10M", 101, side="NO", ask=60.0, stake=1, total_cost=2.0),  # wins: +40 gross
+    ], resolutions={"BTC-A": "YES", "ETH-A": "NO"})
+    ov = _audit(db, None, tmp_path, min_n=1)["account"]["overall"]
+    # staked gross = -120 (BTC -60x2) + 40 = -80 ; fee = 2*2 + 2*1 = 6 ; net = -86
+    assert ov["pnl_total_cents"] == pytest.approx(-80.0)
+    assert ov["fee_total_cents"] == pytest.approx(6.0)
+    assert ov["net_pnl_cents"] == pytest.approx(-86.0)
+    # flat-1 gross = -60 (BTC unit) + 40 = -20 ; flat-1 fee = 2 + 2 = 4 ; net flat1 = -24
+    assert ov["pnl_flat1_cents"] == pytest.approx(-20.0)
+    assert ov["net_flat1_cents"] == pytest.approx(-24.0)
+
+
 def test_stake_two_doubles_pnl(tmp_path):
     # stake=2: NO @ ask 60 settles NO -> +40 per unit * 2 = +80.
     db = _build_v2(tmp_path, [_row("BTC-A", "10M", 100, side="NO", ask=60.0,
