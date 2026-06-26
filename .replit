@@ -103,7 +103,9 @@ Q15_ULTOIM_V2_NO_ONLY = "false"
 Q15_ULTOIM_V2_BTC_CONFIRM = "true"
 Q15_ULTOIM_V2_BTC_CONFIRM_MARGIN_YES = "0.10"  # C5: asymmetric YES cutoff (BTC>=0.60)
 Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE = "true"
-Q15_ULTOIM_V2_SKIP_7M = "false"  # C5: 10M+7M (7M is strong UNDER the new gates)
+Q15_ULTOIM_V2_SKIP_7M = "false"  # keep 7M PROCESSING on so the YES harvest at 7M (strong, +10c) runs
+Q15_ULTOIM_V2_SKIP_7M_NO = "true"  # but DROP NO delivery at 7M: 7M NO is break-even noise that dilutes 10M
+Q15_ULTOIM_V2_YES_NOTIFY = "true"  # paper YES Telegram notifications (hiconv + BTC-confirm); NEVER an order
 Q15_ULTOIM_V2_EXIT_WATCH_SECONDS = "600"
 # 12M EXPENSIVE-NO slice -> LIVE (owner-approved): deliver 12M only for ask>=65 (the cheap <65 zone
 # is suppressed). Data: 12M ask>=65 = 90.9%/+17c/bet (n=11 THIN); same expensive-NO edge as 10M.

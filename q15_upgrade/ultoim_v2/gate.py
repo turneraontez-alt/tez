@@ -277,6 +277,18 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     if floor_12m_block:
         reason_codes.append("ASK_FLOOR_12M")
 
+    # NO-ONLY 7M delivery skip (DEFAULT OFF). Suppress DELIVERY (``fired``) of the NO side at the 7M
+    # mark; ``research_fired`` is UNCHANGED (recap keeps grading 7M NO) and the YES side is untouched.
+    # 7M NO is a ~break-even coin-flip that DILUTES the 10M NO edge -- this drops it without losing the
+    # strong 7M YES harvest (a global skip_7m would kill both). Off => byte-identical.
+    skip_7m_no_block = bool(
+        getattr(cfg, "skip_7m_no_deliver", False)
+        and side == "NO"
+        and interval == "7M"
+    )
+    if skip_7m_no_block:
+        reason_codes.append("SKIP_7M_NO")
+
     # Cross-asset BTC-CONFIRMATION gate (DEFAULT OFF). Suppresses DELIVERY (``fired``)
     # only -- ``research_fired`` is UNCHANGED so the recap keeps measuring. A candidate
     # delivers only when BTC's contemporaneous calibrated P(YES) (``btc_yes_prob``)
@@ -323,10 +335,32 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     if positive_edge_block:
         reason_codes.append("POSITIVE_EDGE_BLOCK")
 
+    # PAPER YES-NOTIFICATION admit (DEFAULT OFF). A high-conviction YES -- V2 calibrated_yes AND the
+    # market both decisively YES -- that BTC contemporaneously CONFIRMS (``btc_unconfirmed`` already
+    # uses the YES margin above) delivers a Telegram NOTIFICATION. Kept as a SEPARATE signal from
+    # ``fired`` so the NO delivery path is byte-identical and YES stays fully isolated (the runner
+    # delivers it through its own block and ``_maybe_execute`` is hard NO-only -- never an order). The
+    # hiconv YES sit ABOVE the NO ask band (~86c), so this admits them on the conviction criteria
+    # rather than the NO-tuned band; the confidence floor and ask_lo still apply. Off => YES never
+    # notifies (unchanged). FAIL-CLOSED when cal/market are missing.
+    cal_yes = _clean_num(candidate.get("calibrated_yes_probability"))
+    mkt_yes = _clean_num(candidate.get("market_implied_yes_probability"))
+    yes_notify = bool(
+        getattr(cfg, "yes_notify_enabled", False)
+        and side == "YES"
+        and cal_yes is not None and cal_yes >= getattr(cfg, "hiconv_yes_cal_min", 0.70)
+        and mkt_yes is not None and mkt_yes >= getattr(cfg, "hiconv_yes_market_min", 0.60)
+        and gate_b_conf and gate_b_ask_lo
+        and not btc_unconfirmed
+    )
+    if yes_notify:
+        reason_codes.append("YES_NOTIFY")
+
     fired = (gate_a and research_fired and not near_block and not floor_12m_block
-             and not btc_unconfirmed and not positive_edge_block)
+             and not btc_unconfirmed and not positive_edge_block and not skip_7m_no_block)
     return {
         "fired": bool(fired),
+        "yes_notify": bool(yes_notify),
         "research_fired": bool(research_fired),
         "reason_codes": reason_codes,
         "gate_a": bool(gate_a),

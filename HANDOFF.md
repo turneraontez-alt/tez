@@ -9,9 +9,34 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1448 passed / 4 skipped here** (8 app tests uncollectable
+Tests: `python3 -m pytest tests/ -q` → **1507 passed / 4 skipped here** (8 app tests uncollectable
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+
+## ✅ Shipped THIS session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
+**Suite 1507 / 4 skipped** (+28 tests). Two fleets confirmed the 15m taker market is efficient net of
+fees (−2 to −4c/contract); the only validated edge is **NO @ 10M** (+11.5c delivered-strict, CI lower
+bound > 0, survives LOAO + time-split), while **7M NO is break-even noise** (+0.75c, CI spans 0) that
+PR #65 had re-enabled — and the **paper YES harvest** (hiconv + BTC-confirm) had NEVER fired (`no_only`
+blocked it) despite being +8.6c/95%-win in-sample. Three changes, all read-only / paper:
+- **Drop NO-7M (`skip_7m_no_deliver`, gate `SKIP_7M_NO`):** NO-only 7M DELIVERY skip; research_fired
+  unchanged; YES-7M untouched (a global `skip_7m` would kill the good YES-7M). `.replit SKIP_7M_NO=true`,
+  `SKIP_7M=false` (7M processing stays on for YES).
+- **Paper YES notifications (`yes_notify_enabled`, gate `yes_notify` signal + isolated runner block):**
+  hiconv YES (cal≥0.70 & mkt≥0.60) that BTC confirms now delivers a Telegram NOTIFICATION + records
+  fired=1. SEPARATE from the NO `fired` path (NO byte-identical). NEVER routes to an executor —
+  `_maybe_execute` is hard NO-only, and the real `yes_live_enabled` bot stays OFF (`Q15_EXEC_YES_ENABLED`
+  unchanged). `.replit YES_NOTIFY=true`. This is "turn YES on for alerts," paper-only.
+- **`tools/v2_audit.py` (+ `tests/test_v2_audit.py`, 14 tests):** foolproof, auto-updating config-gate
+  audit. Auto-reflects EVERY `UltoimV2Config` field + its TRUE env var (AST-parsed from source, so a new
+  field/abbreviated env name appears with zero edits). Data-driven `GATES` registry (add a gate = one
+  line). Per-gate marginal effect, cumulative C5 stacks per side, per-interval/asset breakdowns, OOS
+  (60/40 time-split + leave-one-asset-out), NET-of-fee P&L (recomputed, never trusts gross), deterministic
+  bootstrap CIs. Run: `python3 tools/v2_audit.py [--db PATH] [--side NO|YES|BOTH] [--json]`.
+- **DEPLOY-PENDING:** changes are merged-to-PR but the live Repl must restart to pick up the new code +
+  the new `.replit` env vars (confirm no Replit Secret overrides `Q15_ULTOIM_V2_SKIP_7M_NO` /
+  `Q15_ULTOIM_V2_YES_NOTIFY`). Until then the bot runs the prior config.
+- **+14 gate tests** (`test_ultoim_v2_skip_7m_no.py`, `test_ultoim_v2_yes_notify.py`).
 
 ## ✅ Shipped THIS session — DURABLE per-window cap (restart-reset over-placement fix, BOTH books)
 **Suite 1414 / 13 skipped** (+2 tests). A 5-agent audit (triggered by an owner "4 ETH trades instead of 2"
