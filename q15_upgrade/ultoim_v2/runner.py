@@ -422,6 +422,29 @@ class UltoimV2Runner:
             delivered_tickers.add(str(best["cand"].get("ticker") or ""))
             self._record_and_maybe_alert(best, interval, mark, window_key, now)
 
+        # -- PAPER YES-NOTIFY path (default OFF; ISOLATED). Deliver a Telegram NOTIFICATION for the
+        # high-conviction YES that BTC confirms (gate verdict["yes_notify"]) -- PAPER ONLY. We force
+        # the delivered row's fired=1 so it alerts + records as delivered; _maybe_execute is hard
+        # NO-only, so a YES NEVER reaches a real order. Ordered by market-implied P(YES) (highest
+        # conviction first), capped by deliver_top_n, de-duped against the NO picks already delivered
+        # this window. Never mutates the NO fired/lock state -- the NO blocks above already ran.
+        if getattr(cfg, "yes_notify_enabled", False):
+            yes_notify = [e for e in evaluated if e["verdict"].get("yes_notify")]
+            if yes_notify:
+                n = max(1, int(getattr(cfg, "deliver_top_n", 1) or 1))
+                ordered = sorted(
+                    yes_notify,
+                    key=lambda e: _num(e["cand"].get("market_implied_yes_probability")) or -1.0,
+                    reverse=True)
+                for e in ordered[:n]:
+                    ticker = str(e["cand"].get("ticker") or "")
+                    if ticker in delivered_tickers:
+                        continue
+                    delivered_tickers.add(ticker)
+                    notified = {**e, "verdict": {**e["verdict"], "fired": True},
+                                "stake_multiplier": stake}
+                    self._record_and_maybe_alert(notified, interval, mark, window_key, now)
+
         # -- RESEARCH-YES path: record the best YES candidate so YES-prone windows
         # finally produce gradeable data. Never alerted; never claims the alert
         # lock; skipped when it's the same contract already recorded above (the

@@ -100,6 +100,16 @@ class UltoimV2Config:
     # (real ledger: 7M NO 83%, 7M YES 92%) and roughly DOUBLES daily profit — BTC reads its own
     # 7M settlement more reliably than at 10M. Set Q15_ULTOIM_V2_SKIP_7M=true to run 10M-only.
     skip_7m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M", False))
+    # NO-ONLY 7M delivery skip (DEFAULT OFF). Suppresses DELIVERY of the NO side at the 7M mark
+    # only; research_fired is UNCHANGED (the recap keeps grading 7M NO) and the YES harvest at 7M is
+    # untouched. The faithful-C5 backtest showed 7M NO is a ~break-even coin-flip (+0.75c/contract,
+    # bootstrap CI spanning zero) that DILUTES the real 10M NO edge (+11.5c, CI lower bound > 0),
+    # while 7M YES stays strong (+10c). So this drops the noisy NO-7M without throwing away the good
+    # YES-7M -- a GLOBAL Q15_ULTOIM_V2_SKIP_7M would kill both. Read-only; never places an order.
+    # Set Q15_ULTOIM_V2_SKIP_7M_NO=true.
+    skip_7m_no_deliver: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_SKIP_7M_NO", False)
+    )
     # --- Net-improvement levers (workflow-verified; all reversible).
     # 7M ASK CAP — DEFAULT OFF (flipped from ON). At the 7M mark only, do not admit a NO whose
     # ask > cap_7m_ask_max. NON-STATIONARY SIGNAL: the cap was originally enabled when an EARLIER,
@@ -383,6 +393,18 @@ class UltoimV2Config:
         default_factory=lambda: frozenset(
             s.strip().upper() for s in
             os.environ.get("Q15_EXEC_YES_ALLOWED_INTERVALS", "10M").split(",") if s.strip()))
+    # PAPER YES-NOTIFICATION delivery (DEFAULT OFF). When ON, the high-conviction YES sliver
+    # (calibrated_yes >= hiconv_yes_cal_min AND market-implied YES >= hiconv_yes_market_min) that BTC
+    # contemporaneously CONFIRMS (the gate's YES BTC-confirm, margin_yes) delivers a Telegram
+    # NOTIFICATION and records fired=1 -- PAPER ONLY. It NEVER routes to an executor: the live YES
+    # bot is the separate, double-gated ``yes_live_enabled`` path, and ``_maybe_execute`` is hard
+    # NO-only. This is the observational "turn YES on so I get the alerts" switch -- the audited
+    # hiconv+BTC YES population was +8.6c/contract net at 95% win in-sample (n=42, CI lower bound > 0),
+    # concentrated at 7M/10M. Fully isolated from the NO path (its own delivery block; never mutates
+    # NO fired/alert-lock/report state). Read-only. Set Q15_ULTOIM_V2_YES_NOTIFY=true.
+    yes_notify_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_YES_NOTIFY", False)
+    )
     # Defensive-exit / flip warning. Fires (ONLY when a paper entry was suggested
     # earlier in the same window) if, at/after the watch-start (exit_watch_from_seconds,
     # default 8M), the champion's call has FLIPPED to the opposite side and the flip is
