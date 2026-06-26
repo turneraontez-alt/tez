@@ -273,9 +273,19 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
             else max(latest_trade_event_ts, trade_ts)
         )
 
+    # Per-ticker book provenance and event time. HybridMarketData can fall back
+    # to REST for THIS ticker even while the websocket is connected, so the book
+    # source is read off the book itself (stamped by HybridMarketData) rather
+    # than from global connection health. The websocket book carries its own
+    # event time as ``_updated_at`` — include it first so a ws book's true age is
+    # honored instead of being treated as missing.
     book_event_ts = None
+    book_source = None
     if isinstance(ob_raw, dict):
-        for key in ("updated_at", "event_ts", "ts", "timestamp"):
+        tagged = ob_raw.get("_source")
+        if tagged in ("ws", "rest"):
+            book_source = tagged
+        for key in ("_updated_at", "updated_at", "event_ts", "ts", "timestamp"):
             try:
                 value = ob_raw.get(key)
                 if value is not None:
@@ -291,6 +301,7 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
         "trades": trades,
         "spot": spot,
         "source": "ws" if market_data.is_connected() else "rest",
+        "book_source": book_source,
         "fetch_started_at": started,
         "fetch_completed_at": completed,
         "fetch_latency_seconds": round(completed - started, 4),

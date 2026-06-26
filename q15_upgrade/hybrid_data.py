@@ -62,9 +62,23 @@ class HybridMarketData:
             book = self.ws.get_orderbook(ticker)
             if book is not None:
                 self._ticker_sources.setdefault(ticker, {})["book"] = "ws"
-                return book
+                return self._tag_book_source(book, "ws")
         self._ticker_sources.setdefault(ticker, {})["book"] = "rest"
-        return self.rest.get_orderbook(ticker)
+        return self._tag_book_source(self.rest.get_orderbook(ticker), "rest")
+
+    @staticmethod
+    def _tag_book_source(book, source):
+        """Stamp the per-ticker book ``source`` ("ws"/"rest") onto the returned
+        book so freshness gates can judge each ticker on its own data path. A
+        WebSocket book carries its own ``_updated_at`` event time; a REST
+        fallback (which can happen per ticker — see ``get_orderbook``) does not,
+        so it must not be mistaken for live WebSocket data. The book is copied
+        before tagging so a cached upstream dict is never mutated in place.
+        """
+        if isinstance(book, dict):
+            book = dict(book)
+            book["_source"] = source
+        return book
 
     def get_trades(self, ticker, min_ts=None):
         connected = self._sync_connection_state()
