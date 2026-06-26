@@ -10,6 +10,7 @@ kind), so a duplicated fire or a retry cannot double-place.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Mapping
 
@@ -125,12 +126,31 @@ class Executor:
         from dataclasses import replace
         self.state = replace(self.state, day_realized_pnl_cents=int(bal) - int(self._day_start_balance))
 
+    def _trading_disabled(self) -> bool:
+        """True when the filesystem trading-disable switch is present (scripts/disable_trading.sh).
+        Checked live on every entry so a halt takes effect within one cycle, no restart needed.
+        Best-effort: any stat error reads as NOT disabled (never blocks on a transient FS hiccup)."""
+        path = getattr(self.cfg, "disable_file", "") or ""
+        if not path:
+            return False
+        try:
+            return os.path.exists(path)
+        except OSError:
+            return False
+
     def on_fire(self, pick: Mapping[str, Any]) -> dict[str, Any]:
         """Handle one v2 delivered NO pick. Returns a result dict (never raises on a
         normal refusal). ``pick`` needs: ticker, asset, predicted_side, entry/limit
         price (cents), window_key."""
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
+        # Filesystem kill switch — refuse NEW entries the instant the disable file appears (no
+        # restart). Defensive EXITS (on_exit) are deliberately NOT gated here, so an open position
+        # can still be closed while entries are halted.
+        if self._trading_disabled():
+            logger.warning("entry BLOCKED %s w%s: trading disabled via %s",
+                           pick.get("ticker"), pick.get("window_key"), self.cfg.disable_file)
+            return {"placed": False, "reason": "TRADING_DISABLED"}
         # Release positions whose 15-min window has already settled, so the optimistic in-memory
         # open_count / open_tickers can't grow forever and pin at MAX_OPEN / block every ticker with
         # DUP_TICKER (the cause of the bot silently halting after ~max_open entries). Uses the

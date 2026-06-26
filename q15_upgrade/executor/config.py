@@ -241,6 +241,15 @@ class ExecutorConfig:
     orders_db_path: str = field(
         default_factory=lambda: os.environ.get("Q15_EXEC_ORDERS_DB")
         or "data/q15_executor_orders_v1.sqlite3")
+    # FILESYSTEM TRADING-DISABLE SWITCH. When a file exists at this path, the executor refuses ALL
+    # new ENTRIES (both the NO book and the YES bot) — a runtime kill that takes effect on the next
+    # ~1s cycle with NO restart and NO Secrets edit, because it's checked live on every fire. Unlike
+    # the Q15_EXEC_KILL panic button (which also freezes defensive EXITS), this gates ENTRIES ONLY,
+    # so an already-open position can still be defensively closed. Toggle it with
+    # scripts/disable_trading.sh (create = halt, --enable = resume). Default path lives under data/.
+    # Set Q15_EXEC_DISABLE_FILE to relocate it (both bots must share the same path to halt together).
+    disable_file: str = field(
+        default_factory=lambda: os.environ.get("Q15_EXEC_DISABLE_FILE") or "data/EXECUTOR_DISABLED")
 
     @classmethod
     def from_env(cls) -> "ExecutorConfig":
