@@ -398,8 +398,8 @@ function updateLiveCard(mgr, d){
   renderPrediction(R, d);
 
   // kv
-  R.underlying.innerHTML = fmtUsd(d.underlying_current) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${d.underlying_source}</span>`:'');
-  R.target.innerHTML = (d.target_value?fmtUsd(d.target_value):(d.target||'–')) + ` <span style="font-size:11px" class="${d.target_distance_pct>0?'change-pos':d.target_distance_pct<0?'change-neg':'change-neu'}">${fmtPct(d.target_distance_pct)}</span>`;
+  R.underlying.innerHTML = fmtUsd(d.underlying_current) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${esc(d.underlying_source)}</span>`:'');
+  R.target.innerHTML = (d.target_value?fmtUsd(d.target_value):esc(d.target||'–')) + ` <span style="font-size:11px" class="${d.target_distance_pct>0?'change-pos':d.target_distance_pct<0?'change-neg':'change-neu'}">${fmtPct(d.target_distance_pct)}</span>`;
 
   // pattern
   const dir = d.pattern_direction;

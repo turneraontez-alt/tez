@@ -44,6 +44,18 @@ def test_trade_taker_side_is_escaped():
     assert "'taker '+t.taker_side.toUpperCase()" not in TEMPLATE
 
 
+def test_underlying_source_is_escaped():
+    assert "${esc(d.underlying_source)}" in TEMPLATE
+    assert "${d.underlying_source}" not in TEMPLATE
+
+
+def test_target_fallback_is_escaped():
+    # d.target falls back to the raw Kalshi-API yes_sub_title string, served
+    # unsanitized via /api/snapshot, so the fallback branch must be escaped.
+    assert "esc(d.target||'–')" in TEMPLATE
+    assert "(d.target_value?fmtUsd(d.target_value):(d.target||'–'))" not in TEMPLATE
+
+
 def test_esc_helper_still_present():
     # The escaper itself must remain defined for the above call sites.
     assert "function esc(" in TEMPLATE
