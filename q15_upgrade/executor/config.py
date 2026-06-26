@@ -94,6 +94,15 @@ class ExecutorConfig:
     # bankroll — the correlation guard (picks in a window co-settle ~76%). Never exceeded
     # even if per_pick_pct * max_picks would.
     max_per_window_pct: float = field(default_factory=lambda: _float("Q15_EXEC_MAX_PER_WINDOW_PCT", 0.08))
+    # ABSOLUTE-dollar ceiling on TOTAL stake committed to one 15-minute settlement window, in
+    # CENTS. Owner default $450 (45000c) — the hard cap on per-interval risk. It is the FINAL
+    # clamp on the per-window budget: applied AFTER flat/%/by-interval sizing AND after conviction
+    # up-sizing, so no combination (incl. a doubled extra pick) can put more than this at risk on
+    # one co-settling window. With flat $75 x 1 pick the window budget is already well under it, so
+    # it only BINDS when picks/window or conviction would push the window total above $450. Works
+    # alongside max_per_window_pct (the lower of the two budgets wins). 0 = no absolute window cap
+    # (rely on the %-of-bankroll guard only). Set Q15_EXEC_MAX_PER_WINDOW_CENTS.
+    max_per_window_cents: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PER_WINDOW_CENTS", 45000))
     # Stop opening NEW entries once the day's realized P&L is down this fraction of the
     # day-start bankroll (the daily circuit breaker, %-based). Exits still allowed.
     daily_loss_limit_pct: float = field(default_factory=lambda: _float("Q15_EXEC_DAILY_LOSS_LIMIT_PCT", 0.20))
@@ -227,8 +236,11 @@ class ExecutorConfig:
             stop = "NO daily stop (no circuit breaker)"
         gate = (f"BTC-gate ON (lean>={self.btc_gate_lean:.2f}/breadth>={self.btc_gate_breadth:.2f}, "
                 f"conviction-exempt)" if self.btc_gate_enabled else "BTC-gate OFF")
+        window = f"<= {self.max_per_window_pct*100:.0f}%/window"
+        if self.max_per_window_cents > 0:
+            window += f" & <= ${self.max_per_window_cents/100:.0f}/window"
         return (f"EXECUTOR ENABLED — {mode}; size {size}, "
-                f"<= {self.max_picks_per_window} pick(s)/window, <= {self.max_per_window_pct*100:.0f}%/window, "
+                f"<= {self.max_picks_per_window} pick(s)/window, {window}, "
                 f"{stop}; {gate}")
 
 
@@ -263,6 +275,7 @@ def yes_config_from_env() -> ExecutorConfig:
         flat_stake_cents=_int("Q15_EXEC_YES_FLAT_STAKE_CENTS", 15000),
         max_stake_per_pick_cents=_int("Q15_EXEC_YES_MAX_STAKE_PER_PICK_CENTS", 15000),
         max_picks_per_window=_int("Q15_EXEC_YES_MAX_PICKS_PER_WINDOW", 2),
+        max_per_window_cents=_int("Q15_EXEC_YES_MAX_PER_WINDOW_CENTS", 45000),  # $450 hard window cap
         conviction_sizing=False,              # owner: "no double just yet"
         # Daily stop OFF (parity with the NO book's current posture); per-pick + per-window are the guards.
         daily_loss_limit_cents=_int("Q15_EXEC_YES_DAILY_LOSS_LIMIT_CENTS", 0),

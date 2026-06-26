@@ -192,6 +192,13 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if mult > 1:
         stake *= mult
         window_cap *= mult
+    # ABSOLUTE per-window dollar ceiling — the FINAL clamp on the per-window budget, after every
+    # sizing path (flat/%/by-interval) AND conviction up-sizing. No combination of picks or a
+    # doubled extra can put more than this at risk on one 15-min settlement window (the correlation
+    # guard, in dollars). Owner default $450. 0 => inert. The lower of this and the %-budget wins.
+    abs_window_cap = int(getattr(cfg, "max_per_window_cents", 0) or 0)
+    if abs_window_cap > 0:
+        window_cap = min(window_cap, abs_window_cap)
     already = state.window_committed_cents.get(wk, 0)
     remaining = window_cap - already
     if remaining <= 0:
