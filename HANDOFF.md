@@ -20,8 +20,9 @@ bound > 0, survives LOAO + time-split), while **7M NO is break-even noise** (+0.
 PR #65 had re-enabled — and the **paper YES harvest** (hiconv + BTC-confirm) had NEVER fired (`no_only`
 blocked it) despite being +8.6c/95%-win in-sample. Three changes, all read-only / paper:
 - **Drop NO-7M (`skip_7m_no_deliver`, gate `SKIP_7M_NO`):** NO-only 7M DELIVERY skip; research_fired
-  unchanged; YES-7M untouched (a global `skip_7m` would kill the good YES-7M). `.replit SKIP_7M_NO=true`,
-  `SKIP_7M=false` (7M processing stays on for YES).
+  unchanged; YES-7M untouched (a global `skip_7m` would kill the good YES-7M). Shipped as a ready,
+  default-OFF lever but **LEFT OFF for now** (owner: activate YES only) — `.replit SKIP_7M_NO=false`;
+  7M NO keeps firing as before. Flip to `true` later to drop the dilutive 7M NO. `SKIP_7M=false`.
 - **Paper YES notifications (`yes_notify_enabled`, gate `yes_notify` signal + isolated runner block):**
   hiconv YES (cal≥0.70 & mkt≥0.60) that BTC confirms now delivers a Telegram NOTIFICATION + records
   fired=1. SEPARATE from the NO `fired` path (NO byte-identical). NEVER routes to an executor —
