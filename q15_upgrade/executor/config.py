@@ -11,8 +11,10 @@ that can place/cancel a live order, and it is double-gated:
         -> enabled=true,dry_run=false (LIVE money).
 
 A ``kill_switch`` env (Q15_EXEC_KILL=true) hard-blocks ALL placement regardless of
-the above — the panic button. Sizing defaults encode the owner's chosen rule:
-2 picks/window at ~4% of bankroll each (a ~8% per-window cap), never 15%.
+the above — the panic button. Sizing defaults encode the owner's chosen rule: a
+per-window STAKE LADDER of $275 on the first (best-price) pick and $150 on the second,
+up to 2 picks/window — the larger bet rides the best entry. (Disable the ladder with
+Q15_EXEC_STAKE_LADDER_CENTS= empty to fall back to flat / %-of-bankroll sizing.)
 """
 from __future__ import annotations
 
@@ -42,6 +44,25 @@ def _int(name: str, default: int) -> int:
         return int(float(os.environ.get(name, default)))
     except (TypeError, ValueError):
         return default
+
+
+def _int_tuple(name: str, default: str) -> tuple:
+    """Parse "CENTS[,CENTS...]" (e.g. "27500,15000") into a tuple of positive ints, in order.
+    Empty / malformed entries are skipped; an all-empty value yields () (the ladder is then OFF)."""
+    raw = os.environ.get(name)
+    src = default if raw is None else raw
+    out: list[int] = []
+    for part in (src or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            cents = int(float(part))
+        except (TypeError, ValueError):
+            continue
+        if cents > 0:
+            out.append(cents)
+    return tuple(out)
 
 
 def _stake_map(name: str) -> dict:
@@ -81,7 +102,19 @@ class ExecutorConfig:
     # live Kalshi balance instead (live mode only); a fixed value is safer for testing.
     bankroll_cents: int = field(default_factory=lambda: _int("Q15_EXEC_BANKROLL_CENTS", 0))
     per_pick_pct: float = field(default_factory=lambda: _float("Q15_EXEC_PER_PICK_PCT", 0.04))
-    max_picks_per_window: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PICKS_PER_WINDOW", 1))
+    max_picks_per_window: int = field(default_factory=lambda: _int("Q15_EXEC_MAX_PICKS_PER_WINDOW", 2))
+    # PER-WINDOW STAKE LADDER in CENTS, by pick ORDER within the window: the 1st pick stakes
+    # ladder[0], the 2nd ladder[1], etc. (a pick past the end reuses the last rung). Owner rule:
+    # "$275 on the first/best pick, $150 on the second" -> (27500, 15000). The bot surfaces the
+    # best-price entry first, so the larger bet rides it. When SET (non-empty) the ladder is the
+    # HIGHEST-precedence sizing path: each rung is BOTH the stake AND that pick's per-pick ceiling
+    # (it supersedes flat_stake_cents, stake_by_interval, the % sizing, AND conviction up-sizing),
+    # and the per-window budget becomes the sum of the rungs (still clamped by max_per_window_cents
+    # and the bankroll on hand). The ladder length also implies the natural picks/window
+    # (max_picks_per_window should be >= len). Set Q15_EXEC_STAKE_LADDER_CENTS= (empty) to DISABLE
+    # it and fall back to flat / %-of-bankroll sizing.
+    stake_ladder_cents: tuple = field(
+        default_factory=lambda: _int_tuple("Q15_EXEC_STAKE_LADDER_CENTS", "27500,15000"))
     # CONDITIONAL gate on the 2nd-or-later pick in a window: it must have ask (price) >= this many
     # cents, else it is refused (SECOND_PICK_ASK_FLOOR). The FIRST pick of a window is never gated.
     # DEFAULT 0 = OFF / no condition (the gate is `price >= 0`, always true -> byte-identical). Pairs
@@ -221,7 +254,10 @@ class ExecutorConfig:
             return "EXECUTOR ENABLED but KILL SWITCH ON — no orders will be placed"
         mode = "DRY-RUN (orders logged, nothing sent)" if self.dry_run else "*** LIVE REAL MONEY ***"
         cap = f"${self.max_stake_per_pick_cents/100:.0f}/pick cap" if self.max_stake_per_pick_cents > 0 else "no per-pick cap"
-        if self.flat_stake_cents > 0:
+        if self.stake_ladder_cents:
+            rungs = "/".join(f"${c/100:.0f}" for c in self.stake_ladder_cents)
+            size = f"LADDER {rungs} by pick order"
+        elif self.flat_stake_cents > 0:
             size = f"FLAT ${self.flat_stake_cents/100:.0f}/pick ({cap})"
         else:
             size = f"{self.per_pick_pct*100:.0f}%/pick ({cap})"
@@ -276,6 +312,8 @@ def yes_config_from_env() -> ExecutorConfig:
         max_stake_per_pick_cents=_int("Q15_EXEC_YES_MAX_STAKE_PER_PICK_CENTS", 15000),
         max_picks_per_window=_int("Q15_EXEC_YES_MAX_PICKS_PER_WINDOW", 2),
         max_per_window_cents=_int("Q15_EXEC_YES_MAX_PER_WINDOW_CENTS", 45000),  # $450 hard window cap
+        # Same per-window ladder as the NO book: $275 on the first/best pick, $150 on the second.
+        stake_ladder_cents=_int_tuple("Q15_EXEC_YES_STAKE_LADDER_CENTS", "27500,15000"),
         conviction_sizing=False,              # owner: "no double just yet"
         # Daily stop OFF (parity with the NO book's current posture); per-pick + per-window are the guards.
         daily_loss_limit_cents=_int("Q15_EXEC_YES_DAILY_LOSS_LIMIT_CENTS", 0),

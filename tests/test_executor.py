@@ -17,7 +17,7 @@ def _cfg(**over):
     base = dict(enabled=True, dry_run=True, bankroll_cents=100_000,  # $1000
                 per_pick_pct=0.04, max_picks_per_window=2, max_per_window_pct=0.08,
                 daily_loss_limit_pct=0.20, daily_loss_limit_cents=0, max_open_positions=6,
-                flat_stake_cents=0, min_price_cents=50, max_price_cents=85,
+                flat_stake_cents=0, stake_ladder_cents=(), min_price_cents=50, max_price_cents=85,
                 record_orders=False)  # order recording off by default in tests; its own tests enable it
     base.update(over)
     return ExecutorConfig(**base)
@@ -487,13 +487,15 @@ def test_apply_fill_updates_state():
 
 
 # --------------------------------------------------------------------------- #
-# FLAT sizing mode (owner default: $75 flat / pick, 1 pick/window)
+# Owner default sizing: per-window LADDER $275 (1st/best pick) / $150 (2nd), 2 picks/window
 # --------------------------------------------------------------------------- #
-def test_owner_default_executor_sizing_is_flat_75_one_pick():
+def test_owner_default_executor_sizing_is_ladder_275_150_two_picks():
     cfg = ExecutorConfig()      # production defaults
-    assert cfg.flat_stake_cents == 7500          # $75 flat per pick
-    assert cfg.max_picks_per_window == 1         # single best pick per window
-    assert cfg.max_stake_per_pick_cents == 7500  # hard cap matches
+    assert cfg.stake_ladder_cents == (27500, 15000)  # $275 on the 1st/best pick, $150 on the 2nd
+    assert cfg.max_picks_per_window == 2             # up to two picks per settlement window
+    # flat / per-pick-cap stay as the documented FALLBACK used only when the ladder is disabled.
+    assert cfg.flat_stake_cents == 7500
+    assert cfg.max_stake_per_pick_cents == 7500
 
 
 def test_flat_stake_overrides_pct_sizing():
@@ -675,6 +677,7 @@ def _yescfg(**over):
     YES gates are exercised deterministically. flat $150/pick, 2/window, band 50-99, the 3 gates on."""
     base = dict(enabled=True, dry_run=True, bankroll_cents=100_000, no_only=False,
                 flat_stake_cents=15000, max_stake_per_pick_cents=15000, max_picks_per_window=2,
+                stake_ladder_cents=(),
                 conviction_sizing=False, daily_loss_limit_cents=0, daily_loss_limit_pct=0.0,
                 max_open_positions=6, min_price_cents=50, max_price_cents=99,
                 limit_offset_cents=1, allowed_intervals=frozenset({"10M"}), btc_gate_enabled=False,

@@ -158,16 +158,28 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     if bankroll <= 0:
         return Decision(False, "BANKROLL")
 
-    # Per-pick stake. An INTERVAL override (stake_by_interval) wins first: that exact amount is the
-    # stake AND the per-pick ceiling for this interval (it supersedes both flat and the hard cap),
-    # so a 10M pick can stake $100 while the global cap stays $75. Else FLAT mode stakes a fixed
-    # amount per pick; else size as a % of bankroll. The window total is then CLAMPED to the
-    # per-window budget (the correlation guard — picks in a window co-settle).
+    # Per-pick stake. A per-window STAKE LADDER (stake_ladder_cents) wins first when set: the Nth
+    # pick of the window stakes the Nth rung (here $275 on the 1st/best pick, $150 on the 2nd) — the
+    # rung is BOTH the stake AND that pick's per-pick ceiling, the window budget is the sum of the
+    # rungs, and conviction up-sizing is bypassed. Else an INTERVAL override (stake_by_interval): that
+    # exact amount is the stake AND the per-pick ceiling for the interval (supersedes flat and the
+    # hard cap). Else FLAT mode stakes a fixed amount per pick; else size as a % of bankroll. The
+    # window total is then CLAMPED to the per-window budget (the correlation guard — picks co-settle).
     flat = int(getattr(cfg, "flat_stake_cents", 0) or 0)
     by_interval = getattr(cfg, "stake_by_interval", None) or {}
     interval_stake = by_interval.get((pick.interval or "").upper())
+    ladder = tuple(int(c) for c in (getattr(cfg, "stake_ladder_cents", ()) or ()) if int(c) > 0)
     per_pick_cap = int(getattr(cfg, "max_stake_per_pick_cents", 0) or 0)
-    if interval_stake and int(interval_stake) > 0:
+    placed_this_window = state.window_count.get(wk, 0)
+    if ladder:
+        stake = ladder[min(placed_this_window, len(ladder) - 1)]
+        # Window budget = the rungs actually spendable this window: one per allowed pick, reusing
+        # the last rung for any pick past the ladder's end (so a picks/window > len(ladder) still
+        # has room). With the usual max_picks == len(ladder) this is just sum(ladder).
+        n_picks = max(len(ladder), int(getattr(cfg, "max_picks_per_window", 1) or 1))
+        window_cap = sum(ladder[min(i, len(ladder) - 1)] for i in range(n_picks))
+        per_pick_cap = stake   # the ladder rung is the absolute ceiling for this pick
+    elif interval_stake and int(interval_stake) > 0:
         stake = int(interval_stake)
         window_cap = int(interval_stake) * max(1, cfg.max_picks_per_window)
         per_pick_cap = int(interval_stake)   # the override is the ceiling for this interval
@@ -186,8 +198,9 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     # past it). bankroll still binds below. NOTE: leverage — a conviction window commits more on
     # correlated co-settlers than a normal window.
     mult = int(getattr(pick, "stake_multiplier", 1) or 1)
-    is_extra_pick = state.window_count.get(wk, 0) >= 1
-    if not getattr(cfg, "conviction_sizing", True) or mult < 1 or not is_extra_pick:
+    is_extra_pick = placed_this_window >= 1
+    # The ladder is self-contained per-pick sizing; conviction doubling never stacks on top of it.
+    if ladder or not getattr(cfg, "conviction_sizing", True) or mult < 1 or not is_extra_pick:
         mult = 1
     if mult > 1:
         stake *= mult

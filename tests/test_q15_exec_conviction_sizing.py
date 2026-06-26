@@ -19,7 +19,7 @@ def _cfg(**over):
     base = dict(
         enabled=True, dry_run=True, bankroll_cents=1_000_000,
         flat_stake_cents=15000, max_stake_per_pick_cents=30000, conviction_sizing=True,
-        stake_by_interval={}, max_picks_per_window=2, max_per_window_pct=1.0,
+        stake_by_interval={}, stake_ladder_cents=(), max_picks_per_window=2, max_per_window_pct=1.0,
         daily_loss_limit_pct=0.0, daily_loss_limit_cents=0, max_open_positions=6,
         min_price_cents=50, max_price_cents=85, record_orders=False,
     )
