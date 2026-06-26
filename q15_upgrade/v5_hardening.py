@@ -31,11 +31,25 @@ def latest_trade_ts(trades):
 
 
 def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=None):
-    """Use source timestamps, not local snapshot rebuild time."""
+    """Use per-ticker source event timestamps, not local snapshot rebuild time.
+
+    Book freshness is judged on the path THIS ticker's book actually took.
+    ``raw["book_source"]`` ("ws"/"rest") is stamped per ticker by
+    ``HybridMarketData.get_orderbook``: a websocket book carries its own
+    ``_updated_at`` event time (surfaced as ``book_event_ts``); a REST book —
+    which can be a per-ticker fallback even while the websocket is connected — is
+    judged by fetch-completion time. We deliberately do NOT fall back to global
+    websocket health (``last_orderbook_at``/``last_message_at``): those advance
+    whenever ANY subscribed market updates, so a single active market could
+    otherwise make a different market's missing or stale book read as fresh and
+    slip past this gate. ``ws_health`` is retained for signature/diagnostic
+    compatibility. ``source`` (overall connection mode) is the fallback only when
+    a legacy raw result predates ``book_source``.
+    """
     snap = dict(snapshot)
     raw = raw_result or {}
-    health = ws_health or {}
     source = raw.get("source") or "unknown"
+    book_source = raw.get("book_source") or source
     spot = raw.get("spot") or {}
 
     spot_ts = _num(spot.get("ts"))
@@ -53,12 +67,11 @@ def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=N
     if trade_ts is None:
         trade_ts = latest_trade_ts(raw.get("trades"))
 
-    if source == "ws":
+    if book_source == "ws":
+        # A websocket book always carries its own _updated_at; if it somehow
+        # doesn't, leave book_ts None so the gate flags it missing (fail closed)
+        # rather than borrowing another ticker's global websocket freshness.
         book_ts = _num(raw.get("book_event_ts"))
-        if book_ts is None:
-            book_ts = _num(health.get("last_orderbook_at"))
-        if book_ts is None:
-            book_ts = _num(health.get("last_message_at"))
     else:
         book_ts = _num(raw.get("fetch_completed_at"), now)
 
@@ -93,6 +106,7 @@ def apply_snapshot_freshness(snapshot, raw_result, now, ws_health=None, config=N
 
     snap.update({
         "source_mode": source,
+        "book_source_mode": book_source,
         "spot_event_ts": spot_ts,
         "latest_trade_event_ts": trade_ts,
         "orderbook_event_ts": book_ts,

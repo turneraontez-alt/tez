@@ -398,8 +398,8 @@ function updateLiveCard(mgr, d){
   renderPrediction(R, d);
 
   // kv
-  R.underlying.innerHTML = fmtUsd(d.underlying_current) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${d.underlying_source}</span>`:'');
-  R.target.innerHTML = (d.target_value?fmtUsd(d.target_value):(d.target||'–')) + ` <span style="font-size:11px" class="${d.target_distance_pct>0?'change-pos':d.target_distance_pct<0?'change-neg':'change-neu'}">${fmtPct(d.target_distance_pct)}</span>`;
+  R.underlying.innerHTML = fmtUsd(d.underlying_current) + (d.underlying_source?` <span style="font-size:9px;color:var(--muted)">${esc(d.underlying_source)}</span>`:'');
+  R.target.innerHTML = (d.target_value?fmtUsd(d.target_value):esc(d.target||'–')) + ` <span style="font-size:11px" class="${d.target_distance_pct>0?'change-pos':d.target_distance_pct<0?'change-neg':'change-neu'}">${fmtPct(d.target_distance_pct)}</span>`;
 
   // pattern
   const dir = d.pattern_direction;
@@ -420,7 +420,7 @@ function updateLiveCard(mgr, d){
 
   // confirmations
   const reasons = d.confirmation_reasons||[];
-  R.confirms.innerHTML = reasons.length ? reasons.map(r=>`<span class="confirm-chip">${r}</span>`).join('')
+  R.confirms.innerHTML = reasons.length ? reasons.map(r=>`<span class="confirm-chip">${esc(r)}</span>`).join('')
     : '<span class="confirm-none">No confirmations yet</span>';
 
   // flow
@@ -455,7 +455,7 @@ function updateLiveCard(mgr, d){
     <div class="trade-row ${t.is_large?'trade-large':''}">
       <span class="trade-cnt">${fmt(t.contracts,0)}</span>
       <span class="trade-price-yes">${fmtCents(t.yes_price)}</span>
-      <span class="trade-side ${t.taker_side==='yes'?'side-yes':'side-no'}">${t.taker_side?('taker '+t.taker_side.toUpperCase()):''}</span>
+      <span class="trade-side ${t.taker_side==='yes'?'side-yes':'side-no'}">${t.taker_side?('taker '+esc(String(t.taker_side).toUpperCase())):''}</span>
       ${t.is_large?'<span class="large-badge">LG</span>':''}
       ${t.is_block?'<span class="block-badge">BLK</span>':''}
       <span class="trade-time">${fmtClock(t.time)}</span>
@@ -463,7 +463,7 @@ function updateLiveCard(mgr, d){
 
   // warnings
   const w = d.data_quality_warnings||[];
-  R.warnWrap.innerHTML = w.length ? `<div class="section-title">Data quality</div><div class="warns">${w.map(x=>`<div class="warn">⚠ ${x}</div>`).join('')}</div>` : '';
+  R.warnWrap.innerHTML = w.length ? `<div class="section-title">Data quality</div><div class="warns">${w.map(x=>`<div class="warn">⚠ ${esc(x)}</div>`).join('')}</div>` : '';
 
   mgr.el.className = 'card ' + (isStale(d)?'stale':'');
   updateChart(mgr, d);
@@ -486,12 +486,12 @@ function updateSimpleCard(mgr, d){
     R.cdLabel.textContent = 'cycling';
     R.body.innerHTML = `<div class="cycling-body">
       <div class="upcoming-msg"><span class="cycling-dot"></span> Finding next 15-min market…</div>
-      <div class="upcoming-sub">${d.ticker?('Was: '+d.ticker):''}</div>
+      <div class="upcoming-sub">${d.ticker?('Was: '+esc(d.ticker)):''}</div>
     </div>`;
   } else {
     R.cd.textContent = '–';
     R.cdLabel.textContent = '';
-    R.body.innerHTML = `<div class="upcoming-body"><div class="upcoming-sub">${d.error||'No market'}</div></div>`;
+    R.body.innerHTML = `<div class="upcoming-body"><div class="upcoming-sub">${esc(d.error||'No market')}</div></div>`;
   }
 }
 
