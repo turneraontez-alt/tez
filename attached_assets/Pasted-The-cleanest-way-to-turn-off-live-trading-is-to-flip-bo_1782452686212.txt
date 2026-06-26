@@ -1,0 +1,25 @@
+The cleanest way to turn off live trading is to flip both books to **dry‑run** — real orders stop, but the alerts and learning keep running. Set these in your `.replit` (`[userenv.shared]`, where the other `Q15_EXEC_*` live) and **restart the app**:
+
+```
+Q15_EXEC_DRY_RUN     = "true"     # NO book → logs orders, sends nothing
+Q15_EXEC_YES_DRY_RUN = "true"     # YES bot → same
+```
+
+That's the recommended "off." No real money moves; everything else (paper signals, Telegram, settlement learning) continues exactly as before, and you flip them back to `"false"` to go live again.
+
+## The three levels (pick by how hard a stop you want)
+
+| goal | set | effect |
+|---|---|---|
+| **Stop real orders, keep system live** *(recommended)* | `Q15_EXEC_DRY_RUN="true"` + `Q15_EXEC_YES_DRY_RUN="true"` | orders are logged, never sent; alerts/learning continue |
+| **Panic button — halt everything now** | `Q15_EXEC_KILL="true"` | blocks ALL placement on **both** books, **including defensive exits** — so manage any open positions yourself (they settle at window close anyway, ≤15 min) |
+| **Fully disable the order layer** | `Q15_EXEC_ENABLED="false"` + `Q15_EXEC_YES_ENABLED="false"` | the executor never loads at all |
+
+`Q15_EXEC_KILL="true"` is the single global switch that kills both the NO book and the YES bot (the YES kill also has its own `Q15_EXEC_YES_KILL="true"` if you ever want to stop *only* the YES bot).
+
+## Important
+- **You must restart the app** for the env change to take effect — the running process holds its env until then. On Replit: Stop → Run (or restart the "Start application" workflow).
+- Open positions aren't force‑closed by turning trading off; being 15‑minute binaries, they **settle on their own within ≤15 minutes**.
+- Dry‑run vs kill difference: **dry‑run** stops new entries *and* exits (both become simulated); **kill** does the same but is the explicit panic flag. For a calm "stop trading," dry‑run is cleaner; for "stop RIGHT NOW," use kill.
+
+Want me to make the `.replit` edit for you (set both to dry‑run), so all you have to do is restart? I won't change anything live without you — just say the word.
