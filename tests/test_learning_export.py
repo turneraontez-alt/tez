@@ -50,6 +50,7 @@ def _point_ledgers_at(monkeypatch, data_dir: Path) -> None:
     monkeypatch.setenv(
         "Q15_POLYMARKET_DB", str(data_dir / "q15_polymarket_shadow_v1.sqlite3")
     )
+    monkeypatch.setenv("Q15_SPOT_DEPTH_DB", str(data_dir / "q15_spot_depth_v1.sqlite3"))
 
 
 # --------------------------------------------------------------------------- #

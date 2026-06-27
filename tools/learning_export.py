@@ -83,6 +83,7 @@ _LEDGER_ENV_DEFAULTS = {
     "v95": ("Q15_V95_LEDGER_DB", "data/q15_v95_ledger_v1.sqlite3"),
     "challenger": ("Q15_CHALLENGER_DB", "data/q15_challenger_shadow_v1.sqlite3"),
     "polymarket": ("Q15_POLYMARKET_DB", "data/q15_polymarket_shadow_v1.sqlite3"),
+    "spot_depth": ("Q15_SPOT_DEPTH_DB", "data/q15_spot_depth_v1.sqlite3"),
 }
 
 

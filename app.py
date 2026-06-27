@@ -1177,6 +1177,12 @@ def health():
     except Exception:
         spot_ws_status = {"enabled": False}
 
+    try:
+        from spot_depth import spot_depth_health
+        spot_depth_status = spot_depth_health()
+    except Exception:
+        spot_depth_status = {"enabled": False}
+
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
 
     # Surface learning-ledger health at the top level so silent learning-layer
@@ -1228,6 +1234,7 @@ def health():
         "websocket_last_message_at": wsh.get("last_message_at"),
         "websocket_book_ages": wsh.get("book_ages"),
         "spot_ws": spot_ws_status,
+        "spot_depth": spot_depth_status,
         "cycle_watchdog": cycle_watchdog.health(),
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
@@ -1254,6 +1261,11 @@ def _start_refresh():
     global _refresh_started
     with _refresh_lock:
         if not _refresh_started:
+            try:
+                from spot_depth import start_spot_depth
+                start_spot_depth()
+            except Exception as exc:
+                logger.warning("Spot depth collector did not start: %s", exc)
             threading.Thread(target=refresh_loop, daemon=True).start()
             _refresh_started = True
             logger.info("Refresh loop started")
