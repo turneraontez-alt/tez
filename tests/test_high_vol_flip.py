@@ -180,7 +180,16 @@ def test_more_fire_strict_uses_checkpoint_jump_and_excludes_hype(tmp_path):
 
     bnb_now = _cand(
         "BNB", "YES", 66, 69, 0.62, ticker="T-BNB", secs=720, close=close,
-        quote_extra={"yes_bid_depth_contracts": 31, "yes_ask_depth_contracts": 44},
+        quote_extra={
+            "yes_bid_depth_contracts": 31,
+            "yes_ask_depth_contracts": 44,
+            "spot_depth_source": "OKX BNB-USDT",
+            "spot_depth_age_seconds": 3.0,
+            "spot_depth_bid_depth_levels": 900.0,
+            "spot_depth_ask_depth_levels": 300.0,
+            "spot_depth_imbalance": 0.5,
+            "spot_depth_trade_net_qty_15s": 5.0,
+        },
     )
     hype_now = _cand("HYPE", "YES", 66, 69, 0.62, ticker="T-HYPE", secs=720, close=close)
     r._observe_sync(candidates=[bnb_now, hype_now], now=1060.0)
@@ -193,6 +202,11 @@ def test_more_fire_strict_uses_checkpoint_jump_and_excludes_hype(tmp_path):
     assert rows[0]["previous_interval"] == "13M"
     assert rows[0]["selected_mid_jump_cents"] == 6.0
     assert rows[0]["yes_ask_depth_contracts"] == 44
+    assert rows[0]["spot_depth_source"] == "OKX BNB-USDT"
+    assert rows[0]["spot_depth_bid_depth_levels"] == 900.0
+    assert rows[0]["spot_depth_ask_depth_levels"] == 300.0
+    assert rows[0]["spot_depth_imbalance"] == 0.5
+    assert rows[0]["spot_depth_trade_net_qty_15s"] == 5.0
     assert "MORE-FIRE STRICT" in r.telegram.sent[0]
 
 

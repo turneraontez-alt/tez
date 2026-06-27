@@ -708,6 +708,53 @@ def _kalshi_depth(snapshot: Mapping[str, Any], side: str) -> float | None:
     return None
 
 
+def _spot_depth_quote_fields(snapshot: Mapping[str, Any], observed_at: float) -> dict[str, Any]:
+    """Record-only actual-coin depth context, aligned to the Kalshi decision row.
+
+    ``spot_depth`` is produced by the optional public exchange collector. These
+    fields are never used by the live gate here; they simply make later research
+    easy: each V2/HVF row can compare Kalshi contract depth against actual-coin
+    book imbalance and trade pressure at the same decision time.
+    """
+    depth = snapshot.get("spot_depth")
+    if not isinstance(depth, Mapping):
+        return {}
+
+    def val(key: str) -> Any:
+        return depth.get(key)
+
+    created = _num(depth.get("created_at"))
+    snapshot_age = max(0.0, observed_at - created) if created is not None else None
+    book_age = _num(depth.get("book_age_seconds"))
+    trade_age = _num(depth.get("trade_age_seconds"))
+    return {
+        "spot_depth_source": val("source"),
+        "spot_depth_age_seconds": (
+            (snapshot_age or 0.0) + book_age if book_age is not None else snapshot_age
+        ),
+        "spot_depth_trade_age_seconds": (
+            (snapshot_age or 0.0) + trade_age if trade_age is not None else None
+        ),
+        "spot_depth_best_bid": val("best_bid"),
+        "spot_depth_best_ask": val("best_ask"),
+        "spot_depth_mid": val("mid"),
+        "spot_depth_spread_bps": val("spread_bps"),
+        "spot_depth_bid_depth_top": val("bid_depth_top"),
+        "spot_depth_ask_depth_top": val("ask_depth_top"),
+        "spot_depth_bid_depth_levels": val("bid_depth_levels"),
+        "spot_depth_ask_depth_levels": val("ask_depth_levels"),
+        "spot_depth_bid_notional_levels": val("bid_notional_levels"),
+        "spot_depth_ask_notional_levels": val("ask_notional_levels"),
+        "spot_depth_imbalance": val("depth_imbalance"),
+        "spot_depth_trade_buy_qty_15s": val("trade_buy_qty_15s"),
+        "spot_depth_trade_sell_qty_15s": val("trade_sell_qty_15s"),
+        "spot_depth_trade_net_qty_15s": val("trade_net_qty_15s"),
+        "spot_depth_trade_buy_notional_15s": val("trade_buy_notional_15s"),
+        "spot_depth_trade_sell_notional_15s": val("trade_sell_notional_15s"),
+        "spot_depth_trade_net_qty_60s": val("trade_net_qty_60s"),
+    }
+
+
 def _market_implied_yes(snapshot: Mapping[str, Any]) -> float | None:
     """Market-implied P(YES) from the Kalshi quote (a YES price in cents is the
     market's probability estimate). Uses the YES mid, falling back to the NO mid."""
@@ -1246,6 +1293,7 @@ def analyse_v95(
     no_bid_depth = _first_num(snapshot, ("no_bid_qty", "no_bid_size", "no_bid_depth_contracts"))
     quote_ts = canonical.feed_timestamps.get("quote")
     quote_age = None if quote_ts is None else max(0.0, canonical.observed_at - quote_ts)
+    spot_depth_fields = _spot_depth_quote_fields(snapshot, canonical.observed_at)
     # Per-checkpoint gates. 7M defaults mirror 10M so adding the 7-minute tracker
     # does not change live entry behavior; both stay overridable via env.
     _checkpoint = canonical.checkpoint if canonical.checkpoint in ("10M", "15M", "7M") else "10M"
@@ -1382,6 +1430,7 @@ def analyse_v95(
             "yes_ask_depth_contracts": yes_ask_depth,
             "no_bid_depth_contracts": no_bid_depth,
             "no_ask_depth_contracts": no_ask_depth,
+            **spot_depth_fields,
         },
         "costs": costs,
         "net_edge_cents": net_edge,

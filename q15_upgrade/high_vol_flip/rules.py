@@ -15,6 +15,29 @@ REASON_MORE_FIRE_STRICT = "HVF_MORE_FIRE_STRICT"
 REASON_BTC_FOLLOW_EXTREME = "HVF_BTC_FOLLOW_EXTREME"
 REASON_BTC_DIVERGENCE_ACCEL_WATCH = "HVF_BTC_DIVERGENCE_ACCEL_WATCH"
 
+SPOT_DEPTH_KEYS = (
+    "spot_depth_source",
+    "spot_depth_age_seconds",
+    "spot_depth_trade_age_seconds",
+    "spot_depth_best_bid",
+    "spot_depth_best_ask",
+    "spot_depth_mid",
+    "spot_depth_spread_bps",
+    "spot_depth_bid_depth_top",
+    "spot_depth_ask_depth_top",
+    "spot_depth_bid_depth_levels",
+    "spot_depth_ask_depth_levels",
+    "spot_depth_bid_notional_levels",
+    "spot_depth_ask_notional_levels",
+    "spot_depth_imbalance",
+    "spot_depth_trade_buy_qty_15s",
+    "spot_depth_trade_sell_qty_15s",
+    "spot_depth_trade_net_qty_15s",
+    "spot_depth_trade_buy_notional_15s",
+    "spot_depth_trade_sell_notional_15s",
+    "spot_depth_trade_net_qty_60s",
+)
+
 
 def _num(value: Any) -> float | None:
     try:
@@ -143,7 +166,7 @@ def extract_candidate(asset: Any, analysis: Mapping[str, Any], canonical: Any) -
         else:
             dominant_side, dominant_mid = "NO", no_mid
     close_time = getattr(canonical, "settlement_time", None)
-    return {
+    out = {
         "asset": str(asset).upper(),
         "ticker": str(ticker),
         "seconds_remaining": seconds,
@@ -172,6 +195,9 @@ def extract_candidate(asset: Any, analysis: Mapping[str, Any], canonical: Any) -
         "dominant_mid_cents": dominant_mid,
         **quotes,
     }
+    for key in SPOT_DEPTH_KEYS:
+        out[key] = quote.get(key)
+    return out
 
 
 def _spread_ok(cand: Mapping[str, Any], cfg: Any, limit: float | None = None) -> bool:

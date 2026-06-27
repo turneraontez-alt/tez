@@ -28,6 +28,29 @@ from .telegram import UltoimV2Telegram
 
 logger = logging.getLogger("ultoim_v2.runner")
 
+SPOT_DEPTH_KEYS = (
+    "spot_depth_source",
+    "spot_depth_age_seconds",
+    "spot_depth_trade_age_seconds",
+    "spot_depth_best_bid",
+    "spot_depth_best_ask",
+    "spot_depth_mid",
+    "spot_depth_spread_bps",
+    "spot_depth_bid_depth_top",
+    "spot_depth_ask_depth_top",
+    "spot_depth_bid_depth_levels",
+    "spot_depth_ask_depth_levels",
+    "spot_depth_bid_notional_levels",
+    "spot_depth_ask_notional_levels",
+    "spot_depth_imbalance",
+    "spot_depth_trade_buy_qty_15s",
+    "spot_depth_trade_sell_qty_15s",
+    "spot_depth_trade_net_qty_15s",
+    "spot_depth_trade_buy_notional_15s",
+    "spot_depth_trade_sell_notional_15s",
+    "spot_depth_trade_net_qty_60s",
+)
+
 
 def _num(value: Any) -> float | None:
     try:
@@ -189,7 +212,7 @@ class UltoimV2Runner:
         total_cost = costs.get("total_cost_cents")
         if total_cost is None:
             total_cost = costs.get("total_cents")
-        return {
+        out = {
             "asset": str(asset),
             "ticker": str(ticker),
             "seconds_remaining": float(secs),
@@ -231,6 +254,9 @@ class UltoimV2Runner:
             "champion_flow": feature_values.get("flow"),
             "snapshot_id": analysis.get("snapshot_id"),
         }
+        for key in SPOT_DEPTH_KEYS:
+            out[key] = quote.get(key)
+        return out
 
     @staticmethod
     def _spot_stale_age(canonical: Any, analysis: Mapping[str, Any]) -> float | None:
@@ -642,6 +668,26 @@ class UltoimV2Runner:
             "yes_ask_depth_contracts": cand.get("yes_ask_depth_contracts"),
             "no_bid_depth_contracts": cand.get("no_bid_depth_contracts"),
             "no_ask_depth_contracts": cand.get("no_ask_depth_contracts"),
+            "spot_depth_source": cand.get("spot_depth_source"),
+            "spot_depth_age_seconds": cand.get("spot_depth_age_seconds"),
+            "spot_depth_trade_age_seconds": cand.get("spot_depth_trade_age_seconds"),
+            "spot_depth_best_bid": cand.get("spot_depth_best_bid"),
+            "spot_depth_best_ask": cand.get("spot_depth_best_ask"),
+            "spot_depth_mid": cand.get("spot_depth_mid"),
+            "spot_depth_spread_bps": cand.get("spot_depth_spread_bps"),
+            "spot_depth_bid_depth_top": cand.get("spot_depth_bid_depth_top"),
+            "spot_depth_ask_depth_top": cand.get("spot_depth_ask_depth_top"),
+            "spot_depth_bid_depth_levels": cand.get("spot_depth_bid_depth_levels"),
+            "spot_depth_ask_depth_levels": cand.get("spot_depth_ask_depth_levels"),
+            "spot_depth_bid_notional_levels": cand.get("spot_depth_bid_notional_levels"),
+            "spot_depth_ask_notional_levels": cand.get("spot_depth_ask_notional_levels"),
+            "spot_depth_imbalance": cand.get("spot_depth_imbalance"),
+            "spot_depth_trade_buy_qty_15s": cand.get("spot_depth_trade_buy_qty_15s"),
+            "spot_depth_trade_sell_qty_15s": cand.get("spot_depth_trade_sell_qty_15s"),
+            "spot_depth_trade_net_qty_15s": cand.get("spot_depth_trade_net_qty_15s"),
+            "spot_depth_trade_buy_notional_15s": cand.get("spot_depth_trade_buy_notional_15s"),
+            "spot_depth_trade_sell_notional_15s": cand.get("spot_depth_trade_sell_notional_15s"),
+            "spot_depth_trade_net_qty_60s": cand.get("spot_depth_trade_net_qty_60s"),
             "quote_age_seconds": cand.get("quote_age_seconds"),
             "spot_stale_age_seconds": cand.get("spot_stale_age_seconds"),
             "distance_sigma": cand.get("distance_sigma"),

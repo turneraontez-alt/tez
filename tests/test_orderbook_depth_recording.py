@@ -1,5 +1,6 @@
 from q15_upgrade.orderbook import parse_orderbook
 from q15_upgrade.runtime import attach_orderbook_levels
+from q15_upgrade.checkpoint_v95 import _spot_depth_quote_fields
 
 
 def test_attach_orderbook_levels_bridges_depth_aliases():
@@ -16,3 +17,37 @@ def test_attach_orderbook_levels_bridges_depth_aliases():
     assert snap["yes_ask_size"] == 7
     assert snap["yes_ask_depth_contracts"] == 7
     assert snap["no_ask_depth_contracts"] == 12
+
+
+def test_spot_depth_context_is_flattened_for_market_comparison():
+    fields = _spot_depth_quote_fields({
+        "spot_depth": {
+            "created_at": 995.0,
+            "source": "OKX HYPE-USDT",
+            "book_age_seconds": 2.0,
+            "trade_age_seconds": 3.0,
+            "best_bid": 40.0,
+            "best_ask": 40.1,
+            "mid": 40.05,
+            "spread_bps": 24.9,
+            "bid_depth_top": 10.0,
+            "ask_depth_top": 8.0,
+            "bid_depth_levels": 15.0,
+            "ask_depth_levels": 20.0,
+            "bid_notional_levels": 601.0,
+            "ask_notional_levels": 802.0,
+            "depth_imbalance": -0.142857,
+            "trade_buy_qty_15s": 1.0,
+            "trade_sell_qty_15s": 3.0,
+            "trade_net_qty_15s": -2.0,
+            "trade_buy_notional_15s": 40.0,
+            "trade_sell_notional_15s": 120.0,
+            "trade_net_qty_60s": -5.0,
+        }
+    }, observed_at=1000.0)
+
+    assert fields["spot_depth_source"] == "OKX HYPE-USDT"
+    assert fields["spot_depth_age_seconds"] == 7.0
+    assert fields["spot_depth_trade_age_seconds"] == 8.0
+    assert fields["spot_depth_imbalance"] == -0.142857
+    assert fields["spot_depth_trade_net_qty_15s"] == -2.0

@@ -565,6 +565,13 @@ def refresh_loop(max_cycles=None):
                         broader, r.get("source") == "ws", now,
                     )
                     snap = attach_orderbook_levels(snap, ob_parsed, market)
+                    try:
+                        from spot_depth import get_latest_spot_depth
+                        spot_depth = get_latest_spot_depth(a)
+                        if spot_depth is not None:
+                            snap["spot_depth"] = spot_depth
+                    except Exception:
+                        logger.debug("spot depth attach failed for %s", a, exc_info=True)
                     snap = apply_snapshot_freshness(
                         snap, r, now, market_data.health(), config
                     )

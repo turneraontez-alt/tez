@@ -37,7 +37,6 @@ def test_coinbase_depth_and_trade_are_recorded(tmp_path):
         "side": "buy",
         "price": "100.25",
         "size": "0.4",
-        "time": "2026-06-27T12:00:00.000000Z",
     }))
 
     assert feed.record_once() == 1
