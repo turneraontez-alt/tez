@@ -250,7 +250,80 @@ def _normalize_book_source(value):
         return "ws"
     if raw in {"rest", "rest-fallback"}:
         return "rest"
+    if raw in {"rest-depth-retry", "depth-retry"}:
+        return "rest-depth-retry"
     return None
+
+
+def _book_depth_status(parsed_orderbook):
+    if not isinstance(parsed_orderbook, dict):
+        return "missing", "parse_failed"
+    qty_keys = ("yes_bid_qty", "yes_ask_qty", "no_bid_qty", "no_ask_qty")
+    present = [parsed_orderbook.get(k) is not None for k in qty_keys]
+    if all(present):
+        return "ok", None
+    if any(present):
+        return "partial", "partial_side_depth"
+    has_price = any(parsed_orderbook.get(k) is not None for k in ("yes_bid", "yes_ask", "no_bid", "no_ask"))
+    return "missing", "price_without_depth" if has_price else "empty_orderbook"
+
+
+def _raw_book_depth_status(raw_orderbook):
+    try:
+        return _book_depth_status(parse_orderbook(raw_orderbook))
+    except Exception:
+        return "missing", "parse_failed"
+
+
+def _with_orderbook_meta(book, *, source, updated_at=None):
+    if not isinstance(book, dict):
+        return book
+    out = dict(book)
+    out["_hybrid_source"] = source
+    if updated_at is not None:
+        out["_updated_at"] = updated_at
+    elif out.get("_updated_at") is None:
+        out["_updated_at"] = time.time()
+    return out
+
+
+def _attach_spot_depth_context(snapshot, asset):
+    """Attach actual-coin spot depth, plus an explicit missing reason.
+
+    The collector is best-effort public market data. A blank spot-depth field is
+    useful only if we know whether it was disabled, still warming up, stale, or
+    errored, so stamp status on every live snapshot.
+    """
+    try:
+        from spot_depth import get_latest_spot_depth, spot_depth_health
+
+        spot_depth = get_latest_spot_depth(asset)
+        if spot_depth is not None:
+            snapshot["spot_depth"] = spot_depth
+            snapshot["spot_depth_status"] = "ok"
+            snapshot["spot_depth_missing_reason"] = None
+            return snapshot
+
+        health = spot_depth_health()
+        snapshot["spot_depth_status"] = "missing"
+        if not health.get("enabled"):
+            reason = "collector_disabled"
+        elif not health.get("have_ws"):
+            reason = "websocket_dependency_missing"
+        elif asset not in set(health.get("assets") or []):
+            reason = "asset_not_configured"
+        else:
+            book_ages = health.get("book_age_seconds") or {}
+            if asset not in book_ages:
+                reason = "no_spot_book_yet"
+            else:
+                reason = "spot_book_stale_or_not_recorded"
+        snapshot["spot_depth_missing_reason"] = reason
+    except Exception as exc:  # noqa: BLE001 - context only; never break alerts
+        snapshot["spot_depth_status"] = "error"
+        snapshot["spot_depth_missing_reason"] = f"{type(exc).__name__}: {exc}"[:200]
+        logger.debug("spot depth attach failed for %s", asset, exc_info=True)
+    return snapshot
 
 
 def fetch_asset_raw(asset, market, now, last_trade_ts):
@@ -266,6 +339,27 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
     ticker = market["ticker"]
     min_ts = int(last_trade_ts - 1) if last_trade_ts else int(now - 60)
     ob_raw = market_data.get_orderbook(ticker)
+    initial_depth_status, initial_depth_reason = _raw_book_depth_status(ob_raw)
+    depth_retry_used = False
+    depth_retry_reason = None
+    if initial_depth_status == "missing":
+        # WebSocket/orderbook snapshots can occasionally contain prices without
+        # usable size, or no levels at all. Depth is critical for later research,
+        # so do one direct REST retry before publishing a depth-blank snapshot.
+        try:
+            rest_book = market_data.rest.get_orderbook(ticker)
+        except Exception as exc:  # noqa: BLE001 - diagnostics only; keep cycle alive
+            rest_book = None
+            depth_retry_reason = f"rest_retry_failed:{type(exc).__name__}"
+        rest_status, rest_reason = _raw_book_depth_status(rest_book)
+        if rest_status in {"ok", "partial"}:
+            ob_raw = _with_orderbook_meta(
+                rest_book, source="rest-depth-retry", updated_at=time.time()
+            )
+            depth_retry_used = True
+            initial_depth_status, initial_depth_reason = rest_status, rest_reason
+        elif depth_retry_reason is None:
+            depth_retry_reason = rest_reason or "rest_retry_no_depth"
     trades = market_data.get_trades(ticker, min_ts=min_ts)
     spot = get_spot(asset)
     completed = time.time()
@@ -312,6 +406,9 @@ def fetch_asset_raw(asset, market, now, last_trade_ts):
         "fetch_latency_seconds": round(completed - started, 4),
         "latest_trade_event_ts": latest_trade_event_ts,
         "book_event_ts": book_event_ts,
+        "kalshi_depth_status": initial_depth_status,
+        "kalshi_depth_missing_reason": initial_depth_reason or depth_retry_reason,
+        "kalshi_depth_retry_used": depth_retry_used,
     }
 
 
@@ -541,6 +638,11 @@ def refresh_loop(max_cycles=None):
                     ob_parsed = parse_orderbook(r["ob_raw"])
                     yb, ya = ob_parsed["yes_bid"], ob_parsed["yes_ask"]
                     ob_parsed["spread"] = (ya - yb) if (yb is not None and ya is not None) else None
+                    depth_status, depth_reason = _book_depth_status(ob_parsed)
+                    r["kalshi_depth_status"] = depth_status
+                    r["kalshi_depth_missing_reason"] = (
+                        depth_reason or r.get("kalshi_depth_missing_reason")
+                    )
                     ob_delta = eng.ob_tracker.update(ob_parsed)
                     prelim[a] = (r, ob_parsed, ob_delta)
                 except Exception as e:
@@ -565,13 +667,10 @@ def refresh_loop(max_cycles=None):
                         broader, r.get("source") == "ws", now,
                     )
                     snap = attach_orderbook_levels(snap, ob_parsed, market)
-                    try:
-                        from spot_depth import get_latest_spot_depth
-                        spot_depth = get_latest_spot_depth(a)
-                        if spot_depth is not None:
-                            snap["spot_depth"] = spot_depth
-                    except Exception:
-                        logger.debug("spot depth attach failed for %s", a, exc_info=True)
+                    snap["kalshi_depth_status"] = r.get("kalshi_depth_status")
+                    snap["kalshi_depth_missing_reason"] = r.get("kalshi_depth_missing_reason")
+                    snap["kalshi_depth_retry_used"] = bool(r.get("kalshi_depth_retry_used"))
+                    snap = _attach_spot_depth_context(snap, a)
                     snap = apply_snapshot_freshness(
                         snap, r, now, market_data.health(), config
                     )

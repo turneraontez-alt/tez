@@ -27,6 +27,18 @@ import app as appmod  # noqa: E402
 
 
 class TestFetchResultIsCurrent(unittest.TestCase):
+    def test_raw_orderbook_depth_status_flags_depth_quality(self):
+        ok, reason = appmod._raw_book_depth_status({
+            "yes": [[0.60, 12]],
+            "no": [[0.35, 7]],
+        })
+        self.assertEqual(ok, "ok")
+        self.assertIsNone(reason)
+
+        missing, reason = appmod._raw_book_depth_status({"yes": [], "no": []})
+        self.assertEqual(missing, "missing")
+        self.assertEqual(reason, "empty_orderbook")
+
     def test_matching_ticker_is_current(self):
         active = {"BTC": {"ticker": "T1"}}
         self.assertTrue(appmod._fetch_result_is_current(active, "BTC", {"ticker": "T1"}))

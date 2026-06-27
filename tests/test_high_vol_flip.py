@@ -183,6 +183,11 @@ def test_more_fire_strict_uses_checkpoint_jump_and_excludes_hype(tmp_path):
         quote_extra={
             "yes_bid_depth_contracts": 31,
             "yes_ask_depth_contracts": 44,
+            "kalshi_depth_status": "ok",
+            "kalshi_depth_missing_reason": None,
+            "kalshi_depth_retry_used": True,
+            "spot_depth_status": "ok",
+            "spot_depth_missing_reason": None,
             "spot_depth_source": "OKX BNB-USDT",
             "spot_depth_age_seconds": 3.0,
             "spot_depth_bid_depth_levels": 900.0,
@@ -202,6 +207,9 @@ def test_more_fire_strict_uses_checkpoint_jump_and_excludes_hype(tmp_path):
     assert rows[0]["previous_interval"] == "13M"
     assert rows[0]["selected_mid_jump_cents"] == 6.0
     assert rows[0]["yes_ask_depth_contracts"] == 44
+    assert rows[0]["kalshi_depth_status"] == "ok"
+    assert rows[0]["kalshi_depth_retry_used"] == 1
+    assert rows[0]["spot_depth_status"] == "ok"
     assert rows[0]["spot_depth_source"] == "OKX BNB-USDT"
     assert rows[0]["spot_depth_bid_depth_levels"] == 900.0
     assert rows[0]["spot_depth_ask_depth_levels"] == 300.0

@@ -16,6 +16,8 @@ REASON_BTC_FOLLOW_EXTREME = "HVF_BTC_FOLLOW_EXTREME"
 REASON_BTC_DIVERGENCE_ACCEL_WATCH = "HVF_BTC_DIVERGENCE_ACCEL_WATCH"
 
 SPOT_DEPTH_KEYS = (
+    "spot_depth_status",
+    "spot_depth_missing_reason",
     "spot_depth_source",
     "spot_depth_age_seconds",
     "spot_depth_trade_age_seconds",
@@ -36,6 +38,12 @@ SPOT_DEPTH_KEYS = (
     "spot_depth_trade_buy_notional_15s",
     "spot_depth_trade_sell_notional_15s",
     "spot_depth_trade_net_qty_60s",
+)
+
+KALSHI_DEPTH_STATUS_KEYS = (
+    "kalshi_depth_status",
+    "kalshi_depth_missing_reason",
+    "kalshi_depth_retry_used",
 )
 
 
@@ -195,6 +203,8 @@ def extract_candidate(asset: Any, analysis: Mapping[str, Any], canonical: Any) -
         "dominant_mid_cents": dominant_mid,
         **quotes,
     }
+    for key in KALSHI_DEPTH_STATUS_KEYS:
+        out[key] = quote.get(key)
     for key in SPOT_DEPTH_KEYS:
         out[key] = quote.get(key)
     return out

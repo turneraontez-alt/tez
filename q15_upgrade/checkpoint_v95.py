@@ -717,8 +717,14 @@ def _spot_depth_quote_fields(snapshot: Mapping[str, Any], observed_at: float) ->
     book imbalance and trade pressure at the same decision time.
     """
     depth = snapshot.get("spot_depth")
+    status = snapshot.get("spot_depth_status")
+    missing_reason = snapshot.get("spot_depth_missing_reason")
+    base = {
+        "spot_depth_status": status or ("ok" if isinstance(depth, Mapping) else "missing"),
+        "spot_depth_missing_reason": missing_reason,
+    }
     if not isinstance(depth, Mapping):
-        return {}
+        return base
 
     def val(key: str) -> Any:
         return depth.get(key)
@@ -728,6 +734,9 @@ def _spot_depth_quote_fields(snapshot: Mapping[str, Any], observed_at: float) ->
     book_age = _num(depth.get("book_age_seconds"))
     trade_age = _num(depth.get("trade_age_seconds"))
     return {
+        **base,
+        "spot_depth_status": "ok",
+        "spot_depth_missing_reason": None,
         "spot_depth_source": val("source"),
         "spot_depth_age_seconds": (
             (snapshot_age or 0.0) + book_age if book_age is not None else snapshot_age
@@ -1430,6 +1439,9 @@ def analyse_v95(
             "yes_ask_depth_contracts": yes_ask_depth,
             "no_bid_depth_contracts": no_bid_depth,
             "no_ask_depth_contracts": no_ask_depth,
+            "kalshi_depth_status": snapshot.get("kalshi_depth_status"),
+            "kalshi_depth_missing_reason": snapshot.get("kalshi_depth_missing_reason"),
+            "kalshi_depth_retry_used": snapshot.get("kalshi_depth_retry_used"),
             **spot_depth_fields,
         },
         "costs": costs,

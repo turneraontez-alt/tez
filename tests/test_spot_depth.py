@@ -84,8 +84,14 @@ def test_okx_depth_trade_order_count_and_health(tmp_path):
     assert health["book_age_seconds"]["HYPE"] >= 0.0
 
 
-def test_spot_depth_health_is_disabled_by_default(monkeypatch):
+def test_spot_depth_health_is_enabled_by_default(monkeypatch):
     monkeypatch.delenv("Q15_SPOT_DEPTH_ENABLED", raising=False)
     health = spot_depth_health()
-    assert health["enabled"] is False
+    assert health["enabled"] is True
     assert "spot_depth" in health["db_path"]
+
+
+def test_spot_depth_can_be_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("Q15_SPOT_DEPTH_ENABLED", "false")
+    health = spot_depth_health()
+    assert health["enabled"] is False

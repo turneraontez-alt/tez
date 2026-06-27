@@ -1,9 +1,9 @@
-"""Optional actual-coin spot depth and trade recorder.
+"""Actual-coin spot depth and trade recorder.
 
-Default OFF. When ``Q15_SPOT_DEPTH_ENABLED`` is truthy, a background thread
-subscribes to public exchange orderbook and trade channels for the same spot
-symbols used by ``spot_client``. It records visible top-of-book depth and recent
-trade pressure to SQLite for later research.
+Default ON, with an explicit opt-out via ``Q15_SPOT_DEPTH_ENABLED=false``. A
+background thread subscribes to public exchange orderbook and trade channels for
+the same spot symbols used by ``spot_client``. It records visible top-of-book
+depth and recent trade pressure to SQLite for later research.
 
 Read-only market data only: no authentication, no orders. Public books expose
 visible liquidity and trades, not hidden/iceberg size or trader identity.
@@ -132,7 +132,7 @@ def _max_book_age() -> float:
 
 
 def _enabled() -> bool:
-    return _env_bool("Q15_SPOT_DEPTH_ENABLED", False)
+    return _env_bool("Q15_SPOT_DEPTH_ENABLED", True)
 
 
 def _f(value: Any) -> float | None:

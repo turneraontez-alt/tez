@@ -49,6 +49,11 @@ def _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35, **extra
         "quote": {"ask_cents": ask, "spread_cents": 2.0, "depth_contracts": 50.0,
                   "yes_bid_depth_contracts": 11.0, "yes_ask_depth_contracts": 22.0,
                   "no_bid_depth_contracts": 33.0, "no_ask_depth_contracts": 44.0,
+                  "kalshi_depth_status": "ok",
+                  "kalshi_depth_missing_reason": None,
+                  "kalshi_depth_retry_used": True,
+                  "spot_depth_status": "ok",
+                  "spot_depth_missing_reason": None,
                   "spot_depth_source": "OKX HYPE-USDT",
                   "spot_depth_age_seconds": 4.0,
                   "spot_depth_bid_depth_levels": 1000.0,
@@ -282,6 +287,9 @@ def test_extract_candidate_skips_when_not_in_data(tmp_path):
     assert cand["yes_ask_depth_contracts"] == pytest.approx(22.0)
     assert cand["no_bid_depth_contracts"] == pytest.approx(33.0)
     assert cand["no_ask_depth_contracts"] == pytest.approx(44.0)
+    assert cand["kalshi_depth_status"] == "ok"
+    assert cand["kalshi_depth_retry_used"] is True
+    assert cand["spot_depth_status"] == "ok"
     assert cand["spot_depth_imbalance"] == pytest.approx(0.428571)
     assert cand["spot_depth_trade_net_qty_15s"] == pytest.approx(12.0)
 
@@ -298,6 +306,9 @@ def test_v2_records_full_side_depth_without_gating(tmp_path):
     assert row["yes_ask_depth_contracts"] == pytest.approx(22.0)
     assert row["no_bid_depth_contracts"] == pytest.approx(33.0)
     assert row["no_ask_depth_contracts"] == pytest.approx(44.0)
+    assert row["kalshi_depth_status"] == "ok"
+    assert row["kalshi_depth_retry_used"] == 1
+    assert row["spot_depth_status"] == "ok"
     assert row["spot_depth_source"] == "OKX HYPE-USDT"
     assert row["spot_depth_bid_depth_levels"] == pytest.approx(1000.0)
     assert row["spot_depth_ask_depth_levels"] == pytest.approx(400.0)

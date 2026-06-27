@@ -47,7 +47,19 @@ def test_spot_depth_context_is_flattened_for_market_comparison():
     }, observed_at=1000.0)
 
     assert fields["spot_depth_source"] == "OKX HYPE-USDT"
+    assert fields["spot_depth_status"] == "ok"
+    assert fields["spot_depth_missing_reason"] is None
     assert fields["spot_depth_age_seconds"] == 7.0
     assert fields["spot_depth_trade_age_seconds"] == 8.0
     assert fields["spot_depth_imbalance"] == -0.142857
     assert fields["spot_depth_trade_net_qty_15s"] == -2.0
+
+
+def test_spot_depth_context_records_missing_status():
+    fields = _spot_depth_quote_fields({
+        "spot_depth_status": "missing",
+        "spot_depth_missing_reason": "no_spot_book_yet",
+    }, observed_at=1000.0)
+
+    assert fields["spot_depth_status"] == "missing"
+    assert fields["spot_depth_missing_reason"] == "no_spot_book_yet"

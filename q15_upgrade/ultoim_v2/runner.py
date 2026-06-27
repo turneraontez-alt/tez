@@ -29,6 +29,8 @@ from .telegram import UltoimV2Telegram
 logger = logging.getLogger("ultoim_v2.runner")
 
 SPOT_DEPTH_KEYS = (
+    "spot_depth_status",
+    "spot_depth_missing_reason",
     "spot_depth_source",
     "spot_depth_age_seconds",
     "spot_depth_trade_age_seconds",
@@ -49,6 +51,12 @@ SPOT_DEPTH_KEYS = (
     "spot_depth_trade_buy_notional_15s",
     "spot_depth_trade_sell_notional_15s",
     "spot_depth_trade_net_qty_60s",
+)
+
+KALSHI_DEPTH_STATUS_KEYS = (
+    "kalshi_depth_status",
+    "kalshi_depth_missing_reason",
+    "kalshi_depth_retry_used",
 )
 
 
@@ -254,6 +262,8 @@ class UltoimV2Runner:
             "champion_flow": feature_values.get("flow"),
             "snapshot_id": analysis.get("snapshot_id"),
         }
+        for key in KALSHI_DEPTH_STATUS_KEYS:
+            out[key] = quote.get(key)
         for key in SPOT_DEPTH_KEYS:
             out[key] = quote.get(key)
         return out
@@ -668,6 +678,11 @@ class UltoimV2Runner:
             "yes_ask_depth_contracts": cand.get("yes_ask_depth_contracts"),
             "no_bid_depth_contracts": cand.get("no_bid_depth_contracts"),
             "no_ask_depth_contracts": cand.get("no_ask_depth_contracts"),
+            "kalshi_depth_status": cand.get("kalshi_depth_status"),
+            "kalshi_depth_missing_reason": cand.get("kalshi_depth_missing_reason"),
+            "kalshi_depth_retry_used": 1 if cand.get("kalshi_depth_retry_used") else 0,
+            "spot_depth_status": cand.get("spot_depth_status"),
+            "spot_depth_missing_reason": cand.get("spot_depth_missing_reason"),
             "spot_depth_source": cand.get("spot_depth_source"),
             "spot_depth_age_seconds": cand.get("spot_depth_age_seconds"),
             "spot_depth_trade_age_seconds": cand.get("spot_depth_trade_age_seconds"),
