@@ -47,6 +47,8 @@ def _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35, **extra
         "market_implied_yes_probability": mkt_yes, "data_quality": 0.8,
         "evidence_quality": 0.8, "net_edge_cents": net_edge, "entry_ask_cents": ask,
         "quote": {"ask_cents": ask, "spread_cents": 2.0, "depth_contracts": 50.0,
+                  "yes_bid_depth_contracts": 11.0, "yes_ask_depth_contracts": 22.0,
+                  "no_bid_depth_contracts": 33.0, "no_ask_depth_contracts": 44.0,
                   "quote_age_seconds": 1.0},
         "costs": {"fee_cents": 1.0, "total_cost_cents": 2.0},
         "regime": {"name": "TREND", "distance_sigma": 1.2},
@@ -270,6 +272,24 @@ def test_extract_candidate_skips_when_not_in_data(tmp_path):
                                 _canon("T", 900.0, 9000.0), None) is None
     cand = r._extract_candidate("BTC", _analysis(), _canon("T-BTC", 900.0, 9000.0), None)
     assert cand is not None and cand["asset"] == "BTC" and cand["predicted_side"] == "NO"
+    assert cand["yes_bid_depth_contracts"] == pytest.approx(11.0)
+    assert cand["yes_ask_depth_contracts"] == pytest.approx(22.0)
+    assert cand["no_bid_depth_contracts"] == pytest.approx(33.0)
+    assert cand["no_ask_depth_contracts"] == pytest.approx(44.0)
+
+
+def test_v2_records_full_side_depth_without_gating(tmp_path):
+    r = _runner(tmp_path)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", 900.0, 9000.0)}
+    cand = r._extract_candidate("BTC", a["BTC"], c["BTC"], None)
+    r._observe_sync(candidates=[cand], now=1000.0)
+    row = r.ledger.recent_rows("ultoim-v2", limit=1)[0]
+    assert row["fired"] == 1
+    assert row["yes_bid_depth_contracts"] == pytest.approx(11.0)
+    assert row["yes_ask_depth_contracts"] == pytest.approx(22.0)
+    assert row["no_bid_depth_contracts"] == pytest.approx(33.0)
+    assert row["no_ask_depth_contracts"] == pytest.approx(44.0)
 
 
 # --------------------------------------------------------------------------- #

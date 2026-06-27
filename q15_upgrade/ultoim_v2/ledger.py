@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     total_cost_cents REAL,
     spread_cents REAL,
     depth_contracts REAL,
+    yes_bid_depth_contracts REAL,
+    yes_ask_depth_contracts REAL,
+    no_bid_depth_contracts REAL,
+    no_ask_depth_contracts REAL,
     quote_age_seconds REAL,
     spot_stale_age_seconds REAL,
     distance_sigma REAL,
@@ -258,6 +262,12 @@ class UltoimV2Ledger:
             # >=3 co-triggering 10M alerts). hypothetical_pnl_cents is scored at THIS size,
             # so the ledger reflects staked paper P&L. Legacy rows default to 1 (unchanged).
             ("stake_multiplier", "INTEGER DEFAULT 1"),
+            # Record-only full side-depth snapshot. These never gate delivery; they let us
+            # grade whether bid support / ask supply improves future V2 filters.
+            ("yes_bid_depth_contracts", "REAL"),
+            ("yes_ask_depth_contracts", "REAL"),
+            ("no_bid_depth_contracts", "REAL"),
+            ("no_ask_depth_contracts", "REAL"),
         )
         for name, decl in additions:
             if name not in cols:
@@ -373,7 +383,9 @@ class UltoimV2Ledger:
         "calibrated_yes_probability", "conservative_probability",
         "market_implied_yes_probability", "raw_yes_probability", "net_edge_cents",
         "entry_ask_cents", "best_entry_cents", "fee_cents", "total_cost_cents",
-        "spread_cents", "depth_contracts", "quote_age_seconds", "spot_stale_age_seconds",
+        "spread_cents", "depth_contracts", "yes_bid_depth_contracts",
+        "yes_ask_depth_contracts", "no_bid_depth_contracts", "no_ask_depth_contracts",
+        "quote_age_seconds", "spot_stale_age_seconds",
         "distance_sigma", "regime_name", "regime_directional", "data_quality",
         "evidence_quality", "manipulation_suspected", "flip_probability",
         "order_flow_persistence", "book_resiliency", "prediction_stability",
