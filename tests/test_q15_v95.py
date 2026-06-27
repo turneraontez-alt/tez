@@ -274,6 +274,17 @@ class V95Tests(unittest.TestCase):
         self.assertIsNotNone(off["quote"]["ask_depth"])
         self.assertAlmostEqual(off["liquidity_quality"], on["liquidity_quality"], places=6)
 
+    def test_yes_ask_qty_alias_records_known_depth(self):
+        row = snapshot(spot=102.0, target=100.0)
+        row.pop("yes_ask_size", None)
+        row["yes_ask_qty"] = 33.0
+
+        result = analyse_v95(row, self.canonical(row=row), self.ledger)
+
+        self.assertEqual(result["quote"]["ask_depth"], 33.0)
+        self.assertEqual(result["quote"]["depth_contracts"], 33.0)
+        self.assertEqual(result["quote"]["yes_ask_depth_contracts"], 33.0)
+
     def test_raw_model_signal_is_independent_of_kalshi_price(self):
         # The model's own (raw) probability must not depend on the Kalshi price...
         low = snapshot(ask=25)

@@ -29,12 +29,20 @@ CREATE TABLE IF NOT EXISTS hvf_alerts (
     selected_side TEXT,
     selected_bid_cents REAL,
     selected_ask_cents REAL,
+    selected_mid_cents REAL,
+    previous_interval TEXT,
+    previous_selected_mid_cents REAL,
+    selected_mid_jump_cents REAL,
     yes_bid_cents REAL,
     yes_ask_cents REAL,
     no_bid_cents REAL,
     no_ask_cents REAL,
     spread_cents REAL,
     depth_contracts REAL,
+    yes_bid_depth_contracts REAL,
+    yes_ask_depth_contracts REAL,
+    no_bid_depth_contracts REAL,
+    no_ask_depth_contracts REAL,
     model_yes_probability REAL,
     raw_yes_probability REAL,
     calibrated_yes_probability REAL,
@@ -65,6 +73,17 @@ CREATE INDEX IF NOT EXISTS idx_hvf_resolve
 CREATE INDEX IF NOT EXISTS idx_hvf_asset_rule
     ON hvf_alerts(model_version, asset, rule_code);
 """
+
+_ADDED_COLUMNS = {
+    "selected_mid_cents": "REAL",
+    "previous_interval": "TEXT",
+    "previous_selected_mid_cents": "REAL",
+    "selected_mid_jump_cents": "REAL",
+    "yes_bid_depth_contracts": "REAL",
+    "yes_ask_depth_contracts": "REAL",
+    "no_bid_depth_contracts": "REAL",
+    "no_ask_depth_contracts": "REAL",
+}
 
 
 def kalshi_fee_cents(entry_ask_cents: float | int | None) -> int | None:
@@ -104,8 +123,12 @@ class HighVolFlipLedger:
         "interval", "window_key", "close_time", "seconds_remaining",
         "predicted_outcome", "model_predicted_side", "rule_code", "rule_name",
         "reason_codes", "selected_side", "selected_bid_cents",
-        "selected_ask_cents", "yes_bid_cents", "yes_ask_cents",
-        "no_bid_cents", "no_ask_cents", "spread_cents", "depth_contracts",
+        "selected_ask_cents", "selected_mid_cents", "previous_interval",
+        "previous_selected_mid_cents", "selected_mid_jump_cents",
+        "yes_bid_cents", "yes_ask_cents", "no_bid_cents", "no_ask_cents",
+        "spread_cents", "depth_contracts", "yes_bid_depth_contracts",
+        "yes_ask_depth_contracts", "no_bid_depth_contracts",
+        "no_ask_depth_contracts",
         "model_yes_probability", "raw_yes_probability",
         "calibrated_yes_probability", "conservative_probability",
         "data_quality", "btc_ticker", "btc_dominant_side",
@@ -125,7 +148,17 @@ class HighVolFlipLedger:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._ensure_columns_locked()
             self._conn.commit()
+
+    def _ensure_columns_locked(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(hvf_alerts)").fetchall()
+        }
+        for name, column_type in _ADDED_COLUMNS.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE hvf_alerts ADD COLUMN {name} {column_type}")
 
     def record_alert(self, row: Mapping[str, Any]) -> int | None:
         values = []

@@ -581,6 +581,29 @@ def attach_orderbook_levels(snapshot: dict, parsed_orderbook: dict, market: dict
     """Attach depth and pricing metadata that the original AssetEngine omitted."""
     for key in ("yes_bid_levels", "yes_ask_levels", "no_bid_levels", "no_ask_levels"):
         snapshot[key] = parsed_orderbook.get(key) or []
+    for key in (
+        "yes_bid_qty", "yes_ask_qty", "no_bid_qty", "no_ask_qty",
+        "depth_3c_yes", "depth_3c_no",
+    ):
+        value = parsed_orderbook.get(key)
+        if value is not None:
+            snapshot[key] = value
+    # v9.5 and the alert ledgers read the "*_size"/depth aliases. Keep them
+    # bridged from the parsed Kalshi book so depth does not silently go blank.
+    aliases = {
+        "yes_bid_size": "yes_bid_qty",
+        "yes_ask_size": "yes_ask_qty",
+        "no_bid_size": "no_bid_qty",
+        "no_ask_size": "no_ask_qty",
+        "yes_bid_depth_contracts": "yes_bid_qty",
+        "yes_ask_depth_contracts": "yes_ask_qty",
+        "no_bid_depth_contracts": "no_bid_qty",
+        "no_ask_depth_contracts": "no_ask_qty",
+    }
+    for target, source in aliases.items():
+        value = parsed_orderbook.get(source)
+        if value is not None:
+            snapshot[target] = value
     if market:
         snapshot["target_type"] = market.get("strike_type", snapshot.get("target_type", "greater_or_equal"))
         structure = market.get("price_level_structure")

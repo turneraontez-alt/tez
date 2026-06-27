@@ -16,6 +16,7 @@ from .telegram import HighVolFlipTelegram
 logger = logging.getLogger("high_vol_flip.runner")
 
 _RULE_PRIORITY = {
+    "HVF_MORE_FIRE_STRICT": 760.0,
     "HVF_HYPE_EARLY_BULLISH_FLIP": 700.0,
     "HVF_OWN_EARLY_FLIP": 680.0,
     "HVF_BTC_EARLY_FOLLOW_LAG": 650.0,
@@ -47,6 +48,7 @@ class HighVolFlipRunner:
         self._worker_lock = threading.Lock()
         self._last_reconcile_at = 0.0
         self._last_btc_by_window: dict[int, dict[str, Any]] = {}
+        self._candidate_history_by_window: dict[int, dict[str, dict[str, dict[str, Any]]]] = {}
 
     def _ensure_worker(self) -> None:
         with self._worker_lock:
@@ -109,8 +111,9 @@ class HighVolFlipRunner:
             windows.setdefault(wk, []).append(cand)
         self._prune_btc_state(now)
         for wk, cands in windows.items():
-            for interval, mark in INTERVAL_MARKS.items():
-                if interval not in cfg.intervals:
+            self._remember_interval_candidates(wk, cands, now)
+            for interval, mark in self._active_interval_marks():
+                if interval == "13M":
                     continue
                 in_band = [
                     c for c in cands
@@ -128,7 +131,10 @@ class HighVolFlipRunner:
                     asset = str(cand.get("asset") or "").upper()
                     if asset == "BTC" or asset not in cfg.assets:
                         continue
-                    decision = evaluate_rules(cand, btc, prev_btc, cfg)
+                    prev_asset = self._previous_candidate(wk, asset, interval)
+                    decision = evaluate_rules(
+                        cand, btc, prev_btc, cfg, interval=interval, prev_asset=prev_asset
+                    )
                     if decision is None:
                         continue
                     rows.append(self._build_row(cand, decision, interval, wk, now))
@@ -194,7 +200,8 @@ class HighVolFlipRunner:
         return {
             "created_at": now,
             "model_version": self.config.model_version,
-            "record_kind": "HIGH_VOL_FLIP_ALERT",
+            "record_kind": decision.get("record_kind") or "HIGH_VOL_FLIP_ALERT",
+            "alert_title": decision.get("alert_title"),
             "asset": cand.get("asset"),
             "ticker": cand.get("ticker"),
             "interval": interval,
@@ -209,12 +216,20 @@ class HighVolFlipRunner:
             "selected_side": decision.get("selected_side"),
             "selected_bid_cents": decision.get("selected_bid_cents"),
             "selected_ask_cents": decision.get("selected_ask_cents"),
+            "selected_mid_cents": decision.get("selected_mid_cents"),
+            "previous_interval": decision.get("previous_interval"),
+            "previous_selected_mid_cents": decision.get("previous_selected_mid_cents"),
+            "selected_mid_jump_cents": decision.get("selected_mid_jump_cents"),
             "yes_bid_cents": cand.get("yes_bid_cents"),
             "yes_ask_cents": cand.get("yes_ask_cents"),
             "no_bid_cents": cand.get("no_bid_cents"),
             "no_ask_cents": cand.get("no_ask_cents"),
             "spread_cents": cand.get("spread_cents"),
             "depth_contracts": cand.get("depth_contracts"),
+            "yes_bid_depth_contracts": cand.get("yes_bid_depth_contracts"),
+            "yes_ask_depth_contracts": cand.get("yes_ask_depth_contracts"),
+            "no_bid_depth_contracts": cand.get("no_bid_depth_contracts"),
+            "no_ask_depth_contracts": cand.get("no_ask_depth_contracts"),
             "model_yes_probability": cand.get("model_yes_probability"),
             "raw_yes_probability": cand.get("raw_yes_probability"),
             "calibrated_yes_probability": cand.get("calibrated_yes_probability"),
@@ -240,6 +255,65 @@ class HighVolFlipRunner:
                  if float(rec.get("updated_at") or 0.0) < cutoff]
         for wk in stale:
             self._last_btc_by_window.pop(wk, None)
+        stale_history = [
+            wk for wk, asset_map in self._candidate_history_by_window.items()
+            if not any(
+                float(rec.get("updated_at") or 0.0) >= cutoff
+                for interval_map in asset_map.values()
+                for rec in interval_map.values()
+            )
+        ]
+        for wk in stale_history:
+            self._candidate_history_by_window.pop(wk, None)
+
+    def _active_interval_marks(self) -> list[tuple[str, int]]:
+        names = set(self.config.intervals)
+        if getattr(self.config, "more_fire_strict_enabled", False):
+            names.update(getattr(self.config, "more_fire_strict_intervals", frozenset()))
+        # 13M is a history-only checkpoint for the 12M More-fire jump.
+        names.add("13M")
+        return [(iv, mark) for iv, mark in INTERVAL_MARKS.items() if iv in names]
+
+    def _remember_interval_candidates(
+        self, window_key_value: int, candidates: list[dict[str, Any]], now: float
+    ) -> None:
+        history = self._candidate_history_by_window.setdefault(window_key_value, {})
+        for interval, mark in INTERVAL_MARKS.items():
+            in_band = [
+                c for c in candidates
+                if (mark - self.config.mark_band_seconds) <= float(c["seconds_remaining"]) <= mark
+            ]
+            if not in_band:
+                continue
+            for cand in in_band:
+                asset = str(cand.get("asset") or "").upper()
+                if not asset:
+                    continue
+                stamped = dict(cand)
+                stamped["_interval"] = interval
+                history.setdefault(asset, {})[interval] = {
+                    "candidate": stamped,
+                    "updated_at": now,
+                }
+
+    def _previous_candidate(self, window_key_value: int, asset: str,
+                            current_interval: str) -> dict[str, Any] | None:
+        current_mark = INTERVAL_MARKS.get(current_interval)
+        if current_mark is None:
+            return None
+        interval_map = self._candidate_history_by_window.get(window_key_value, {}).get(asset)
+        if not interval_map:
+            return None
+        eligible: list[tuple[int, dict[str, Any]]] = []
+        for interval, rec in interval_map.items():
+            mark = INTERVAL_MARKS.get(interval)
+            if mark is not None and mark > current_mark:
+                cand = rec.get("candidate")
+                if isinstance(cand, Mapping):
+                    eligible.append((mark, dict(cand)))
+        if not eligible:
+            return None
+        return min(eligible, key=lambda item: item[0])[1]
 
     def resolve_settled(self, result_events: Sequence[Mapping[str, Any]] | None,
                         now: float) -> int:
@@ -294,6 +368,11 @@ class HighVolFlipRunner:
             "telegram": self.telegram.status(),
             "assets": sorted(self.config.assets),
             "intervals": sorted(self.config.intervals),
+            "more_fire_strict": {
+                "enabled": self.config.more_fire_strict_enabled,
+                "assets": sorted(self.config.more_fire_strict_assets),
+                "intervals": sorted(self.config.more_fire_strict_intervals),
+            },
         }
 
 

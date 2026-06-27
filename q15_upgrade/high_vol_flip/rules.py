@@ -11,6 +11,7 @@ REASON_HYPE_BULLISH_FLASH = "HVF_HYPE_BULLISH_FLASH"
 REASON_OWN_EARLY_FLIP = "HVF_OWN_EARLY_FLIP"
 REASON_HYPE_EARLY_BULLISH_FLIP = "HVF_HYPE_EARLY_BULLISH_FLIP"
 REASON_BTC_EARLY_FOLLOW_LAG = "HVF_BTC_EARLY_FOLLOW_LAG"
+REASON_MORE_FIRE_STRICT = "HVF_MORE_FIRE_STRICT"
 REASON_BTC_FOLLOW_EXTREME = "HVF_BTC_FOLLOW_EXTREME"
 REASON_BTC_DIVERGENCE_ACCEL_WATCH = "HVF_BTC_DIVERGENCE_ACCEL_WATCH"
 
@@ -128,6 +129,10 @@ def extract_candidate(asset: Any, analysis: Mapping[str, Any], canonical: Any) -
     depth = _num(quote.get("ask_depth"))
     if depth is None:
         depth = _num(quote.get("depth_contracts"))
+    yes_bid_depth = _num(quote.get("yes_bid_depth_contracts"))
+    yes_ask_depth = _num(quote.get("yes_ask_depth_contracts"))
+    no_bid_depth = _num(quote.get("no_bid_depth_contracts"))
+    no_ask_depth = _num(quote.get("no_ask_depth_contracts"))
     yes_mid = _mid(quotes["yes_bid_cents"], quotes["yes_ask_cents"])
     no_mid = _mid(quotes["no_bid_cents"], quotes["no_ask_cents"])
     dominant_side = None
@@ -157,6 +162,10 @@ def extract_candidate(asset: Any, analysis: Mapping[str, Any], canonical: Any) -
         "selected_ask_cents": selected_ask,
         "spread_cents": spread,
         "depth_contracts": depth,
+        "yes_bid_depth_contracts": yes_bid_depth,
+        "yes_ask_depth_contracts": yes_ask_depth,
+        "no_bid_depth_contracts": no_bid_depth,
+        "no_ask_depth_contracts": no_ask_depth,
         "yes_mid_cents": yes_mid,
         "no_mid_cents": no_mid,
         "dominant_side": dominant_side,
@@ -216,17 +225,29 @@ def btc_jump_cents(current_btc: Mapping[str, Any] | None,
 
 def _decision(cand: Mapping[str, Any], rule: str, reason: str,
               predicted: str, *, btc: Mapping[str, Any] | None = None,
-              btc_jump: float | None = None) -> dict[str, Any]:
+              btc_jump: float | None = None,
+              previous_interval: str | None = None,
+              previous_selected_mid: float | None = None,
+              selected_mid: float | None = None,
+              selected_mid_jump: float | None = None,
+              record_kind: str | None = None,
+              alert_title: str | None = None) -> dict[str, Any]:
     return {
         "asset": cand["asset"],
         "ticker": cand["ticker"],
         "rule": rule,
         "reason_code": reason,
+        "record_kind": record_kind,
+        "alert_title": alert_title,
         "predicted_outcome": predicted,
         "entry_ask_cents": side_ask(cand, predicted),
         "selected_side": predicted,
         "selected_bid_cents": side_bid(cand, predicted),
         "selected_ask_cents": side_ask(cand, predicted),
+        "previous_interval": previous_interval,
+        "previous_selected_mid_cents": previous_selected_mid,
+        "selected_mid_cents": selected_mid,
+        "selected_mid_jump_cents": selected_mid_jump,
         "btc_ticker": None if btc is None else btc.get("ticker"),
         "btc_dominant_side": None if btc is None else btc.get("dominant_side"),
         "btc_dominant_mid_cents": None if btc is None else btc.get("dominant_mid_cents"),
@@ -263,6 +284,8 @@ def _own_strong_selected(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | 
 
 
 def _own_early_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
+    if not getattr(cfg, "early_entry_enabled", False):
+        return None
     asset = str(cand.get("asset") or "").upper()
     if asset not in cfg.own_early_assets:
         return None
@@ -280,6 +303,8 @@ def _own_early_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
 def _hype_early_bullish_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
     model_yes = _num(cand.get("model_yes_probability"))
     if (
+        getattr(cfg, "early_entry_enabled", False)
+        and
         cfg.hype_early_enabled
         and
         cand.get("asset") == "HYPE"
@@ -310,7 +335,12 @@ def _hype_bullish_flash(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | N
 def _btc_early_follow_lag(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
                           cfg: Any) -> dict[str, Any] | None:
     asset = str(cand.get("asset") or "").upper()
-    if not cfg.btc_early_follow_enabled or asset not in cfg.btc_early_follow_assets or not btc:
+    if (
+        not getattr(cfg, "early_entry_enabled", False)
+        or not cfg.btc_early_follow_enabled
+        or asset not in cfg.btc_early_follow_assets
+        or not btc
+    ):
         return None
     btc_side = _side(btc.get("dominant_side"))
     btc_mid = _num(btc.get("dominant_mid_cents"))
@@ -322,6 +352,47 @@ def _btc_early_follow_lag(cand: Mapping[str, Any], btc: Mapping[str, Any] | None
     ):
         return _decision(cand, "BTC_EARLY_FOLLOW_LAG",
                          REASON_BTC_EARLY_FOLLOW_LAG, btc_side, btc=btc)
+    return None
+
+
+def _more_fire_strict_yes(cand: Mapping[str, Any], prev_asset: Mapping[str, Any] | None,
+                          cfg: Any, interval: str | None) -> dict[str, Any] | None:
+    if not getattr(cfg, "more_fire_strict_enabled", False):
+        return None
+    asset = str(cand.get("asset") or "").upper()
+    if asset == "HYPE" or asset not in getattr(cfg, "more_fire_strict_assets", frozenset()):
+        return None
+    if interval is not None and interval not in getattr(cfg, "more_fire_strict_intervals", frozenset()):
+        return None
+    calibrated_yes = _num(cand.get("calibrated_yes_probability"))
+    if calibrated_yes is None:
+        calibrated_yes = _num(cand.get("model_yes_probability"))
+    ask = side_ask(cand, "YES")
+    cur_mid = side_mid(cand, "YES")
+    prev_mid = side_mid(prev_asset or {}, "YES")
+    jump = None if cur_mid is None or prev_mid is None else cur_mid - prev_mid
+    if (
+        cand.get("predicted_side") == "YES"
+        and calibrated_yes is not None
+        and calibrated_yes >= cfg.more_fire_min_calibrated_yes
+        and ask is not None
+        and cfg.more_fire_yes_ask_lo <= ask <= cfg.more_fire_yes_ask_hi
+        and jump is not None
+        and jump >= cfg.more_fire_min_mid_jump_cents
+        and _tradable(cand, "YES", cfg, spread_limit=cfg.more_fire_spread_max)
+    ):
+        return _decision(
+            cand,
+            "MORE_FIRE_STRICT",
+            REASON_MORE_FIRE_STRICT,
+            "YES",
+            previous_interval=None if prev_asset is None else str(prev_asset.get("_interval") or ""),
+            previous_selected_mid=prev_mid,
+            selected_mid=cur_mid,
+            selected_mid_jump=jump,
+            record_kind="MORE_FIRE_STRICT_ALERT",
+            alert_title="MORE-FIRE STRICT",
+        )
     return None
 
 
@@ -373,11 +444,18 @@ def _btc_divergence_watch(cand: Mapping[str, Any], btc: Mapping[str, Any] | None
 
 
 def evaluate_rules(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
-                   prev_btc: Mapping[str, Any] | None, cfg: Any) -> dict[str, Any] | None:
+                   prev_btc: Mapping[str, Any] | None, cfg: Any,
+                   *, interval: str | None = None,
+                   prev_asset: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     """Return the first confirmed rule for this asset/window, or None."""
     asset = str(cand.get("asset") or "").upper()
-    if asset == "HYPE":
+    base_rules_enabled = interval is None or interval in getattr(cfg, "intervals", frozenset())
+    more_fire = lambda: _more_fire_strict_yes(cand, prev_asset, cfg, interval)
+    if not base_rules_enabled:
+        checks = (more_fire,)
+    elif asset == "HYPE":
         checks = (
+            more_fire,
             lambda: _hype_early_bullish_flip(cand, cfg),
             lambda: _own_early_flip(cand, cfg),
             lambda: _hype_bullish_flash(cand, cfg),
@@ -385,12 +463,14 @@ def evaluate_rules(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
         )
     elif asset == "BNB":
         checks = (
+            more_fire,
             lambda: _own_early_flip(cand, cfg),
             lambda: _own_no_flash(cand, cfg),
             lambda: _own_strong_selected(cand, cfg),
         )
     elif asset == "DOGE":
         checks = (
+            more_fire,
             lambda: _own_early_flip(cand, cfg),
             lambda: _btc_early_follow_lag(cand, btc, cfg),
             lambda: _own_strong_selected(cand, cfg),
@@ -399,6 +479,7 @@ def evaluate_rules(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
         )
     elif asset in {"SOL", "ETH"}:
         checks = (
+            more_fire,
             lambda: _own_early_flip(cand, cfg),
             lambda: _btc_early_follow_lag(cand, btc, cfg),
             lambda: _own_no_flash(cand, cfg),
@@ -407,6 +488,7 @@ def evaluate_rules(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
         )
     elif asset == "XRP":
         checks = (
+            more_fire,
             lambda: _own_early_flip(cand, cfg),
             lambda: _btc_early_follow_lag(cand, btc, cfg),
             lambda: _own_no_flash(cand, cfg),
