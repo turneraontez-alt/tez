@@ -3,7 +3,8 @@
 Default ON, with an explicit opt-out via ``Q15_SPOT_DEPTH_ENABLED=false``. A
 background thread subscribes to public exchange orderbook and trade channels for
 the same spot symbols used by ``spot_client``. It records visible top-of-book
-depth and recent trade pressure to SQLite for later research.
+depth and recent trade pressure to SQLite for later research. BTC is always kept
+in the configured asset list as the cross-market baseline.
 
 Read-only market data only: no authentication, no orders. Public books expose
 visible liquidity and trades, not hidden/iceberg size or trader identity.
@@ -112,7 +113,15 @@ def _configured_assets() -> list[str]:
         wanted = [x.strip().upper() for x in raw.split(",") if x.strip()]
     else:
         wanted = list(SPOT_SOURCES.keys())
-    return [asset for asset in wanted if asset in SPOT_SOURCES]
+    if "BTC" in SPOT_SOURCES and "BTC" not in wanted:
+        wanted = ["BTC", *wanted]
+    assets: list[str] = []
+    seen: set[str] = set()
+    for asset in wanted:
+        if asset in SPOT_SOURCES and asset not in seen:
+            assets.append(asset)
+            seen.add(asset)
+    return assets
 
 
 def _db_path() -> str:

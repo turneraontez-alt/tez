@@ -9,7 +9,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-from spot_depth import SpotDepthRecorder, spot_depth_health
+from spot_depth import SpotDepthRecorder, _configured_assets, spot_depth_health
 
 
 def _row(path):
@@ -89,6 +89,11 @@ def test_spot_depth_health_is_enabled_by_default(monkeypatch):
     health = spot_depth_health()
     assert health["enabled"] is True
     assert "spot_depth" in health["db_path"]
+
+
+def test_spot_depth_custom_asset_list_keeps_btc(monkeypatch):
+    monkeypatch.setenv("Q15_SPOT_DEPTH_ASSETS", "ETH,SOL,XRP,BNB")
+    assert _configured_assets() == ["BTC", "ETH", "SOL", "XRP", "BNB"]
 
 
 def test_spot_depth_can_be_explicitly_disabled(monkeypatch):
