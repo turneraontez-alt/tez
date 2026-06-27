@@ -263,6 +263,8 @@ def _own_strong_selected(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | 
 
 
 def _own_early_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
+    if not getattr(cfg, "early_entry_enabled", False):
+        return None
     asset = str(cand.get("asset") or "").upper()
     if asset not in cfg.own_early_assets:
         return None
@@ -280,6 +282,8 @@ def _own_early_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
 def _hype_early_bullish_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
     model_yes = _num(cand.get("model_yes_probability"))
     if (
+        getattr(cfg, "early_entry_enabled", False)
+        and
         cfg.hype_early_enabled
         and
         cand.get("asset") == "HYPE"
@@ -310,7 +314,12 @@ def _hype_bullish_flash(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | N
 def _btc_early_follow_lag(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
                           cfg: Any) -> dict[str, Any] | None:
     asset = str(cand.get("asset") or "").upper()
-    if not cfg.btc_early_follow_enabled or asset not in cfg.btc_early_follow_assets or not btc:
+    if (
+        not getattr(cfg, "early_entry_enabled", False)
+        or not cfg.btc_early_follow_enabled
+        or asset not in cfg.btc_early_follow_assets
+        or not btc
+    ):
         return None
     btc_side = _side(btc.get("dominant_side"))
     btc_mid = _num(btc.get("dominant_mid_cents"))

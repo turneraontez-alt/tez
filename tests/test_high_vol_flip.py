@@ -95,8 +95,8 @@ def test_hype_bullish_flash_sends_one_paper_alert_per_window(tmp_path):
     assert "Paper-only: tracking performance, no trade placed" in r.telegram.sent[0]
 
 
-def test_hype_early_bullish_flip_fires_while_ask_is_near_60(tmp_path):
-    r = _runner(tmp_path, hype_early_enabled=True)
+def test_hype_early_bullish_flip_is_opt_in_research_entry(tmp_path):
+    r = _runner(tmp_path, early_entry_enabled=True, hype_early_enabled=True)
     hype = _cand("HYPE", "YES", 55, 60, 0.60)
 
     r._observe_sync(candidates=[hype], now=1000.0)
@@ -108,8 +108,17 @@ def test_hype_early_bullish_flip_fires_while_ask_is_near_60(tmp_path):
     assert rows[0]["selected_ask_cents"] == 60
 
 
-def test_own_early_flip_fires_before_no_flash_price_band(tmp_path):
+def test_own_early_flip_is_watch_only_by_default(tmp_path):
     r = _runner(tmp_path)
+    xrp = _cand("XRP", "NO", 55, 60, 0.42, ticker="T-XRP")
+
+    r._observe_sync(candidates=[xrp], now=1000.0)
+
+    assert r.ledger.rows(r.config.model_version) == []
+
+
+def test_own_early_flip_can_be_enabled_for_research_entry(tmp_path):
+    r = _runner(tmp_path, early_entry_enabled=True)
     xrp = _cand("XRP", "NO", 55, 60, 0.42, ticker="T-XRP")
 
     r._observe_sync(candidates=[xrp], now=1000.0)
@@ -122,11 +131,11 @@ def test_own_early_flip_fires_before_no_flash_price_band(tmp_path):
 
 
 def test_btc_early_follow_lag_catches_alt_before_70s(tmp_path):
-    r = _runner(tmp_path, btc_early_follow_enabled=True)
+    r = _runner(tmp_path, early_entry_enabled=True, btc_early_follow_enabled=True)
     btc = _cand("BTC", "NO", 76, 78, 0.20, ticker="T-BTC")
-    doge = _cand("DOGE", "YES", 40, 45, 0.50, ticker="T-DOGE")
+    xrp = _cand("XRP", "YES", 40, 45, 0.50, ticker="T-XRP")
 
-    r._observe_sync(candidates=[btc, doge], now=1000.0)
+    r._observe_sync(candidates=[btc, xrp], now=1000.0)
 
     rows = r.ledger.rows(r.config.model_version)
     assert len(rows) == 1
@@ -148,10 +157,10 @@ def test_default_early_tuning_blocks_noisy_hype_and_btc_lag_rules(tmp_path):
 
 
 def test_top_two_window_cap_keeps_board_from_spamming_every_asset(tmp_path):
-    r = _runner(tmp_path, max_alerts_per_window=2)
+    r = _runner(tmp_path, early_entry_enabled=True, max_alerts_per_window=2)
     cands = [
         _cand("XRP", "NO", 56, 60, 0.41, ticker="T-XRP"),
-        _cand("DOGE", "NO", 55, 60, 0.42, ticker="T-DOGE"),
+        _cand("ETH", "NO", 55, 60, 0.42, ticker="T-ETH"),
         _cand("SOL", "NO", 54, 60, 0.43, ticker="T-SOL"),
     ]
 
@@ -175,19 +184,28 @@ def test_first_confirmed_rule_wins_over_stacked_rules(tmp_path):
     assert rows[0]["rule_code"] == "HVF_OWN_NO_FLASH"
 
 
-def test_btc_follow_applies_to_doge_but_not_bnb(tmp_path):
+def test_btc_follow_applies_to_xrp_but_not_bnb(tmp_path):
     r = _runner(tmp_path)
     btc = _cand("BTC", "NO", 82, 84, 0.15, ticker="T-BTC")
-    doge = _cand("DOGE", "YES", 24, 25, 0.50, ticker="T-DOGE")
+    xrp = _cand("XRP", "YES", 24, 25, 0.50, ticker="T-XRP")
     bnb = _cand("BNB", "YES", 24, 25, 0.50, ticker="T-BNB")
 
-    r._observe_sync(candidates=[btc, doge, bnb], now=1000.0)
+    r._observe_sync(candidates=[btc, xrp, bnb], now=1000.0)
 
     rows = r.ledger.rows(r.config.model_version)
     assert len(rows) == 1
-    assert rows[0]["asset"] == "DOGE"
+    assert rows[0]["asset"] == "XRP"
     assert rows[0]["rule_code"] == "HVF_BTC_FOLLOW_EXTREME"
     assert rows[0]["predicted_outcome"] == "NO"
+
+
+def test_doge_is_excluded_from_clean_hvf_default_assets(tmp_path):
+    r = _runner(tmp_path)
+    doge = _cand("DOGE", "YES", 82, 84, 0.85, ticker="T-DOGE")
+
+    r._observe_sync(candidates=[doge], now=1000.0)
+
+    assert r.ledger.rows(r.config.model_version) == []
 
 
 def test_fee_aware_grading_and_scoreboard(tmp_path):

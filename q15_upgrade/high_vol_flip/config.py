@@ -2,7 +2,7 @@
 
 HVF is paper-only and independent from V2's 10M entry picker. It may share the
 same Telegram chat for convenience, but every row is written to its own ledger
-under the ``high-vol-flip-v1`` model version.
+under the configured HVF model version.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ INTERVAL_MARKS: dict[str, int] = {
 class HighVolFlipConfig:
     enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_ENABLED", False))
     model_version: str = field(
-        default_factory=lambda: _str("Q15_HVF_MODEL_VERSION", "high-vol-flip-v2-early")
+        default_factory=lambda: _str("Q15_HVF_MODEL_VERSION", "high-vol-flip-v3-confirmed")
     )
     db_path: str = field(
         default_factory=lambda: _str("Q15_HVF_DB", "data/q15_high_vol_flip_v1.sqlite3")
@@ -65,7 +65,7 @@ class HighVolFlipConfig:
         )
     )
     assets: frozenset[str] = field(
-        default_factory=lambda: _csv_set("Q15_HVF_ASSETS", "XRP,DOGE,SOL,ETH,HYPE,BNB")
+        default_factory=lambda: _csv_set("Q15_HVF_ASSETS", "XRP,SOL,ETH,HYPE,BNB")
     )
     intervals: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_HVF_INTERVALS", "12M,11M,10M,9M,8M,7M")
@@ -91,13 +91,16 @@ class HighVolFlipConfig:
     )
 
     early_enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_EARLY_ENABLED", True))
+    early_entry_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_EARLY_ENTRY_ENABLED", False)
+    )
     early_ask_lo: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_ASK_LO", 50.0))
     early_ask_hi: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_ASK_HI", 65.0))
     early_mid_lo: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_MID_LO", 45.0))
     early_mid_hi: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_MID_HI", 62.0))
     early_spread_max: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_SPREAD_MAX", 6.0))
     own_early_assets: frozenset[str] = field(
-        default_factory=lambda: _csv_set("Q15_HVF_OWN_EARLY_ASSETS", "XRP,DOGE,SOL,ETH,BNB")
+        default_factory=lambda: _csv_set("Q15_HVF_OWN_EARLY_ASSETS", "XRP,SOL,ETH,BNB")
     )
     own_early_yes_min: float = field(default_factory=lambda: _float("Q15_HVF_OWN_EARLY_YES_MIN", 0.57))
     own_early_no_max: float = field(default_factory=lambda: _float("Q15_HVF_OWN_EARLY_NO_MAX", 0.43))
@@ -112,7 +115,7 @@ class HighVolFlipConfig:
         default_factory=lambda: _float("Q15_HVF_BTC_EARLY_FOLLOW_MID_MIN", 75.0)
     )
     btc_early_follow_assets: frozenset[str] = field(
-        default_factory=lambda: _csv_set("Q15_HVF_BTC_EARLY_FOLLOW_ASSETS", "XRP,DOGE,SOL,ETH")
+        default_factory=lambda: _csv_set("Q15_HVF_BTC_EARLY_FOLLOW_ASSETS", "XRP,SOL,ETH")
     )
 
     own_no_yes_max: float = field(default_factory=lambda: _float("Q15_HVF_OWN_NO_YES_MAX", 0.35))
@@ -125,7 +128,7 @@ class HighVolFlipConfig:
     btc_follow_mid_min: float = field(default_factory=lambda: _float("Q15_HVF_BTC_FOLLOW_MID_MIN", 80.0))
     btc_follow_asset_mid_min: float = field(default_factory=lambda: _float("Q15_HVF_BTC_FOLLOW_ASSET_MID_MIN", 75.0))
     btc_follow_assets: frozenset[str] = field(
-        default_factory=lambda: _csv_set("Q15_HVF_BTC_FOLLOW_ASSETS", "XRP,DOGE,SOL,ETH")
+        default_factory=lambda: _csv_set("Q15_HVF_BTC_FOLLOW_ASSETS", "XRP,SOL,ETH")
     )
     divergence_watch_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_DIVERGENCE_WATCH_ENABLED", True)
