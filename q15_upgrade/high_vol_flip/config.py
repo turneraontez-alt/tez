@@ -34,6 +34,8 @@ def _csv_set(name: str, default: str = "") -> frozenset[str]:
 
 
 INTERVAL_MARKS: dict[str, int] = {
+    "12M": 720,
+    "11M": 660,
     "10M": 600,
     "9M": 540,
     "8M": 480,
@@ -45,7 +47,7 @@ INTERVAL_MARKS: dict[str, int] = {
 class HighVolFlipConfig:
     enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_ENABLED", False))
     model_version: str = field(
-        default_factory=lambda: _str("Q15_HVF_MODEL_VERSION", "high-vol-flip-v1")
+        default_factory=lambda: _str("Q15_HVF_MODEL_VERSION", "high-vol-flip-v2-early")
     )
     db_path: str = field(
         default_factory=lambda: _str("Q15_HVF_DB", "data/q15_high_vol_flip_v1.sqlite3")
@@ -66,7 +68,7 @@ class HighVolFlipConfig:
         default_factory=lambda: _csv_set("Q15_HVF_ASSETS", "XRP,DOGE,SOL,ETH,HYPE,BNB")
     )
     intervals: frozenset[str] = field(
-        default_factory=lambda: _csv_set("Q15_HVF_INTERVALS", "10M,9M,8M,7M")
+        default_factory=lambda: _csv_set("Q15_HVF_INTERVALS", "12M,11M,10M,9M,8M,7M")
     )
     mark_band_seconds: float = field(
         default_factory=lambda: _float("Q15_HVF_BAND_SECONDS", 25.0)
@@ -83,6 +85,34 @@ class HighVolFlipConfig:
     )
     min_depth_contracts: float = field(
         default_factory=lambda: _float("Q15_HVF_MIN_DEPTH_CONTRACTS", 0.0)
+    )
+    max_alerts_per_window: int = field(
+        default_factory=lambda: max(1, int(_float("Q15_HVF_MAX_ALERTS_PER_WINDOW", 2.0)))
+    )
+
+    early_enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_EARLY_ENABLED", True))
+    early_ask_lo: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_ASK_LO", 50.0))
+    early_ask_hi: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_ASK_HI", 65.0))
+    early_mid_lo: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_MID_LO", 45.0))
+    early_mid_hi: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_MID_HI", 62.0))
+    early_spread_max: float = field(default_factory=lambda: _float("Q15_HVF_EARLY_SPREAD_MAX", 6.0))
+    own_early_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_OWN_EARLY_ASSETS", "XRP,DOGE,SOL,ETH,BNB")
+    )
+    own_early_yes_min: float = field(default_factory=lambda: _float("Q15_HVF_OWN_EARLY_YES_MIN", 0.57))
+    own_early_no_max: float = field(default_factory=lambda: _float("Q15_HVF_OWN_EARLY_NO_MAX", 0.43))
+    hype_early_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_HYPE_EARLY_ENABLED", False)
+    )
+    hype_early_yes_min: float = field(default_factory=lambda: _float("Q15_HVF_HYPE_EARLY_YES_MIN", 0.58))
+    btc_early_follow_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_BTC_EARLY_FOLLOW_ENABLED", False)
+    )
+    btc_early_follow_mid_min: float = field(
+        default_factory=lambda: _float("Q15_HVF_BTC_EARLY_FOLLOW_MID_MIN", 75.0)
+    )
+    btc_early_follow_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_BTC_EARLY_FOLLOW_ASSETS", "XRP,DOGE,SOL,ETH")
     )
 
     own_no_yes_max: float = field(default_factory=lambda: _float("Q15_HVF_OWN_NO_YES_MAX", 0.35))

@@ -160,6 +160,14 @@ class HighVolFlipLedger:
             )
             self._conn.commit()
 
+    def alert_count(self, model_version: str, window_key: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM hvf_alerts WHERE model_version=? AND window_key=?",
+                (model_version, window_key),
+            ).fetchone()
+        return int(row["n"] if row is not None else 0)
+
     def unresolved_closed(self, model_version: str, now: float) -> list[str]:
         with self._lock:
             rows = self._conn.execute(

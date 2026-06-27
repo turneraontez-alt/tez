@@ -99,10 +99,21 @@ Q15_ULTOIM_V2_SKIP_15M = "true"
 # but delivered to the existing V2 Telegram channel unless Q15_HVF_TELEGRAM_CHAT_ID
 # is set. Paper-only means no order path exists for these signals.
 Q15_HVF_ENABLED = "true"
+Q15_HVF_MODEL_VERSION = "high-vol-flip-v2-early"
 Q15_HVF_TELEGRAM_ENABLED = "true"
 Q15_HVF_ASSETS = "XRP,DOGE,SOL,ETH,HYPE,BNB"
-Q15_HVF_INTERVALS = "10M,9M,8M,7M"
+Q15_HVF_INTERVALS = "12M,9M"  # replay-cleaned: 11M/8M dragged early HVF negative/noisy
 Q15_HVF_PAPER_ONLY = "true"
+Q15_HVF_MAX_ALERTS_PER_WINDOW = "2"
+Q15_HVF_EARLY_ENABLED = "true"
+Q15_HVF_EARLY_ASK_LO = "50"
+Q15_HVF_EARLY_ASK_HI = "65"
+Q15_HVF_EARLY_MID_LO = "45"
+Q15_HVF_EARLY_MID_HI = "62"
+Q15_HVF_EARLY_SPREAD_MAX = "6"
+Q15_HVF_OWN_EARLY_ASSETS = "XRP,DOGE,SOL,ETH,BNB"
+Q15_HVF_HYPE_EARLY_ENABLED = "false"       # replay: early HYPE bullish was not reliable yet
+Q15_HVF_BTC_EARLY_FOLLOW_ENABLED = "false" # replay: early BTC-lag follow was noisy/negative
 # --- 10M selective book (owner-enabled, in-sample edge -- watch it).
 # Show top 2 10M choices per 15-min window; both YES and NO are gated by BTC confirmation
 # + inverse-edge. YES is PAPER-ONLY; the live NO executor is NO-only guarded.

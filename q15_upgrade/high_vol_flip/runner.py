@@ -15,6 +15,17 @@ from .telegram import HighVolFlipTelegram
 
 logger = logging.getLogger("high_vol_flip.runner")
 
+_RULE_PRIORITY = {
+    "HVF_HYPE_EARLY_BULLISH_FLIP": 700.0,
+    "HVF_OWN_EARLY_FLIP": 680.0,
+    "HVF_BTC_EARLY_FOLLOW_LAG": 650.0,
+    "HVF_HYPE_BULLISH_FLASH": 520.0,
+    "HVF_OWN_NO_FLASH": 500.0,
+    "HVF_OWN_STRONG_SELECTED": 480.0,
+    "HVF_BTC_FOLLOW_EXTREME": 460.0,
+    "HVF_BTC_DIVERGENCE_ACCEL_WATCH": 430.0,
+}
+
 
 def _resolved_result(market: Any) -> str | None:
     if not isinstance(market, Mapping):
@@ -112,6 +123,7 @@ class HighVolFlipRunner:
                 prev_btc = None
                 if prev_rec is not None and prev_rec.get("interval") != interval:
                     prev_btc = prev_rec.get("candidate")
+                rows: list[dict[str, Any]] = []
                 for cand in in_band:
                     asset = str(cand.get("asset") or "").upper()
                     if asset == "BTC" or asset not in cfg.assets:
@@ -119,18 +131,12 @@ class HighVolFlipRunner:
                     decision = evaluate_rules(cand, btc, prev_btc, cfg)
                     if decision is None:
                         continue
-                    row = self._build_row(cand, decision, interval, wk, now)
-                    row_id = self.ledger.record_alert(row)
-                    if row_id is None:
-                        continue
-                    result = self.telegram.send(panel.build_alert(row))
-                    if result.get("delivered"):
-                        status, message_id = "SENT", result.get("message_id")
-                    elif result.get("muted"):
-                        status, message_id = "MUTED", None
-                    else:
-                        status, message_id = "DELIVERY_FAILED", None
-                    self.ledger.mark_delivery(row_id, status, message_id, result.get("error"))
+                    rows.append(self._build_row(cand, decision, interval, wk, now))
+                rows.sort(key=self._rank_row, reverse=True)
+                remaining = cfg.max_alerts_per_window - self.ledger.alert_count(cfg.model_version, wk)
+                if remaining > 0:
+                    for row in rows[:remaining]:
+                        self._record_and_send(row)
                 if btc is not None:
                     existing = self._last_btc_by_window.get(wk)
                     if existing is None or existing.get("interval") != interval:
@@ -139,6 +145,47 @@ class HighVolFlipRunner:
                             "candidate": dict(btc),
                             "updated_at": now,
                         }
+
+    @staticmethod
+    def _rank_row(row: Mapping[str, Any]) -> float:
+        rule = str(row.get("rule_code") or "")
+        side = str(row.get("predicted_outcome") or "").upper()
+        model_yes = row.get("model_yes_probability")
+        try:
+            yes_prob = float(model_yes) if model_yes is not None else 0.5
+        except (TypeError, ValueError):
+            yes_prob = 0.5
+        side_prob = yes_prob if side == "YES" else 1.0 - yes_prob if side == "NO" else 0.5
+        try:
+            ask = float(row.get("selected_ask_cents"))
+        except (TypeError, ValueError):
+            ask = 100.0
+        try:
+            spread = float(row.get("spread_cents"))
+        except (TypeError, ValueError):
+            spread = 8.0
+        early_price_bonus = max(0.0, 20.0 - abs(ask - 58.0))
+        expensive_penalty = max(0.0, ask - 65.0) * 2.5
+        return (
+            _RULE_PRIORITY.get(rule, 0.0)
+            + side_prob * 100.0
+            + early_price_bonus
+            - spread * 4.0
+            - expensive_penalty
+        )
+
+    def _record_and_send(self, row: Mapping[str, Any]) -> None:
+        row_id = self.ledger.record_alert(row)
+        if row_id is None:
+            return
+        result = self.telegram.send(panel.build_alert(row))
+        if result.get("delivered"):
+            status, message_id = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, message_id = "MUTED", None
+        else:
+            status, message_id = "DELIVERY_FAILED", None
+        self.ledger.mark_delivery(row_id, status, message_id, result.get("error"))
 
     def _build_row(self, cand: Mapping[str, Any], decision: Mapping[str, Any],
                    interval: str, wk: int, now: float) -> dict[str, Any]:
