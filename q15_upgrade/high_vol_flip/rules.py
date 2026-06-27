@@ -32,18 +32,39 @@ SPOT_DEPTH_KEYS = (
     "spot_depth_bid_notional_levels",
     "spot_depth_ask_notional_levels",
     "spot_depth_imbalance",
+    "spot_depth_trade_buy_qty_5s",
+    "spot_depth_trade_sell_qty_5s",
+    "spot_depth_trade_net_qty_5s",
+    "spot_depth_trade_buy_notional_5s",
+    "spot_depth_trade_sell_notional_5s",
+    "spot_depth_trade_net_notional_5s",
     "spot_depth_trade_buy_qty_15s",
     "spot_depth_trade_sell_qty_15s",
     "spot_depth_trade_net_qty_15s",
     "spot_depth_trade_buy_notional_15s",
     "spot_depth_trade_sell_notional_15s",
+    "spot_depth_trade_net_notional_15s",
+    "spot_depth_trade_buy_qty_60s",
+    "spot_depth_trade_sell_qty_60s",
     "spot_depth_trade_net_qty_60s",
+    "spot_depth_trade_buy_notional_60s",
+    "spot_depth_trade_sell_notional_60s",
+    "spot_depth_trade_net_notional_60s",
+    "spot_depth_last_trade_price",
+    "spot_depth_last_trade_side",
+    "spot_depth_last_trade_size",
 )
 
 KALSHI_DEPTH_STATUS_KEYS = (
     "kalshi_depth_status",
     "kalshi_depth_missing_reason",
     "kalshi_depth_retry_used",
+)
+
+KALSHI_TRADE_FLOW_KEYS = (
+    "kalshi_taker_yes_volume_15s",
+    "kalshi_taker_no_volume_15s",
+    "kalshi_taker_net_yes_volume_15s",
 )
 
 
@@ -205,6 +226,8 @@ def extract_candidate(asset: Any, analysis: Mapping[str, Any], canonical: Any) -
     }
     for key in KALSHI_DEPTH_STATUS_KEYS:
         out[key] = quote.get(key)
+    for key in KALSHI_TRADE_FLOW_KEYS:
+        out[key] = quote.get(key)
     for key in SPOT_DEPTH_KEYS:
         out[key] = quote.get(key)
     return out
@@ -230,6 +253,20 @@ def _tradable(cand: Mapping[str, Any], side: str, cfg: Any, *, spread_limit: flo
         and side_ask(cand, side) is not None
         and _spread_ok(cand, cfg, spread_limit)
         and _depth_ok(cand, cfg)
+    )
+
+
+def _more_fire_depth_ok(cand: Mapping[str, Any], cfg: Any) -> bool:
+    minimum = _num(getattr(cfg, "more_fire_min_yes_bid_ask_depth_ratio", 0.0))
+    if minimum is None or minimum <= 0.0:
+        return True
+    bid_depth = _num(cand.get("yes_bid_depth_contracts"))
+    ask_depth = _num(cand.get("yes_ask_depth_contracts"))
+    return (
+        bid_depth is not None
+        and ask_depth is not None
+        and ask_depth > 0.0
+        and (bid_depth / ask_depth) >= minimum
     )
 
 
@@ -396,7 +433,8 @@ def _more_fire_strict_yes(cand: Mapping[str, Any], prev_asset: Mapping[str, Any]
     if not getattr(cfg, "more_fire_strict_enabled", False):
         return None
     asset = str(cand.get("asset") or "").upper()
-    if asset == "HYPE" or asset not in getattr(cfg, "more_fire_strict_assets", frozenset()):
+    excluded = getattr(cfg, "more_fire_excluded_assets", frozenset({"BNB", "HYPE"}))
+    if asset in excluded or asset not in getattr(cfg, "more_fire_strict_assets", frozenset()):
         return None
     if interval is not None and interval not in getattr(cfg, "more_fire_strict_intervals", frozenset()):
         return None
@@ -416,6 +454,7 @@ def _more_fire_strict_yes(cand: Mapping[str, Any], prev_asset: Mapping[str, Any]
         and jump is not None
         and jump >= cfg.more_fire_min_mid_jump_cents
         and _tradable(cand, "YES", cfg, spread_limit=cfg.more_fire_spread_max)
+        and _more_fire_depth_ok(cand, cfg)
     ):
         return _decision(
             cand,

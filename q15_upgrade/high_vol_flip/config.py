@@ -95,7 +95,10 @@ class HighVolFlipConfig:
         default_factory=lambda: _bool("Q15_HVF_MORE_FIRE_STRICT_ENABLED", False)
     )
     more_fire_strict_assets: frozenset[str] = field(
-        default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_STRICT_ASSETS", "BNB,ETH,SOL,XRP")
+        default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_STRICT_ASSETS", "ETH,SOL,XRP")
+    )
+    more_fire_excluded_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_EXCLUDED_ASSETS", "BNB,HYPE")
     )
     more_fire_strict_intervals: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_STRICT_INTERVALS", "12M,10M,8M,7M")
@@ -104,7 +107,7 @@ class HighVolFlipConfig:
         default_factory=lambda: _float("Q15_HVF_MORE_FIRE_YES_ASK_LO", 55.0)
     )
     more_fire_yes_ask_hi: float = field(
-        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_YES_ASK_HI", 75.0)
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_YES_ASK_HI", 70.0)
     )
     more_fire_spread_max: float = field(
         default_factory=lambda: _float("Q15_HVF_MORE_FIRE_SPREAD_MAX", 3.0)
@@ -114,6 +117,9 @@ class HighVolFlipConfig:
     )
     more_fire_min_mid_jump_cents: float = field(
         default_factory=lambda: _float("Q15_HVF_MORE_FIRE_MIN_MID_JUMP_CENTS", 4.0)
+    )
+    more_fire_min_yes_bid_ask_depth_ratio: float = field(
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_MIN_YES_BID_ASK_DEPTH_RATIO", 3.0)
     )
 
     early_enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_EARLY_ENABLED", True))

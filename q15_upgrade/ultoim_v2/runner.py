@@ -45,18 +45,39 @@ SPOT_DEPTH_KEYS = (
     "spot_depth_bid_notional_levels",
     "spot_depth_ask_notional_levels",
     "spot_depth_imbalance",
+    "spot_depth_trade_buy_qty_5s",
+    "spot_depth_trade_sell_qty_5s",
+    "spot_depth_trade_net_qty_5s",
+    "spot_depth_trade_buy_notional_5s",
+    "spot_depth_trade_sell_notional_5s",
+    "spot_depth_trade_net_notional_5s",
     "spot_depth_trade_buy_qty_15s",
     "spot_depth_trade_sell_qty_15s",
     "spot_depth_trade_net_qty_15s",
     "spot_depth_trade_buy_notional_15s",
     "spot_depth_trade_sell_notional_15s",
+    "spot_depth_trade_net_notional_15s",
+    "spot_depth_trade_buy_qty_60s",
+    "spot_depth_trade_sell_qty_60s",
     "spot_depth_trade_net_qty_60s",
+    "spot_depth_trade_buy_notional_60s",
+    "spot_depth_trade_sell_notional_60s",
+    "spot_depth_trade_net_notional_60s",
+    "spot_depth_last_trade_price",
+    "spot_depth_last_trade_side",
+    "spot_depth_last_trade_size",
 )
 
 KALSHI_DEPTH_STATUS_KEYS = (
     "kalshi_depth_status",
     "kalshi_depth_missing_reason",
     "kalshi_depth_retry_used",
+)
+
+KALSHI_TRADE_FLOW_KEYS = (
+    "kalshi_taker_yes_volume_15s",
+    "kalshi_taker_no_volume_15s",
+    "kalshi_taker_net_yes_volume_15s",
 )
 
 
@@ -263,6 +284,8 @@ class UltoimV2Runner:
             "snapshot_id": analysis.get("snapshot_id"),
         }
         for key in KALSHI_DEPTH_STATUS_KEYS:
+            out[key] = quote.get(key)
+        for key in KALSHI_TRADE_FLOW_KEYS:
             out[key] = quote.get(key)
         for key in SPOT_DEPTH_KEYS:
             out[key] = quote.get(key)
@@ -681,6 +704,9 @@ class UltoimV2Runner:
             "kalshi_depth_status": cand.get("kalshi_depth_status"),
             "kalshi_depth_missing_reason": cand.get("kalshi_depth_missing_reason"),
             "kalshi_depth_retry_used": 1 if cand.get("kalshi_depth_retry_used") else 0,
+            "kalshi_taker_yes_volume_15s": cand.get("kalshi_taker_yes_volume_15s"),
+            "kalshi_taker_no_volume_15s": cand.get("kalshi_taker_no_volume_15s"),
+            "kalshi_taker_net_yes_volume_15s": cand.get("kalshi_taker_net_yes_volume_15s"),
             "spot_depth_status": cand.get("spot_depth_status"),
             "spot_depth_missing_reason": cand.get("spot_depth_missing_reason"),
             "spot_depth_source": cand.get("spot_depth_source"),
@@ -697,12 +723,27 @@ class UltoimV2Runner:
             "spot_depth_bid_notional_levels": cand.get("spot_depth_bid_notional_levels"),
             "spot_depth_ask_notional_levels": cand.get("spot_depth_ask_notional_levels"),
             "spot_depth_imbalance": cand.get("spot_depth_imbalance"),
+            "spot_depth_trade_buy_qty_5s": cand.get("spot_depth_trade_buy_qty_5s"),
+            "spot_depth_trade_sell_qty_5s": cand.get("spot_depth_trade_sell_qty_5s"),
+            "spot_depth_trade_net_qty_5s": cand.get("spot_depth_trade_net_qty_5s"),
+            "spot_depth_trade_buy_notional_5s": cand.get("spot_depth_trade_buy_notional_5s"),
+            "spot_depth_trade_sell_notional_5s": cand.get("spot_depth_trade_sell_notional_5s"),
+            "spot_depth_trade_net_notional_5s": cand.get("spot_depth_trade_net_notional_5s"),
             "spot_depth_trade_buy_qty_15s": cand.get("spot_depth_trade_buy_qty_15s"),
             "spot_depth_trade_sell_qty_15s": cand.get("spot_depth_trade_sell_qty_15s"),
             "spot_depth_trade_net_qty_15s": cand.get("spot_depth_trade_net_qty_15s"),
             "spot_depth_trade_buy_notional_15s": cand.get("spot_depth_trade_buy_notional_15s"),
             "spot_depth_trade_sell_notional_15s": cand.get("spot_depth_trade_sell_notional_15s"),
+            "spot_depth_trade_net_notional_15s": cand.get("spot_depth_trade_net_notional_15s"),
+            "spot_depth_trade_buy_qty_60s": cand.get("spot_depth_trade_buy_qty_60s"),
+            "spot_depth_trade_sell_qty_60s": cand.get("spot_depth_trade_sell_qty_60s"),
             "spot_depth_trade_net_qty_60s": cand.get("spot_depth_trade_net_qty_60s"),
+            "spot_depth_trade_buy_notional_60s": cand.get("spot_depth_trade_buy_notional_60s"),
+            "spot_depth_trade_sell_notional_60s": cand.get("spot_depth_trade_sell_notional_60s"),
+            "spot_depth_trade_net_notional_60s": cand.get("spot_depth_trade_net_notional_60s"),
+            "spot_depth_last_trade_price": cand.get("spot_depth_last_trade_price"),
+            "spot_depth_last_trade_side": cand.get("spot_depth_last_trade_side"),
+            "spot_depth_last_trade_size": cand.get("spot_depth_last_trade_size"),
             "quote_age_seconds": cand.get("quote_age_seconds"),
             "spot_stale_age_seconds": cand.get("spot_stale_age_seconds"),
             "distance_sigma": cand.get("distance_sigma"),

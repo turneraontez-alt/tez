@@ -160,75 +160,119 @@ def test_default_early_tuning_blocks_noisy_hype_and_btc_lag_rules(tmp_path):
     assert r.ledger.rows(r.config.model_version) == []
 
 
-def test_more_fire_strict_uses_checkpoint_jump_and_excludes_hype(tmp_path):
+def test_more_fire_strict_uses_checkpoint_jump_depth_and_excludes_bnb_hype(tmp_path):
     r = _runner(
         tmp_path,
-        assets=frozenset({"BNB", "HYPE"}),
+        assets=frozenset({"SOL", "BNB", "HYPE"}),
         intervals=frozenset({"9M"}),
         more_fire_strict_enabled=True,
-        more_fire_strict_assets=frozenset({"BNB", "HYPE"}),
+        more_fire_strict_assets=frozenset({"SOL", "BNB", "HYPE"}),
         more_fire_strict_intervals=frozenset({"12M"}),
         max_alerts_per_window=2,
     )
     close = 1800.0
-    bnb_prev = _cand(
-        "BNB", "YES", 60, 63, 0.58, ticker="T-BNB", secs=780, close=close,
-        quote_extra={"yes_bid_depth_contracts": 31, "yes_ask_depth_contracts": 44},
+    sol_prev = _cand(
+        "SOL", "YES", 60, 63, 0.58, ticker="T-SOL", secs=780, close=close,
+        quote_extra={"yes_bid_depth_contracts": 150, "yes_ask_depth_contracts": 40},
     )
+    bnb_prev = _cand("BNB", "YES", 60, 63, 0.58, ticker="T-BNB", secs=780, close=close)
     hype_prev = _cand("HYPE", "YES", 60, 63, 0.58, ticker="T-HYPE", secs=780, close=close)
-    r._observe_sync(candidates=[bnb_prev, hype_prev], now=1000.0)
+    r._observe_sync(candidates=[sol_prev, bnb_prev, hype_prev], now=1000.0)
 
-    bnb_now = _cand(
-        "BNB", "YES", 66, 69, 0.62, ticker="T-BNB", secs=720, close=close,
+    sol_now = _cand(
+        "SOL", "YES", 66, 69, 0.62, ticker="T-SOL", secs=720, close=close,
         quote_extra={
-            "yes_bid_depth_contracts": 31,
-            "yes_ask_depth_contracts": 44,
+            "yes_bid_depth_contracts": 150,
+            "yes_ask_depth_contracts": 40,
             "kalshi_depth_status": "ok",
             "kalshi_depth_missing_reason": None,
             "kalshi_depth_retry_used": True,
+            "kalshi_taker_yes_volume_15s": 12.0,
+            "kalshi_taker_no_volume_15s": 3.0,
+            "kalshi_taker_net_yes_volume_15s": 9.0,
             "spot_depth_status": "ok",
             "spot_depth_missing_reason": None,
-            "spot_depth_source": "OKX BNB-USDT",
+            "spot_depth_source": "OKX SOL-USDT",
             "spot_depth_age_seconds": 3.0,
             "spot_depth_bid_depth_levels": 900.0,
             "spot_depth_ask_depth_levels": 300.0,
             "spot_depth_imbalance": 0.5,
+            "spot_depth_trade_buy_qty_5s": 1.0,
+            "spot_depth_trade_sell_qty_5s": 0.25,
+            "spot_depth_trade_net_qty_5s": 0.75,
             "spot_depth_trade_net_qty_15s": 5.0,
+            "spot_depth_trade_buy_qty_60s": 12.0,
+            "spot_depth_trade_sell_qty_60s": 4.0,
+            "spot_depth_trade_net_qty_60s": 8.0,
+            "spot_depth_last_trade_side": "buy",
+            "spot_depth_last_trade_size": 0.5,
         },
     )
+    bnb_now = _cand("BNB", "YES", 66, 69, 0.62, ticker="T-BNB", secs=720, close=close)
     hype_now = _cand("HYPE", "YES", 66, 69, 0.62, ticker="T-HYPE", secs=720, close=close)
-    r._observe_sync(candidates=[bnb_now, hype_now], now=1060.0)
+    r._observe_sync(candidates=[sol_now, bnb_now, hype_now], now=1060.0)
 
     rows = r.ledger.rows(r.config.model_version)
     assert len(rows) == 1
-    assert rows[0]["asset"] == "BNB"
+    assert rows[0]["asset"] == "SOL"
     assert rows[0]["rule_code"] == "HVF_MORE_FIRE_STRICT"
     assert rows[0]["record_kind"] == "MORE_FIRE_STRICT_ALERT"
     assert rows[0]["previous_interval"] == "13M"
     assert rows[0]["selected_mid_jump_cents"] == 6.0
-    assert rows[0]["yes_ask_depth_contracts"] == 44
+    assert rows[0]["yes_ask_depth_contracts"] == 40
     assert rows[0]["kalshi_depth_status"] == "ok"
     assert rows[0]["kalshi_depth_retry_used"] == 1
+    assert rows[0]["kalshi_taker_net_yes_volume_15s"] == 9.0
     assert rows[0]["spot_depth_status"] == "ok"
-    assert rows[0]["spot_depth_source"] == "OKX BNB-USDT"
+    assert rows[0]["spot_depth_source"] == "OKX SOL-USDT"
     assert rows[0]["spot_depth_bid_depth_levels"] == 900.0
     assert rows[0]["spot_depth_ask_depth_levels"] == 300.0
     assert rows[0]["spot_depth_imbalance"] == 0.5
+    assert rows[0]["spot_depth_trade_net_qty_5s"] == 0.75
     assert rows[0]["spot_depth_trade_net_qty_15s"] == 5.0
+    assert rows[0]["spot_depth_trade_net_qty_60s"] == 8.0
+    assert rows[0]["spot_depth_last_trade_side"] == "buy"
     assert "MORE-FIRE STRICT" in r.telegram.sent[0]
+
+
+def test_more_fire_strict_requires_yes_depth_ratio(tmp_path):
+    r = _runner(
+        tmp_path,
+        assets=frozenset({"SOL"}),
+        intervals=frozenset({"9M"}),
+        more_fire_strict_enabled=True,
+        more_fire_strict_intervals=frozenset({"12M"}),
+    )
+    close = 1800.0
+    prev = _cand(
+        "SOL", "YES", 60, 63, 0.58, ticker="T-SOL", secs=780, close=close,
+        quote_extra={"yes_bid_depth_contracts": 31, "yes_ask_depth_contracts": 44},
+    )
+    now = _cand(
+        "SOL", "YES", 66, 69, 0.62, ticker="T-SOL", secs=720, close=close,
+        quote_extra={"yes_bid_depth_contracts": 31, "yes_ask_depth_contracts": 44},
+    )
+
+    r._observe_sync(candidates=[prev], now=1000.0)
+    r._observe_sync(candidates=[now], now=1060.0)
+
+    assert r.ledger.rows(r.config.model_version) == []
 
 
 def test_more_fire_strict_requires_prior_checkpoint(tmp_path):
     r = _runner(
         tmp_path,
-        assets=frozenset({"BNB"}),
+        assets=frozenset({"SOL"}),
         intervals=frozenset({"9M"}),
         more_fire_strict_enabled=True,
         more_fire_strict_intervals=frozenset({"12M"}),
     )
-    bnb_now = _cand("BNB", "YES", 66, 69, 0.62, ticker="T-BNB", secs=720, close=1800.0)
+    sol_now = _cand(
+        "SOL", "YES", 66, 69, 0.62, ticker="T-SOL", secs=720, close=1800.0,
+        quote_extra={"yes_bid_depth_contracts": 150, "yes_ask_depth_contracts": 40},
+    )
 
-    r._observe_sync(candidates=[bnb_now], now=1060.0)
+    r._observe_sync(candidates=[sol_now], now=1060.0)
 
     assert r.ledger.rows(r.config.model_version) == []
 

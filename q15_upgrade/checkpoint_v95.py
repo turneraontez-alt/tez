@@ -729,6 +729,13 @@ def _spot_depth_quote_fields(snapshot: Mapping[str, Any], observed_at: float) ->
     def val(key: str) -> Any:
         return depth.get(key)
 
+    def net_notional(suffix: str) -> float | None:
+        buy = _num(depth.get(f"trade_buy_notional_{suffix}"))
+        sell = _num(depth.get(f"trade_sell_notional_{suffix}"))
+        if buy is None or sell is None:
+            return None
+        return buy - sell
+
     created = _num(depth.get("created_at"))
     snapshot_age = max(0.0, observed_at - created) if created is not None else None
     book_age = _num(depth.get("book_age_seconds"))
@@ -755,12 +762,27 @@ def _spot_depth_quote_fields(snapshot: Mapping[str, Any], observed_at: float) ->
         "spot_depth_bid_notional_levels": val("bid_notional_levels"),
         "spot_depth_ask_notional_levels": val("ask_notional_levels"),
         "spot_depth_imbalance": val("depth_imbalance"),
+        "spot_depth_trade_buy_qty_5s": val("trade_buy_qty_5s"),
+        "spot_depth_trade_sell_qty_5s": val("trade_sell_qty_5s"),
+        "spot_depth_trade_net_qty_5s": val("trade_net_qty_5s"),
+        "spot_depth_trade_buy_notional_5s": val("trade_buy_notional_5s"),
+        "spot_depth_trade_sell_notional_5s": val("trade_sell_notional_5s"),
+        "spot_depth_trade_net_notional_5s": net_notional("5s"),
         "spot_depth_trade_buy_qty_15s": val("trade_buy_qty_15s"),
         "spot_depth_trade_sell_qty_15s": val("trade_sell_qty_15s"),
         "spot_depth_trade_net_qty_15s": val("trade_net_qty_15s"),
         "spot_depth_trade_buy_notional_15s": val("trade_buy_notional_15s"),
         "spot_depth_trade_sell_notional_15s": val("trade_sell_notional_15s"),
+        "spot_depth_trade_net_notional_15s": net_notional("15s"),
+        "spot_depth_trade_buy_qty_60s": val("trade_buy_qty_60s"),
+        "spot_depth_trade_sell_qty_60s": val("trade_sell_qty_60s"),
         "spot_depth_trade_net_qty_60s": val("trade_net_qty_60s"),
+        "spot_depth_trade_buy_notional_60s": val("trade_buy_notional_60s"),
+        "spot_depth_trade_sell_notional_60s": val("trade_sell_notional_60s"),
+        "spot_depth_trade_net_notional_60s": net_notional("60s"),
+        "spot_depth_last_trade_price": val("last_trade_price"),
+        "spot_depth_last_trade_side": val("last_trade_side"),
+        "spot_depth_last_trade_size": val("last_trade_size"),
     }
 
 
@@ -1303,6 +1325,13 @@ def analyse_v95(
     quote_ts = canonical.feed_timestamps.get("quote")
     quote_age = None if quote_ts is None else max(0.0, canonical.observed_at - quote_ts)
     spot_depth_fields = _spot_depth_quote_fields(snapshot, canonical.observed_at)
+    kalshi_taker_yes_15s = _num(snapshot.get("taker_yes_volume_15s"))
+    kalshi_taker_no_15s = _num(snapshot.get("taker_no_volume_15s"))
+    kalshi_taker_net_yes_15s = (
+        kalshi_taker_yes_15s - kalshi_taker_no_15s
+        if kalshi_taker_yes_15s is not None and kalshi_taker_no_15s is not None
+        else None
+    )
     # Per-checkpoint gates. 7M defaults mirror 10M so adding the 7-minute tracker
     # does not change live entry behavior; both stay overridable via env.
     _checkpoint = canonical.checkpoint if canonical.checkpoint in ("10M", "15M", "7M") else "10M"
@@ -1442,6 +1471,9 @@ def analyse_v95(
             "kalshi_depth_status": snapshot.get("kalshi_depth_status"),
             "kalshi_depth_missing_reason": snapshot.get("kalshi_depth_missing_reason"),
             "kalshi_depth_retry_used": snapshot.get("kalshi_depth_retry_used"),
+            "kalshi_taker_yes_volume_15s": kalshi_taker_yes_15s,
+            "kalshi_taker_no_volume_15s": kalshi_taker_no_15s,
+            "kalshi_taker_net_yes_volume_15s": kalshi_taker_net_yes_15s,
             **spot_depth_fields,
         },
         "costs": costs,

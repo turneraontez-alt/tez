@@ -52,6 +52,9 @@ def _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35, **extra
                   "kalshi_depth_status": "ok",
                   "kalshi_depth_missing_reason": None,
                   "kalshi_depth_retry_used": True,
+                  "kalshi_taker_yes_volume_15s": 2.0,
+                  "kalshi_taker_no_volume_15s": 8.0,
+                  "kalshi_taker_net_yes_volume_15s": -6.0,
                   "spot_depth_status": "ok",
                   "spot_depth_missing_reason": None,
                   "spot_depth_source": "OKX HYPE-USDT",
@@ -59,7 +62,15 @@ def _analysis(side="NO", sel=0.65, ask=60.0, net_edge=5.0, mkt_yes=0.35, **extra
                   "spot_depth_bid_depth_levels": 1000.0,
                   "spot_depth_ask_depth_levels": 400.0,
                   "spot_depth_imbalance": 0.428571,
+                  "spot_depth_trade_buy_qty_5s": 1.0,
+                  "spot_depth_trade_sell_qty_5s": 0.25,
+                  "spot_depth_trade_net_qty_5s": 0.75,
                   "spot_depth_trade_net_qty_15s": 12.0,
+                  "spot_depth_trade_buy_qty_60s": 20.0,
+                  "spot_depth_trade_sell_qty_60s": 5.0,
+                  "spot_depth_trade_net_qty_60s": 15.0,
+                  "spot_depth_last_trade_side": "buy",
+                  "spot_depth_last_trade_size": 0.4,
                   "quote_age_seconds": 1.0},
         "costs": {"fee_cents": 1.0, "total_cost_cents": 2.0},
         "regime": {"name": "TREND", "distance_sigma": 1.2},
@@ -289,9 +300,13 @@ def test_extract_candidate_skips_when_not_in_data(tmp_path):
     assert cand["no_ask_depth_contracts"] == pytest.approx(44.0)
     assert cand["kalshi_depth_status"] == "ok"
     assert cand["kalshi_depth_retry_used"] is True
+    assert cand["kalshi_taker_net_yes_volume_15s"] == pytest.approx(-6.0)
     assert cand["spot_depth_status"] == "ok"
     assert cand["spot_depth_imbalance"] == pytest.approx(0.428571)
+    assert cand["spot_depth_trade_net_qty_5s"] == pytest.approx(0.75)
     assert cand["spot_depth_trade_net_qty_15s"] == pytest.approx(12.0)
+    assert cand["spot_depth_trade_net_qty_60s"] == pytest.approx(15.0)
+    assert cand["spot_depth_last_trade_side"] == "buy"
 
 
 def test_v2_records_full_side_depth_without_gating(tmp_path):
@@ -308,11 +323,15 @@ def test_v2_records_full_side_depth_without_gating(tmp_path):
     assert row["no_ask_depth_contracts"] == pytest.approx(44.0)
     assert row["kalshi_depth_status"] == "ok"
     assert row["kalshi_depth_retry_used"] == 1
+    assert row["kalshi_taker_net_yes_volume_15s"] == pytest.approx(-6.0)
     assert row["spot_depth_status"] == "ok"
     assert row["spot_depth_source"] == "OKX HYPE-USDT"
     assert row["spot_depth_bid_depth_levels"] == pytest.approx(1000.0)
     assert row["spot_depth_ask_depth_levels"] == pytest.approx(400.0)
     assert row["spot_depth_imbalance"] == pytest.approx(0.428571)
+    assert row["spot_depth_trade_net_qty_5s"] == pytest.approx(0.75)
+    assert row["spot_depth_trade_net_qty_60s"] == pytest.approx(15.0)
+    assert row["spot_depth_last_trade_side"] == "buy"
 
 
 # --------------------------------------------------------------------------- #
