@@ -40,6 +40,12 @@ MERGE_IDENTITY = [
     "-c", "user.email=github-relay@users.noreply.github.com",
 ]
 
+# Files where GitHub (codex) is the source of truth: if the ONLY merge conflict
+# is in one of these, auto-resolve by taking GitHub's version ('-X theirs').
+# .replit churns constantly because Replit's auto-checkpoint commits rewrite it
+# locally while codex pushes config edits to the same lines.
+AUTO_THEIRS_FILES = {".replit"}
+
 
 def _token() -> str | None:
     return os.environ.get("GH_PUSH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -79,15 +85,38 @@ def _merge_remote(token: str) -> tuple[str, str]:
     status: 'ok' (merged / fast-forwarded / already up to date),
             'conflict' (aborted, project untouched),
             'error' (aborted, project untouched).
+
+    When the ONLY conflicting paths are auto-resolvable config files
+    (AUTO_THEIRS_FILES, e.g. .replit), GitHub is treated as the source of
+    truth and the merge is retried with '-X theirs'. This clears the recurring
+    churn between Replit's auto-checkpoint commits and codex's config pushes,
+    while still hard-pausing on any real code conflict.
     """
     m = _git([*MERGE_IDENTITY, "merge", "--no-edit", "FETCH_HEAD"])
     out = _mask((m.stdout + m.stderr).strip(), token)
     if m.returncode == 0:
         return "ok", out
-    conflicts = _git(["diff", "--name-only", "--diff-filter=U"]).stdout.strip()
+    conflicts = [
+        c for c in _git(["diff", "--name-only", "--diff-filter=U"]).stdout.strip().splitlines() if c
+    ]
+    if conflicts and all(c in AUTO_THEIRS_FILES for c in conflicts):
+        ab = _git(["merge", "--abort"])
+        if ab.returncode != 0:
+            return "error", "merge --abort failed before auto-resolve:\n" + _mask(
+                (ab.stdout + ab.stderr).strip(), token
+            )
+        r = _git([*MERGE_IDENTITY, "merge", "--no-edit", "-X", "theirs", "FETCH_HEAD"])
+        rout = _mask((r.stdout + r.stderr).strip(), token)
+        if r.returncode == 0:
+            return "ok", "auto-resolved (GitHub wins) " + ", ".join(conflicts) + "\n" + rout
+        leftover = _git(["diff", "--name-only", "--diff-filter=U"]).stdout.strip()
+        _git(["merge", "--abort"])
+        if leftover:
+            return "conflict", "auto-resolve failed; same file changed on both sides:\n" + leftover
+        return "error", "auto-resolve merge failed:\n" + rout
     _git(["merge", "--abort"])
     if conflicts:
-        return "conflict", "Same file changed on both sides:\n" + conflicts
+        return "conflict", "Same file changed on both sides:\n" + "\n".join(conflicts)
     return "error", out
 
 

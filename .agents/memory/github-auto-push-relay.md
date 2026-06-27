@@ -37,3 +37,17 @@ without that marker.
 - One-shot reconcile (fetch + merge + push) is the safe way to fold GitHub-only
   commits back in without force-pushing; run it as a temporary workflow, then
   remove that workflow.
+- `.replit` is a perpetual merge-conflict source: Replit's auto-checkpoint
+  commits rewrite it locally while codex pushes config edits to the same lines,
+  so a plain merge conflicts and the relay PAUSES (codex commits never arrive).
+  Policy: when a merge conflict's ONLY files are config files, the relay resolves
+  in GitHub's favor and continues; it still hard-pauses on any real code conflict.
+  **Why:** local env edits are meant to feed INTO codex, which carries them
+  forward, so on collision GitHub (codex) should win for config files.
+  **Gotcha:** a local-only `.replit` env change (e.g. flipping
+  `Q15_EXEC_YES_ENABLED=true`) gets overwritten whenever codex pushes a `.replit`
+  edit — re-apply via setEnvVars + restart after such pulls.
+- If codex pushes aren't arriving locally, FIRST check the relay workflow is even
+  running (it can be in NOT_STARTED); a stopped relay looks identical to "no new
+  pushes". `/tmp/logs/*.log` are stale snapshots — call refresh_all_logs to see
+  the live relay state (e.g. the `PAUSED:` conflict line).
