@@ -99,12 +99,20 @@ Q15_ULTOIM_V2_SKIP_15M = "true"
 # but delivered to the existing V2 Telegram channel unless Q15_HVF_TELEGRAM_CHAT_ID
 # is set. Paper-only means no order path exists for these signals.
 Q15_HVF_ENABLED = "true"
-Q15_HVF_MODEL_VERSION = "high-vol-flip-v3-confirmed"
+Q15_HVF_MODEL_VERSION = "high-vol-flip-v4-more-fire-strict"
 Q15_HVF_TELEGRAM_ENABLED = "true"
-Q15_HVF_ASSETS = "XRP,SOL,ETH,HYPE,BNB" # DOGE removed: replay-cleaned HVF P/L drag
+Q15_HVF_ASSETS = "XRP,SOL,ETH,BNB" # DOGE/HYPE removed from live HVF/MFS alert universe
 Q15_HVF_INTERVALS = "12M,9M"  # confirmed HVF: entry alerts stay on 12M/9M
 Q15_HVF_PAPER_ONLY = "true"
 Q15_HVF_MAX_ALERTS_PER_WINDOW = "2"
+Q15_HVF_MORE_FIRE_STRICT_ENABLED = "true"
+Q15_HVF_MORE_FIRE_STRICT_ASSETS = "BNB,ETH,SOL,XRP"
+Q15_HVF_MORE_FIRE_STRICT_INTERVALS = "12M,10M,8M,7M"
+Q15_HVF_MORE_FIRE_YES_ASK_LO = "55"
+Q15_HVF_MORE_FIRE_YES_ASK_HI = "75"
+Q15_HVF_MORE_FIRE_SPREAD_MAX = "3"
+Q15_HVF_MORE_FIRE_MIN_CAL_YES = "0.60"
+Q15_HVF_MORE_FIRE_MIN_MID_JUMP_CENTS = "4"
 Q15_HVF_EARLY_ENABLED = "true"
 Q15_HVF_EARLY_ENTRY_ENABLED = "false" # early flips are watch/research only, not entry alerts
 Q15_HVF_EARLY_ASK_LO = "50"

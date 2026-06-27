@@ -687,7 +687,13 @@ def _model_probability(structural: Mapping[str, Any], features: Mapping[str, flo
 
 
 def _kalshi_depth(snapshot: Mapping[str, Any], side: str) -> float | None:
-    aliases = ("yes_ask_size", "yes_offer_size", "yes_depth_at_ask") if side == "YES" else ("no_ask_size", "no_offer_size", "no_depth_at_ask")
+    aliases = (
+        ("yes_ask_size", "yes_ask_qty", "yes_offer_size",
+         "yes_depth_at_ask", "yes_ask_depth_contracts")
+        if side == "YES"
+        else ("no_ask_size", "no_ask_qty", "no_offer_size",
+              "no_depth_at_ask", "no_ask_depth_contracts")
+    )
     direct = _first_num(snapshot, aliases)
     if direct is not None:
         return max(0.0, direct)
@@ -1234,6 +1240,10 @@ def analyse_v95(
     ask = _num(quote.get("ask_cents"))
     spread = _num(quote.get("spread_cents"))
     depth = _kalshi_depth(snapshot, side)
+    yes_ask_depth = _kalshi_depth(snapshot, "YES")
+    no_ask_depth = _kalshi_depth(snapshot, "NO")
+    yes_bid_depth = _first_num(snapshot, ("yes_bid_qty", "yes_bid_size", "yes_bid_depth_contracts"))
+    no_bid_depth = _first_num(snapshot, ("no_bid_qty", "no_bid_size", "no_bid_depth_contracts"))
     quote_ts = canonical.feed_timestamps.get("quote")
     quote_age = None if quote_ts is None else max(0.0, canonical.observed_at - quote_ts)
     # Per-checkpoint gates. 7M defaults mirror 10M so adding the 7-minute tracker
@@ -1368,6 +1378,10 @@ def analyse_v95(
             "seconds_remaining": canonical.seconds_remaining,
             "volatility_per_min": _shadow_vol_per_min(volatility),
             "depth_contracts": depth, "data_quality": data_quality,
+            "yes_bid_depth_contracts": yes_bid_depth,
+            "yes_ask_depth_contracts": yes_ask_depth,
+            "no_bid_depth_contracts": no_bid_depth,
+            "no_ask_depth_contracts": no_ask_depth,
         },
         "costs": costs,
         "net_edge_cents": net_edge,

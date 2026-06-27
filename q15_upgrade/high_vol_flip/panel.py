@@ -39,8 +39,9 @@ def _remaining(seconds: Any) -> str:
 
 
 def build_alert(row: Mapping[str, Any]) -> str:
+    title = row.get("alert_title") or "HIGH VOLATILITY FLIP"
     lines = [
-        "<b>HIGH VOLATILITY FLIP</b>",
+        f"<b>{_esc(title)}</b>",
         f"Asset: <b>{_esc(row.get('asset'))}</b>",
         f"Predicted outcome: <b>{_esc(row.get('predicted_outcome'))}</b>",
         f"Rule: {_esc(row.get('rule_name'))}",
@@ -50,6 +51,10 @@ def build_alert(row: Mapping[str, Any]) -> str:
         f"{_cents(row.get('selected_bid_cents'))}/{_cents(row.get('selected_ask_cents'))}",
         f"Model YES probability: {_prob(row.get('model_yes_probability'))}",
     ]
+    if row.get("selected_mid_jump_cents") is not None:
+        lines.append(f"Selected-side mid jump: {_cents(row.get('selected_mid_jump_cents'))}c")
+    if row.get("depth_contracts") is not None:
+        lines.append(f"Ask depth: {_cents(row.get('depth_contracts'))} contracts")
     if row.get("btc_dominant_side"):
         btc = (
             f"BTC {_esc(row.get('btc_dominant_side'))} "

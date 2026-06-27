@@ -34,6 +34,7 @@ def _csv_set(name: str, default: str = "") -> frozenset[str]:
 
 
 INTERVAL_MARKS: dict[str, int] = {
+    "13M": 780,
     "12M": 720,
     "11M": 660,
     "10M": 600,
@@ -88,6 +89,31 @@ class HighVolFlipConfig:
     )
     max_alerts_per_window: int = field(
         default_factory=lambda: max(1, int(_float("Q15_HVF_MAX_ALERTS_PER_WINDOW", 2.0)))
+    )
+
+    more_fire_strict_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_MORE_FIRE_STRICT_ENABLED", False)
+    )
+    more_fire_strict_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_STRICT_ASSETS", "BNB,ETH,SOL,XRP")
+    )
+    more_fire_strict_intervals: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_STRICT_INTERVALS", "12M,10M,8M,7M")
+    )
+    more_fire_yes_ask_lo: float = field(
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_YES_ASK_LO", 55.0)
+    )
+    more_fire_yes_ask_hi: float = field(
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_YES_ASK_HI", 75.0)
+    )
+    more_fire_spread_max: float = field(
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_SPREAD_MAX", 3.0)
+    )
+    more_fire_min_calibrated_yes: float = field(
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_MIN_CAL_YES", 0.60)
+    )
+    more_fire_min_mid_jump_cents: float = field(
+        default_factory=lambda: _float("Q15_HVF_MORE_FIRE_MIN_MID_JUMP_CENTS", 4.0)
     )
 
     early_enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_EARLY_ENABLED", True))
