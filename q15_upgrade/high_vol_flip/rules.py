@@ -270,6 +270,38 @@ def _more_fire_depth_ok(cand: Mapping[str, Any], cfg: Any) -> bool:
     )
 
 
+def selected_depth_ratio(data: Mapping[str, Any], side: str | None = None) -> float | None:
+    s = _side(side or data.get("selected_side") or data.get("predicted_outcome")
+              or data.get("predicted_side"))
+    if s == "YES":
+        bid_depth = _num(data.get("yes_bid_depth_contracts"))
+        ask_depth = _num(data.get("yes_ask_depth_contracts"))
+    elif s == "NO":
+        bid_depth = _num(data.get("no_bid_depth_contracts"))
+        ask_depth = _num(data.get("no_ask_depth_contracts"))
+    else:
+        return None
+    if bid_depth is None or ask_depth is None or ask_depth <= 0.0:
+        return None
+    return bid_depth / ask_depth
+
+
+def _depth_veto_ok(cand: Mapping[str, Any], decision: Mapping[str, Any], cfg: Any) -> bool:
+    if not getattr(cfg, "depth_veto_enabled", True):
+        return True
+    reason = str(decision.get("reason_code") or "")
+    rule_codes = getattr(cfg, "depth_veto_rule_codes", frozenset())
+    if reason not in rule_codes:
+        return True
+    minimum = _num(getattr(cfg, "depth_veto_min_selected_bid_ask_ratio", 0.0))
+    if minimum is None or minimum <= 0.0:
+        return True
+    ratio = selected_depth_ratio(cand, decision.get("selected_side"))
+    # Fail-open: a missing depth snapshot should not throw away the many
+    # historically clean strong-selected winners. Known bad depth is blocked.
+    return ratio is None or ratio >= minimum
+
+
 def _early_price_ok(cand: Mapping[str, Any], side: str | None, cfg: Any) -> bool:
     if not getattr(cfg, "early_enabled", True):
         return False
@@ -474,7 +506,12 @@ def _more_fire_strict_yes(cand: Mapping[str, Any], prev_asset: Mapping[str, Any]
 def _btc_follow_extreme(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
                         cfg: Any) -> dict[str, Any] | None:
     asset = str(cand.get("asset") or "").upper()
-    if asset not in cfg.btc_follow_assets or not btc:
+    if (
+        not getattr(cfg, "btc_follow_enabled", False)
+        or asset in getattr(cfg, "btc_follow_excluded_assets", frozenset())
+        or asset not in cfg.btc_follow_assets
+        or not btc
+    ):
         return None
     btc_side = _side(btc.get("dominant_side"))
     btc_mid = _num(btc.get("dominant_mid_cents"))
@@ -524,6 +561,8 @@ def evaluate_rules(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
                    prev_asset: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     """Return the first confirmed rule for this asset/window, or None."""
     asset = str(cand.get("asset") or "").upper()
+    if asset in getattr(cfg, "excluded_assets", frozenset()):
+        return None
     base_rules_enabled = interval is None or interval in getattr(cfg, "intervals", frozenset())
     more_fire = lambda: _more_fire_strict_yes(cand, prev_asset, cfg, interval)
     if not base_rules_enabled:
@@ -574,6 +613,6 @@ def evaluate_rules(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
         checks = (lambda: None,)
     for check in checks:
         decision = check()
-        if decision is not None:
+        if decision is not None and _depth_veto_ok(cand, decision, cfg):
             return decision
     return None

@@ -68,6 +68,9 @@ class HighVolFlipConfig:
     assets: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_HVF_ASSETS", "XRP,SOL,ETH,HYPE,BNB")
     )
+    excluded_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_EXCLUDED_ASSETS", "DOGE")
+    )
     intervals: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_HVF_INTERVALS", "12M,11M,10M,9M,8M,7M")
     )
@@ -122,6 +125,20 @@ class HighVolFlipConfig:
         default_factory=lambda: _float("Q15_HVF_MORE_FIRE_MIN_YES_BID_ASK_DEPTH_RATIO", 3.0)
     )
 
+    depth_veto_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_DEPTH_VETO_ENABLED", True)
+    )
+    depth_veto_min_selected_bid_ask_ratio: float = field(
+        default_factory=lambda: _float("Q15_HVF_DEPTH_VETO_MIN_SELECTED_RATIO", 0.10)
+    )
+    depth_veto_rule_codes: frozenset[str] = field(
+        default_factory=lambda: _csv_set(
+            "Q15_HVF_DEPTH_VETO_RULE_CODES",
+            "HVF_OWN_STRONG_SELECTED,HVF_OWN_NO_FLASH,"
+            "HVF_OWN_EARLY_FLIP,HVF_HYPE_EARLY_BULLISH_FLIP",
+        )
+    )
+
     early_enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_EARLY_ENABLED", True))
     early_entry_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_EARLY_ENTRY_ENABLED", False)
@@ -157,10 +174,16 @@ class HighVolFlipConfig:
     hype_bull_yes_min: float = field(default_factory=lambda: _float("Q15_HVF_HYPE_BULL_YES_MIN", 0.65))
     hype_bull_yes_bid_min: float = field(default_factory=lambda: _float("Q15_HVF_HYPE_BULL_YES_BID_MIN", 70.0))
     hype_bull_spread_max: float = field(default_factory=lambda: _float("Q15_HVF_HYPE_BULL_SPREAD_MAX", 4.0))
+    btc_follow_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_BTC_FOLLOW_ENABLED", False)
+    )
     btc_follow_mid_min: float = field(default_factory=lambda: _float("Q15_HVF_BTC_FOLLOW_MID_MIN", 80.0))
     btc_follow_asset_mid_min: float = field(default_factory=lambda: _float("Q15_HVF_BTC_FOLLOW_ASSET_MID_MIN", 75.0))
     btc_follow_assets: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_HVF_BTC_FOLLOW_ASSETS", "XRP,SOL,ETH")
+    )
+    btc_follow_excluded_assets: frozenset[str] = field(
+        default_factory=lambda: _csv_set("Q15_HVF_BTC_FOLLOW_EXCLUDED_ASSETS", "BNB,HYPE,DOGE")
     )
     divergence_watch_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_DIVERGENCE_WATCH_ENABLED", True)

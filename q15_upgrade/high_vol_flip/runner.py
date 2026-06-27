@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 from . import panel
 from .config import HighVolFlipConfig, INTERVAL_MARKS, window_key
 from .ledger import HighVolFlipLedger, kalshi_fee_cents
-from .rules import evaluate_rules, extract_candidate
+from .rules import evaluate_rules, extract_candidate, selected_depth_ratio
 from .telegram import HighVolFlipTelegram
 
 logger = logging.getLogger("high_vol_flip.runner")
@@ -78,9 +78,10 @@ class HighVolFlipRunner:
         if not cfg.enabled:
             return
         candidates: list[dict[str, Any]] = []
+        excluded_assets = getattr(cfg, "excluded_assets", frozenset())
         for asset, analysis in (analyses or {}).items():
             asset_key = str(asset or "").upper()
-            if asset_key != "BTC" and asset_key not in cfg.assets:
+            if asset_key != "BTC" and (asset_key not in cfg.assets or asset_key in excluded_assets):
                 continue
             try:
                 cand = extract_candidate(asset_key, analysis, (canonicals or {}).get(asset))
@@ -129,7 +130,7 @@ class HighVolFlipRunner:
                 rows: list[dict[str, Any]] = []
                 for cand in in_band:
                     asset = str(cand.get("asset") or "").upper()
-                    if asset == "BTC" or asset not in cfg.assets:
+                    if asset == "BTC" or asset not in cfg.assets or asset in cfg.excluded_assets:
                         continue
                     prev_asset = self._previous_candidate(wk, asset, interval)
                     decision = evaluate_rules(
@@ -230,6 +231,7 @@ class HighVolFlipRunner:
             "yes_ask_depth_contracts": cand.get("yes_ask_depth_contracts"),
             "no_bid_depth_contracts": cand.get("no_bid_depth_contracts"),
             "no_ask_depth_contracts": cand.get("no_ask_depth_contracts"),
+            "selected_depth_ratio": selected_depth_ratio(cand, decision.get("selected_side")),
             "kalshi_depth_status": cand.get("kalshi_depth_status"),
             "kalshi_depth_missing_reason": cand.get("kalshi_depth_missing_reason"),
             "kalshi_depth_retry_used": 1 if cand.get("kalshi_depth_retry_used") else 0,
@@ -410,7 +412,22 @@ class HighVolFlipRunner:
             "paper_only": True,
             "telegram": self.telegram.status(),
             "assets": sorted(self.config.assets),
+            "excluded_assets": sorted(self.config.excluded_assets),
             "intervals": sorted(self.config.intervals),
+            "depth_veto": {
+                "enabled": self.config.depth_veto_enabled,
+                "min_selected_bid_ask_ratio": (
+                    self.config.depth_veto_min_selected_bid_ask_ratio
+                ),
+                "rule_codes": sorted(self.config.depth_veto_rule_codes),
+            },
+            "btc_follow_extreme": {
+                "enabled": self.config.btc_follow_enabled,
+                "assets": sorted(self.config.btc_follow_assets),
+                "excluded_assets": sorted(self.config.btc_follow_excluded_assets),
+                "mid_min": self.config.btc_follow_mid_min,
+                "asset_mid_min": self.config.btc_follow_asset_mid_min,
+            },
             "more_fire_strict": {
                 "enabled": self.config.more_fire_strict_enabled,
                 "assets": sorted(self.config.more_fire_strict_assets),

@@ -96,6 +96,8 @@ def test_hype_bullish_flash_sends_one_paper_alert_per_window(tmp_path):
     assert rows[0]["predicted_outcome"] == "YES"
     assert rows[0]["delivery_status"] == "SENT"
     assert "HIGH VOLATILITY FLIP" in r.telegram.sent[0]
+    assert "<pre>" in r.telegram.sent[0]
+    assert "Depth ratio: missing" in r.telegram.sent[0]
     assert "Paper-only: tracking performance, no trade placed" in r.telegram.sent[0]
 
 
@@ -220,6 +222,7 @@ def test_more_fire_strict_uses_checkpoint_jump_depth_and_excludes_bnb_hype(tmp_p
     assert rows[0]["previous_interval"] == "13M"
     assert rows[0]["selected_mid_jump_cents"] == 6.0
     assert rows[0]["yes_ask_depth_contracts"] == 40
+    assert rows[0]["selected_depth_ratio"] == 3.75
     assert rows[0]["kalshi_depth_status"] == "ok"
     assert rows[0]["kalshi_depth_retry_used"] == 1
     assert rows[0]["kalshi_taker_net_yes_volume_15s"] == 9.0
@@ -233,6 +236,7 @@ def test_more_fire_strict_uses_checkpoint_jump_depth_and_excludes_bnb_hype(tmp_p
     assert rows[0]["spot_depth_trade_net_qty_60s"] == 8.0
     assert rows[0]["spot_depth_last_trade_side"] == "buy"
     assert "MORE-FIRE STRICT" in r.telegram.sent[0]
+    assert "Depth ratio: 3.75" in r.telegram.sent[0]
 
 
 def test_more_fire_strict_requires_yes_depth_ratio(tmp_path):
@@ -305,13 +309,14 @@ def test_first_confirmed_rule_wins_over_stacked_rules(tmp_path):
     assert rows[0]["rule_code"] == "HVF_OWN_NO_FLASH"
 
 
-def test_btc_follow_applies_to_xrp_but_not_bnb(tmp_path):
-    r = _runner(tmp_path)
+def test_btc_follow_applies_to_xrp_when_explicitly_enabled_but_not_bnb_or_doge(tmp_path):
+    r = _runner(tmp_path, btc_follow_enabled=True, assets=frozenset({"XRP", "BNB", "DOGE"}))
     btc = _cand("BTC", "NO", 82, 84, 0.15, ticker="T-BTC")
     xrp = _cand("XRP", "YES", 24, 25, 0.50, ticker="T-XRP")
     bnb = _cand("BNB", "YES", 24, 25, 0.50, ticker="T-BNB")
+    doge = _cand("DOGE", "YES", 24, 25, 0.50, ticker="T-DOGE")
 
-    r._observe_sync(candidates=[btc, xrp, bnb], now=1000.0)
+    r._observe_sync(candidates=[btc, xrp, bnb, doge], now=1000.0)
 
     rows = r.ledger.rows(r.config.model_version)
     assert len(rows) == 1
@@ -321,12 +326,32 @@ def test_btc_follow_applies_to_xrp_but_not_bnb(tmp_path):
 
 
 def test_doge_is_excluded_from_clean_hvf_default_assets(tmp_path):
-    r = _runner(tmp_path)
+    r = _runner(tmp_path, assets=frozenset({"DOGE"}))
     doge = _cand("DOGE", "YES", 82, 84, 0.85, ticker="T-DOGE")
 
     r._observe_sync(candidates=[doge], now=1000.0)
 
     assert r.ledger.rows(r.config.model_version) == []
+
+
+def test_depth_veto_blocks_known_bad_depth_but_allows_missing_depth(tmp_path):
+    r = _runner(tmp_path, assets=frozenset({"SOL"}), max_alerts_per_window=2)
+    bad_depth = _cand(
+        "SOL", "YES", 82, 84, 0.85, ticker="T-SOL-BAD", close=1600.0,
+        quote_extra={"yes_bid_depth_contracts": 5, "yes_ask_depth_contracts": 100},
+    )
+    missing_depth = _cand(
+        "SOL", "YES", 82, 84, 0.85, ticker="T-SOL-MISS", close=2500.0,
+    )
+
+    r._observe_sync(candidates=[bad_depth], now=1000.0)
+    assert r.ledger.rows(r.config.model_version) == []
+
+    r._observe_sync(candidates=[missing_depth], now=1900.0)
+    rows = r.ledger.rows(r.config.model_version)
+    assert len(rows) == 1
+    assert rows[0]["rule_code"] == "HVF_OWN_STRONG_SELECTED"
+    assert rows[0]["selected_depth_ratio"] is None
 
 
 def test_fee_aware_grading_and_scoreboard(tmp_path):
