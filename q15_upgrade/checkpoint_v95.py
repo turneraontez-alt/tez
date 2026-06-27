@@ -2944,6 +2944,15 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     _u2r.observe(analyses=analyses, canonicals=canonicals, now=now)
             except Exception:
                 logger.debug("ultoim_v2 observe skipped", exc_info=True)
+            # High Volatility Flip paper alerts (separate ledger/model; may share
+            # the V2 Telegram room by config). It never trades or changes V2.
+            try:
+                from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
+                _hvf = _hvf_runner()
+                if _hvf is not None:
+                    _hvf.observe(analyses=analyses, canonicals=canonicals, now=now)
+            except Exception:
+                logger.debug("high_vol_flip observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
             if now - self._last_reconcile_at >= 30.0:
                 self._last_reconcile_at = now
@@ -2972,6 +2981,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         _irr.resolve_settled(result_events, now)
                 except Exception:
                     logger.debug("interval-research resolve skipped", exc_info=True)
+                try:
+                    from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
+                    _hvf = _hvf_runner()
+                    if _hvf is not None:
+                        _hvf.resolve_settled(result_events, now)
+                except Exception:
+                    logger.debug("high_vol_flip resolve skipped", exc_info=True)
             ledger_status = self.ledger.status()
             # The recommended BEST ENTRY is rank #1 of the qualifying entries — the
             # single source of truth shared by the alert's top summary and detail.

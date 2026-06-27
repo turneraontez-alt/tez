@@ -704,6 +704,14 @@ def refresh_loop(max_cycles=None):
                     _u2r.maybe_send_recap(now)
             except Exception:
                 logger.debug("ultoim_v2 reconcile skipped", exc_info=True)
+            # High Volatility Flip: separate paper-only alert ledger/scoreboard.
+            try:
+                from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
+                _hvf = _hvf_runner()
+                if _hvf is not None:
+                    _hvf.reconcile(now, market_cache)
+            except Exception:
+                logger.debug("high_vol_flip reconcile skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)
@@ -969,6 +977,18 @@ def q15_v95_accuracy_ep():
 @app.route("/data/q15-v9-5/shadow-signals")
 def q15_v95_shadow_signals_ep():
     return jsonify(checkpoint_v95.shadow_signal_experiment())
+
+@app.route("/api/q15-hvf/scoreboard")
+@app.route("/data/q15-hvf/scoreboard")
+def q15_hvf_scoreboard_ep():
+    try:
+        from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
+        runner = _hvf_runner()
+        if runner is None:
+            return jsonify({"available": False, "enabled": False, "model_version": "high-vol-flip-v1"})
+        return jsonify(runner.scoreboard())
+    except Exception as exc:
+        return jsonify({"available": False, "error": str(exc)})
 
 @app.route("/api/market-cache")
 @app.route("/data/market-cache")

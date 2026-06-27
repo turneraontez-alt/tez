@@ -95,6 +95,14 @@ Q15_ULTOIM_V2_RECORD_XFLOW = "true"
 Q15_ULTOIM_V2_DELIVER_TOP_N = "2"  # show top 2 10M choices per 15-min window
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
+# HIGH VOLATILITY FLIP paper alerts: separate model/ledger from V2 10M entries,
+# but delivered to the existing V2 Telegram channel unless Q15_HVF_TELEGRAM_CHAT_ID
+# is set. Paper-only means no order path exists for these signals.
+Q15_HVF_ENABLED = "true"
+Q15_HVF_TELEGRAM_ENABLED = "true"
+Q15_HVF_ASSETS = "XRP,DOGE,SOL,ETH,HYPE,BNB"
+Q15_HVF_INTERVALS = "10M,9M,8M,7M"
+Q15_HVF_PAPER_ONLY = "true"
 # --- 10M selective book (owner-enabled, in-sample edge -- watch it).
 # Show top 2 10M choices per 15-min window; both YES and NO are gated by BTC confirmation
 # + inverse-edge. YES is PAPER-ONLY; the live NO executor is NO-only guarded.
