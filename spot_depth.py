@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover - optional dependency guard
 
 COINBASE_WS = "wss://ws-feed.exchange.coinbase.com"
 OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
+COINBASE_BOOK_CHANNEL = "level2_50"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS spot_depth_snapshots (
@@ -134,6 +135,10 @@ def _record_seconds() -> float:
 
 def _levels() -> int:
     return _env_int("Q15_SPOT_DEPTH_LEVELS", 5, minimum=1)
+
+
+def _ws_max_size() -> int:
+    return _env_int("Q15_SPOT_DEPTH_WS_MAX_SIZE_BYTES", 16 * 1024 * 1024, minimum=1024 * 1024)
 
 
 def _max_book_age() -> float:
@@ -279,6 +284,13 @@ class SpotDepthRecorder:
         except Exception:
             return
         typ = data.get("type")
+        if typ == "error":
+            message = data.get("message") or "coinbase_error"
+            reason = data.get("reason")
+            text = f"{message}: {reason}" if reason else str(message)
+            with self._lock:
+                self._last_error["coinbase_message"] = text[:200]
+            return
         asset = self._coinbase.get(data.get("product_id"))
         if not asset:
             return
@@ -299,7 +311,7 @@ class SpotDepthRecorder:
                 changes=data.get("changes") or [],
                 ts=_source_ts(data.get("time")) or time.time(),
             )
-        elif typ == "match":
+        elif typ in {"match", "last_match"}:
             self._record_trade(
                 asset,
                 provider="coinbase",
@@ -615,7 +627,12 @@ class SpotDepthRecorder:
         while not self._stop.is_set():
             try:
                 async with websockets.connect(
-                    url, ping_interval=20, ping_timeout=20, close_timeout=5, max_queue=1000
+                    url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=5,
+                    max_queue=1000,
+                    max_size=_ws_max_size(),
                 ) as socket:
                     with self._lock:
                         self._connected[name] = True
@@ -647,7 +664,7 @@ class SpotDepthRecorder:
         await socket.send(json.dumps({
             "type": "subscribe",
             "product_ids": sorted(self._coinbase.keys()),
-            "channels": ["level2", "matches"],
+            "channels": [COINBASE_BOOK_CHANNEL, "matches"],
         }))
 
     async def _subscribe_okx(self, socket) -> None:

@@ -52,6 +52,37 @@ def test_coinbase_depth_and_trade_are_recorded(tmp_path):
     assert row["last_trade_side"] == "buy"
 
 
+def test_coinbase_last_match_and_errors_are_recorded(tmp_path):
+    db = str(tmp_path / "depth.sqlite3")
+    feed = SpotDepthRecorder(assets=["BTC"], db_path=db)
+
+    feed._handle_coinbase(json.dumps({
+        "type": "error",
+        "message": "Failed to subscribe",
+        "reason": "level2 requires authentication",
+    }))
+    assert "requires authentication" in feed.health()["last_error"]["coinbase_message"]
+
+    feed._handle_coinbase(json.dumps({
+        "type": "snapshot",
+        "product_id": "BTC-USD",
+        "bids": [["100.0", "2.0"]],
+        "asks": [["100.5", "1.5"]],
+    }))
+    feed._handle_coinbase(json.dumps({
+        "type": "last_match",
+        "product_id": "BTC-USD",
+        "side": "sell",
+        "price": "100.25",
+        "size": "0.2",
+    }))
+
+    assert feed.record_once() == 1
+    row = _row(db)
+    assert row["trade_sell_qty_60s"] == 0.2
+    assert row["last_trade_side"] == "sell"
+
+
 def test_okx_depth_trade_order_count_and_health(tmp_path):
     db = str(tmp_path / "depth.sqlite3")
     feed = SpotDepthRecorder(assets=["HYPE"], db_path=db)
