@@ -65,6 +65,7 @@ class HighVolFlipConfig:
         default_factory=lambda: (
             os.environ.get("Q15_HVF_TELEGRAM_CHAT_ID")
             or os.environ.get("Q15_ULTOIM_V2_TELEGRAM_CHAT_ID")
+            or os.environ.get("TELEGRAM_CHAT_ID")
             or ""
         )
     )

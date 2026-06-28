@@ -93,12 +93,7 @@ class V3Telegram:
         self.chat_id = (
             chat_id
             if chat_id is not None
-            else (
-                os.environ.get("Q15_V3_TELEGRAM_CHAT_ID")
-                or os.environ.get("Q15_ULTOIM_V2_TELEGRAM_CHAT_ID")
-                or os.environ.get("TELEGRAM_CHAT_ID")
-                or ""
-            )
+            else (os.environ.get("Q15_V3_TELEGRAM_CHAT_ID") or "")
         )
         active = _bool("Q15_V3_TELEGRAM_ENABLED", False) if enabled is None else bool(enabled)
         self.enabled = bool(active and self.token and self.chat_id)

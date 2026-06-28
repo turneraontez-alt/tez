@@ -39,6 +39,16 @@ def _runner(tmp_path, **overrides):
     return r
 
 
+def test_hvf_telegram_falls_back_to_current_chat(monkeypatch):
+    monkeypatch.delenv("Q15_HVF_TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.delenv("Q15_ULTOIM_V2_TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "current-room")
+
+    cfg = HighVolFlipConfig.from_env()
+
+    assert cfg.telegram_chat_id == "current-room"
+
+
 def _canon(ticker, secs=600.0, close=1600.0):
     return SimpleNamespace(ticker=ticker, seconds_remaining=secs, settlement_time=close)
 

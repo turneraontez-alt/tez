@@ -16,6 +16,7 @@ from q15_upgrade.strategy_bots.rules import (
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
 )
+from q15_upgrade.strategy_bots.telegram import V3Telegram
 
 
 def _row(**over):
@@ -192,3 +193,22 @@ def test_runtime_suppresses_duplicate_hype_window_and_marks_muted_notification(t
     assert [r["decision_status"] for r in hype_rows] == [ACCEPTED, REJECTED]
     assert hype_rows[0]["notification_status"] == "MUTED"
     assert "DUPLICATE_HYPE_WINDOW_EXPOSURE" in hype_rows[1]["reason_codes"]
+
+
+def test_v3_telegram_requires_dedicated_chat(monkeypatch):
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "old-room")
+    monkeypatch.setenv("Q15_ULTOIM_V2_TELEGRAM_CHAT_ID", "v2-room")
+    monkeypatch.delenv("Q15_V3_TELEGRAM_CHAT_ID", raising=False)
+
+    muted = V3Telegram()
+
+    assert muted.chat_id == ""
+    assert muted.enabled is False
+
+    monkeypatch.setenv("Q15_V3_TELEGRAM_CHAT_ID", "v3-room")
+    dedicated = V3Telegram()
+
+    assert dedicated.chat_id == "v3-room"
+    assert dedicated.enabled is True
