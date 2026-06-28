@@ -131,6 +131,13 @@ def _hiconv_yes_pass(cand: Mapping[str, Any], cfg: Any) -> bool:
             and regime == "THRESHOLD_PIN")
 
 
+def _v3_owns_bnb_notification(cfg: Any, row: Mapping[str, Any]) -> bool:
+    return (
+        bool(getattr(cfg, "suppress_bnb_telegram_for_v3", False))
+        and str(row.get("asset") or "").upper() == "BNB"
+    )
+
+
 class UltoimV2Runner:
     def __init__(self, config: UltoimV2Config) -> None:
         self.config = config
@@ -836,7 +843,15 @@ class UltoimV2Runner:
         alert_row["best_entry_cents"] = display
         summary = self._alert_summary()
         text = panel.build_entry_alert(alert_row, summary, cfg)
-        result = self.telegram.send(text)
+        if _v3_owns_bnb_notification(cfg, row):
+            result = {
+                "delivered": False,
+                "muted": True,
+                "message_id": None,
+                "error": "v3_bnb_combined_owns_notification",
+            }
+        else:
+            result = self.telegram.send(text)
         if result.get("delivered"):
             status, mid = "SENT", result.get("message_id")
         elif result.get("muted"):

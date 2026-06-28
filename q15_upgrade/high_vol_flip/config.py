@@ -59,6 +59,9 @@ class HighVolFlipConfig:
     alert_telegram_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_ALERT_TELEGRAM_ENABLED", False)
     )
+    suppress_bnb_telegram_for_v3: bool = field(
+        default_factory=lambda: _bool("Q15_V3_SUPPRESS_OLD_BNB_NOTIFICATIONS", False)
+    )
     # User requested the existing V2 Telegram room. A dedicated HVF chat can still
     # override it later without changing code.
     telegram_chat_id: str = field(

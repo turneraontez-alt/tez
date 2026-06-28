@@ -520,6 +520,21 @@ def test_deliver_default_is_single_best_by_edge(tmp_path):
     assert "BTC" in tg.sent[0]                        # the max net-edge pick (edge 8)
 
 
+def test_v3_can_own_bnb_notifications_without_disabling_ultoim_tracking(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, suppress_bnb_telegram_for_v3=True)
+    r._observe_sync(candidates=_no_book(r, {"BNB": (60.0, 0.66)}, secs=900.0, now=1000.0),
+                    now=1000.0)
+
+    rows = r.ledger.recent_rows("ultoim-v2", limit=5)
+    assert len(rows) == 1
+    assert rows[0]["asset"] == "BNB"
+    assert rows[0]["fired"] == 1
+    assert rows[0]["delivery_status"] == "MUTED"
+    assert rows[0]["delivery_error"] == "v3_bnb_combined_owns_notification"
+    assert tg.sent == []
+
+
 def test_deliver_top_n_by_reward_risk_picks_cheapest(tmp_path):
     tg = _StubTelegram()
     r = _runner(tmp_path, telegram=tg, deliver_top_n=2, deliver_by_reward_risk=True)

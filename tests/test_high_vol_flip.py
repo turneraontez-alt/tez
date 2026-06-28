@@ -125,6 +125,39 @@ def test_old_hvf_telegram_switch_does_not_send_without_alert_opt_in(tmp_path):
     assert r.telegram.sent == []
 
 
+def test_v3_can_own_bnb_notifications_without_disabling_hvf_tracking(tmp_path):
+    r = _runner(tmp_path, suppress_bnb_telegram_for_v3=True)
+    row = {
+        "created_at": 1000.0,
+        "model_version": r.config.model_version,
+        "record_kind": "HIGH_VOL_FLIP_ALERT",
+        "asset": "BNB",
+        "ticker": "T-BNB",
+        "interval": "10M",
+        "window_key": 1,
+        "close_time": 1600.0,
+        "seconds_remaining": 600.0,
+        "predicted_outcome": "NO",
+        "model_predicted_side": "NO",
+        "rule_code": "HVF_OWN_STRONG_SELECTED",
+        "rule_name": "OWN_STRONG_SELECTED",
+        "reason_codes": "HVF_OWN_STRONG_SELECTED",
+        "selected_side": "NO",
+        "selected_ask_cents": 80.0,
+        "entry_ask_cents": 80.0,
+        "paper_only": True,
+    }
+
+    r._record_and_send(row)
+
+    rows = r.ledger.rows(r.config.model_version)
+    assert len(rows) == 1
+    assert rows[0]["asset"] == "BNB"
+    assert rows[0]["delivery_status"] == "MUTED"
+    assert rows[0]["delivery_error"] == "v3_bnb_combined_owns_notification"
+    assert r.telegram.sent == []
+
+
 def test_hype_early_bullish_flip_is_opt_in_research_entry(tmp_path):
     r = _runner(tmp_path, early_entry_enabled=True, hype_early_enabled=True)
     hype = _cand("HYPE", "YES", 55, 60, 0.60)

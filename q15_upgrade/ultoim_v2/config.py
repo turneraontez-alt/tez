@@ -70,6 +70,9 @@ class UltoimV2Config:
     telegram_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_TELEGRAM_ENABLED", True)
     )
+    suppress_bnb_telegram_for_v3: bool = field(
+        default_factory=lambda: _bool("Q15_V3_SUPPRESS_OLD_BNB_NOTIFICATIONS", False)
+    )
     # Entry gate thresholds (all research-only; tunable). Confidence is the
     # selected-side probability; ask band keeps entries in a sensible cents range;
     # min_edge is the conservative net edge after costs to fire.

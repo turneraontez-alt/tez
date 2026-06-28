@@ -41,6 +41,13 @@ def _resolved_result(market: Any) -> str | None:
     return result if result in {"YES", "NO"} else None
 
 
+def _v3_owns_bnb_notification(config: Any, row: Mapping[str, Any]) -> bool:
+    return (
+        bool(getattr(config, "suppress_bnb_telegram_for_v3", False))
+        and str(row.get("asset") or "").upper() == "BNB"
+    )
+
+
 class HighVolFlipRunner:
     def __init__(self, config: HighVolFlipConfig) -> None:
         self.config = config
@@ -200,7 +207,14 @@ class HighVolFlipRunner:
         row_id = self.ledger.record_alert(row)
         if row_id is None:
             return
-        if self.config.telegram_enabled and self.config.alert_telegram_enabled:
+        if _v3_owns_bnb_notification(self.config, row):
+            result = {
+                "delivered": False,
+                "muted": True,
+                "message_id": None,
+                "error": "v3_bnb_combined_owns_notification",
+            }
+        elif self.config.telegram_enabled and self.config.alert_telegram_enabled:
             result = self.telegram.send(panel.build_alert(row))
         else:
             result = {"delivered": False, "muted": True,
