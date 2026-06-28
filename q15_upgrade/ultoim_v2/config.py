@@ -64,6 +64,12 @@ class UltoimV2Config:
     telegram_chat_id: str = field(
         default_factory=lambda: _str("Q15_ULTOIM_V2_TELEGRAM_CHAT_ID", "")
     )
+    # Master mute for the legacy V2 Telegram sender. Keep V2 enabled for
+    # recording/settlement, but set false when a downstream notification surface
+    # (v3) should own the channel.
+    telegram_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_TELEGRAM_ENABLED", True)
+    )
     # Entry gate thresholds (all research-only; tunable). Confidence is the
     # selected-side probability; ask band keeps entries in a sensible cents range;
     # min_edge is the conservative net edge after costs to fire.

@@ -21,6 +21,7 @@ import time
 from typing import Any, Mapping
 
 from .. import shadow_factors as cross_asset
+from ..strategy_bots import runtime as strategy_bots_runtime
 from . import fifteen_min, gate, panel, screen, validate
 from .config import INTERVAL_MARKS, UltoimV2Config, is_enabled
 from .ledger import UltoimV2Ledger, _window_key
@@ -136,7 +137,9 @@ class UltoimV2Runner:
         self.ledger = UltoimV2Ledger(config.db_path)
         self.ledger.ensure_reset_marker(config.model_version, time.time())
         self.session_id = self.ledger.session_id()
-        self.telegram = UltoimV2Telegram(config.telegram_chat_id)
+        self.telegram = UltoimV2Telegram(
+            config.telegram_chat_id if getattr(config, "telegram_enabled", True) else ""
+        )
         self._jobs: "queue.Queue[tuple[str, dict]]" = queue.Queue(maxsize=512)
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
@@ -804,10 +807,17 @@ class UltoimV2Runner:
         # in this window (one alert per contract per window, across checkpoints).
         if not verdict["fired"]:
             self.ledger.mark_delivery(row_id, "RECORDED", None, None)
+            strategy_row = dict(row)
+            strategy_row["delivery_status"] = "RECORDED"
+            strategy_bots_runtime.record_source_row(strategy_row, source_system="ultoim_v2")
             return
         ticker = str(cand.get("ticker") or "")
         if not self.ledger.claim_alert(cfg.model_version, ticker, window_key, now):
             self.ledger.mark_delivery(row_id, "RECORDED", None, "alert_already_sent")
+            strategy_row = dict(row)
+            strategy_row["delivery_status"] = "RECORDED"
+            strategy_row["delivery_error"] = "alert_already_sent"
+            strategy_bots_runtime.record_source_row(strategy_row, source_system="ultoim_v2")
             return
         # EXECUTE BEFORE TELEGRAM (latency fix): place the real order BEFORE the synchronous
         # Telegram send. telegram.send is a blocking network call (~0.3-1.5s typ, up to ~8-17s on
@@ -835,6 +845,11 @@ class UltoimV2Runner:
             status, mid = "DELIVERY_FAILED", None
         self.ledger.set_report_message(cfg.model_version, interval, window_key, mid)
         self.ledger.mark_delivery(row_id, status, mid, result.get("error"))
+        strategy_row = dict(row)
+        strategy_row["delivery_status"] = status
+        strategy_row["message_id"] = mid
+        strategy_row["delivery_error"] = result.get("error")
+        strategy_bots_runtime.record_source_row(strategy_row, source_system="ultoim_v2")
 
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
                        window_key: int, interval: str, now: float,
@@ -924,7 +939,9 @@ class UltoimV2Runner:
         row = self._build_row(cand, verdict, interval, mark, window_key, now,
                               record_kind="RESEARCH_YES", delivery_status="RESEARCH")
         row.pop("_best_entry_cents", None)
-        self.ledger.record_decision(row)
+        row_id = self.ledger.record_decision(row)
+        if row_id is not None:
+            strategy_bots_runtime.record_source_row(row, source_system="ultoim_v2")
 
     def _alert_summary(self) -> dict[str, Any]:
         """Compact scoreboard facts for the entry card's caveat — derived, never
@@ -1088,6 +1105,13 @@ class UltoimV2Runner:
             result = _resolved_result(market)
             if result is not None:
                 self.ledger.resolve(mv, ticker, result, now)
+                strategy_bots_runtime.resolve(
+                    source_system="ultoim_v2",
+                    source_model_version=mv,
+                    ticker=ticker,
+                    official_result=result,
+                    now=now,
+                )
                 # Grade the exit warning too: was bailing the right call (entry lost)
                 # or a false alarm (entry would have won)? This is how it learns.
                 self.ledger.resolve_exit_warning(mv, ticker, result, now)

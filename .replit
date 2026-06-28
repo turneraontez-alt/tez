@@ -91,6 +91,7 @@ Q15_POLYMARKET_ENABLED = "true"
 "Q15_ULTOIM_TELEGRAM_CHAT_ID " = "-1001234567890"
 LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
+Q15_ULTOIM_V2_TELEGRAM_ENABLED = "false" # V2 still records/settles; V3 owns Telegram notifications
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
 Q15_ULTOIM_V2_DELIVER_TOP_N = "2"  # show top 2 10M choices per 15-min window
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
@@ -142,8 +143,12 @@ Q15_ULTOIM_V2_10M_YES_MARKET_MIN = "0.70"
 Q15_ULTOIM_V2_10M_EXPENSIVE_NO_ASK_HI = "85"
 # 7M is skipped globally in the 10M-only book; this NO-only lever stays as a separate fallback.
 Q15_ULTOIM_V2_SKIP_7M_NO = "false"
-Q15_ULTOIM_V2_YES_NOTIFY = "true"  # paper YES Telegram notifications (hiconv + BTC-confirm); NEVER an order
+Q15_ULTOIM_V2_YES_NOTIFY = "false" # V3 sends filtered YES notifications; keep old V2 YES cards muted
 Q15_ULTOIM_V2_EXIT_WATCH_SECONDS = "600"
+Q15_STRATEGY_BOTS_ENABLED = "true"
+Q15_STRATEGY_BOTS_DB = "data/q15_strategy_bots_v3.sqlite3"
+Q15_V3_TELEGRAM_ENABLED = "true"
+Q15_V3_HYPE_ALLOW_DUPLICATE_WINDOW = "false"
 # 12M EXPENSIVE-NO slice -> LIVE (owner-approved): deliver 12M only for ask>=65 (the cheap <65 zone
 # is suppressed). Data: 12M ask>=65 = 90.9%/+17c/bet (n=11 THIN); same expensive-NO edge as 10M.
 # Reversible: set false to revert 12M to research-only.

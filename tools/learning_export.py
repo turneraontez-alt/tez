@@ -89,6 +89,7 @@ _LEDGER_ENV_DEFAULTS = {
     "challenger": ("Q15_CHALLENGER_DB", "data/q15_challenger_shadow_v1.sqlite3"),
     "polymarket": ("Q15_POLYMARKET_DB", "data/q15_polymarket_shadow_v1.sqlite3"),
     "spot_depth": ("Q15_SPOT_DEPTH_DB", "data/q15_spot_depth_v1.sqlite3"),
+    "strategy_bots": ("Q15_STRATEGY_BOTS_DB", "data/q15_strategy_bots_v3.sqlite3"),
 }
 
 
@@ -223,8 +224,9 @@ def _ledger_basename(role: str) -> str:
 
 def _configured_db_paths() -> list[Path]:
     return [
-        Path(os.environ.get(env) or default)
+        Path(os.environ[env])
         for env, default in _LEDGER_ENV_DEFAULTS.values()
+        if os.environ.get(env)
     ]
 
 
@@ -342,6 +344,20 @@ def _challenger_scoreboards(backup_path: Path) -> dict[str, Any]:
     return {"scoreboard": _guard("challenger.scoreboard", ledger.scoreboard)}
 
 
+def _strategy_bot_scoreboards(backup_path: Path) -> dict[str, Any]:
+    from q15_upgrade.strategy_bots.ledger import StrategyBotLedger
+    from q15_upgrade.strategy_bots.rules import STRATEGY_VERSION
+
+    ledger = StrategyBotLedger(str(backup_path))
+    try:
+        return {"scoreboard": _guard(
+            "strategy_bots.scoreboard",
+            lambda: ledger.scoreboard(STRATEGY_VERSION),
+        )}
+    finally:
+        ledger.close()
+
+
 def build_snapshot(
     data_dir: str | os.PathLike[str],
     *,
@@ -361,6 +377,7 @@ def build_snapshot(
 
     v95_name = _ledger_basename("v95")
     challenger_name = _ledger_basename("challenger")
+    strategy_bots_name = _ledger_basename("strategy_bots")
 
     for src in _db_files(data_dir):
         backup = _backup_db(src)
@@ -387,6 +404,10 @@ def build_snapshot(
             elif src.name == challenger_name:
                 scoreboards["challenger"] = _guard(
                     "challenger", lambda b=backup: _challenger_scoreboards(b)
+                )
+            elif src.name == strategy_bots_name:
+                scoreboards["strategy_bots"] = _guard(
+                    "strategy_bots", lambda b=backup: _strategy_bot_scoreboards(b)
                 )
         finally:
             _safe_unlink(backup)

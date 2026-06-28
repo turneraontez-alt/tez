@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Any, Mapping, Sequence
 
+from ..strategy_bots import runtime as strategy_bots_runtime
 from . import panel
 from .config import HighVolFlipConfig, INTERVAL_MARKS, window_key
 from .ledger import HighVolFlipLedger, kalshi_fee_cents
@@ -145,6 +146,8 @@ class HighVolFlipRunner:
                     if decision is None:
                         continue
                     row = self._build_row(cand, decision, interval, wk, now)
+                    if btc is not None:
+                        row["_btc_context"] = dict(btc)
                     if row.get("record_kind") == RECORD_EARLY_FLIP_WATCH:
                         watch_rows.append(row)
                     else:
@@ -197,7 +200,11 @@ class HighVolFlipRunner:
         row_id = self.ledger.record_alert(row)
         if row_id is None:
             return
-        result = self.telegram.send(panel.build_alert(row))
+        if self.config.telegram_enabled and self.config.alert_telegram_enabled:
+            result = self.telegram.send(panel.build_alert(row))
+        else:
+            result = {"delivered": False, "muted": True,
+                      "message_id": None, "error": "telegram_disabled"}
         if result.get("delivered"):
             status, message_id = "SENT", result.get("message_id")
         elif result.get("muted"):
@@ -205,6 +212,15 @@ class HighVolFlipRunner:
         else:
             status, message_id = "DELIVERY_FAILED", None
         self.ledger.mark_delivery(row_id, status, message_id, result.get("error"))
+        strategy_row = dict(row)
+        strategy_row["delivery_status"] = status
+        strategy_row["message_id"] = message_id
+        strategy_row["delivery_error"] = result.get("error")
+        strategy_bots_runtime.record_source_row(
+            strategy_row,
+            source_system="high_vol_flip",
+            btc_context=strategy_row.get("_btc_context"),
+        )
 
     def _record_watch(self, row: Mapping[str, Any]) -> None:
         self.ledger.record_watch(row)
@@ -392,6 +408,13 @@ class HighVolFlipRunner:
                 total += self.ledger.resolve(
                     self.config.model_version, str(ticker), str(result), now
                 )
+                strategy_bots_runtime.resolve(
+                    source_system="high_vol_flip",
+                    source_model_version=self.config.model_version,
+                    ticker=str(ticker),
+                    official_result=str(result),
+                    now=now,
+                )
         return total
 
     def reconcile(self, now: float, resolver: Any) -> None:
@@ -419,6 +442,13 @@ class HighVolFlipRunner:
             result = _resolved_result(market)
             if result is not None:
                 self.ledger.resolve(self.config.model_version, ticker, result, now)
+                strategy_bots_runtime.resolve(
+                    source_system="high_vol_flip",
+                    source_model_version=self.config.model_version,
+                    ticker=ticker,
+                    official_result=result,
+                    now=now,
+                )
 
     def scoreboard(self) -> dict[str, Any]:
         return self.ledger.scoreboard(self.config.model_version)

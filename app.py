@@ -1096,6 +1096,15 @@ def q15_hvf_scoreboard_ep():
     except Exception as exc:
         return jsonify({"available": False, "error": str(exc)})
 
+@app.route("/api/q15-v3/scoreboard")
+@app.route("/data/q15-v3/scoreboard")
+def q15_v3_scoreboard_ep():
+    try:
+        from q15_upgrade.strategy_bots import runtime as _v3_runtime
+        return jsonify(_v3_runtime.scoreboard())
+    except Exception as exc:
+        return jsonify({"available": False, "error": str(exc)})
+
 @app.route("/api/market-cache")
 @app.route("/data/market-cache")
 def market_cache_ep():
