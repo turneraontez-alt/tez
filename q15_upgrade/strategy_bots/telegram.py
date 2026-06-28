@@ -44,6 +44,14 @@ def _bot_label(name: str) -> str:
     }.get(name, name)
 
 
+def _metric_parts(row: Mapping[str, Any], specs: list[tuple[str, str, str]]) -> str:
+    parts: list[str] = []
+    for label, key, suffix in specs:
+        if row.get(key) is not None:
+            parts.append(f"{label} {_fmt(row.get(key), suffix)}")
+    return ", ".join(parts)
+
+
 def build_v3_alert(row: Mapping[str, Any]) -> str:
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     parts = [
@@ -61,27 +69,31 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
             f"{_fmt(row.get('entry_ask_cents'), 'c')} ask, "
             f"{_fmt(row.get('spread_cents'), 'c')} spread"
         ),
-        (
-            "Kalshi: "
-            f"depth {_fmt(row.get('depth_contracts'))}, "
-            f"YES ask depth {_fmt(row.get('yes_ask_depth_contracts'))}, "
-            f"taker net YES 15s {_fmt(row.get('kalshi_taker_net_yes_volume_15s'))}"
-        ),
-        (
-            "Spot: "
-            f"imb {_fmt(row.get('spot_depth_imbalance'))}, "
-            f"sell15 {_fmt(row.get('spot_depth_trade_sell_notional_15s'))}, "
-            f"net60 {_fmt(row.get('spot_depth_trade_net_qty_60s'))}"
-        ),
-        (
-            "BTC: "
-            f"depth {_fmt(row.get('btc_depth_contracts'))}, "
-            f"pressure {_fmt(row.get('btc_book_pressure_cents'), 'c')}, "
-            f"side {html.escape(str(row.get('btc_dominant_side') or 'n/a'))}"
-        ),
-        f"Reasons: {html.escape(reasons)}",
-        "Mode: paper/research tracking",
     ]
+    kalshi = _metric_parts(row, [
+        ("depth", "depth_contracts", ""),
+        ("YES ask depth", "yes_ask_depth_contracts", ""),
+        ("taker net YES 15s", "kalshi_taker_net_yes_volume_15s", ""),
+    ])
+    if kalshi:
+        parts.append(f"Kalshi: {kalshi}")
+    spot = _metric_parts(row, [
+        ("imb", "spot_depth_imbalance", ""),
+        ("sell15", "spot_depth_trade_sell_notional_15s", ""),
+        ("net60", "spot_depth_trade_net_qty_60s", ""),
+    ])
+    if spot:
+        parts.append(f"Spot: {spot}")
+    btc = _metric_parts(row, [
+        ("depth", "btc_depth_contracts", ""),
+        ("pressure", "btc_book_pressure_cents", "c"),
+    ])
+    if row.get("btc_dominant_side"):
+        btc = (btc + ", " if btc else "") + f"side {html.escape(str(row.get('btc_dominant_side')))}"
+    if btc:
+        parts.append(f"BTC: {btc}")
+    parts.append(f"Reasons: {html.escape(reasons)}")
+    parts.append("Mode: paper/research tracking")
     return "\n".join(parts)
 
 

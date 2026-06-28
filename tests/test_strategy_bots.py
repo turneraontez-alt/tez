@@ -16,7 +16,7 @@ from q15_upgrade.strategy_bots.rules import (
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
 )
-from q15_upgrade.strategy_bots.telegram import V3Telegram
+from q15_upgrade.strategy_bots.telegram import V3Telegram, build_v3_alert
 
 
 def _row(**over):
@@ -212,3 +212,48 @@ def test_v3_telegram_requires_dedicated_chat(monkeypatch):
 
     assert dedicated.chat_id == "v3-room"
     assert dedicated.enabled is True
+
+
+def test_v3_alert_omits_missing_btc_context():
+    text = build_v3_alert({
+        "asset": "BNB",
+        "side": "NO",
+        "interval": "10M",
+        "bot_name": BOT_BNB_NO,
+        "source_rule": "EXPENSIVE_NO_ADMIT",
+        "ticker": "KXBNB-1",
+        "entry_ask_cents": 84.0,
+        "spread_cents": 2.0,
+        "depth_contracts": 37.88,
+        "yes_ask_depth_contracts": 13.0,
+        "kalshi_taker_net_yes_volume_15s": -0.06,
+        "spot_depth_imbalance": -0.032,
+        "spot_depth_trade_sell_notional_15s": 31.5,
+        "spot_depth_trade_net_qty_60s": 6.67,
+        "reason_codes": "SPOT_IMBALANCE_LE_NEG_0_02",
+    })
+
+    assert "n/a" not in text
+    assert "\nBTC:" not in text
+    assert "Kalshi:" in text
+    assert "Spot:" in text
+
+
+def test_v3_alert_includes_btc_context_when_available():
+    text = build_v3_alert({
+        "asset": "ETH",
+        "side": "YES",
+        "interval": "7M",
+        "bot_name": BOT_MOREFIRE_BTC,
+        "source_rule": "HVF_MORE_FIRE_STRICT",
+        "ticker": "KXETH-1",
+        "entry_ask_cents": 65.0,
+        "spread_cents": 2.0,
+        "btc_depth_contracts": 3604.1,
+        "btc_book_pressure_cents": 25.0,
+        "btc_dominant_side": "YES",
+        "reason_codes": "BTC_DEPTH_GE_1225",
+    })
+
+    assert "BTC: depth 3604, pressure 25.0c, side YES" in text
+    assert "n/a" not in text
