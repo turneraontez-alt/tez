@@ -9,6 +9,7 @@ predictions.
 from __future__ import annotations
 
 import copy
+import atexit
 import hashlib
 import json
 import logging
@@ -17,6 +18,7 @@ import os
 import statistics
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Sequence
@@ -106,6 +108,14 @@ def _env_float(name: str, default: float, low: float, high: float) -> float:
     except (TypeError, ValueError):
         value = default
     if not math.isfinite(value):
+        value = default
+    return max(low, min(high, value))
+
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
         value = default
     return max(low, min(high, value))
 
@@ -427,14 +437,42 @@ def _shadow_vol_per_min(volatility: Mapping[str, Any] | None) -> float | None:
     return sigma * math.sqrt(60.0) if sigma > 0 else None
 
 
-def _multi_horizon_returns(canonical: CanonicalSnapshot) -> dict[str, float | None]:
+def _window_return_with_cadence(
+    candles: Sequence[Mapping[str, float]],
+    seconds: float,
+    cadence: float,
+) -> float | None:
+    if len(candles) < 2:
+        return None
+    count = max(2, int(round(seconds / cadence)) + 1)
+    subset = candles[-min(len(candles), count):]
+    start = _num(subset[0].get("close"))
+    end = _num(subset[-1].get("close"))
+    if start is None or end is None or start <= 0 or end <= 0:
+        return None
+    return math.log(end / start)
+
+
+def _multi_horizon_returns(
+    canonical: CanonicalSnapshot,
+    cadence_seconds: float | None = None,
+) -> dict[str, float | None]:
     # Coordinate contract: `_window_return` yields LOG returns (candle space); the
     # public feed quotes SIMPLE fractional returns (e.g. 0.012 == +1.2%), which we
     # lift into log space with log1p before blending. A value outside (-1, 1) can't
     # be a plausible short-horizon fractional return (it's likely percent-scaled or
     # already-log from a feed change) and would make log1p raise/-inf, so it is
     # dropped rather than trusted — the candle return then stands alone.
-    result = {f"return_{seconds}s": _window_return(canonical.candles, float(seconds)) for seconds in (5, 15, 30, 60, 180, 900, 1800)}
+    try:
+        cadence = float(cadence_seconds) if cadence_seconds is not None else _cadence(canonical.candles)
+    except (TypeError, ValueError):
+        cadence = _cadence(canonical.candles)
+    if not math.isfinite(cadence) or cadence <= 0:
+        cadence = _cadence(canonical.candles)
+    result = {
+        f"return_{seconds}s": _window_return_with_cadence(canonical.candles, float(seconds), cadence)
+        for seconds in (5, 15, 30, 60, 180, 900, 1800)
+    }
     public_returns = canonical.public.get("price_returns") if isinstance(canonical.public.get("price_returns"), Mapping) else {}
     for seconds in (5, 15, 30, 60, 180):
         key = f"return_{seconds}s"
@@ -1190,7 +1228,7 @@ def analyse_v95(
         }
     prof = _feature_profile_enabled()
     volatility = _timed(prof, "volatility", _robust_volatility, canonical)
-    returns = _timed(prof, "returns", _multi_horizon_returns, canonical)
+    returns = _timed(prof, "returns", _multi_horizon_returns, canonical, volatility.get("cadence_seconds"))
     structural = _timed(prof, "structural", _structural_probability, canonical, volatility, returns)
     # Defense-in-depth: the structural base probability is the spine of the model
     # (every feature is an adjustment to its logit). If it failed to load — a state
@@ -2684,6 +2722,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._run_cycle_timing: dict[str, Any] = {}
         self._slowest_run_cycle: dict[str, Any] | None = None
         self._last_reconcile_at = 0.0
+        # Hot-path DB guards. The prediction/timing/flip-decision tables are
+        # insert-once per contract+checkpoint/mark; after the first write, later
+        # cycles were still paying SQLite round-trips that could not change the
+        # frozen record. These caches preserve the same first-write semantics while
+        # keeping the ~1s loop off the disk on repeated snapshots.
+        self._prediction_record_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._timing_observation_recorded: set[tuple[str, int]] = set()
+        self._flip_decision_recorded: set[tuple[str, str]] = set()
+        self._flip_threshold_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._reconcile_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="q15-v95-reconcile")
+        self._reconcile_future: Future[dict[str, Any]] | None = None
+        atexit.register(self._reconcile_executor.shutdown, wait=False)
         # Optional Kalshi client (set by the app) so predictions can be settled
         # directly from official results, not only via the signals table.
         self.kalshi_client = None
@@ -2707,6 +2757,111 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             return
         self._warn_throttle[key] = ts
         logger.warning(fmt, *args)
+
+    def _flip_threshold_selection(self, checkpoint: str, cfg: flip_decision.FlipConfig) -> dict[str, Any]:
+        """Cached strict-flip threshold selection for the live loop.
+
+        Selection depends only on resolved flip-decision history and config, not
+        on the current open snapshot. The ledger bumps ``_data_version`` on
+        settlement/learning updates, so caching by that version avoids rescanning
+        historical rows every refresh cycle while still refreshing when new
+        outcomes land.
+        """
+        default = {"validated": False, "threshold": 1.01}
+        if not cfg.enabled:
+            return dict(default)
+        version = int(getattr(self.ledger, "_data_version", 0) or 0)
+        key = (
+            str(checkpoint),
+            version,
+            float(cfg.target_precision),
+            float(cfg.train_fraction),
+            int(cfg.min_total),
+            int(cfg.min_yes_train),
+            int(cfg.min_yes_test),
+        )
+        cached = self._flip_threshold_cache.get(key)
+        if cached is not None:
+            return dict(cached)
+        try:
+            selected = flip_decision.select_threshold(
+                self.ledger.flip_decision_rows(checkpoint, resolved_only=True, post_reset_only=True),
+                cfg,
+            )
+        except Exception as exc:  # never let calibration abort the cycle
+            logger.debug("flip threshold selection skipped for %s: %s", checkpoint, exc)
+            selected = dict(default)
+        if len(self._flip_threshold_cache) > 12:
+            self._flip_threshold_cache.clear()
+        self._flip_threshold_cache[key] = dict(selected)
+        return dict(selected)
+
+    def _reconcile_job(self, get_market: Any, now: float) -> dict[str, Any]:
+        """Run settlement reconciliation off the refresh-loop hot path."""
+        result_events: list[Mapping[str, Any]] = []
+        last_reconcile: dict[str, Any] = {}
+        last_market_reconcile: dict[str, Any] = {}
+        try:
+            if self.signal_store is not None:
+                last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+                result_events = list(last_reconcile.get("result_events") or [])
+            if callable(get_market):
+                max_calls = _env_int("Q15_V95_RECONCILE_MAX_CALLS", 6, 1, 1000)
+                last_market_reconcile = self.ledger.reconcile_pending_from_market(
+                    get_market,
+                    now,
+                    max_calls=max_calls,
+                )
+                result_events = list(last_market_reconcile.get("result_events") or []) + result_events
+            if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
+                self.ledger.reconcile_flip_warnings()
+            try:
+                from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+                _irr = _ir_runner()
+                if _irr is not None:
+                    _irr.resolve_settled(result_events, now)
+            except Exception:
+                logger.debug("interval-research resolve skipped", exc_info=True)
+            try:
+                from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
+                _hvf = _hvf_runner()
+                if _hvf is not None:
+                    _hvf.resolve_settled(result_events, now)
+            except Exception:
+                logger.debug("high_vol_flip resolve skipped", exc_info=True)
+            return {
+                "last_reconcile": last_reconcile,
+                "last_market_reconcile": last_market_reconcile,
+                "result_events": result_events[:20],
+            }
+        except Exception as exc:
+            logger.debug("v95 reconcile job failed", exc_info=True)
+            return {"error": f"{type(exc).__name__}: {exc}", "result_events": []}
+
+    def _harvest_reconcile_job(self) -> list[Mapping[str, Any]]:
+        future = self._reconcile_future
+        if future is None or not future.done():
+            return []
+        self._reconcile_future = None
+        try:
+            result = future.result()
+        except Exception as exc:
+            self._last_market_reconcile = {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+            logger.debug("v95 reconcile harvest failed", exc_info=True)
+            return []
+        if isinstance(result.get("last_reconcile"), Mapping):
+            self._last_reconcile = dict(result["last_reconcile"])
+        if isinstance(result.get("last_market_reconcile"), Mapping):
+            self._last_market_reconcile = dict(result["last_market_reconcile"])
+        if result.get("error"):
+            self._last_market_reconcile = {"available": False, "reason": str(result.get("error"))}
+        return list(result.get("result_events") or [])
+
+    def _schedule_reconcile_job(self, get_market: Any, now: float) -> None:
+        if self._reconcile_future is not None and not self._reconcile_future.done():
+            return
+        self._last_reconcile_at = now
+        self._reconcile_future = self._reconcile_executor.submit(self._reconcile_job, get_market, now)
 
     def run_cycle(self, snapshots: dict[str, dict], now: float, ws_health: Mapping[str, Any] | None,
                   focus_manager: Any, calibrated_edge: Any, notifier: Any) -> dict[str, dict]:
@@ -2795,14 +2950,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # cycle from completed post-reset history (chronological OOS). The
             # decision per pick uses it below; never tuned on the rows it grades.
             _flip_cfg = flip_decision.FlipConfig.from_env(checkpoint)
-            _flip_sel = {"validated": False, "threshold": 1.01}
-            if _flip_cfg.enabled:
-                try:
-                    _flip_sel = flip_decision.select_threshold(
-                        self.ledger.flip_decision_rows(checkpoint, resolved_only=True, post_reset_only=True),
-                        _flip_cfg)
-                except Exception as exc:  # never let calibration abort the cycle
-                    logger.debug("flip threshold selection skipped for %s: %s", checkpoint, exc)
+            _flip_sel = self._flip_threshold_selection(checkpoint, _flip_cfg)
             # ONE shared frozen-snapshot id for this interval's batch. Every asset
             # in this cycle is scored from the same `now` freeze and the same data,
             # and BOTH systems (champion + shadow) are recorded from this single
@@ -2811,6 +2959,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             # prediction time. The id is locked with the first (INSERT-OR-IGNORE)
             # write; later cycles in the band never overwrite it.
             snapshot_id = f"{checkpoint}@{int(now)}"
+            _tmarks = _timing_experiment_marks()
+            _tmark_band = _timing_experiment_band() if _tmarks else 0.0
             # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
             # persisted with it, enabling per-rank accuracy tracking.
             for key, snapshot in output.items():
@@ -2856,10 +3006,6 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     and float(analysis.get("data_quality") or 0.0) >= min_record_dq
                 )
                 if record_ok:
-                    xfactors_row = (
-                        cross_asset.for_asset(asset, analysis, shadow_market)
-                        if shadow_market is not None else None
-                    )
                     # Experimental shadow signals (default-OFF): computed from data
                     # already on the analysis/canonical, recorded for the background
                     # A/B only. Never touches the champion or the live probability;
@@ -2872,33 +3018,64 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
                             logger.debug("shadow signal compute skipped for %s: %s", asset, exc)
                             signals_row = None
-                    prediction_id, inserted = self.ledger.record_prediction(
-                        ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
-                        created_at=now, close_time=canonical.settlement_time,
-                        predicted_side=str(analysis["prediction_side"]),
-                        raw_yes_probability=float(analysis["raw_yes_probability"]),
-                        calibrated_yes_probability=float(analysis["yes_probability"]),
-                        challenger_yes_probability=float(analysis["challenger_yes_probability"]),
-                        baseline_yes_probability=float(analysis["baseline_yes_probability"]),
-                        selected_probability=float(analysis["selected_probability"]),
-                        conservative_probability=float(analysis["conservative_probability"]),
-                        data_quality=float(analysis["data_quality"]),
-                        evidence_quality=float(analysis["evidence_quality"]),
-                        trade_quality=float(analysis["trade_quality"]),
-                        trade_decision=str(analysis["trade_decision"]),
-                        regime=str((analysis.get("regime") or {}).get("name") or "UNKNOWN"),
-                        features=analysis["feature_values"], contributions=analysis["contributions"],
-                        quote=analysis["quote"], rank=rank, costs=analysis.get("costs"),
-                        confidence_grade=analysis.get("confidence_grade"),
-                        manipulation_suspected=bool((analysis.get("manipulation") or {}).get("suspected")),
-                        manipulation_reason=(",".join((analysis.get("manipulation") or {}).get("reasons") or []) or None),
-                        flip_risk_score=(analysis.get("flip_risk") or {}).get("score"),
-                        flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
-                        flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
-                        shadow_factors=xfactors_row,
-                        shadow_signals=signals_row,
-                        snapshot_id=snapshot_id,
-                    )
+                    prediction_cache_key = (str(canonical.ticker), str(checkpoint))
+                    prediction_cache = self._prediction_record_cache.get(prediction_cache_key)
+                    inserted = False
+                    if prediction_cache is not None:
+                        prediction_id = str(
+                            prediction_cache.get("prediction_id")
+                            or f"{MODEL_VERSION}|{checkpoint}|{canonical.ticker}"
+                        )
+                    else:
+                        xfactors_row = (
+                            cross_asset.for_asset(asset, analysis, shadow_market)
+                            if shadow_market is not None else None
+                        )
+                        prediction_id, inserted = self.ledger.record_prediction(
+                            ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
+                            created_at=now, close_time=canonical.settlement_time,
+                            predicted_side=str(analysis["prediction_side"]),
+                            raw_yes_probability=float(analysis["raw_yes_probability"]),
+                            calibrated_yes_probability=float(analysis["yes_probability"]),
+                            challenger_yes_probability=float(analysis["challenger_yes_probability"]),
+                            baseline_yes_probability=float(analysis["baseline_yes_probability"]),
+                            selected_probability=float(analysis["selected_probability"]),
+                            conservative_probability=float(analysis["conservative_probability"]),
+                            data_quality=float(analysis["data_quality"]),
+                            evidence_quality=float(analysis["evidence_quality"]),
+                            trade_quality=float(analysis["trade_quality"]),
+                            trade_decision=str(analysis["trade_decision"]),
+                            regime=str((analysis.get("regime") or {}).get("name") or "UNKNOWN"),
+                            features=analysis["feature_values"], contributions=analysis["contributions"],
+                            quote=analysis["quote"], rank=rank, costs=analysis.get("costs"),
+                            confidence_grade=analysis.get("confidence_grade"),
+                            manipulation_suspected=bool((analysis.get("manipulation") or {}).get("suspected")),
+                            manipulation_reason=(",".join((analysis.get("manipulation") or {}).get("reasons") or []) or None),
+                            flip_risk_score=(analysis.get("flip_risk") or {}).get("score"),
+                            flip_risk_confidence=(analysis.get("flip_risk") or {}).get("confidence"),
+                            flip_evidence_count=(analysis.get("flip_risk") or {}).get("evidence_count"),
+                            shadow_factors=xfactors_row,
+                            shadow_signals=signals_row,
+                            snapshot_id=snapshot_id,
+                        )
+                        original_side = str(analysis.get("prediction_side") or "").upper()
+                        if not inserted:
+                            frozen = self.ledger.frozen_prediction(canonical.ticker, checkpoint)
+                            if isinstance(frozen, Mapping) and frozen.get("side"):
+                                original_side = str(frozen.get("side") or "").upper()
+                        prediction_cache = {
+                            "prediction_id": prediction_id,
+                            "original_side": original_side,
+                            "close_time": canonical.settlement_time,
+                            "revision_noted": False,
+                        }
+                        self._prediction_record_cache[prediction_cache_key] = prediction_cache
+                        if len(self._prediction_record_cache) > 512:
+                            cutoff = now - 1800.0
+                            for _cache_key, _cache_value in list(self._prediction_record_cache.items()):
+                                _close = _num(_cache_value.get("close_time"))
+                                if _close is not None and _close < cutoff:
+                                    self._prediction_record_cache.pop(_cache_key, None)
                     snapshot["q15_v9_5_snapshot_id"] = snapshot_id
                     analysis["snapshot_id"] = snapshot_id
                     analysis["prediction_id"] = prediction_id
@@ -2922,10 +3099,20 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     # Flag (without mutating the graded prediction) when the live
                     # side drifts from the locked one before close — the stability
                     # / change-rate metric per interval.
-                    self.ledger.note_prediction_revision(
-                        ticker=canonical.ticker, checkpoint=checkpoint,
-                        current_side=str(analysis["prediction_side"]),
-                    )
+                    _current_side = str(analysis.get("prediction_side") or "").upper()
+                    _original_side = str((prediction_cache or {}).get("original_side") or "").upper()
+                    if (
+                        _current_side in ("YES", "NO")
+                        and _original_side in ("YES", "NO")
+                        and _current_side != _original_side
+                        and not (prediction_cache or {}).get("revision_noted")
+                    ):
+                        self.ledger.note_prediction_revision(
+                            ticker=canonical.ticker, checkpoint=checkpoint,
+                            current_side=_current_side,
+                        )
+                        if prediction_cache is not None:
+                            prediction_cache["revision_noted"] = True
                     # Read-only Polymarket up/down shadow (default-OFF; never
                     # affects production). Reuses the champion's frozen snapshot:
                     # OUR P(up) is the same structural model re-thresholded at the
@@ -2966,20 +3153,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     # model's call there so we can later MEASURE which entry time
                     # crosses into an edge. Never delivered; first write per
                     # (contract, mark) wins; graded on settlement. Read-only.
-                    _tmarks = _timing_experiment_marks()
                     if _tmarks and seconds_left is not None:
-                        _band = _timing_experiment_band()
                         for _mark in _tmarks:
-                            if abs(seconds_left - _mark) <= _band:
-                                self.ledger.record_timing_observation(
-                                    contract=canonical.ticker, mark_seconds=_mark, asset=asset,
-                                    predicted_side=str(analysis.get("prediction_side") or "") or None,
-                                    yes_probability=analysis.get("yes_probability"),
-                                    selected_probability=analysis.get("selected_probability"),
-                                    confidence_grade=analysis.get("confidence_grade"),
-                                    created_at=now, close_time=canonical.settlement_time,
-                                    snapshot_id=snapshot_id,
-                                )
+                            if abs(seconds_left - _mark) <= _tmark_band:
+                                _timing_key = (str(canonical.ticker), int(_mark))
+                                if _timing_key not in self._timing_observation_recorded:
+                                    self.ledger.record_timing_observation(
+                                        contract=canonical.ticker, mark_seconds=_mark, asset=asset,
+                                        predicted_side=str(analysis.get("prediction_side") or "") or None,
+                                        yes_probability=analysis.get("yes_probability"),
+                                        selected_probability=analysis.get("selected_probability"),
+                                        confidence_grade=analysis.get("confidence_grade"),
+                                        created_at=now, close_time=canonical.settlement_time,
+                                        snapshot_id=snapshot_id,
+                                    )
+                                    self._timing_observation_recorded.add(_timing_key)
+                                    if len(self._timing_observation_recorded) > 4096:
+                                        self._timing_observation_recorded.clear()
                                 break
                     # STRICT FLIP DECISION (observational): compute the flip
                     # probability for this pick, decide YES only when the interval
@@ -3002,14 +3192,19 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                                 "decision": _decision, "flip_probability": _prob,
                                 "threshold": _shown_thr, "validated": _validated,
                             }
-                            self.ledger.record_flip_decision(
-                                contract=canonical.ticker, checkpoint=checkpoint, asset=asset,
-                                predicted_side=str(analysis.get("prediction_side") or "") or None,
-                                flip_probability=_prob, threshold=_operative_thr,
-                                decision=_decision, validated=_validated,
-                                created_at=now, close_time=canonical.settlement_time,
-                                snapshot_id=snapshot_id,
-                            )
+                            _flip_record_key = (str(canonical.ticker), str(checkpoint))
+                            if _flip_record_key not in self._flip_decision_recorded:
+                                self.ledger.record_flip_decision(
+                                    contract=canonical.ticker, checkpoint=checkpoint, asset=asset,
+                                    predicted_side=str(analysis.get("prediction_side") or "") or None,
+                                    flip_probability=_prob, threshold=_operative_thr,
+                                    decision=_decision, validated=_validated,
+                                    created_at=now, close_time=canonical.settlement_time,
+                                    snapshot_id=snapshot_id,
+                                )
+                                self._flip_decision_recorded.add(_flip_record_key)
+                                if len(self._flip_decision_recorded) > 2048:
+                                    self._flip_decision_recorded.clear()
                         except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
                             logger.debug("flip decision skipped for %s %s: %s", asset, checkpoint, exc)
 
@@ -3061,40 +3256,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             except Exception:
                 logger.debug("high_vol_flip observe skipped", exc_info=True)
             result_events: list[Mapping[str, Any]] = []
-            if now - self._last_reconcile_at >= 30.0:
-                self._last_reconcile_at = now
-                if self.signal_store is not None:
-                    _t0 = time.monotonic()
-                    self._last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
-                    _t["signal_store_reconcile"] = round(time.monotonic() - _t0, 3)
-                    result_events = list(self._last_reconcile.get("result_events") or [])
-                # Settle any remaining closed markets directly from Kalshi, so
-                # predictions without a signals row still get graded.
-                get_market = getattr(self.kalshi_client, "get_market", None)
-                if callable(get_market):
-                    _t0 = time.monotonic()
-                    self._last_market_reconcile = self.ledger.reconcile_pending_from_market(get_market, now)
-                    _t["market_reconcile"] = round(time.monotonic() - _t0, 3)
-                    result_events = list(self._last_market_reconcile.get("result_events") or []) + result_events
-                # Score fired flip warnings against whether the prediction flipped.
-                if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
-                    self.ledger.reconcile_flip_warnings()
-                # Interval-timing research: attach settled outcomes to any captured
-                # intervals (read-only; default-OFF; never affects production).
-                try:
-                    from q15_upgrade.interval_research.runner import get_runner as _ir_runner
-                    _irr = _ir_runner()
-                    if _irr is not None:
-                        _irr.resolve_settled(result_events, now)
-                except Exception:
-                    logger.debug("interval-research resolve skipped", exc_info=True)
-                try:
-                    from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
-                    _hvf = _hvf_runner()
-                    if _hvf is not None:
-                        _hvf.resolve_settled(result_events, now)
-                except Exception:
-                    logger.debug("high_vol_flip resolve skipped", exc_info=True)
+            _t0 = time.monotonic()
+            result_events = self._harvest_reconcile_job()
+            if now - self._last_reconcile_at >= _env_float("Q15_V95_RECONCILE_INTERVAL_SECONDS", 30.0, 5.0, 300.0):
+                # Settle closed markets directly from Kalshi in the background, so
+                # grading/recaps keep up without blocking fresh predictions.
+                self._schedule_reconcile_job(getattr(self.kalshi_client, "get_market", None), now)
+            _t["market_reconcile"] = round(time.monotonic() - _t0, 3)
             ledger_status = self.ledger.status()
             # The recommended BEST ENTRY is rank #1 of the qualifying entries — the
             # single source of truth shared by the alert's top summary and detail.
