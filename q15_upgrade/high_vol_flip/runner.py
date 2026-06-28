@@ -153,8 +153,9 @@ class HighVolFlipRunner:
                     if decision is None:
                         continue
                     row = self._build_row(cand, decision, interval, wk, now)
-                    if btc is not None:
-                        row["_btc_context"] = dict(btc)
+                    context_btc = btc or prev_btc
+                    if context_btc is not None:
+                        row["_btc_context"] = dict(context_btc)
                     if row.get("record_kind") == RECORD_EARLY_FLIP_WATCH:
                         watch_rows.append(row)
                     else:
@@ -213,6 +214,17 @@ class HighVolFlipRunner:
                 "muted": True,
                 "message_id": None,
                 "error": "v3_bnb_combined_owns_notification",
+            }
+        elif strategy_bots_runtime.owns_source_notification(
+            row,
+            source_system="high_vol_flip",
+            btc_context=row.get("_btc_context"),
+        ):
+            result = {
+                "delivered": False,
+                "muted": True,
+                "message_id": None,
+                "error": "v3_owns_notification",
             }
         elif self.config.telegram_enabled and self.config.alert_telegram_enabled:
             result = self.telegram.send(panel.build_alert(row))

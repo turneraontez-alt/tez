@@ -13,6 +13,7 @@ from .rules import (
     ACCEPTED,
     BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
+    BOT_CONFIDENCE_TIER,
     KALSHI_DEPTH_KEYS,
     KALSHI_FLOW_KEYS,
     REJECTED,
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS strategy_bot_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at REAL NOT NULL,
     bot_name TEXT NOT NULL,
+    tier TEXT,
     strategy_version TEXT NOT NULL,
     decision_status TEXT NOT NULL,
     decision_mode TEXT NOT NULL DEFAULT 'PAPER_RESEARCH',
@@ -132,6 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_strategy_bot_score
 _COLS = (
     "created_at",
     "bot_name",
+    "tier",
     "strategy_version",
     "decision_status",
     "decision_mode",
@@ -253,6 +256,7 @@ def _build_record(
     out: dict[str, Any] = {
         "created_at": created,
         "bot_name": decision.bot_name,
+        "tier": decision.tier,
         "strategy_version": decision.strategy_version,
         "decision_status": decision.decision_status,
         "decision_mode": "PAPER_RESEARCH",
@@ -328,6 +332,7 @@ class StrategyBotLedger:
             for row in self._conn.execute("PRAGMA table_info(strategy_bot_decisions)").fetchall()
         }
         added = {
+            "tier": "TEXT",
             "original_source_side": "TEXT",
             "notification_status": "TEXT",
             "notification_message_id": "INTEGER",
@@ -477,12 +482,27 @@ class StrategyBotLedger:
             ),
             "all": self._agg(rows, min_n),
             "by_bot": self._group(rows, ("bot_name",), min_n),
+            "by_tier": self._group(
+                [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER],
+                ("tier",),
+                min_n,
+            ),
+            "by_tier_status": self._group(
+                [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER],
+                ("tier", "decision_status"),
+                min_n,
+            ),
             "by_bot_status": self._group(rows, ("bot_name", "decision_status"), min_n),
             "by_bot_asset": self._group(rows, ("bot_name", "asset"), min_n),
             "by_bot_asset_side": self._group(rows, ("bot_name", "asset", "side"), min_n),
             "by_bot_rule": self._group(rows, ("bot_name", "source_rule"), min_n),
             "by_bot_interval": self._group(rows, ("bot_name", "interval"), min_n),
             "by_bot_delivery_status": self._group(rows, ("bot_name", "delivery_status"), min_n),
+            "by_tier_source_asset_side_rule": self._group(
+                [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER],
+                ("tier", "source_system", "asset", "side", "source_rule"),
+                min_n,
+            ),
             "by_bot_rule_interval_delivery": self._group(
                 rows, ("bot_name", "source_rule", "interval", "delivery_status"), min_n
             ),
@@ -492,6 +512,7 @@ class StrategyBotLedger:
                 min_n,
             ),
             "bnb_system": self._bnb_system(rows, min_n),
+            "data_coverage": self._data_coverage(rows),
         }
 
     @classmethod
@@ -526,6 +547,88 @@ class StrategyBotLedger:
             "avg_pnl_cents": None if not pnls else sum(pnls) / len(pnls),
             "net_pnl_cents": None if not pnls else sum(pnls),
             "provisional": n < int(min_n),
+        }
+
+    @classmethod
+    def _data_coverage(cls, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        all_rows = list(rows)
+        tier_rows = [r for r in all_rows if r.get("bot_name") == BOT_CONFIDENCE_TIER]
+        return {
+            "all": cls._coverage_summary(all_rows),
+            "confidence_tier_rows": cls._coverage_summary(tier_rows),
+            "by_source_asset": cls._coverage_group(all_rows, ("source_system", "asset")),
+            "by_source_asset_tier": cls._coverage_group(
+                tier_rows,
+                ("source_system", "asset", "tier"),
+            ),
+        }
+
+    @classmethod
+    def _coverage_group(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        keys: Sequence[str],
+    ) -> dict[str, Any]:
+        groups: dict[str, list[Mapping[str, Any]]] = {}
+        for row in rows:
+            label = "|".join(str(row.get(k) if row.get(k) is not None else "") for k in keys)
+            groups.setdefault(label, []).append(row)
+        return {
+            label: cls._coverage_summary(group)
+            for label, group in sorted(groups.items())
+        }
+
+    @staticmethod
+    def _coverage_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        all_rows = list(rows)
+        total = len(all_rows)
+
+        def present(key: str) -> int:
+            return sum(1 for row in all_rows if row.get(key) is not None)
+
+        def any_present(keys: Sequence[str]) -> int:
+            return sum(1 for row in all_rows if any(row.get(k) is not None for k in keys))
+
+        counts = {
+            "entry_ask": present("entry_ask_cents"),
+            "spread": present("spread_cents"),
+            "kalshi_depth": any_present((
+                "yes_bid_depth_contracts",
+                "yes_ask_depth_contracts",
+                "no_bid_depth_contracts",
+                "no_ask_depth_contracts",
+            )),
+            "kalshi_taker_flow": present("kalshi_taker_net_yes_volume_15s"),
+            "spot_depth": any_present((
+                "spot_depth_imbalance",
+                "spot_depth_bid_depth_levels",
+                "spot_depth_ask_depth_levels",
+            )),
+            "spot_trade_flow_5s": present("spot_depth_trade_net_qty_5s"),
+            "spot_trade_flow_15s": any_present((
+                "spot_depth_trade_net_qty_15s",
+                "spot_depth_trade_net_notional_15s",
+            )),
+            "spot_trade_flow_60s": any_present((
+                "spot_depth_trade_net_qty_60s",
+                "spot_depth_trade_net_notional_60s",
+            )),
+            "btc_context": any_present((
+                "btc_ticker",
+                "btc_depth_contracts",
+                "btc_book_pressure_cents",
+                "btc_dominant_side",
+            )),
+            "settlement": present("official_result"),
+        }
+
+        def rate(count: int) -> float | None:
+            return None if total <= 0 else count / total
+
+        return {
+            "rows": total,
+            "counts": counts,
+            "rates": {key: rate(value) for key, value in counts.items()},
         }
 
     @classmethod

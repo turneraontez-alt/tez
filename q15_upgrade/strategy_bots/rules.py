@@ -10,13 +10,19 @@ import math
 from typing import Any, Mapping
 
 
-STRATEGY_VERSION = "filtered-alert-system-v3-bnb-combined-provisional"
+STRATEGY_VERSION = "filtered-alert-system-v3-confidence-tiers-provisional"
 
 BOT_BASELINE = "baseline_control"
+BOT_CONFIDENCE_TIER = "v3_confidence_tier"
 BOT_BNB_NO = "bnb_no_confirmation"
 BOT_BNB_YES_REVERSAL = "bnb_yes_reversal"
 BOT_HYPE_YES = "hype_yes_confirmation"
 BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
+
+TIER_A = "A"
+TIER_B = "B"
+TIER_C = "C"
+TIER_NONE = "NONE"
 
 ACCEPTED = "ACCEPTED"
 REJECTED = "REJECTED"
@@ -86,6 +92,7 @@ class BotDecision:
     decision_status: str
     reason_codes: tuple[str, ...]
     strategy_version: str = STRATEGY_VERSION
+    tier: str | None = None
     threshold_profile: Mapping[str, Any] = field(default_factory=dict)
     btc_context: Mapping[str, Any] | None = None
     side_override: str | None = None
@@ -131,6 +138,13 @@ def source_rule(row: Mapping[str, Any]) -> str:
     return str(row.get("record_kind") or "UNKNOWN")
 
 
+def _entry_ask(row: Mapping[str, Any]) -> float | None:
+    value = row.get("entry_ask_cents")
+    if value is None:
+        value = row.get("selected_ask_cents")
+    return _num(value)
+
+
 def _source_text(row: Mapping[str, Any]) -> str:
     return " ".join(
         str(value or "")
@@ -168,7 +182,205 @@ def baseline_decision(row: Mapping[str, Any]) -> BotDecision:
         bot_name=BOT_BASELINE,
         decision_status=status,
         reason_codes=(reason,),
+        tier=TIER_NONE,
         threshold_profile={"control_group": True},
+    )
+
+
+def _confidence_thresholds() -> dict[str, Any]:
+    return {
+        "tier_a": {
+            "ultoim_v2": {
+                "BTC": {"YES": {"entry_ask_cents_min": 74.0}, "NO": {"entry_ask_cents_min": 75.0}},
+                "DOGE": {"YES": {"entry_ask_cents_min": 69.0}, "NO": {"entry_ask_cents_min": 78.0}},
+                "ETH": {"YES": {"entry_ask_cents_min": 80.0}},
+            },
+            "high_vol_flip": {
+                "SOL": {"YES": {"entry_ask_cents_min": 66.0}},
+                "ETH": {"NO": {"entry_ask_cents_max": 91.6}},
+            },
+        },
+        "tier_b": {
+            "ultoim_v2": {
+                "BTC": {"YES": {"entry_ask_cents_min": 57.0}, "NO": {"entry_ask_cents_min": 62.0}},
+                "ETH": {"YES": {"entry_ask_cents_min": 67.0}},
+                "DOGE": {"NO": {"entry_ask_cents_min": 76.0}},
+            },
+        },
+        "tier_c": {
+            "ultoim_v2": {
+                "XRP": {"NO": {"source_rule_contains": "EXPENSIVE_NO_ADMIT", "entry_ask_cents_min": 76.0}},
+                "SOL": {"NO": {"source_rule_contains": "EXPENSIVE_NO_ADMIT", "entry_ask_cents_min": 76.0}},
+                "BNB": {"NO": {"source_rule_contains": "EXPENSIVE_NO_ADMIT", "entry_ask_cents_min": 77.0}},
+            },
+        },
+        "provisional": True,
+        "paper_only": True,
+    }
+
+
+def _source_matches(source_system: str, expected: str) -> bool:
+    return str(source_system or "").lower() == expected
+
+
+def _ask_ge(row: Mapping[str, Any], threshold: float) -> bool:
+    ask = _entry_ask(row)
+    return ask is not None and ask >= float(threshold)
+
+
+def _ask_le(row: Mapping[str, Any], threshold: float) -> bool:
+    ask = _entry_ask(row)
+    return ask is not None and ask <= float(threshold)
+
+
+def _tier_rule_reason(prefix: str, source_system: str, asset: str, side: str, suffix: str) -> str:
+    source = "ULTOIM" if source_system == "ultoim_v2" else "HVF"
+    return f"{prefix}_{source}_{asset}_{side}_{suffix}"
+
+
+def confidence_tier_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision:
+    """Single prioritized A/B/C confidence-tier decision for every source row."""
+    thresholds = _confidence_thresholds()
+    source = str(source_system or "").lower()
+    asset = _asset(row)
+    side = source_side(row)
+    ask = _entry_ask(row)
+    base_profile = {
+        **thresholds,
+        "source_system": source_system,
+        "asset": asset,
+        "side": side,
+        "entry_ask_cents": ask,
+    }
+    if not asset or side not in {"YES", "NO"}:
+        return BotDecision(
+            BOT_CONFIDENCE_TIER,
+            REJECTED,
+            ("V3_CONFIDENCE_TIER_INVALID_ASSET_OR_SIDE",),
+            tier=TIER_NONE,
+            threshold_profile=base_profile,
+        )
+
+    # Tier A always wins before Tier B, so a strict pick never double-counts as
+    # volume expansion.
+    tier_a_checks: list[tuple[bool, str]] = [
+        (
+            _source_matches(source, "ultoim_v2") and asset == "BTC" and side == "YES" and _ask_ge(row, 74.0),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_GE_74"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "BTC" and side == "NO" and _ask_ge(row, 75.0),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_GE_75"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "DOGE" and side == "YES" and _ask_ge(row, 69.0),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_GE_69"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "DOGE" and side == "NO" and _ask_ge(row, 78.0),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_GE_78"),
+        ),
+        (
+            _source_matches(source, "high_vol_flip") and asset == "SOL" and side == "YES" and _ask_ge(row, 66.0),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_GE_66"),
+        ),
+        (
+            _source_matches(source, "high_vol_flip") and asset == "ETH" and side == "NO" and _ask_le(row, 91.6),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_LE_91_6"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "ETH" and side == "YES" and _ask_ge(row, 80.0),
+            _tier_rule_reason("V3_TIER_A", source, asset, side, "ASK_GE_80"),
+        ),
+    ]
+    for passed, reason in tier_a_checks:
+        if passed:
+            return BotDecision(
+                BOT_CONFIDENCE_TIER,
+                ACCEPTED,
+                ("V3_TIER_A_STRICT_7_HIGH_CONFIDENCE", reason),
+                tier=TIER_A,
+                threshold_profile={**base_profile, "tier": TIER_A},
+            )
+
+    tier_b_checks: list[tuple[bool, str]] = [
+        (
+            _source_matches(source, "ultoim_v2") and asset == "BTC" and side == "YES" and _ask_ge(row, 57.0),
+            _tier_rule_reason("V3_TIER_B", source, asset, side, "ASK_GE_57"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "BTC" and side == "NO" and _ask_ge(row, 62.0),
+            _tier_rule_reason("V3_TIER_B", source, asset, side, "ASK_GE_62"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "ETH" and side == "YES" and _ask_ge(row, 67.0),
+            _tier_rule_reason("V3_TIER_B", source, asset, side, "ASK_GE_67"),
+        ),
+        (
+            _source_matches(source, "ultoim_v2") and asset == "DOGE" and side == "NO" and _ask_ge(row, 76.0),
+            _tier_rule_reason("V3_TIER_B", source, asset, side, "ASK_GE_76"),
+        ),
+    ]
+    for passed, reason in tier_b_checks:
+        if passed:
+            return BotDecision(
+                BOT_CONFIDENCE_TIER,
+                ACCEPTED,
+                ("V3_TIER_B_VOLUME_EXPANSION", reason),
+                tier=TIER_B,
+                threshold_profile={**base_profile, "tier": TIER_B},
+            )
+
+    text = _source_text(row)
+    tier_c_checks: list[tuple[bool, str]] = [
+        (
+            _source_matches(source, "ultoim_v2")
+            and asset == "XRP"
+            and side == "NO"
+            and "EXPENSIVE_NO_ADMIT" in text
+            and _ask_ge(row, 76.0),
+            "V3_TIER_C_ULTOIM_XRP_NO_EXPENSIVE_NO_ADMIT_ASK_GE_76",
+        ),
+        (
+            _source_matches(source, "ultoim_v2")
+            and asset == "SOL"
+            and side == "NO"
+            and "EXPENSIVE_NO_ADMIT" in text
+            and _ask_ge(row, 76.0),
+            "V3_TIER_C_ULTOIM_SOL_NO_EXPENSIVE_NO_ADMIT_ASK_GE_76",
+        ),
+        (
+            _source_matches(source, "ultoim_v2")
+            and asset == "BNB"
+            and side == "NO"
+            and "EXPENSIVE_NO_ADMIT" in text
+            and _ask_ge(row, 77.0),
+            "V3_TIER_C_ULTOIM_BNB_NO_EXPENSIVE_NO_ADMIT_ASK_GE_77",
+        ),
+    ]
+    for passed, reason in tier_c_checks:
+        if passed:
+            return BotDecision(
+                BOT_CONFIDENCE_TIER,
+                RESEARCH_ONLY,
+                ("V3_TIER_C_RESEARCH_ONLY", reason),
+                tier=TIER_C,
+                threshold_profile={**base_profile, "tier": TIER_C, "research_only": True},
+            )
+
+    reason = "V3_CONFIDENCE_TIER_NO_MATCH"
+    if ask is None:
+        reason = "V3_CONFIDENCE_TIER_ENTRY_ASK_MISSING"
+    return BotDecision(
+        BOT_CONFIDENCE_TIER,
+        REJECTED,
+        (reason,),
+        tier=TIER_NONE,
+        threshold_profile={**base_profile, "tier": TIER_NONE},
     )
 
 
@@ -563,7 +775,10 @@ def decisions_for_row(
     btc_context: Mapping[str, Any] | None = None,
 ) -> list[BotDecision]:
     """Return the side-by-side strategy decisions for one source alert row."""
-    decisions: list[BotDecision] = [baseline_decision(row)]
+    decisions: list[BotDecision] = [
+        baseline_decision(row),
+        confidence_tier_decision(row, source_system=source_system),
+    ]
     bnb = bnb_no_confirmation_decision(row)
     if bnb is not None:
         decisions.append(bnb)

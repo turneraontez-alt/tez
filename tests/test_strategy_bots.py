@@ -8,6 +8,7 @@ from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
     BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
+    BOT_CONFIDENCE_TIER,
     BOT_HYPE_YES,
     BOT_MOREFIRE_BTC,
     REJECTED,
@@ -15,6 +16,7 @@ from q15_upgrade.strategy_bots.rules import (
     STRATEGY_VERSION,
     bnb_no_confirmation_decision,
     bnb_yes_reversal_decision,
+    confidence_tier_decision,
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
 )
@@ -242,6 +244,58 @@ def test_morefire_btc_confirmed_accepts_only_with_btc_support():
     assert "BTC_DOMINANT_SIDE_NO" in weak.reason_codes
 
 
+def test_confidence_tier_prioritizes_a_over_b():
+    d = confidence_tier_decision(
+        _row(asset="BTC", ticker="KXBTC-1", predicted_side="YES", entry_ask_cents=80.0),
+        source_system="ultoim_v2",
+    )
+
+    assert d.bot_name == BOT_CONFIDENCE_TIER
+    assert d.decision_status == ACCEPTED
+    assert d.tier == "A"
+    assert "V3_TIER_A_STRICT_7_HIGH_CONFIDENCE" in d.reason_codes
+    assert not any("V3_TIER_B" in code for code in d.reason_codes)
+
+
+def test_confidence_tier_b_volume_expansion():
+    d = confidence_tier_decision(
+        _row(asset="BTC", ticker="KXBTC-1", predicted_side="NO", entry_ask_cents=63.0),
+        source_system="ultoim_v2",
+    )
+
+    assert d.decision_status == ACCEPTED
+    assert d.tier == "B"
+    assert "V3_TIER_B_VOLUME_EXPANSION" in d.reason_codes
+
+
+def test_confidence_tier_c_is_research_only():
+    d = confidence_tier_decision(
+        _row(
+            asset="XRP",
+            ticker="KXXRP-1",
+            predicted_side="NO",
+            entry_ask_cents=77.0,
+            reason_codes="EXPENSIVE_NO_ADMIT,RISK_LOW",
+        ),
+        source_system="ultoim_v2",
+    )
+
+    assert d.decision_status == RESEARCH_ONLY
+    assert d.tier == "C"
+    assert "V3_TIER_C_RESEARCH_ONLY" in d.reason_codes
+
+
+def test_confidence_tier_rejects_non_matching_rows_but_records_none():
+    d = confidence_tier_decision(
+        _row(asset="SOL", ticker="KXSOL-1", predicted_side="YES", entry_ask_cents=52.0),
+        source_system="ultoim_v2",
+    )
+
+    assert d.decision_status == REJECTED
+    assert d.tier == "NONE"
+    assert d.reason_codes == ("V3_CONFIDENCE_TIER_NO_MATCH",)
+
+
 def test_ledger_resolves_skipped_rows_and_scoreboard(tmp_path):
     led = StrategyBotLedger(tmp_path / "v3.sqlite3")
     decision = bnb_no_confirmation_decision(_row(
@@ -277,6 +331,45 @@ def test_ledger_resolves_skipped_rows_and_scoreboard(tmp_path):
     sb = led.scoreboard(STRATEGY_VERSION, min_n=2)
     assert sb["by_bot"][BOT_BNB_NO]["resolved"] == 1
     assert sb["by_bot"][BOT_BNB_NO]["provisional"] is True
+
+
+def test_scoreboard_includes_tiers_and_data_coverage(tmp_path):
+    led = StrategyBotLedger(tmp_path / "v3.sqlite3")
+    row = _row(
+        asset="BTC",
+        ticker="KXBTC-1",
+        predicted_side="YES",
+        entry_ask_cents=80.0,
+        spread_cents=2.0,
+        yes_bid_depth_contracts=100.0,
+        yes_ask_depth_contracts=200.0,
+        kalshi_taker_net_yes_volume_15s=12.0,
+        spot_depth_imbalance=0.25,
+        spot_depth_trade_net_qty_15s=1.0,
+        spot_depth_trade_net_notional_60s=100.0,
+    )
+    decision = confidence_tier_decision(row, source_system="ultoim_v2")
+
+    assert led.record_decision(decision, row, source_system="ultoim_v2") is not None
+    assert led.resolve(
+        source_system="ultoim_v2",
+        source_model_version="ultoim-v2",
+        ticker="KXBTC-1",
+        official_result="YES",
+        now=1600.0,
+    ) == 1
+
+    sb = led.scoreboard(STRATEGY_VERSION, min_n=2)
+    assert sb["by_tier"]["A"]["rows"] == 1
+    assert sb["by_tier_source_asset_side_rule"]["A|ultoim_v2|BTC|YES|TEST"]["rows"] == 1
+    coverage = sb["data_coverage"]["by_source_asset_tier"]["ultoim_v2|BTC|A"]
+    assert coverage["counts"]["entry_ask"] == 1
+    assert coverage["counts"]["kalshi_depth"] == 1
+    assert coverage["counts"]["kalshi_taker_flow"] == 1
+    assert coverage["counts"]["spot_depth"] == 1
+    assert coverage["counts"]["spot_trade_flow_15s"] == 1
+    assert coverage["counts"]["spot_trade_flow_60s"] == 1
+    assert coverage["counts"]["settlement"] == 1
 
 
 def test_scoreboard_includes_bnb_veto_and_yes_reversal_candidates(tmp_path):
@@ -339,8 +432,8 @@ def test_runtime_suppresses_duplicate_hype_window_and_marks_muted_notification(t
     )
     second = dict(first, ticker="KXHYPE-2")
 
-    assert runtime.record_source_row(first, source_system="ultoim_v2") == 2
-    assert runtime.record_source_row(second, source_system="ultoim_v2") == 2
+    assert runtime.record_source_row(first, source_system="ultoim_v2") == 3
+    assert runtime.record_source_row(second, source_system="ultoim_v2") == 3
 
     led = runtime.get_ledger()
     assert led is not None
@@ -446,3 +539,60 @@ def test_v3_alert_includes_btc_context_when_available():
 
     assert "BTC: depth 3604, pressure 25.0c, side YES" in text
     assert "n/a" not in text
+
+
+def test_v3_tier_b_alert_is_labeled_volume_expansion():
+    text = build_v3_alert({
+        "asset": "BTC",
+        "side": "NO",
+        "tier": "B",
+        "interval": "10M",
+        "bot_name": BOT_CONFIDENCE_TIER,
+        "source_rule": "EXPENSIVE_NO_ADMIT",
+        "ticker": "KXBTC-1",
+        "entry_ask_cents": 63.0,
+        "spread_cents": 2.0,
+        "reason_codes": "V3_TIER_B_VOLUME_EXPANSION,V3_TIER_B_ULTOIM_BTC_NO_ASK_GE_62",
+    })
+
+    assert "V3 TIER B / VOLUME EXPANSION" in text
+    assert "Tier: B" in text
+    assert "Mode: paper/research tracking" in text
+    assert "n/a" not in text
+
+
+def test_tier_c_research_notification_requires_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
+    monkeypatch.setenv("Q15_V3_RESEARCH_TELEGRAM_ENABLED", "false")
+    runtime._ledger = None
+    runtime._telegram = None
+
+    row = _row(
+        asset="XRP",
+        ticker="KXXRP-1",
+        predicted_side="NO",
+        entry_ask_cents=77.0,
+        reason_codes="EXPENSIVE_NO_ADMIT,RISK_LOW",
+    )
+
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 2
+    led = runtime.get_ledger()
+    assert led is not None
+    tier = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_CONFIDENCE_TIER)
+    assert tier["decision_status"] == RESEARCH_ONLY
+    assert tier["tier"] == "C"
+    assert tier["notification_status"] is None
+
+
+def test_v3_owned_source_notification_suppression_is_explicit(monkeypatch):
+    row = _row(asset="BTC", ticker="KXBTC-1", predicted_side="YES", entry_ask_cents=80.0)
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "false")
+
+    assert runtime.owns_source_notification(row, source_system="ultoim_v2") is False
+
+    monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
+
+    assert runtime.owns_source_notification(row, source_system="ultoim_v2") is True

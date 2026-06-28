@@ -333,16 +333,21 @@ class UltoimV2Runner:
         # delivery gate (gate.evaluate(btc_yes_prob=...)). None when BTC has no candidate this
         # cycle -> the gate fails open. Distinct from the executor's market-implied btc_lean above.
         self._btc_confirm_yes = {}
+        self._strategy_btc_context = {}
         for window_key, cands in windows.items():
             btc_lean = None
             btc_confirm_yes = None
+            btc_context = None
             for cc in cands:
                 if str(cc.get("asset") or "").upper() == "BTC":
                     btc_lean = _num(cc.get("market_implied_yes_probability"))
                     btc_confirm_yes = _num(cc.get("calibrated_yes_probability"))
+                    btc_context = dict(cc)
                     break
             self._gate_ctx[window_key] = (btc_lean, self.ledger.prior_window_breadth(window_key))
             self._btc_confirm_yes[window_key] = btc_confirm_yes
+            if btc_context is not None:
+                self._strategy_btc_context[window_key] = btc_context
             for interval, mark in INTERVAL_MARKS.items():
                 # Skip the weak/money-losing 15M bin when configured (default OFF).
                 # 10M/7M behaviour is untouched.
@@ -816,7 +821,11 @@ class UltoimV2Runner:
             self.ledger.mark_delivery(row_id, "RECORDED", None, None)
             strategy_row = dict(row)
             strategy_row["delivery_status"] = "RECORDED"
-            strategy_bots_runtime.record_source_row(strategy_row, source_system="ultoim_v2")
+            strategy_bots_runtime.record_source_row(
+                strategy_row,
+                source_system="ultoim_v2",
+                btc_context=getattr(self, "_strategy_btc_context", {}).get(window_key),
+            )
             return
         ticker = str(cand.get("ticker") or "")
         if not self.ledger.claim_alert(cfg.model_version, ticker, window_key, now):
@@ -824,7 +833,11 @@ class UltoimV2Runner:
             strategy_row = dict(row)
             strategy_row["delivery_status"] = "RECORDED"
             strategy_row["delivery_error"] = "alert_already_sent"
-            strategy_bots_runtime.record_source_row(strategy_row, source_system="ultoim_v2")
+            strategy_bots_runtime.record_source_row(
+                strategy_row,
+                source_system="ultoim_v2",
+                btc_context=getattr(self, "_strategy_btc_context", {}).get(window_key),
+            )
             return
         # EXECUTE BEFORE TELEGRAM (latency fix): place the real order BEFORE the synchronous
         # Telegram send. telegram.send is a blocking network call (~0.3-1.5s typ, up to ~8-17s on
@@ -850,6 +863,17 @@ class UltoimV2Runner:
                 "message_id": None,
                 "error": "v3_bnb_combined_owns_notification",
             }
+        elif strategy_bots_runtime.owns_source_notification(
+            row,
+            source_system="ultoim_v2",
+            btc_context=getattr(self, "_strategy_btc_context", {}).get(window_key),
+        ):
+            result = {
+                "delivered": False,
+                "muted": True,
+                "message_id": None,
+                "error": "v3_owns_notification",
+            }
         else:
             result = self.telegram.send(text)
         if result.get("delivered"):
@@ -864,7 +888,11 @@ class UltoimV2Runner:
         strategy_row["delivery_status"] = status
         strategy_row["message_id"] = mid
         strategy_row["delivery_error"] = result.get("error")
-        strategy_bots_runtime.record_source_row(strategy_row, source_system="ultoim_v2")
+        strategy_bots_runtime.record_source_row(
+            strategy_row,
+            source_system="ultoim_v2",
+            btc_context=getattr(self, "_strategy_btc_context", {}).get(window_key),
+        )
 
     def _maybe_execute(self, cand: Mapping[str, Any], best_entry_cents: Any,
                        window_key: int, interval: str, now: float,
@@ -956,7 +984,11 @@ class UltoimV2Runner:
         row.pop("_best_entry_cents", None)
         row_id = self.ledger.record_decision(row)
         if row_id is not None:
-            strategy_bots_runtime.record_source_row(row, source_system="ultoim_v2")
+            strategy_bots_runtime.record_source_row(
+                row,
+                source_system="ultoim_v2",
+                btc_context=getattr(self, "_strategy_btc_context", {}).get(window_key),
+            )
 
     def _alert_summary(self) -> dict[str, Any]:
         """Compact scoreboard facts for the entry card's caveat — derived, never

@@ -55,6 +55,7 @@ def _point_ledgers_at(monkeypatch, data_dir: Path) -> None:
         "Q15_POLYMARKET_DB", str(data_dir / "q15_polymarket_shadow_v1.sqlite3")
     )
     monkeypatch.setenv("Q15_SPOT_DEPTH_DB", str(data_dir / "q15_spot_depth_v1.sqlite3"))
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(data_dir / "q15_strategy_bots_v3.sqlite3"))
 
 
 # --------------------------------------------------------------------------- #
@@ -270,4 +271,42 @@ def test_scoreboards_build_when_launched_as_script(tmp_path, monkeypatch):
     scoreboards = json.loads(res.stdout.strip().splitlines()[-1])
     assert "error" not in scoreboards.get("v95", {}), scoreboards
     assert scoreboards["v95"]["scoreboard"]["available"] is True
+
+
+def test_strategy_bot_tier_scoreboard_exports(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.ledger import StrategyBotLedger
+    from q15_upgrade.strategy_bots.rules import confidence_tier_decision
+
+    data_dir = tmp_path / "data"
+    _point_ledgers_at(monkeypatch, data_dir)
+    db = data_dir / "q15_strategy_bots_v3.sqlite3"
+    ledger = StrategyBotLedger(db)
+    row = {
+        "created_at": 1000.0,
+        "model_version": "ultoim-v2",
+        "asset": "BTC",
+        "ticker": "KXBTC-1",
+        "interval": "10M",
+        "window_key": 10,
+        "predicted_side": "YES",
+        "entry_ask_cents": 80.0,
+        "spread_cents": 2.0,
+        "delivery_status": "MUTED",
+        "record_kind": "DELIVERED_CANDIDATE",
+        "reason_codes": "TEST",
+    }
+    decision = confidence_tier_decision(row, source_system="ultoim_v2")
+    assert ledger.record_decision(decision, row, source_system="ultoim_v2") is not None
+    ledger.close()
+
+    snap, _ = lx.build_snapshot(
+        data_dir,
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
+        head_commit="abc1234",
+        build_info=None,
+    )
+
+    strategy = snap["scoreboards"]["strategy_bots"]["scoreboard"]
+    assert strategy["by_tier"]["A"]["rows"] == 1
+    assert "data_coverage" in strategy
 

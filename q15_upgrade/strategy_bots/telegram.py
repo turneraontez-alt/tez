@@ -37,6 +37,7 @@ def _fmt(value: Any, suffix: str = "") -> str:
 
 def _bot_label(name: str) -> str:
     return {
+        "v3_confidence_tier": "V3 Confidence Tier",
         "bnb_no_confirmation": "BNB NO Confirmation",
         "bnb_yes_reversal": "BNB YES Reversal",
         "hype_yes_confirmation": "HYPE YES Confirmation",
@@ -55,6 +56,10 @@ def _metric_parts(row: Mapping[str, Any], specs: list[tuple[str, str, str]]) -> 
 
 def _is_bnb_combined(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") in {"bnb_no_confirmation", "bnb_yes_reversal"}
+
+
+def _is_confidence_tier(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "v3_confidence_tier"
 
 
 def _bnb_action(row: Mapping[str, Any]) -> str:
@@ -128,8 +133,17 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
 
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"
+    tier = str(row.get("tier") or "").upper()
+    if _is_confidence_tier(row):
+        header = {
+            "A": "<b>V3 TIER A / STRICT HIGH-CONFIDENCE</b>",
+            "B": "<b>V3 TIER B / VOLUME EXPANSION</b>",
+            "C": "<b>V3 TIER C / RESEARCH ONLY</b>",
+        }.get(tier, "<b>V3 CONFIDENCE TIER</b>")
+    else:
+        header = "<b>V3 RESEARCH YES REVERSAL</b>" if is_reversal else "<b>V3 FILTERED PICK</b>"
     parts = [
-        "<b>V3 RESEARCH YES REVERSAL</b>" if is_reversal else "<b>V3 FILTERED PICK</b>",
+        header,
         (
             f"{html.escape(str(row.get('asset') or ''))} "
             f"{html.escape(str(row.get('side') or ''))} "
@@ -168,8 +182,13 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         parts.append(f"BTC: {btc}")
     if row.get("original_source_side"):
         parts.append(f"Original side: {html.escape(str(row.get('original_source_side')))}")
+    if tier:
+        parts.append(f"Tier: {html.escape(tier)}")
     parts.append(f"Reasons: {html.escape(reasons)}")
-    parts.append("Mode: research-only tracking" if is_reversal else "Mode: paper/research tracking")
+    if tier == "C":
+        parts.append("Mode: research-only tracking")
+    else:
+        parts.append("Mode: research-only tracking" if is_reversal else "Mode: paper/research tracking")
     return "\n".join(parts)
 
 

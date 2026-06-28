@@ -11,6 +11,7 @@ from .rules import (
     ACCEPTED,
     BOT_BASELINE,
     BOT_BNB_YES_REVERSAL,
+    BOT_CONFIDENCE_TIER,
     BOT_HYPE_YES,
     REJECTED,
     RESEARCH_ONLY,
@@ -44,6 +45,14 @@ def allow_duplicate_hype_windows() -> bool:
 
 def telegram_enabled() -> bool:
     return _bool("Q15_V3_TELEGRAM_ENABLED", False)
+
+
+def research_telegram_enabled() -> bool:
+    return _bool("Q15_V3_RESEARCH_TELEGRAM_ENABLED", False)
+
+
+def suppress_owned_source_notifications() -> bool:
+    return _bool("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", False)
 
 
 def db_path() -> str:
@@ -129,14 +138,50 @@ def record_source_row(
         return 0
 
 
+def owns_source_notification(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+    btc_context: Mapping[str, Any] | None = None,
+) -> bool:
+    """Whether V3 should own the operator-facing notification for this source row."""
+    try:
+        if not enabled():
+            return False
+        asset = str(row.get("asset") or "").upper()
+        if _bool("Q15_V3_SUPPRESS_OLD_BNB_NOTIFICATIONS", False) and asset == "BNB":
+            return True
+        if not suppress_owned_source_notifications():
+            return False
+        for decision in decisions_for_row(row, source_system=source_system, btc_context=btc_context):
+            if decision.bot_name == BOT_BASELINE:
+                continue
+            if decision.decision_status == ACCEPTED:
+                return True
+            if (
+                decision.bot_name in {BOT_BNB_YES_REVERSAL, BOT_CONFIDENCE_TIER}
+                and decision.decision_status == RESEARCH_ONLY
+            ):
+                return True
+        return False
+    except Exception:  # noqa: BLE001 - fail open: old alert is safer than silence
+        logger.debug("v3 owned-notification check failed open", exc_info=True)
+        return False
+
+
 def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision) -> None:
     reversal_research = (
         decision.bot_name == BOT_BNB_YES_REVERSAL
         and decision.decision_status == RESEARCH_ONLY
     )
+    tier_research = (
+        decision.bot_name == BOT_CONFIDENCE_TIER
+        and decision.decision_status == RESEARCH_ONLY
+        and research_telegram_enabled()
+    )
     if (
         decision.bot_name == BOT_BASELINE
-        or (decision.decision_status != ACCEPTED and not reversal_research)
+        or (decision.decision_status != ACCEPTED and not reversal_research and not tier_research)
     ):
         return
     try:
