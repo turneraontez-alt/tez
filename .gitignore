@@ -14,6 +14,7 @@ logs/
 .env
 .env.*
 !.env.example
+!.env.local.example
 *.pem
 *.key
 *.p8
