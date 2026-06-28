@@ -370,9 +370,40 @@ def test_v3_alert_omits_missing_btc_context():
     })
 
     assert "n/a" not in text
+    assert "V3 FILTERED PICK" not in text
+    assert "V3 BNB COMBINED DECISION" in text
+    assert "Action: TAKE BNB NO" in text
     assert "\nBTC:" not in text
     assert "Kalshi:" in text
     assert "Spot:" in text
+
+
+def test_v3_bnb_reversal_alert_replaces_old_bnb_notification_style():
+    text = build_v3_alert({
+        "asset": "BNB",
+        "side": "YES",
+        "original_source_side": "NO",
+        "interval": "10M",
+        "bot_name": BOT_BNB_YES_REVERSAL,
+        "source_rule": "EXPENSIVE_NO_ADMIT",
+        "ticker": "KXBNB-1",
+        "spread_cents": 2.0,
+        "spot_depth_imbalance": -0.032,
+        "spot_depth_trade_net_notional_60s": 3709.87,
+        "spot_depth_trade_net_qty_60s": 6.67,
+        "reason_codes": (
+            "BNB_YES_REVERSAL_RESEARCH_ONLY,"
+            "BNB_NO_VETO_SPOT_NET_NOTIONAL_60S_POSITIVE"
+        ),
+    })
+
+    assert "V3 FILTERED PICK" not in text
+    assert "V3 RESEARCH YES REVERSAL" not in text
+    assert "V3 BNB COMBINED DECISION" in text
+    assert "Action: RESEARCH YES REVERSAL" in text
+    assert "Original side: NO" in text
+    assert "Mode: research-only tracking" in text
+    assert "n/a" not in text
 
 
 def test_v3_alert_includes_btc_context_when_available():

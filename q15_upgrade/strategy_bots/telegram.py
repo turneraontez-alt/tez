@@ -53,7 +53,79 @@ def _metric_parts(row: Mapping[str, Any], specs: list[tuple[str, str, str]]) -> 
     return ", ".join(parts)
 
 
+def _is_bnb_combined(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") in {"bnb_no_confirmation", "bnb_yes_reversal"}
+
+
+def _bnb_action(row: Mapping[str, Any]) -> str:
+    bot = str(row.get("bot_name") or "")
+    status = str(row.get("decision_status") or "").upper()
+    reasons = str(row.get("reason_codes") or "")
+    if bot == "bnb_yes_reversal":
+        return "RESEARCH YES REVERSAL"
+    if bot == "bnb_no_confirmation" and "BNB_NO_VETO_" in reasons:
+        return "VETO BNB NO"
+    if bot == "bnb_no_confirmation" and status == "REJECTED":
+        return "REJECT BNB NO"
+    if bot == "bnb_no_confirmation" and (status == "ACCEPTED" or not status):
+        return "TAKE BNB NO"
+    return status or "TRACK BNB"
+
+
+def build_bnb_combined_alert(row: Mapping[str, Any]) -> str:
+    reasons = str(row.get("reason_codes") or "").replace(",", ", ")
+    parts = [
+        "<b>V3 BNB COMBINED DECISION</b>",
+        f"Action: {html.escape(_bnb_action(row))}",
+        (
+            f"{html.escape(str(row.get('asset') or 'BNB'))} "
+            f"{html.escape(str(row.get('side') or ''))} "
+            f"{html.escape(str(row.get('interval') or ''))}"
+        ),
+        f"Bot: {html.escape(_bot_label(str(row.get('bot_name') or '')))}",
+        f"Rule: {html.escape(str(row.get('source_rule') or 'UNKNOWN'))}",
+        f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>",
+    ]
+    if row.get("entry_ask_cents") is not None or row.get("spread_cents") is not None:
+        entry = _metric_parts(row, [
+            ("ask", "entry_ask_cents", "c"),
+            ("spread", "spread_cents", "c"),
+        ])
+        if entry:
+            parts.append(f"Entry: {entry}")
+    kalshi = _metric_parts(row, [
+        ("depth", "depth_contracts", ""),
+        ("YES ask depth", "yes_ask_depth_contracts", ""),
+        ("NO ask depth", "no_ask_depth_contracts", ""),
+        ("taker net YES 15s", "kalshi_taker_net_yes_volume_15s", ""),
+    ])
+    if kalshi:
+        parts.append(f"Kalshi: {kalshi}")
+    spot = _metric_parts(row, [
+        ("imb", "spot_depth_imbalance", ""),
+        ("sell15", "spot_depth_trade_sell_notional_15s", ""),
+        ("net15$", "spot_depth_trade_net_notional_15s", ""),
+        ("net60$", "spot_depth_trade_net_notional_60s", ""),
+        ("net60qty", "spot_depth_trade_net_qty_60s", ""),
+    ])
+    if spot:
+        parts.append(f"Spot: {spot}")
+    if row.get("original_source_side"):
+        parts.append(f"Original side: {html.escape(str(row.get('original_source_side')))}")
+    parts.append(f"Reasons: {html.escape(reasons)}")
+    mode = (
+        "research-only tracking"
+        if str(row.get("bot_name") or "") == "bnb_yes_reversal"
+        else "paper/research tracking"
+    )
+    parts.append(f"Mode: {mode}")
+    return "\n".join(parts)
+
+
 def build_v3_alert(row: Mapping[str, Any]) -> str:
+    if _is_bnb_combined(row):
+        return build_bnb_combined_alert(row)
+
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"
     parts = [
