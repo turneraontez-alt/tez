@@ -7,12 +7,14 @@ from q15_upgrade.strategy_bots.ledger import StrategyBotLedger, net_pnl_cents
 from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
     BOT_BNB_NO,
+    BOT_BNB_YES_REVERSAL,
     BOT_HYPE_YES,
     BOT_MOREFIRE_BTC,
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
     bnb_no_confirmation_decision,
+    bnb_yes_reversal_decision,
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
 )
@@ -54,20 +56,107 @@ def test_bnb_no_rejects_tiny_negative_imbalance():
     assert "TINY_NEGATIVE_IMBALANCE" in d.reason_codes
 
 
-def test_bnb_no_accepts_real_sell_pressure_or_real_negative_imbalance():
-    by_sell = bnb_no_confirmation_decision(_row(
-        spot_depth_imbalance=0.01,
-        spot_depth_trade_sell_notional_15s=41.0,
-    ))
-    by_book = bnb_no_confirmation_decision(_row(
-        spot_depth_imbalance=-0.021,
-        spot_depth_trade_sell_notional_15s=0.0,
+def test_bnb_no_rejects_positive_60s_spot_net_notional():
+    d = bnb_no_confirmation_decision(_row(
+        spot_depth_trade_net_notional_60s=1.0,
+        spot_depth_trade_net_qty_60s=-1.0,
+        kalshi_taker_net_yes_volume_15s=-1.0,
+        spot_depth_imbalance=-0.03,
+        spot_depth_trade_sell_notional_15s=80.0,
+        spot_depth_trade_net_notional_15s=-50.0,
     ))
 
-    assert by_sell is not None and by_sell.decision_status == ACCEPTED
-    assert "SELL_NOTIONAL_15S_GE_40" in by_sell.reason_codes
-    assert by_book is not None and by_book.decision_status == ACCEPTED
-    assert "SPOT_IMBALANCE_LE_NEG_0_02" in by_book.reason_codes
+    assert d is not None
+    assert d.decision_status == REJECTED
+    assert "BNB_NO_VETO_SPOT_NET_NOTIONAL_60S_POSITIVE" in d.reason_codes
+
+
+def test_bnb_no_rejects_kalshi_taker_yes_contradiction():
+    d = bnb_no_confirmation_decision(_row(
+        kalshi_taker_net_yes_volume_15s=10.0,
+        spot_depth_trade_net_notional_60s=-10.0,
+        spot_depth_trade_net_qty_60s=-1.0,
+        spot_depth_imbalance=-0.03,
+        spot_depth_trade_sell_notional_15s=80.0,
+        spot_depth_trade_net_notional_15s=-50.0,
+    ))
+
+    assert d is not None
+    assert d.decision_status == REJECTED
+    assert "BNB_NO_VETO_KALSHI_TAKER_YES_GE_10" in d.reason_codes
+
+
+def test_bnb_no_requires_two_bearish_confirmations():
+    d = bnb_no_confirmation_decision(_row(
+        spot_depth_trade_sell_notional_15s=41.0,
+        spot_depth_imbalance=-0.001,
+        spot_depth_trade_net_notional_60s=-5.0,
+        spot_depth_trade_net_qty_60s=-0.1,
+        kalshi_taker_net_yes_volume_15s=1.0,
+    ))
+
+    assert d is not None
+    assert d.decision_status == REJECTED
+    assert "BNB_NO_BEARISH_SCORE_LT_2" in d.reason_codes
+
+
+def test_bnb_no_accepts_without_veto_and_two_bearish_confirmations():
+    d = bnb_no_confirmation_decision(_row(
+        spot_depth_trade_sell_notional_15s=41.0,
+        spot_depth_imbalance=-0.021,
+        spot_depth_trade_net_notional_60s=-1.0,
+        spot_depth_trade_net_qty_60s=-0.1,
+        kalshi_taker_net_yes_volume_15s=-1.0,
+    ))
+
+    assert d is not None
+    assert d.decision_status == ACCEPTED
+    assert "SELL_NOTIONAL_15S_GE_40" in d.reason_codes
+    assert "SPOT_IMBALANCE_LE_NEG_0_02" in d.reason_codes
+
+
+def test_bnb_yes_reversal_fires_research_only_for_ultoim_vetoed_no():
+    row = _row(
+        reason_codes="ASK_ABOVE_BAND,EDGE_BELOW_MIN",
+        spot_depth_imbalance=0.02,
+        spot_depth_trade_net_notional_60s=60.0,
+        spot_depth_trade_net_qty_60s=0.1,
+        spot_depth_trade_net_notional_15s=5.0,
+        kalshi_taker_net_yes_volume_15s=11.0,
+        yes_ask_cents=24.0,
+    )
+    no_decision = bnb_no_confirmation_decision(row)
+    reversal = bnb_yes_reversal_decision(
+        row,
+        source_system="ultoim_v2",
+        no_decision=no_decision,
+    )
+
+    assert reversal is not None
+    assert reversal.bot_name == BOT_BNB_YES_REVERSAL
+    assert reversal.decision_status == RESEARCH_ONLY
+    assert reversal.side_override == "YES"
+    assert reversal.original_source_side == "NO"
+    assert "BNB_YES_REVERSAL_SPOT_NET_NOTIONAL_60S_GE_50" in reversal.reason_codes
+    assert "BNB_NO_VETO_SPOT_NET_NOTIONAL_60S_POSITIVE" in reversal.reason_codes
+
+
+def test_bnb_yes_reversal_does_not_fire_for_hvf_bnb_rows():
+    row = _row(
+        reason_codes="HVF_OWN_NO_FLASH",
+        rule_code="HVF_OWN_NO_FLASH",
+        record_kind="HIGH_VOL_FLIP_ALERT",
+        spot_depth_imbalance=0.02,
+        spot_depth_trade_net_notional_60s=60.0,
+        spot_depth_trade_net_qty_60s=0.1,
+    )
+    no_decision = bnb_no_confirmation_decision(row)
+
+    assert bnb_yes_reversal_decision(
+        row,
+        source_system="high_vol_flip",
+        no_decision=no_decision,
+    ) is None
 
 
 def test_hype_yes_requires_spot_and_kalshi_confirmation_with_missing_taker():
@@ -135,10 +224,16 @@ def test_ledger_resolves_skipped_rows_and_scoreboard(tmp_path):
     led = StrategyBotLedger(tmp_path / "v3.sqlite3")
     decision = bnb_no_confirmation_decision(_row(
         spot_depth_trade_sell_notional_15s=45.0,
+        spot_depth_trade_net_qty_15s=-1.0,
+        spot_depth_trade_net_notional_60s=-1.0,
+        spot_depth_trade_net_qty_60s=-1.0,
     ))
     assert decision is not None
     row_id = led.record_decision(decision, _row(
         spot_depth_trade_sell_notional_15s=45.0,
+        spot_depth_trade_net_qty_15s=-1.0,
+        spot_depth_trade_net_notional_60s=-1.0,
+        spot_depth_trade_net_qty_60s=-1.0,
     ), source_system="ultoim_v2")
     assert row_id is not None
 
@@ -160,6 +255,47 @@ def test_ledger_resolves_skipped_rows_and_scoreboard(tmp_path):
     sb = led.scoreboard(STRATEGY_VERSION, min_n=2)
     assert sb["by_bot"][BOT_BNB_NO]["resolved"] == 1
     assert sb["by_bot"][BOT_BNB_NO]["provisional"] is True
+
+
+def test_scoreboard_includes_bnb_veto_and_yes_reversal_candidates(tmp_path):
+    led = StrategyBotLedger(tmp_path / "v3.sqlite3")
+    row = _row(
+        reason_codes="EXPENSIVE_NO_ADMIT,RISK_LOW",
+        spot_depth_imbalance=-0.02,
+        spot_depth_trade_net_notional_60s=75.0,
+        spot_depth_trade_net_qty_60s=0.2,
+        yes_ask_cents=25.0,
+    )
+    no_decision = bnb_no_confirmation_decision(row)
+    assert no_decision is not None
+    reversal = bnb_yes_reversal_decision(
+        row,
+        source_system="ultoim_v2",
+        no_decision=no_decision,
+    )
+    assert reversal is not None
+
+    assert led.record_decision(no_decision, row, source_system="ultoim_v2") is not None
+    assert led.record_decision(reversal, row, source_system="ultoim_v2") is not None
+    assert led.resolve(
+        source_system="ultoim_v2",
+        source_model_version="ultoim-v2",
+        ticker="KXBNB-1",
+        official_result="YES",
+        now=1600.0,
+    ) == 2
+
+    rows = led.rows(STRATEGY_VERSION)
+    reversal_row = next(r for r in rows if r["bot_name"] == BOT_BNB_YES_REVERSAL)
+    assert reversal_row["side"] == "YES"
+    assert reversal_row["original_source_side"] == "NO"
+    assert math.isclose(reversal_row["hypothetical_pnl_cents"], net_pnl_cents(25.0, True))
+
+    bnb = led.scoreboard(STRATEGY_VERSION)["bnb_system"]
+    assert bnb["bnb_no_vetoed"]["rows"] == 1
+    assert bnb["bnb_yes_reversal_candidates"]["rows"] == 1
+    assert bnb["no_veto_yes_would_have_won"]["rows"] == 1
+    assert bnb["yes_reversal_won"]["rows"] == 1
 
 
 def test_runtime_suppresses_duplicate_hype_window_and_marks_muted_notification(tmp_path, monkeypatch):

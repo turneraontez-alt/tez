@@ -38,6 +38,7 @@ def _fmt(value: Any, suffix: str = "") -> str:
 def _bot_label(name: str) -> str:
     return {
         "bnb_no_confirmation": "BNB NO Confirmation",
+        "bnb_yes_reversal": "BNB YES Reversal",
         "hype_yes_confirmation": "HYPE YES Confirmation",
         "morefire_btc_confirmed": "MoreFire BTC-Confirmed",
         "baseline_control": "Baseline Control",
@@ -54,8 +55,9 @@ def _metric_parts(row: Mapping[str, Any], specs: list[tuple[str, str, str]]) -> 
 
 def build_v3_alert(row: Mapping[str, Any]) -> str:
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
+    is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"
     parts = [
-        "<b>V3 FILTERED PICK</b>",
+        "<b>V3 RESEARCH YES REVERSAL</b>" if is_reversal else "<b>V3 FILTERED PICK</b>",
         (
             f"{html.escape(str(row.get('asset') or ''))} "
             f"{html.escape(str(row.get('side') or ''))} "
@@ -92,8 +94,10 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         btc = (btc + ", " if btc else "") + f"side {html.escape(str(row.get('btc_dominant_side')))}"
     if btc:
         parts.append(f"BTC: {btc}")
+    if row.get("original_source_side"):
+        parts.append(f"Original side: {html.escape(str(row.get('original_source_side')))}")
     parts.append(f"Reasons: {html.escape(reasons)}")
-    parts.append("Mode: paper/research tracking")
+    parts.append("Mode: research-only tracking" if is_reversal else "Mode: paper/research tracking")
     return "\n".join(parts)
 
 

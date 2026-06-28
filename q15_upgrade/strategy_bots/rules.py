@@ -10,10 +10,11 @@ import math
 from typing import Any, Mapping
 
 
-STRATEGY_VERSION = "filtered-alert-system-v3-provisional"
+STRATEGY_VERSION = "filtered-alert-system-v3-bnb-combined-provisional"
 
 BOT_BASELINE = "baseline_control"
 BOT_BNB_NO = "bnb_no_confirmation"
+BOT_BNB_YES_REVERSAL = "bnb_yes_reversal"
 BOT_HYPE_YES = "hype_yes_confirmation"
 BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
 
@@ -87,6 +88,10 @@ class BotDecision:
     strategy_version: str = STRATEGY_VERSION
     threshold_profile: Mapping[str, Any] = field(default_factory=dict)
     btc_context: Mapping[str, Any] | None = None
+    side_override: str | None = None
+    original_source_side: str | None = None
+    entry_ask_cents: Any | None = None
+    use_entry_ask_override: bool = False
 
 
 def _num(value: Any) -> float | None:
@@ -126,6 +131,20 @@ def source_rule(row: Mapping[str, Any]) -> str:
     return str(row.get("record_kind") or "UNKNOWN")
 
 
+def _source_text(row: Mapping[str, Any]) -> str:
+    return " ".join(
+        str(value or "")
+        for value in (
+            source_rule(row),
+            row.get("rule_name"),
+            row.get("source_rule"),
+            row.get("source_rule_name"),
+            row.get("reason_codes"),
+            row.get("source_reason_codes"),
+        )
+    ).upper()
+
+
 def _is_research_row(row: Mapping[str, Any]) -> bool:
     delivery = str(row.get("delivery_status") or "").upper()
     kind = str(row.get("record_kind") or "").upper()
@@ -160,7 +179,14 @@ def bnb_no_confirmation_decision(row: Mapping[str, Any]) -> BotDecision | None:
     thresholds = {
         "spot_depth_trade_sell_notional_15s_min": 40.0,
         "spot_depth_imbalance_max": -0.02,
-        "tiny_negative_imbalance_floor": -0.02,
+        "spot_depth_trade_net_notional_15s_max": -25.0,
+        "spot_depth_trade_net_qty_15s_max": 0.0,
+        "kalshi_taker_net_yes_volume_15s_max": 0.0,
+        "bearish_score_min": 2,
+        "veto_spot_depth_trade_net_notional_60s_min": 0.0,
+        "veto_spot_depth_trade_net_qty_60s_min": 0.0,
+        "veto_kalshi_taker_net_yes_volume_15s_min": 10.0,
+        "veto_spot_depth_imbalance_min": 0.0,
         "provisional": True,
     }
     if side != "NO":
@@ -171,27 +197,123 @@ def bnb_no_confirmation_decision(row: Mapping[str, Any]) -> BotDecision | None:
             threshold_profile=thresholds,
         )
 
-    sell_15 = _num(row.get("spot_depth_trade_sell_notional_15s"))
     imbalance = _num(row.get("spot_depth_imbalance"))
+    net_notional_60 = _num(row.get("spot_depth_trade_net_notional_60s"))
+    net_qty_60 = _num(row.get("spot_depth_trade_net_qty_60s"))
+    taker_net_yes = _num(row.get("kalshi_taker_net_yes_volume_15s"))
+    veto_reasons: list[str] = []
+    if net_notional_60 is not None and net_notional_60 > 0.0:
+        veto_reasons.append("BNB_NO_VETO_SPOT_NET_NOTIONAL_60S_POSITIVE")
+    if net_qty_60 is not None and net_qty_60 > 0.0:
+        veto_reasons.append("BNB_NO_VETO_SPOT_NET_QTY_60S_POSITIVE")
+    if taker_net_yes is not None and taker_net_yes >= 10.0:
+        veto_reasons.append("BNB_NO_VETO_KALSHI_TAKER_YES_GE_10")
+    if imbalance is not None and imbalance > 0.0:
+        veto_reasons.append("BNB_NO_VETO_SPOT_IMBALANCE_POSITIVE")
+    if veto_reasons:
+        return BotDecision(
+            bot_name=BOT_BNB_NO,
+            decision_status=REJECTED,
+            reason_codes=tuple(veto_reasons),
+            threshold_profile=thresholds,
+        )
+
+    sell_15 = _num(row.get("spot_depth_trade_sell_notional_15s"))
+    net_notional_15 = _num(row.get("spot_depth_trade_net_notional_15s"))
+    net_qty_15 = _num(row.get("spot_depth_trade_net_qty_15s"))
     reasons: list[str] = []
     if sell_15 is not None and sell_15 >= 40.0:
         reasons.append("SELL_NOTIONAL_15S_GE_40")
     if imbalance is not None and imbalance <= -0.02:
         reasons.append("SPOT_IMBALANCE_LE_NEG_0_02")
+    if net_notional_15 is not None and net_notional_15 <= -25.0:
+        reasons.append("SPOT_NET_NOTIONAL_15S_LE_NEG_25")
+    if net_qty_15 is not None and net_qty_15 <= 0.0:
+        reasons.append("SPOT_NET_QTY_15S_LE_0")
+    if taker_net_yes is not None and taker_net_yes <= 0.0:
+        reasons.append("KALSHI_TAKER_NET_YES_15S_LE_0")
 
-    if reasons:
+    if len(reasons) >= 2:
         return BotDecision(BOT_BNB_NO, ACCEPTED, tuple(reasons), threshold_profile=thresholds)
 
-    reject_reasons = ["NO_SPOT_SELL_CONFIRMATION"]
+    reject_reasons = ["BNB_NO_BEARISH_SCORE_LT_2"]
+    reject_reasons.extend(reasons)
     if imbalance is not None and -0.02 < imbalance < 0.0:
         reject_reasons.append("TINY_NEGATIVE_IMBALANCE")
-    if sell_15 is None and imbalance is None:
+    if all(value is None for value in (sell_15, imbalance, net_notional_15, net_qty_15, taker_net_yes)):
         reject_reasons.append("SPOT_DEPTH_MISSING")
     return BotDecision(
         bot_name=BOT_BNB_NO,
         decision_status=REJECTED,
         reason_codes=tuple(reject_reasons),
         threshold_profile=thresholds,
+    )
+
+
+def _bnb_no_veto_reasons(decision: BotDecision | None) -> tuple[str, ...]:
+    if decision is None or decision.bot_name != BOT_BNB_NO:
+        return ()
+    return tuple(code for code in decision.reason_codes if code.startswith("BNB_NO_VETO_"))
+
+
+def bnb_yes_reversal_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+    no_decision: BotDecision | None = None,
+) -> BotDecision | None:
+    if source_system != "ultoim_v2":
+        return None
+    if _asset(row) != "BNB" or source_side(row) != "NO":
+        return None
+    veto_reasons = _bnb_no_veto_reasons(no_decision)
+    if not veto_reasons:
+        return None
+    text = _source_text(row)
+    if "ASK_ABOVE_BAND" not in text and "EXPENSIVE_NO_ADMIT" not in text:
+        return None
+
+    thresholds = {
+        "spot_depth_imbalance_min": -0.05,
+        "spot_depth_trade_net_notional_60s_min": 50.0,
+        "spot_depth_trade_net_notional_15s_strong_min": 0.0,
+        "kalshi_taker_net_yes_volume_15s_strong_min": 10.0,
+        "min_resolved_before_promotion": 30,
+        "provisional": True,
+        "research_only": True,
+    }
+    imbalance = _num(row.get("spot_depth_imbalance"))
+    net_notional_60 = _num(row.get("spot_depth_trade_net_notional_60s"))
+    net_notional_15 = _num(row.get("spot_depth_trade_net_notional_15s"))
+    taker_net_yes = _num(row.get("kalshi_taker_net_yes_volume_15s"))
+    if imbalance is None or imbalance <= -0.05:
+        return None
+    if net_notional_60 is None or net_notional_60 < 50.0:
+        return None
+
+    reasons = [
+        "BNB_YES_REVERSAL_RESEARCH_ONLY",
+        "BNB_YES_REVERSAL_SOURCE_ULTOIM_V2",
+        "BNB_YES_REVERSAL_RULE_ASK_ABOVE_OR_EXPENSIVE",
+        "BNB_YES_REVERSAL_IMBALANCE_GT_NEG_0_05",
+        "BNB_YES_REVERSAL_SPOT_NET_NOTIONAL_60S_GE_50",
+        *veto_reasons,
+    ]
+    if net_notional_15 is not None and net_notional_15 > 0.0:
+        reasons.append("BNB_YES_REVERSAL_STRONG_SPOT_NET_NOTIONAL_15S_POSITIVE")
+    if taker_net_yes is not None and taker_net_yes >= 10.0:
+        reasons.append("BNB_YES_REVERSAL_STRONG_KALSHI_TAKER_YES_GE_10")
+
+    yes_ask = row.get("yes_ask_cents") or row.get("yes_ask")
+    return BotDecision(
+        bot_name=BOT_BNB_YES_REVERSAL,
+        decision_status=RESEARCH_ONLY,
+        reason_codes=tuple(reasons),
+        threshold_profile=thresholds,
+        side_override="YES",
+        original_source_side="NO",
+        entry_ask_cents=yes_ask,
+        use_entry_ask_override=True,
     )
 
 
@@ -421,6 +543,13 @@ def decisions_for_row(
     bnb = bnb_no_confirmation_decision(row)
     if bnb is not None:
         decisions.append(bnb)
+        bnb_reversal = bnb_yes_reversal_decision(
+            row,
+            source_system=source_system,
+            no_decision=bnb,
+        )
+        if bnb_reversal is not None:
+            decisions.append(bnb_reversal)
     hype = hype_yes_confirmation_decision(row)
     if hype is not None:
         decisions.append(hype)

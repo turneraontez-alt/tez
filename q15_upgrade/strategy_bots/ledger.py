@@ -11,8 +11,11 @@ from typing import Any, Mapping, Sequence
 
 from .rules import (
     ACCEPTED,
+    BOT_BNB_NO,
+    BOT_BNB_YES_REVERSAL,
     KALSHI_DEPTH_KEYS,
     KALSHI_FLOW_KEYS,
+    REJECTED,
     RESEARCH_ONLY,
     SPOT_DEPTH_KEYS,
     STRATEGY_VERSION,
@@ -43,6 +46,7 @@ CREATE TABLE IF NOT EXISTS strategy_bot_decisions (
     delivery_status TEXT,
     asset TEXT,
     side TEXT,
+    original_source_side TEXT,
     interval TEXT,
     window_key INTEGER,
     ticker TEXT,
@@ -144,6 +148,7 @@ _COLS = (
     "delivery_status",
     "asset",
     "side",
+    "original_source_side",
     "interval",
     "window_key",
     "ticker",
@@ -263,12 +268,15 @@ def _build_record(
         "record_kind": row.get("record_kind"),
         "delivery_status": row.get("delivery_status"),
         "asset": row.get("asset"),
-        "side": source_side(row),
+        "side": decision.side_override or source_side(row),
+        "original_source_side": decision.original_source_side,
         "interval": row.get("interval"),
         "window_key": row.get("window_key"),
         "ticker": row.get("ticker"),
         "close_time": row.get("close_time"),
-        "entry_ask_cents": _entry_ask(row),
+        "entry_ask_cents": (
+            decision.entry_ask_cents if decision.use_entry_ask_override else _entry_ask(row)
+        ),
         "spread_cents": row.get("spread_cents"),
         "btc_context_json": _json(btc) if btc else None,
         "btc_ticker": btc.get("btc_ticker"),
@@ -320,6 +328,7 @@ class StrategyBotLedger:
             for row in self._conn.execute("PRAGMA table_info(strategy_bot_decisions)").fetchall()
         }
         added = {
+            "original_source_side": "TEXT",
             "notification_status": "TEXT",
             "notification_message_id": "INTEGER",
             "notification_error": "TEXT",
@@ -482,6 +491,7 @@ class StrategyBotLedger:
                 ("bot_name", "asset", "side", "source_rule", "interval", "delivery_status"),
                 min_n,
             ),
+            "bnb_system": self._bnb_system(rows, min_n),
         }
 
     @classmethod
@@ -516,4 +526,60 @@ class StrategyBotLedger:
             "avg_pnl_cents": None if not pnls else sum(pnls) / len(pnls),
             "net_pnl_cents": None if not pnls else sum(pnls),
             "provisional": n < int(min_n),
+        }
+
+    @classmethod
+    def _bnb_system(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        min_n: int,
+    ) -> dict[str, Any]:
+        bnb_rows = [
+            r for r in rows
+            if str(r.get("asset") or "").upper() == "BNB"
+            and r.get("bot_name") in {BOT_BNB_NO, BOT_BNB_YES_REVERSAL}
+        ]
+        no_rows = [r for r in bnb_rows if r.get("bot_name") == BOT_BNB_NO]
+        reversal_rows = [
+            r for r in bnb_rows
+            if r.get("bot_name") == BOT_BNB_YES_REVERSAL
+        ]
+        vetoed = [
+            r for r in no_rows
+            if r.get("decision_status") == REJECTED
+            and "BNB_NO_VETO_" in str(r.get("reason_codes") or "")
+        ]
+        no_veto_yes_would_have_won = [
+            r for r in vetoed if str(r.get("official_result") or "").upper() == "YES"
+        ]
+        no_veto_no_would_have_won = [
+            r for r in vetoed if str(r.get("official_result") or "").upper() == "NO"
+        ]
+        return {
+            "bnb_rows": cls._agg(bnb_rows, min_n),
+            "bnb_no_accepted": cls._agg(
+                [r for r in no_rows if r.get("decision_status") == ACCEPTED],
+                min_n,
+            ),
+            "bnb_no_vetoed": cls._agg(vetoed, min_n),
+            "bnb_yes_reversal_candidates": cls._agg(reversal_rows, min_n),
+            "no_veto_yes_would_have_won": cls._agg(no_veto_yes_would_have_won, min_n),
+            "no_veto_no_would_have_won": cls._agg(no_veto_no_would_have_won, min_n),
+            "yes_reversal_won": cls._agg(
+                [r for r in reversal_rows if int(r.get("correct") or 0) == 1],
+                min_n,
+            ),
+            "yes_reversal_lost": cls._agg(
+                [
+                    r for r in reversal_rows
+                    if r.get("official_result") is not None
+                    and int(r.get("correct") or 0) == 0
+                ],
+                min_n,
+            ),
+            "by_ticker_rule_side_status": cls._group(
+                bnb_rows,
+                ("ticker", "source_rule", "bot_name", "side", "decision_status"),
+                min_n,
+            ),
         }

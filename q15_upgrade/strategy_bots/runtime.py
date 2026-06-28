@@ -10,8 +10,10 @@ from .ledger import StrategyBotLedger
 from .rules import (
     ACCEPTED,
     BOT_BASELINE,
+    BOT_BNB_YES_REVERSAL,
     BOT_HYPE_YES,
     REJECTED,
+    RESEARCH_ONLY,
     STRATEGY_VERSION,
     BotDecision,
     decisions_for_row,
@@ -128,7 +130,14 @@ def record_source_row(
 
 
 def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision) -> None:
-    if decision.bot_name == BOT_BASELINE or decision.decision_status != ACCEPTED:
+    reversal_research = (
+        decision.bot_name == BOT_BNB_YES_REVERSAL
+        and decision.decision_status == RESEARCH_ONLY
+    )
+    if (
+        decision.bot_name == BOT_BASELINE
+        or (decision.decision_status != ACCEPTED and not reversal_research)
+    ):
         return
     try:
         recorded = ledger.row_by_id(row_id)
