@@ -256,6 +256,28 @@ def _bnb_no_veto_reasons(decision: BotDecision | None) -> tuple[str, ...]:
     return tuple(code for code in decision.reason_codes if code.startswith("BNB_NO_VETO_"))
 
 
+def _yes_reversal_entry_ask(row: Mapping[str, Any]) -> tuple[Any | None, str | None]:
+    explicit = row.get("yes_ask_cents") if row.get("yes_ask_cents") is not None else row.get("yes_ask")
+    if _num(explicit) is not None:
+        return explicit, None
+    no_bid = _num(row.get("no_bid_cents"))
+    if no_bid is not None:
+        yes_ask = 100.0 - no_bid
+        if 0.0 <= yes_ask <= 100.0:
+            return yes_ask, "BNB_YES_REVERSAL_ENTRY_DERIVED_FROM_NO_BID"
+    no_ask = _num(row.get("entry_ask_cents"))
+    if no_ask is None:
+        no_ask = _num(row.get("selected_ask_cents"))
+    if no_ask is None:
+        no_ask = _num(row.get("no_ask_cents"))
+    spread = _num(row.get("spread_cents"))
+    if no_ask is not None and spread is not None:
+        yes_ask = 100.0 - no_ask + spread
+        if 0.0 <= yes_ask <= 100.0:
+            return yes_ask, "BNB_YES_REVERSAL_ENTRY_ESTIMATED_FROM_NO_SPREAD"
+    return None, None
+
+
 def bnb_yes_reversal_decision(
     row: Mapping[str, Any],
     *,
@@ -303,8 +325,10 @@ def bnb_yes_reversal_decision(
         reasons.append("BNB_YES_REVERSAL_STRONG_SPOT_NET_NOTIONAL_15S_POSITIVE")
     if taker_net_yes is not None and taker_net_yes >= 10.0:
         reasons.append("BNB_YES_REVERSAL_STRONG_KALSHI_TAKER_YES_GE_10")
+    yes_ask, entry_reason = _yes_reversal_entry_ask(row)
+    if entry_reason:
+        reasons.append(entry_reason)
 
-    yes_ask = row.get("yes_ask_cents") or row.get("yes_ask")
     return BotDecision(
         bot_name=BOT_BNB_YES_REVERSAL,
         decision_status=RESEARCH_ONLY,

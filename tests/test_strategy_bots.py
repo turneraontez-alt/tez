@@ -137,8 +137,30 @@ def test_bnb_yes_reversal_fires_research_only_for_ultoim_vetoed_no():
     assert reversal.decision_status == RESEARCH_ONLY
     assert reversal.side_override == "YES"
     assert reversal.original_source_side == "NO"
+    assert reversal.entry_ask_cents == 24.0
     assert "BNB_YES_REVERSAL_SPOT_NET_NOTIONAL_60S_GE_50" in reversal.reason_codes
     assert "BNB_NO_VETO_SPOT_NET_NOTIONAL_60S_POSITIVE" in reversal.reason_codes
+
+
+def test_bnb_yes_reversal_derives_yes_entry_from_no_ask_and_spread():
+    row = _row(
+        reason_codes="EXPENSIVE_NO_ADMIT",
+        entry_ask_cents=84.0,
+        spread_cents=2.0,
+        spot_depth_imbalance=-0.03,
+        spot_depth_trade_net_notional_60s=60.0,
+        spot_depth_trade_net_qty_60s=0.1,
+    )
+    no_decision = bnb_no_confirmation_decision(row)
+    reversal = bnb_yes_reversal_decision(
+        row,
+        source_system="ultoim_v2",
+        no_decision=no_decision,
+    )
+
+    assert reversal is not None
+    assert reversal.entry_ask_cents == 18.0
+    assert "BNB_YES_REVERSAL_ENTRY_ESTIMATED_FROM_NO_SPREAD" in reversal.reason_codes
 
 
 def test_bnb_yes_reversal_does_not_fire_for_hvf_bnb_rows():
