@@ -43,6 +43,9 @@ function Get-Q15Python {
     if ($env:Q15_LOCAL_PYTHON -and (Test-Path -LiteralPath $env:Q15_LOCAL_PYTHON)) { return $env:Q15_LOCAL_PYTHON }
     $candidates = @(
         (Join-Path $root ".venv\Scripts\python.exe"),
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Python\pythoncore-3.11-64\python.exe",
+        "C:\Python311\python.exe",
         "C:\Users\Turne\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe",
         "python"
     )
@@ -51,6 +54,23 @@ function Get-Q15Python {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
     return "python"
+}
+
+function Add-Q15LocalToolPath {
+    $paths = @(
+        "C:\Users\Turne\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd",
+        "$env:LOCALAPPDATA\Programs\Python\Python311",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\Scripts",
+        "$env:LOCALAPPDATA\Python\pythoncore-3.11-64",
+        "$env:LOCALAPPDATA\Python\pythoncore-3.11-64\Scripts",
+        "C:\Python311",
+        "C:\Python311\Scripts"
+    )
+    foreach ($path in $paths) {
+        if ((Test-Path -LiteralPath $path) -and (($env:PATH -split ';') -notcontains $path)) {
+            $env:PATH = "$path;$env:PATH"
+        }
+    }
 }
 
 function Initialize-Q15LocalDirs {

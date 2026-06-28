@@ -12,6 +12,7 @@ $root = Get-Q15RepoRoot
 Set-Location -LiteralPath $root
 Import-Q15Env -EnvFile $EnvFile | Out-Null
 Initialize-Q15LocalDirs
+Add-Q15LocalToolPath
 Set-Q15SafeTradingDefaults -AllowLiveTrading:$AllowLiveTrading
 $python = Get-Q15Python
 if (-not $SkipInstall) {

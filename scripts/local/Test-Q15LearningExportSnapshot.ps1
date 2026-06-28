@@ -5,6 +5,7 @@ Import-Module (Join-Path $PSScriptRoot "Q15Local.psm1") -Force
 $root = Get-Q15RepoRoot
 Set-Location -LiteralPath $root
 Import-Q15Env -EnvFile $EnvFile | Out-Null
+Add-Q15LocalToolPath
 Initialize-Q15LocalDirs
 $python = Get-Q15Python
 $py = @'

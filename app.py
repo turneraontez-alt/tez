@@ -10,7 +10,16 @@ import shutil
 # were launched on anything other than 3.11, re-exec under python3.11. This guard
 # FAILS CLOSED: if 3.11 cannot be reached we abort rather than run degraded, so a
 # live-money process never starts unable to sign.
-if sys.version_info[:2] != (3, 11):
+_safe_non311_dryrun = all(
+    os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    for name in (
+        "Q15_EXEC_DRY_RUN",
+        "Q15_EXEC_KILL",
+        "Q15_EXEC_YES_DRY_RUN",
+        "Q15_EXEC_YES_KILL",
+    )
+)
+if sys.version_info[:2] != (3, 11) and not _safe_non311_dryrun:
     if os.environ.get("Q15_INTERP_REEXEC") == "1":
         sys.stderr.write(
             "FATAL: interpreter guard re-exec did not land on Python 3.11; "
@@ -28,6 +37,12 @@ if sys.version_info[:2] != (3, 11):
     except OSError as _exc:
         sys.stderr.write(f"FATAL: failed to re-exec under {_py311}: {_exc}\n")
         raise SystemExit(70)
+elif sys.version_info[:2] != (3, 11):
+    sys.stderr.write(
+        "WARNING: running on Python "
+        f"{sys.version_info.major}.{sys.version_info.minor} for local dry-run only; "
+        "live trading remains blocked by kill switches.\n"
+    )
 # --- end interpreter guard ---
 
 import atexit

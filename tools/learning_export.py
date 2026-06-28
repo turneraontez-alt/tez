@@ -274,12 +274,17 @@ def _safe_unlink(path: Path | None) -> None:
     if path is None:
         return
     for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-        try:
-            candidate.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            _log(f"could not remove temp {candidate.name}: {type(exc).__name__}: {exc}")
+        for attempt in range(6):
+            try:
+                candidate.unlink()
+                break
+            except FileNotFoundError:
+                break
+            except OSError as exc:
+                if attempt < 5:
+                    time.sleep(0.2)
+                    continue
+                _log(f"could not remove temp {candidate.name}: {type(exc).__name__}: {exc}")
 
 
 def _db_row_counts(db_path: Path) -> dict[str, int]:
@@ -320,28 +325,37 @@ def _v95_scoreboards(backup_path: Path) -> dict[str, Any]:
     from q15_upgrade import ledger_v95
 
     ledger = ledger_v95.V95Ledger(backup_path)
-    return {
-        "scoreboard": _guard("v95.scoreboard", ledger.scoreboard),
-        "official_scoreboard": _guard(
-            "v95.official_scoreboard", ledger.official_scoreboard
-        ),
-        "shadow_signal_experiment": _guard(
-            "v95.shadow_signal_experiment", ledger.shadow_signal_experiment
-        ),
-        "timing_experiment_scoreboard": _guard(
-            "v95.timing_experiment_scoreboard", ledger.timing_experiment_scoreboard
-        ),
-        "flip_warning_performance": _guard(
-            "v95.flip_warning_performance", ledger.flip_warning_performance
-        ),
-    }
+    try:
+        return {
+            "scoreboard": _guard("v95.scoreboard", ledger.scoreboard),
+            "official_scoreboard": _guard(
+                "v95.official_scoreboard", ledger.official_scoreboard
+            ),
+            "shadow_signal_experiment": _guard(
+                "v95.shadow_signal_experiment", ledger.shadow_signal_experiment
+            ),
+            "timing_experiment_scoreboard": _guard(
+                "v95.timing_experiment_scoreboard", ledger.timing_experiment_scoreboard
+            ),
+            "flip_warning_performance": _guard(
+                "v95.flip_warning_performance", ledger.flip_warning_performance
+            ),
+        }
+    finally:
+        connection = getattr(ledger, "_shared_connection", None)
+        if connection is not None:
+            sqlite3.Connection.close(connection)
+            ledger._shared_connection = None
 
 
 def _challenger_scoreboards(backup_path: Path) -> dict[str, Any]:
     from q15_upgrade.challenger.ledger import ShadowLedger
 
     ledger = ShadowLedger(str(backup_path))
-    return {"scoreboard": _guard("challenger.scoreboard", ledger.scoreboard)}
+    try:
+        return {"scoreboard": _guard("challenger.scoreboard", ledger.scoreboard)}
+    finally:
+        ledger.close()
 
 
 def _strategy_bot_scoreboards(backup_path: Path) -> dict[str, Any]:

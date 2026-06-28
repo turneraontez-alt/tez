@@ -5,6 +5,7 @@ Import-Module (Join-Path $PSScriptRoot "Q15Local.psm1") -Force
 $root = Get-Q15RepoRoot
 Set-Location -LiteralPath $root
 $values = Import-Q15Env -EnvFile $EnvFile
+Add-Q15LocalToolPath
 Initialize-Q15LocalDirs
 Set-Q15SafeTradingDefaults
 $requiredSecrets = @("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "GH_PUSH_TOKEN")
