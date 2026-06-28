@@ -118,6 +118,33 @@ def _mask(text: str, token: str | None) -> str:
     return text
 
 
+def _git_executable() -> str:
+    configured = os.environ.get("GIT_EXE") or os.environ.get("Q15_LOCAL_GIT")
+    if configured:
+        configured_path = Path(configured)
+        if configured_path.is_file():
+            return str(configured_path)
+
+    found = shutil.which("git")
+    if found:
+        return found
+
+    bundled = (
+        Path.home()
+        / ".cache"
+        / "codex-runtimes"
+        / "codex-primary-runtime"
+        / "dependencies"
+        / "native"
+        / "git"
+        / "cmd"
+        / "git.exe"
+    )
+    if bundled.is_file():
+        return str(bundled)
+    return "git"
+
+
 def _git(
     args: list[str],
     *,
@@ -127,7 +154,7 @@ def _git(
 ) -> _Result:
     """Run git in binary mode (binary stdin for blobs) and decode for callers."""
     proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", *args],
+        [_git_executable(), *args],
         cwd=workdir or WORKDIR,
         input=input_bytes,
         capture_output=True,

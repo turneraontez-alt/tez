@@ -24,7 +24,11 @@ from tools import learning_export as lx
 # --------------------------------------------------------------------------- #
 def _git(workdir: Path, *args: str, env: dict | None = None) -> str:
     res = subprocess.run(
-        ["git", *args], cwd=workdir, capture_output=True, text=True, env=env
+        [lx._git_executable(), *args],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert res.returncode == 0, f"git {args} failed: {res.stderr}"
     return res.stdout.strip()
@@ -175,7 +179,7 @@ def test_publish_pushes_orphan_and_leaves_worktree_untouched(tmp_path):
     assert json.loads(pushed_json)["generated_at"] == "2026-06-22T12:00:00+00:00"
 
     pushed_gz = subprocess.run(
-        ["git", "cat-file", "blob", "learning-snapshots:dbs/db.sqlite3.gz"],
+        [lx._git_executable(), "cat-file", "blob", "learning-snapshots:dbs/db.sqlite3.gz"],
         cwd=remote, capture_output=True,
     ).stdout
     assert gzip.decompress(pushed_gz) == b"SQLite format 3\x00 fake"
@@ -224,6 +228,15 @@ def test_main_without_token_does_not_run(monkeypatch):
 
 def test_url_embeds_token():
     assert lx._url("owner/repo", "Tk") == "https://x-access-token:Tk@github.com/owner/repo.git"
+
+
+def test_git_executable_prefers_configured_git(tmp_path, monkeypatch):
+    fake_git = tmp_path / "git.exe"
+    fake_git.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_EXE", str(fake_git))
+    monkeypatch.setenv("Q15_LOCAL_GIT", str(tmp_path / "other-git.exe"))
+
+    assert lx._git_executable() == str(fake_git)
 
 
 def test_scoreboards_build_when_launched_as_script(tmp_path, monkeypatch):
