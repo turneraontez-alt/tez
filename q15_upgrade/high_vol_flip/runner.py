@@ -10,7 +10,12 @@ from typing import Any, Mapping, Sequence
 from . import panel
 from .config import HighVolFlipConfig, INTERVAL_MARKS, window_key
 from .ledger import HighVolFlipLedger, kalshi_fee_cents
-from .rules import evaluate_rules, extract_candidate, selected_depth_ratio
+from .rules import (
+    RECORD_EARLY_FLIP_WATCH,
+    evaluate_rules,
+    extract_candidate,
+    selected_depth_ratio,
+)
 from .telegram import HighVolFlipTelegram
 
 logger = logging.getLogger("high_vol_flip.runner")
@@ -41,7 +46,7 @@ class HighVolFlipRunner:
         self.ledger = HighVolFlipLedger(config.db_path)
         self.telegram = HighVolFlipTelegram(
             config.telegram_chat_id,
-            enabled=config.telegram_enabled,
+            enabled=config.telegram_enabled and config.alert_telegram_enabled,
         )
         self._jobs: "queue.Queue[tuple[str, dict[str, Any]]]" = queue.Queue(maxsize=512)
         self._worker: threading.Thread | None = None
@@ -128,6 +133,7 @@ class HighVolFlipRunner:
                 if prev_rec is not None and prev_rec.get("interval") != interval:
                     prev_btc = prev_rec.get("candidate")
                 rows: list[dict[str, Any]] = []
+                watch_rows: list[dict[str, Any]] = []
                 for cand in in_band:
                     asset = str(cand.get("asset") or "").upper()
                     if asset == "BTC" or asset not in cfg.assets or asset in cfg.excluded_assets:
@@ -138,7 +144,13 @@ class HighVolFlipRunner:
                     )
                     if decision is None:
                         continue
-                    rows.append(self._build_row(cand, decision, interval, wk, now))
+                    row = self._build_row(cand, decision, interval, wk, now)
+                    if row.get("record_kind") == RECORD_EARLY_FLIP_WATCH:
+                        watch_rows.append(row)
+                    else:
+                        rows.append(row)
+                for row in watch_rows:
+                    self._record_watch(row)
                 rows.sort(key=self._rank_row, reverse=True)
                 remaining = cfg.max_alerts_per_window - self.ledger.alert_count(cfg.model_version, wk)
                 if remaining > 0:
@@ -194,14 +206,18 @@ class HighVolFlipRunner:
             status, message_id = "DELIVERY_FAILED", None
         self.ledger.mark_delivery(row_id, status, message_id, result.get("error"))
 
+    def _record_watch(self, row: Mapping[str, Any]) -> None:
+        self.ledger.record_watch(row)
+
     def _build_row(self, cand: Mapping[str, Any], decision: Mapping[str, Any],
                    interval: str, wk: int, now: float) -> dict[str, Any]:
         entry_ask = decision.get("entry_ask_cents")
         reason = str(decision.get("reason_code") or "")
+        record_kind = decision.get("record_kind") or "HIGH_VOL_FLIP_ALERT"
         return {
             "created_at": now,
             "model_version": self.config.model_version,
-            "record_kind": decision.get("record_kind") or "HIGH_VOL_FLIP_ALERT",
+            "record_kind": record_kind,
             "alert_title": decision.get("alert_title"),
             "asset": cand.get("asset"),
             "ticker": cand.get("ticker"),
@@ -291,7 +307,9 @@ class HighVolFlipRunner:
             "entry_ask_cents": entry_ask,
             "entry_fee_cents": kalshi_fee_cents(entry_ask),
             "paper_only": True,
-            "delivery_status": "PENDING",
+            "delivery_status": (
+                "RECORDED" if record_kind == RECORD_EARLY_FLIP_WATCH else "PENDING"
+            ),
         }
 
     def _prune_btc_state(self, now: float) -> None:
@@ -411,6 +429,9 @@ class HighVolFlipRunner:
             "model_version": self.config.model_version,
             "paper_only": True,
             "telegram": self.telegram.status(),
+            "telegram_alerts_enabled": (
+                self.config.telegram_enabled and self.config.alert_telegram_enabled
+            ),
             "assets": sorted(self.config.assets),
             "excluded_assets": sorted(self.config.excluded_assets),
             "intervals": sorted(self.config.intervals),
@@ -438,6 +459,11 @@ class HighVolFlipRunner:
                 "min_yes_bid_ask_depth_ratio": (
                     self.config.more_fire_min_yes_bid_ask_depth_ratio
                 ),
+            },
+            "early_watch": {
+                "enabled": self.config.early_watch_enabled,
+                "entry_enabled": self.config.early_entry_enabled,
+                "assets": sorted(self.config.own_early_assets),
             },
         }
 

@@ -40,14 +40,19 @@ Design / safety notes (mirrors ``tools/github_relay.py``):
 """
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -138,8 +143,41 @@ def _url(repo: str, token: str) -> str:
     return f"https://x-access-token:{token}@github.com/{repo}.git"
 
 
+def _api_request(
+    method: str,
+    path: str,
+    token: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[int, str]:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "tez-learning-export",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        "https://api.github.com" + path,
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+            return response.status, response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except urllib.error.URLError as exc:
+        return 0, str(exc)
+
+
 def _head_commit(workdir: str) -> str | None:
-    res = _git(["rev-parse", "--short", "HEAD"], workdir=workdir)
+    try:
+        res = _git(["rev-parse", "--short", "HEAD"], workdir=workdir)
+    except (FileNotFoundError, OSError):
+        return None
     return res.stdout.strip() if res.returncode == 0 else None
 
 
@@ -363,6 +401,24 @@ def _readme_bytes(snapshot: dict[str, Any]) -> bytes:
     return text.encode("utf-8")
 
 
+def _snapshot_files(artifacts: dict[str, bytes], snapshot: dict[str, Any]) -> dict[str, bytes]:
+    files: dict[str, bytes] = dict(artifacts)
+    files["learning_snapshot.json"] = (
+        json.dumps(snapshot, indent=2, sort_keys=True, default=str).encode("utf-8")
+        + b"\n"
+    )
+    files["README.md"] = _readme_bytes(snapshot)
+    return files
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _can_publish_with_git(workdir: str) -> bool:
+    return shutil.which("git") is not None and (Path(workdir) / ".git").exists()
+
+
 def publish(
     artifacts: dict[str, bytes],
     snapshot: dict[str, Any],
@@ -381,12 +437,7 @@ def publish(
     if branch in PROTECTED_BRANCHES:
         raise ValueError(f"refusing to publish snapshots to protected branch {branch!r}")
 
-    files: dict[str, bytes] = dict(artifacts)
-    files["learning_snapshot.json"] = (
-        json.dumps(snapshot, indent=2, sort_keys=True, default=str).encode("utf-8")
-        + b"\n"
-    )
-    files["README.md"] = _readme_bytes(snapshot)
+    files = _snapshot_files(artifacts, snapshot)
 
     with tempfile.TemporaryDirectory(prefix="lexport_idx_") as tmpdir:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmpdir, "index")}
@@ -438,6 +489,103 @@ def publish(
         return ok, _mask((res.stdout + res.stderr).strip(), token)
 
 
+def _api_failure(action: str, status: int, body: str, token: str) -> str:
+    detail = body.strip() or "(empty response)"
+    if len(detail) > 1000:
+        detail = detail[:1000] + "..."
+    return _mask(f"{action} failed via GitHub API ({status}): {detail}", token)
+
+
+def publish_via_github_api(
+    artifacts: dict[str, bytes],
+    snapshot: dict[str, Any],
+    *,
+    repo: str,
+    branch: str,
+    token: str,
+    api_request: Callable[
+        [str, str, str, dict[str, Any] | None],
+        tuple[int, str],
+    ] = _api_request,
+) -> tuple[bool, str]:
+    """Publish a snapshot without requiring a local git checkout.
+
+    Replit deployments may have the app data and GitHub token but not the
+    original ``.git`` directory. The Git Data API gives us the same orphan
+    commit + forced branch update semantics as the local plumbing path.
+    """
+    if branch in PROTECTED_BRANCHES:
+        raise ValueError(f"refusing to publish snapshots to protected branch {branch!r}")
+
+    repo_path = urllib.parse.quote(repo.strip("/"), safe="/")
+    branch_path = urllib.parse.quote(branch, safe="/")
+    tree: list[dict[str, str]] = []
+
+    for relpath, data in sorted(_snapshot_files(artifacts, snapshot).items()):
+        payload = {
+            "content": base64.b64encode(data).decode("ascii"),
+            "encoding": "base64",
+        }
+        status, body = api_request("POST", f"/repos/{repo_path}/git/blobs", token, payload)
+        if status not in {200, 201}:
+            return False, _api_failure(f"create blob {relpath}", status, body, token)
+        try:
+            blob_sha = json.loads(body)["sha"]
+        except (KeyError, json.JSONDecodeError) as exc:
+            return False, _api_failure(
+                f"parse blob {relpath} response ({type(exc).__name__})",
+                status,
+                body,
+                token,
+            )
+        tree.append({"path": relpath, "mode": "100644", "type": "blob", "sha": blob_sha})
+
+    status, body = api_request("POST", f"/repos/{repo_path}/git/trees", token, {"tree": tree})
+    if status not in {200, 201}:
+        return False, _api_failure("create tree", status, body, token)
+    try:
+        tree_sha = json.loads(body)["sha"]
+    except (KeyError, json.JSONDecodeError) as exc:
+        return False, _api_failure(f"parse tree response ({type(exc).__name__})", status, body, token)
+
+    message = f"learning snapshot {snapshot.get('generated_at')}"
+    status, body = api_request(
+        "POST",
+        f"/repos/{repo_path}/git/commits",
+        token,
+        {"message": message, "tree": tree_sha},
+    )
+    if status not in {200, 201}:
+        return False, _api_failure("create commit", status, body, token)
+    try:
+        commit_sha = json.loads(body)["sha"]
+    except (KeyError, json.JSONDecodeError) as exc:
+        return False, _api_failure(
+            f"parse commit response ({type(exc).__name__})",
+            status,
+            body,
+            token,
+        )
+
+    status, body = api_request(
+        "PATCH",
+        f"/repos/{repo_path}/git/refs/heads/{branch_path}",
+        token,
+        {"sha": commit_sha, "force": True},
+    )
+    if status == 404:
+        status, body = api_request(
+            "POST",
+            f"/repos/{repo_path}/git/refs",
+            token,
+            {"ref": f"refs/heads/{branch}", "sha": commit_sha},
+        )
+    if status not in {200, 201}:
+        return False, _api_failure(f"update branch {branch}", status, body, token)
+
+    return True, f"github api published {commit_sha[:8]} to {branch}"
+
+
 def run_once(
     *,
     data_dir: str,
@@ -454,14 +602,34 @@ def run_once(
         head_commit=_head_commit(workdir),
         build_info=_read_build_info(workdir),
     )
-    ok, detail = publish(
-        artifacts,
-        snapshot,
-        remote_url=_url(repo, token),
-        branch=branch,
-        workdir=workdir,
-        token=token,
-    )
+    force_api = _truthy(os.environ.get("LEARNING_EXPORT_USE_GITHUB_API"))
+    use_api = force_api or not _can_publish_with_git(workdir)
+    if use_api:
+        ok, detail = publish_via_github_api(
+            artifacts,
+            snapshot,
+            repo=repo,
+            branch=branch,
+            token=token,
+        )
+    else:
+        try:
+            ok, detail = publish(
+                artifacts,
+                snapshot,
+                remote_url=_url(repo, token),
+                branch=branch,
+                workdir=workdir,
+                token=token,
+            )
+        except (FileNotFoundError, OSError):
+            ok, detail = publish_via_github_api(
+                artifacts,
+                snapshot,
+                repo=repo,
+                branch=branch,
+                token=token,
+            )
     return ok, detail, snapshot
 
 

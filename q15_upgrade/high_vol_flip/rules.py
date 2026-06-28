@@ -14,6 +14,7 @@ REASON_BTC_EARLY_FOLLOW_LAG = "HVF_BTC_EARLY_FOLLOW_LAG"
 REASON_MORE_FIRE_STRICT = "HVF_MORE_FIRE_STRICT"
 REASON_BTC_FOLLOW_EXTREME = "HVF_BTC_FOLLOW_EXTREME"
 REASON_BTC_DIVERGENCE_ACCEL_WATCH = "HVF_BTC_DIVERGENCE_ACCEL_WATCH"
+RECORD_EARLY_FLIP_WATCH = "EARLY_FLIP_WATCH"
 
 SPOT_DEPTH_KEYS = (
     "spot_depth_status",
@@ -389,7 +390,8 @@ def _own_strong_selected(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | 
 
 
 def _own_early_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
-    if not getattr(cfg, "early_entry_enabled", False):
+    entry_enabled = getattr(cfg, "early_entry_enabled", False)
+    if not entry_enabled and not getattr(cfg, "early_watch_enabled", True):
         return None
     asset = str(cand.get("asset") or "").upper()
     if asset not in cfg.own_early_assets:
@@ -401,14 +403,21 @@ def _own_early_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
     yes_ok = side == "YES" and model_yes >= cfg.own_early_yes_min
     no_ok = side == "NO" and model_yes <= cfg.own_early_no_max
     if yes_ok or no_ok:
-        return _decision(cand, "OWN_EARLY_FLIP", REASON_OWN_EARLY_FLIP, side)
+        return _decision(
+            cand,
+            "OWN_EARLY_FLIP",
+            REASON_OWN_EARLY_FLIP,
+            side,
+            record_kind=None if entry_enabled else RECORD_EARLY_FLIP_WATCH,
+        )
     return None
 
 
 def _hype_early_bullish_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | None:
     model_yes = _num(cand.get("model_yes_probability"))
+    entry_enabled = getattr(cfg, "early_entry_enabled", False)
     if (
-        getattr(cfg, "early_entry_enabled", False)
+        (entry_enabled or getattr(cfg, "early_watch_enabled", True))
         and
         cfg.hype_early_enabled
         and
@@ -419,7 +428,8 @@ def _hype_early_bullish_flip(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any
         and _early_price_ok(cand, "YES", cfg)
     ):
         return _decision(cand, "HYPE_EARLY_BULLISH_FLIP",
-                         REASON_HYPE_EARLY_BULLISH_FLIP, "YES")
+                         REASON_HYPE_EARLY_BULLISH_FLIP, "YES",
+                         record_kind=None if entry_enabled else RECORD_EARLY_FLIP_WATCH)
     return None
 
 
@@ -440,8 +450,9 @@ def _hype_bullish_flash(cand: Mapping[str, Any], cfg: Any) -> dict[str, Any] | N
 def _btc_early_follow_lag(cand: Mapping[str, Any], btc: Mapping[str, Any] | None,
                           cfg: Any) -> dict[str, Any] | None:
     asset = str(cand.get("asset") or "").upper()
+    entry_enabled = getattr(cfg, "early_entry_enabled", False)
     if (
-        not getattr(cfg, "early_entry_enabled", False)
+        not (entry_enabled or getattr(cfg, "early_watch_enabled", True))
         or not cfg.btc_early_follow_enabled
         or asset not in cfg.btc_early_follow_assets
         or not btc
@@ -456,7 +467,8 @@ def _btc_early_follow_lag(cand: Mapping[str, Any], btc: Mapping[str, Any] | None
         and _early_price_ok(cand, btc_side, cfg)
     ):
         return _decision(cand, "BTC_EARLY_FOLLOW_LAG",
-                         REASON_BTC_EARLY_FOLLOW_LAG, btc_side, btc=btc)
+                         REASON_BTC_EARLY_FOLLOW_LAG, btc_side, btc=btc,
+                         record_kind=None if entry_enabled else RECORD_EARLY_FLIP_WATCH)
     return None
 
 

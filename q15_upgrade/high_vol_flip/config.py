@@ -56,6 +56,9 @@ class HighVolFlipConfig:
     telegram_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_TELEGRAM_ENABLED", False)
     )
+    alert_telegram_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_ALERT_TELEGRAM_ENABLED", False)
+    )
     # User requested the existing V2 Telegram room. A dedicated HVF chat can still
     # override it later without changing code.
     telegram_chat_id: str = field(
@@ -140,6 +143,9 @@ class HighVolFlipConfig:
     )
 
     early_enabled: bool = field(default_factory=lambda: _bool("Q15_HVF_EARLY_ENABLED", True))
+    early_watch_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_EARLY_WATCH_ENABLED", True)
+    )
     early_entry_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_EARLY_ENTRY_ENABLED", False)
     )

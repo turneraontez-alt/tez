@@ -12,7 +12,7 @@ externalPort = 80
 
 [deployment]
 deploymentTarget = "gce"
-run = ["python3", "app.py"]
+run = ["python3", "tools/replit_supervisor.py"]
 
 [workflows]
 runButton = "Project"
@@ -100,7 +100,8 @@ Q15_ULTOIM_V2_SKIP_15M = "true"
 # is set. Paper-only means no order path exists for these signals.
 Q15_HVF_ENABLED = "true"
 Q15_HVF_MODEL_VERSION = "high-vol-flip-v4-more-fire-strict"
-Q15_HVF_TELEGRAM_ENABLED = "true"
+Q15_HVF_TELEGRAM_ENABLED = "false"
+Q15_HVF_ALERT_TELEGRAM_ENABLED = "false" # explicit opt-in required for HVF alert Telegram sends
 Q15_HVF_ASSETS = "XRP,SOL,ETH,BNB" # DOGE/HYPE removed from live HVF/MFS alert universe
 Q15_HVF_INTERVALS = "12M,9M"  # confirmed HVF: entry alerts stay on 12M/9M
 Q15_HVF_PAPER_ONLY = "true"
@@ -115,6 +116,7 @@ Q15_HVF_MORE_FIRE_MIN_CAL_YES = "0.60"
 Q15_HVF_MORE_FIRE_MIN_MID_JUMP_CENTS = "4"
 Q15_HVF_EARLY_ENABLED = "true"
 Q15_HVF_EARLY_ENTRY_ENABLED = "false" # early flips are watch/research only, not entry alerts
+Q15_HVF_EARLY_WATCH_ENABLED = "true"
 Q15_HVF_EARLY_ASK_LO = "50"
 Q15_HVF_EARLY_ASK_HI = "65"
 Q15_HVF_EARLY_MID_LO = "45"

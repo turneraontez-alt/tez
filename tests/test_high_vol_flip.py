@@ -23,6 +23,7 @@ def _cfg(tmp_path, **overrides):
     data = {
         "enabled": True,
         "telegram_enabled": True,
+        "alert_telegram_enabled": True,
         "telegram_chat_id": "test-chat",
         "db_path": str(tmp_path / "hvf.sqlite3"),
         "mark_band_seconds": 25.0,
@@ -101,6 +102,19 @@ def test_hype_bullish_flash_sends_one_paper_alert_per_window(tmp_path):
     assert "Paper-only: tracking performance, no trade placed" in r.telegram.sent[0]
 
 
+def test_old_hvf_telegram_switch_does_not_send_without_alert_opt_in(tmp_path):
+    r = _runner(tmp_path, alert_telegram_enabled=False)
+    hype = _cand("HYPE", "YES", 72, 75, 0.68)
+
+    r._observe_sync(candidates=[hype], now=1000.0)
+
+    rows = r.ledger.rows(r.config.model_version)
+    assert len(rows) == 1
+    assert rows[0]["rule_code"] == "HVF_HYPE_BULLISH_FLASH"
+    assert rows[0]["delivery_status"] == "MUTED"
+    assert r.telegram.sent == []
+
+
 def test_hype_early_bullish_flip_is_opt_in_research_entry(tmp_path):
     r = _runner(tmp_path, early_entry_enabled=True, hype_early_enabled=True)
     hype = _cand("HYPE", "YES", 55, 60, 0.60)
@@ -121,6 +135,40 @@ def test_own_early_flip_is_watch_only_by_default(tmp_path):
     r._observe_sync(candidates=[xrp], now=1000.0)
 
     assert r.ledger.rows(r.config.model_version) == []
+    watch = r.ledger.watch_rows(r.config.model_version)
+    assert len(watch) == 1
+    assert watch[0]["record_kind"] == "EARLY_FLIP_WATCH"
+    assert watch[0]["rule_code"] == "HVF_OWN_EARLY_FLIP"
+    assert watch[0]["predicted_outcome"] == "NO"
+    assert watch[0]["entry_ask_cents"] == 60
+    assert watch[0]["delivery_status"] == "RECORDED"
+    assert r.telegram.sent == []
+
+
+def test_own_early_flip_watch_grades_without_blocking_later_alert(tmp_path):
+    r = _runner(tmp_path)
+    close = 1600.0
+    early = _cand("XRP", "NO", 55, 60, 0.42, ticker="T-XRP", secs=720, close=close)
+    later = _cand("XRP", "NO", 72, 75, 0.30, ticker="T-XRP", secs=600, close=close)
+
+    r._observe_sync(candidates=[early], now=1000.0)
+    r._observe_sync(candidates=[later], now=1120.0)
+
+    alerts = r.ledger.rows(r.config.model_version)
+    watch = r.ledger.watch_rows(r.config.model_version)
+    assert len(watch) == 1
+    assert len(alerts) == 1
+    assert alerts[0]["rule_code"] == "HVF_OWN_NO_FLASH"
+    assert alerts[0]["delivery_status"] == "SENT"
+
+    assert r.ledger.resolve(r.config.model_version, "T-XRP", "NO", now=1700.0) == 2
+    watch = r.ledger.watch_rows(r.config.model_version)
+    assert watch[0]["correct"] == 1
+    sb = r.ledger.scoreboard(r.config.model_version)
+    assert sb["total_alerts"] == 1
+    assert sb["early_watch"]["total_records"] == 1
+    assert sb["early_watch"]["resolved"] == 1
+    assert sb["early_watch"]["overall"]["wins"] == 1
 
 
 def test_own_early_flip_can_be_enabled_for_research_entry(tmp_path):
@@ -261,6 +309,7 @@ def test_more_fire_strict_requires_yes_depth_ratio(tmp_path):
     r._observe_sync(candidates=[now], now=1060.0)
 
     assert r.ledger.rows(r.config.model_version) == []
+    assert r.ledger.watch_rows(r.config.model_version) == []
 
 
 def test_more_fire_strict_requires_prior_checkpoint(tmp_path):
