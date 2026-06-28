@@ -12,7 +12,7 @@ externalPort = 80
 
 [deployment]
 deploymentTarget = "gce"
-run = ["python3", "tools/replit_supervisor.py"]
+run = ["python3", "-c", "import time; print('Replit disabled after local Windows cutover; local stack is source of truth'); time.sleep(3600)"]
 
 [workflows]
 runButton = "Project"
@@ -23,16 +23,16 @@ mode = "parallel"
 author = "agent"
 
 [[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Start application"
+task = "shell.exec"
+args = "python3 -c \"print('Replit disabled after local Windows cutover; use local stack')\""
 
 [[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "GitHub Relay"
+task = "shell.exec"
+args = "python3 -c \"print('GitHub relay disabled on Replit after local Windows cutover')\""
 
 [[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Learning Export"
+task = "shell.exec"
+args = "python3 -c \"print('Learning export disabled on Replit after local Windows cutover')\""
 
 [[workflows.workflow]]
 name = "Start application"
@@ -43,8 +43,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3.11 app.py"
-waitForPort = 8000
+args = "python3 -c \"print('Start application disabled on Replit after local Windows cutover')\""
 
 [[workflows.workflow]]
 name = "GitHub Relay"
@@ -52,7 +51,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3 tools/github_relay.py"
+args = "python3 -c \"print('GitHub relay disabled on Replit after local Windows cutover')\""
 
 [workflows.workflow.metadata]
 outputType = "console"
@@ -63,7 +62,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3 tools/learning_export.py"
+args = "python3 -c \"print('Learning export disabled on Replit after local Windows cutover')\""
 
 [workflows.workflow.metadata]
 outputType = "console"
@@ -71,6 +70,9 @@ outputType = "console"
 [userenv]
 
 [userenv.shared]
+REPLIT_SUPERVISOR_DISABLE_APP = "true"
+REPLIT_SUPERVISOR_DISABLE_RELAY = "true"
+REPLIT_SUPERVISOR_DISABLE_LEARNING_EXPORT = "true"
 KALSHI_WS_ENABLED = "true"
 Q15_SPOT_WS_ENABLED = "true"
 # v9.5 is authoritative; the legacy v9.4 "unified" loop (~1.6s/cycle) is computed

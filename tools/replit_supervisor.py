@@ -93,7 +93,12 @@ def _restart_delay(service: Service, now: float) -> float:
 
 def main() -> int:
     services = [
-        Service("app", [PYTHON, "app.py"], required=True),
+        Service(
+            "app",
+            [PYTHON, "app.py"],
+            required=True,
+            disabled_env="REPLIT_SUPERVISOR_DISABLE_APP",
+        ),
         Service(
             "github-relay",
             [PYTHON, "tools/github_relay.py"],
