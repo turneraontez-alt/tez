@@ -40,6 +40,12 @@ def _normalize_pem(raw: str) -> str:
 
     s = raw.strip()
 
+    # Copying secrets from notes often leaves one pair of visual angle brackets
+    # around the actual body. They are not PEM/base64 data, so remove only the
+    # outer wrapper and let real placeholders fail key loading downstream.
+    if s.startswith("<") and s.endswith(">"):
+        s = s[1:-1].strip()
+
     # 1. Resolve escaped newlines first
     if "\\n" in s and "\n" not in s:
         s = s.replace("\\n", "\n")
