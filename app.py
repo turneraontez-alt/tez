@@ -78,10 +78,10 @@ logger = logging.getLogger(__name__)
 
 # Stamp the running build at boot so the Repl console shows exactly which code
 # this process loaded (Stop ▸ Run is required to pick up a synced update).
-_bi = build_version.build_info()
+_bi = build_version.version_payload()
 logger.info("BUILD %s (%s) shipped=%s — %s · tests=%s",
-            _bi.get("commit"), _bi.get("branch"), _bi.get("committed_at"),
-            _bi.get("summary"), _bi.get("tests"))
+            _bi.get("running_commit") or _bi.get("commit"), _bi.get("branch"), _bi.get("committed_at"),
+            f"{_bi.get('summary')} stale={_bi.get('build_info_stale')}", _bi.get("tests"))
 
 
 @app.route("/version")

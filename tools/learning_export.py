@@ -183,13 +183,37 @@ def _head_commit(workdir: str) -> str | None:
 
 def _read_build_info(workdir: str) -> dict[str, Any] | None:
     path = Path(workdir) / "build_info.json"
+    live_head = _head_commit(workdir)
     if not path.is_file():
-        return None
+        if not live_head:
+            return None
+        return {
+            "commit": live_head,
+            "running_commit": live_head,
+            "matches_checkout": True,
+            "build_info_stale": False,
+        }
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        info = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         _log(f"build_info.json unreadable: {type(exc).__name__}: {exc}")
+        if not live_head:
+            return None
+        return {
+            "commit": live_head,
+            "running_commit": live_head,
+            "matches_checkout": True,
+            "build_info_stale": False,
+        }
+    if not isinstance(info, dict):
         return None
+    stamped_commit = info.get("commit")
+    stale = bool(live_head and stamped_commit and stamped_commit != live_head)
+    info["running_commit"] = live_head
+    info["matches_checkout"] = bool(live_head and live_head == stamped_commit)
+    info["build_info_stale"] = stale
+    info["stale_build_info_commit"] = stamped_commit if stale else None
+    return info
 
 
 def _ledger_basename(role: str) -> str:

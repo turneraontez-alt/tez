@@ -1,10 +1,8 @@
-"""Deploy/version surface — proves which code the RUNNING app is on.
+"""Deploy/version surface: proves which code the running app loaded.
 
-``build_info.json`` is stamped on every ship (see ``scripts/ship.sh``) with the
-shipped commit, UTC timestamp, summary and test count. It is read ONCE at process
-start, so ``/version`` reflects the code the running process actually loaded — if
-it still shows the old build, the app hasn't been restarted (Stop ▸ Run) onto the
-new code yet, even though the GitHub Relay may have already synced the files.
+``build_info.json`` is stamped by the ship script, but Replit can also run code
+that was synced without refreshing that file. The payload reports both the file
+stamp and the live checkout HEAD, then marks the stamp stale when they disagree.
 """
 from __future__ import annotations
 
@@ -17,14 +15,18 @@ from datetime import datetime, timezone
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _BUILD_INFO_PATH = os.path.join(_DIR, "build_info.json")
 
-# Captured once, at import (≈ process start). Distinguishes "restarted onto new
-# code" from "files synced but not yet reloaded".
+# Captured once, at import. Distinguishes a restarted process from synced files.
 _PROCESS_STARTED_AT = time.time()
 
 
 def _read_build_info() -> dict:
-    info = {"commit": "unknown", "branch": None, "committed_at": None,
-            "summary": None, "tests": None}
+    info = {
+        "commit": "unknown",
+        "branch": None,
+        "committed_at": None,
+        "summary": None,
+        "tests": None,
+    }
     try:
         with open(_BUILD_INFO_PATH, encoding="utf-8") as fh:
             loaded = json.load(fh)
@@ -35,18 +37,25 @@ def _read_build_info() -> dict:
     return info
 
 
-def _runtime_git_head() -> str | None:
-    """Best-effort live HEAD of the deployed checkout (None if git unavailable).
-    A cross-check: it should match build_info.commit on a clean deploy."""
+def _git_value(args: list[str]) -> str | None:
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], cwd=_DIR,
-            capture_output=True, text=True, timeout=2.0,
+            ["git", *args],
+            cwd=_DIR,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
         )
-        sha = out.stdout.strip()
-        return sha or None
     except (OSError, subprocess.SubprocessError):
         return None
+    if out.returncode != 0:
+        return None
+    value = out.stdout.strip()
+    return value or None
+
+
+def _runtime_git_head() -> str | None:
+    return _git_value(["rev-parse", "--short", "HEAD"])
 
 
 # Build info is immutable for the life of the process; read it once.
@@ -57,15 +66,28 @@ def build_info() -> dict:
     return dict(_BUILD_INFO)
 
 
+def _stale_build_info(info: dict, live_head: str | None) -> bool:
+    stamped_commit = info.get("commit")
+    return bool(
+        live_head
+        and stamped_commit
+        and stamped_commit != "unknown"
+        and stamped_commit != live_head
+    )
+
+
 def version_payload() -> dict:
     started = datetime.fromtimestamp(_PROCESS_STARTED_AT, tz=timezone.utc)
     now = datetime.now(timezone.utc)
     live_head = _runtime_git_head()
     info = build_info()
+    stale = _stale_build_info(info, live_head)
     return {
         **info,
         "running_commit": live_head,
         "matches_checkout": (live_head is not None and live_head == info.get("commit")),
+        "build_info_stale": stale,
+        "stale_build_info_commit": info.get("commit") if stale else None,
         "process_started_at": started.isoformat(),
         "uptime_seconds": round(now.timestamp() - _PROCESS_STARTED_AT, 1),
         "server_time": now.isoformat(),
@@ -80,7 +102,8 @@ def version_text() -> str:
         f"summary : {p.get('summary') or '?'}",
         f"tests   : {p.get('tests') or '?'}",
         f"running : {p.get('running_commit') or '?'}"
-        + ("  ✓ matches" if p.get("matches_checkout") else "  ⚠ differs / unknown"),
+        + ("  matches" if p.get("matches_checkout") else "  differs / unknown"),
+        f"stale   : {p.get('build_info_stale')}",
         f"started : {p.get('process_started_at')}  (up {p.get('uptime_seconds')}s)",
     ]
     return "\n".join(lines) + "\n"

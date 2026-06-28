@@ -19,6 +19,7 @@ class VersionTests(unittest.TestCase):
     def test_payload_includes_runtime_fields(self):
         p = version.version_payload()
         for key in ("commit", "running_commit", "matches_checkout",
+                    "build_info_stale", "stale_build_info_commit",
                     "process_started_at", "uptime_seconds", "server_time"):
             self.assertIn(key, p)
         self.assertGreaterEqual(p["uptime_seconds"], 0.0)
@@ -48,6 +49,12 @@ class VersionTests(unittest.TestCase):
                 info = version._read_build_info()
         self.assertEqual(info["commit"], "abc1234")
         self.assertEqual(info["summary"], "x")
+
+    def test_stale_build_info_detects_checkout_mismatch(self):
+        info = {"commit": "old1234"}
+        self.assertTrue(version._stale_build_info(info, "new5678"))
+        self.assertFalse(version._stale_build_info(info, "old1234"))
+        self.assertFalse(version._stale_build_info(info, None))
 
 
 if __name__ == "__main__":  # pragma: no cover
