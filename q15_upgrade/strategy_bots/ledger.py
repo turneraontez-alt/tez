@@ -341,9 +341,13 @@ class StrategyBotLedger:
         }
         for name, column_type in added.items():
             if name not in existing:
-                self._conn.execute(
-                    f"ALTER TABLE strategy_bot_decisions ADD COLUMN {name} {column_type}"
-                )
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE strategy_bot_decisions ADD COLUMN {name} {column_type}"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
 
     def record_decision(
         self,

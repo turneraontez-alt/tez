@@ -1369,6 +1369,7 @@ class V95Ledger:
                 "INSERT INTO metadata(key,value) VALUES('flip_reset_at',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(now),))
             connection.commit()
+            self._data_version += 1
         return {"reset": True, "archived": archived, "reset_at": now}
 
     def flip_reset_status(self) -> dict[str, Any]:
