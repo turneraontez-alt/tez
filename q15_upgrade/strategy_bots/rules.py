@@ -5,7 +5,7 @@ the latest learning-export review and must earn their keep out-of-sample.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from typing import Any, Mapping
 
@@ -18,6 +18,13 @@ BOT_BNB_NO = "bnb_no_confirmation"
 BOT_BNB_YES_REVERSAL = "bnb_yes_reversal"
 BOT_HYPE_YES = "hype_yes_confirmation"
 BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
+BOT_NINE_MINUTE = "v3_nine_minute_deliver"
+
+# Learning-review levers (paper-only, runtime-gated). The 9M interval is the
+# only checkpoint whose delivered accuracy reliably clears fee+spread; YES on
+# these alts is the toxic core (SOL/ETH/XRP YES win ~70% but are priced -EV).
+NINE_MINUTE_INTERVAL = "9M"
+ALT_YES_VETO_ASSETS = frozenset({"SOL", "ETH", "XRP"})
 
 TIER_A = "A"
 TIER_B = "B"
@@ -766,6 +773,51 @@ def morefire_btc_confirmed_decision(
         threshold_profile=thresholds,
         btc_context=ctx,
     )
+
+
+def nine_minute_delivery_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Factory for the #1 lever: deliver 9M-interval alerts.
+
+    Returns an ACCEPTED decision for a live 9M source alert so it routes to a
+    notification, or None when the row is not a 9M candidate. The caller gates
+    this on ``Q15_V3_DELIVER_9M``; this never mutes other intervals — it only
+    *adds* 9M delivery. Research-only rows are skipped (they are not live
+    alerts), and the YES-alt veto (if enabled) still applies downstream.
+    """
+    if _is_research_row(row):
+        return None
+    if str(row.get("interval") or "").upper() != NINE_MINUTE_INTERVAL:
+        return None
+    side = source_side(row)
+    if side not in {"YES", "NO"}:
+        return None
+    return BotDecision(
+        bot_name=BOT_NINE_MINUTE,
+        decision_status=ACCEPTED,
+        reason_codes=("V3_9M_DELIVER",),
+        tier=TIER_NONE,
+        threshold_profile={"interval": NINE_MINUTE_INTERVAL, "paper_only": True},
+    )
+
+
+def yes_alt_veto(decision: BotDecision, row: Mapping[str, Any]) -> BotDecision:
+    """#3 lever: veto YES alerts on SOL/ETH/XRP.
+
+    Flips a non-baseline ACCEPTED YES decision on an alt asset to REJECTED with
+    a ``V3_YES_ALT_VETO`` marker. Pure; the caller gates on
+    ``Q15_V3_VETO_YES_ALTS``. The baseline control arm is never vetoed so the
+    unfiltered counterfactual stays intact for measurement.
+    """
+    if decision.bot_name == BOT_BASELINE or decision.decision_status != ACCEPTED:
+        return decision
+    side = str(decision.side_override or source_side(row) or "").upper()
+    if side == "YES" and _asset(row) in ALT_YES_VETO_ASSETS:
+        return replace(
+            decision,
+            decision_status=REJECTED,
+            reason_codes=tuple(decision.reason_codes) + ("V3_YES_ALT_VETO",),
+        )
+    return decision
 
 
 def decisions_for_row(

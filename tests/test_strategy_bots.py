@@ -6,11 +6,13 @@ from q15_upgrade.strategy_bots import runtime
 from q15_upgrade.strategy_bots.ledger import StrategyBotLedger, net_pnl_cents
 from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
+    BOT_BASELINE,
     BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
     BOT_HYPE_YES,
     BOT_MOREFIRE_BTC,
+    BOT_NINE_MINUTE,
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
@@ -19,6 +21,8 @@ from q15_upgrade.strategy_bots.rules import (
     confidence_tier_decision,
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
+    nine_minute_delivery_decision,
+    yes_alt_veto,
 )
 from q15_upgrade.strategy_bots.telegram import V3Telegram, build_v3_alert
 
@@ -596,3 +600,101 @@ def test_v3_owned_source_notification_suppression_is_explicit(monkeypatch):
     monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
 
     assert runtime.owns_source_notification(row, source_system="ultoim_v2") is True
+
+
+# --- #1 lever: deliver 9M alerts (Q15_V3_DELIVER_9M) ---
+
+def test_nine_minute_factory_accepts_live_9m_with_valid_side():
+    d = nine_minute_delivery_decision(_row(interval="9M", predicted_side="NO"))
+    assert d is not None
+    assert d.bot_name == BOT_NINE_MINUTE
+    assert d.decision_status == ACCEPTED
+    assert "V3_9M_DELIVER" in d.reason_codes
+
+
+def test_nine_minute_factory_skips_other_intervals_research_and_no_side():
+    assert nine_minute_delivery_decision(_row(interval="10M", predicted_side="NO")) is None
+    assert nine_minute_delivery_decision(_row(interval="12M", predicted_side="YES")) is None
+    assert nine_minute_delivery_decision(
+        _row(interval="9M", predicted_side="NO",
+             record_kind="RESEARCH_YES", delivery_status="RESEARCH")
+    ) is None
+    assert nine_minute_delivery_decision(_row(interval="9M", predicted_side="MAYBE")) is None
+
+
+def test_runtime_deliver_9m_adds_row_only_when_flag_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
+    monkeypatch.delenv("Q15_V3_VETO_YES_ALTS", raising=False)
+    runtime._ledger = None
+    runtime._telegram = None
+
+    row = _row(asset="BTC", ticker="KXBTC-9m", interval="9M",
+               predicted_side="NO", entry_ask_cents=60.0)
+
+    monkeypatch.setenv("Q15_V3_DELIVER_9M", "false")
+    runtime.record_source_row(row, source_system="ultoim_v2")
+    led = runtime.get_ledger()
+    assert led is not None
+    assert not [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_NINE_MINUTE]
+
+    monkeypatch.setenv("Q15_V3_DELIVER_9M", "true")
+    runtime.record_source_row(dict(row, ticker="KXBTC-9m-2"), source_system="ultoim_v2")
+    nine = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_NINE_MINUTE]
+    assert len(nine) == 1
+    assert nine[0]["decision_status"] == ACCEPTED
+    assert nine[0]["interval"] == "9M"
+    # other intervals are never muted by this lever
+    assert nine_minute_delivery_decision(dict(row, interval="12M")) is None
+
+
+# --- #3 lever: veto YES on SOL/ETH/XRP (Q15_V3_VETO_YES_ALTS) ---
+
+def test_yes_alt_veto_flips_accepted_alt_yes_but_spares_control_and_no_side():
+    row = _row(asset="SOL", ticker="KXSOL-y", predicted_side="YES", entry_ask_cents=70.0)
+    accepted = confidence_tier_decision(row, source_system="high_vol_flip")
+    assert accepted.decision_status == ACCEPTED  # SOL YES ask>=66 is Tier A
+
+    vetoed = yes_alt_veto(accepted, row)
+    assert vetoed.decision_status == REJECTED
+    assert "V3_YES_ALT_VETO" in vetoed.reason_codes
+
+    # NO side and non-alt assets untouched
+    no_row = _row(asset="SOL", predicted_side="NO")
+    no_dec = nine_minute_delivery_decision(dict(no_row, interval="9M"))
+    assert yes_alt_veto(no_dec, no_row).decision_status == ACCEPTED
+    btc_row = _row(asset="BTC", predicted_side="YES")
+    btc_dec = nine_minute_delivery_decision(dict(btc_row, interval="9M"))
+    assert yes_alt_veto(btc_dec, btc_row).decision_status == ACCEPTED
+
+
+def test_yes_alt_veto_never_touches_baseline_control():
+    row = _row(asset="ETH", predicted_side="YES")
+    from q15_upgrade.strategy_bots.rules import baseline_decision
+    base = baseline_decision(row)
+    assert base.bot_name == BOT_BASELINE and base.decision_status == ACCEPTED
+    assert yes_alt_veto(base, row).decision_status == ACCEPTED
+
+
+def test_runtime_yes_alt_veto_rejects_tier_pick_when_flag_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
+    monkeypatch.setenv("Q15_V3_DELIVER_9M", "false")
+    monkeypatch.setenv("Q15_V3_VETO_YES_ALTS", "true")
+    runtime._ledger = None
+    runtime._telegram = None
+
+    row = _row(asset="SOL", ticker="KXSOL-veto", predicted_side="YES", entry_ask_cents=70.0)
+    runtime.record_source_row(row, source_system="high_vol_flip")
+    led = runtime.get_ledger()
+    assert led is not None
+    rows = led.rows(STRATEGY_VERSION)
+    tier = next(r for r in rows if r["bot_name"] == BOT_CONFIDENCE_TIER)
+    assert tier["decision_status"] == REJECTED
+    assert "V3_YES_ALT_VETO" in tier["reason_codes"]
+    assert tier["notification_status"] is None
+    # control arm stays ACCEPTED for honest measurement
+    base = next(r for r in rows if r["bot_name"] == BOT_BASELINE)
+    assert base["decision_status"] == ACCEPTED

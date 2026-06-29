@@ -18,7 +18,9 @@ from .rules import (
     STRATEGY_VERSION,
     BotDecision,
     decisions_for_row,
+    nine_minute_delivery_decision,
     source_side,
+    yes_alt_veto,
 )
 from .telegram import V3Telegram, build_v3_alert
 
@@ -49,6 +51,16 @@ def telegram_enabled() -> bool:
 
 def research_telegram_enabled() -> bool:
     return _bool("Q15_V3_RESEARCH_TELEGRAM_ENABLED", False)
+
+
+def deliver_9m_enabled() -> bool:
+    """#1 lever — add 9M-interval alerts to delivery (does not mute others)."""
+    return _bool("Q15_V3_DELIVER_9M", False)
+
+
+def veto_yes_alts_enabled() -> bool:
+    """#3 lever — veto YES alerts on SOL/ETH/XRP."""
+    return _bool("Q15_V3_VETO_YES_ALTS", False)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -110,6 +122,16 @@ def _with_duplicate_window_guard(
         return decision
 
 
+def _with_yes_alt_veto(decision: BotDecision, row: Mapping[str, Any]) -> BotDecision:
+    if not veto_yes_alts_enabled():
+        return decision
+    try:
+        return yes_alt_veto(decision, row)
+    except Exception:  # noqa: BLE001 - veto must never block tracking
+        logger.debug("v3 yes-alt veto failed open", exc_info=True)
+        return decision
+
+
 def record_source_row(
     row: Mapping[str, Any],
     *,
@@ -126,8 +148,16 @@ def record_source_row(
         if ledger is None:
             return 0
         count = 0
-        for decision in decisions_for_row(row, source_system=source_system, btc_context=btc_context):
+        decisions = list(
+            decisions_for_row(row, source_system=source_system, btc_context=btc_context)
+        )
+        if deliver_9m_enabled():
+            nine_minute = nine_minute_delivery_decision(row)
+            if nine_minute is not None:
+                decisions.append(nine_minute)
+        for decision in decisions:
             stamped = _with_duplicate_window_guard(ledger, decision, row)
+            stamped = _with_yes_alt_veto(stamped, row)
             row_id = ledger.record_decision(stamped, row, source_system=source_system)
             if row_id is not None:
                 count += 1
