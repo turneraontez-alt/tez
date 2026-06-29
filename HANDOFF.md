@@ -13,7 +13,30 @@ Tests: `python3 -m pytest tests/ -q` → **1507 passed / 4 skipped here** (8 app
 in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
 issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
 
-## ✅ Shipped THIS session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
+## ✅ Shipped THIS session — V3 delivery levers: deliver-9M + veto-YES-alts (deploy-pending)
+**Suite 1581 / 4 skipped** (+6 tests). Two paper-only, runtime-gated, default-OFF V3 levers from a
+learning-snapshot probe of `q15_strategy_bots_v3.sqlite3`. The probe found V3's *delivered* P&L is
+−222c lifetime (+74.6c only in the last ~18 alerts), driven by late-interval and YES-alt alerts:
+- **#1 `Q15_V3_DELIVER_9M` (default OFF):** injects an `ACCEPTED` `v3_nine_minute_deliver` decision for
+  live 9M source rows so they deliver. **ADDS 9M delivery only — never mutes 10M/11M/12M.** 9M is the
+  one checkpoint whose delivered accuracy clears fee+spread (9M-minus-YES-alts = +271.6c / +5.66c per
+  contract @ 92%, n=48 in-sample). Factory `rules.nine_minute_delivery_decision` (skips research rows /
+  non-9M / no-side); injected in `runtime.record_source_row` under the flag.
+- **#3 `Q15_V3_VETO_YES_ALTS` (default OFF):** flips any non-baseline `ACCEPTED` YES decision on
+  SOL/ETH/XRP to `REJECTED` (+`V3_YES_ALT_VETO`). The toxic core (SOL-YES −619c, ETH-YES −395c,
+  XRP-YES −169c). `rules.yes_alt_veto` (pure) applied via gated `runtime._with_yes_alt_veto`; the
+  `baseline_control` arm is deliberately spared so the unfiltered counterfactual stays measurable.
+- **In-sample caveat:** filters derived and measured on the same ~2-day, 334-alert window. The ≤9M
+  *direction* is triple-confirmed (v95, V2, V3 all show closer-to-settlement wins); magnitudes need an
+  OOS (time-split + leave-one-asset-out) check before trusting. **Both levers LEFT OFF** — flip on the
+  Repl after OOS validation.
+- **⚠️ Repo/prod drift noted:** local `main` STRATEGY_VERSION is `...confidence-tiers-provisional`, but
+  the live ledger shows `...hvf-depth-flow-top250-recovery-provisional` plus bots `hvf_depth_flow_wrapper`
+  + `btc_regime_context_probe` that exist in **no committed file**. These levers were written against
+  local `main`; reconcile with the Repl's newer V3 code before/at deploy.
+- **+6 tests** in `tests/test_strategy_bots.py` (pure factory/veto + runtime gating both directions).
+
+## ✅ Shipped a PRIOR session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
 **Suite 1507 / 4 skipped** (+28 tests). Two fleets confirmed the 15m taker market is efficient net of
 fees (−2 to −4c/contract); the only validated edge is **NO @ 10M** (+11.5c delivered-strict, CI lower
 bound > 0, survives LOAO + time-split), while **7M NO is break-even noise** (+0.75c, CI spans 0) that
