@@ -24,11 +24,15 @@ $pidRel = if ($env:Q15_LOCAL_PID_DIR) { $env:Q15_LOCAL_PID_DIR } else { "work/lo
 $logDir = Join-Path $root $logRel
 $pidDir = Join-Path $root $pidRel
 New-Item -ItemType Directory -Force -Path $logDir,$pidDir | Out-Null
+$stopScript = Join-Path $PSScriptRoot "Stop-Q15Local.ps1"
+if (Test-Path -LiteralPath $stopScript) {
+    & $stopScript -PidDir $pidDir -IncludeStale
+}
 $services = @(
-    @{ Name = "app"; Args = @("app.py") }
+    @{ Name = "app"; Args = @((Join-Path $root "app.py")) }
 )
-if (-not $NoRelay) { $services += @{ Name = "github-relay"; Args = @("tools/github_relay.py") } }
-if (-not $NoLearningExport) { $services += @{ Name = "learning-export"; Args = @("tools/learning_export.py") } }
+if (-not $NoRelay) { $services += @{ Name = "github-relay"; Args = @((Join-Path $root "tools/github_relay.py")) } }
+if (-not $NoLearningExport) { $services += @{ Name = "learning-export"; Args = @((Join-Path $root "tools/learning_export.py")) } }
 foreach ($svc in $services) {
     $out = Join-Path $logDir ($svc.Name + ".out.log")
     $err = Join-Path $logDir ($svc.Name + ".err.log")
