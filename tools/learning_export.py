@@ -81,6 +81,12 @@ PROTECTED_BRANCHES = {"main", "master", "HEAD", ""}
 IDENT_NAME = "learning-export"
 IDENT_EMAIL = "learning-export@users.noreply.github.com"
 SCHEMA_VERSION = 1
+DEFAULT_MAX_ARTIFACT_BYTES = 95 * 1024 * 1024
+DEFAULT_RAW_ARTIFACT_EXCLUDE_NAMES = {
+    "q15_coinbase_adv_l2_v1.sqlite3",
+    "q15_kraken_l3_v1.sqlite3",
+    "q15_spot_l3_v1.sqlite3",
+}
 
 # Canonical ledger locations, so curated scoreboards are attached to the right
 # DB even if an operator points a ledger at a non-default path.
@@ -249,6 +255,21 @@ def _ledger_basename(role: str) -> str:
     return Path(os.environ.get(env) or default).name
 
 
+def _max_artifact_bytes() -> int:
+    try:
+        raw = os.environ.get("LEARNING_EXPORT_MAX_ARTIFACT_BYTES")
+        return max(1, int(raw or DEFAULT_MAX_ARTIFACT_BYTES))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ARTIFACT_BYTES
+
+
+def _raw_artifact_exclude_names() -> set[str]:
+    raw = os.environ.get("LEARNING_EXPORT_RAW_DB_EXCLUDE_NAMES")
+    if raw is None:
+        return set(DEFAULT_RAW_ARTIFACT_EXCLUDE_NAMES)
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
 def _configured_db_paths() -> list[Path]:
     return [
         Path(os.environ[env])
@@ -415,6 +436,8 @@ def build_snapshot(
     artifacts: dict[str, bytes] = {}
     databases: dict[str, Any] = {}
     scoreboards: dict[str, Any] = {}
+    max_artifact_bytes = _max_artifact_bytes()
+    raw_artifact_exclude_names = _raw_artifact_exclude_names()
 
     v95_name = _ledger_basename("v95")
     challenger_name = _ledger_basename("challenger")
@@ -427,14 +450,31 @@ def build_snapshot(
             continue
         try:
             raw = backup.read_bytes()
-            gz = gzip.compress(raw, mtime=0)  # mtime=0 -> stable bytes for clean diffs
             rel = f"dbs/{src.name}.gz"
-            artifacts[rel] = gz
+            excluded = src.name in raw_artifact_exclude_names
+            gz = None if excluded else gzip.compress(raw, mtime=0)
+            artifact_skipped = excluded or (gz is not None and len(gz) > max_artifact_bytes)
+            if excluded:
+                _log(f"skipping raw DB artifact {src.name}: configured high-volume collector")
+            elif gz is not None and not artifact_skipped:
+                artifacts[rel] = gz
+            else:
+                _log(
+                    f"skipping raw DB artifact {src.name}: "
+                    f"{len(gz or b'')} gz bytes exceeds {max_artifact_bytes}"
+                )
             databases[src.name] = {
-                "artifact": rel,
+                "artifact": None if artifact_skipped else rel,
+                "artifact_skipped": artifact_skipped,
+                "artifact_skipped_reason": (
+                    "raw_artifact_excluded"
+                    if excluded
+                    else ("gz_bytes_exceed_limit" if artifact_skipped else None)
+                ),
+                "artifact_max_bytes": max_artifact_bytes,
                 "db_bytes": len(raw),
-                "gz_bytes": len(gz),
-                "gz_sha256": hashlib.sha256(gz).hexdigest(),
+                "gz_bytes": None if gz is None else len(gz),
+                "gz_sha256": None if gz is None else hashlib.sha256(gz).hexdigest(),
                 "row_counts": _db_row_counts(backup),
             }
             # Guard the whole scoreboard build (incl. import/constructor) so a
@@ -475,6 +515,10 @@ def _readme_bytes(snapshot: dict[str, Any]) -> bytes:
         f"- From commit: {snapshot.get('git_commit')}\n"
         f"- Databases: {dbs}\n\n"
         "## Consume\n\n"
+        "Large/high-volume raw DB artifacts may be omitted by\n"
+        "`LEARNING_EXPORT_RAW_DB_EXCLUDE_NAMES` or when their gzip size exceeds\n"
+        "`LEARNING_EXPORT_MAX_ARTIFACT_BYTES`; `learning_snapshot.json` still\n"
+        "records row counts, available size metadata, and the skip reason.\n\n"
         "```bash\n"
         "git fetch origin learning-snapshots\n"
         "git show origin/learning-snapshots:learning_snapshot.json | less\n"

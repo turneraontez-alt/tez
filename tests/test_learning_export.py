@@ -9,6 +9,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -91,6 +93,70 @@ def test_build_snapshot_structure_and_gzip(tmp_path, monkeypatch):
     # gz artifact round-trips to a valid sqlite file
     raw = gzip.decompress(artifacts["dbs/q15_v95_ledger_v1.sqlite3.gz"])
     assert raw[:16] == b"SQLite format 3\x00"
+
+
+def test_build_snapshot_skips_oversized_raw_db_artifact(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _point_ledgers_at(monkeypatch, data_dir)
+    monkeypatch.setenv("LEARNING_EXPORT_RAW_DB_EXCLUDE_NAMES", "")
+    monkeypatch.setenv("LEARNING_EXPORT_MAX_ARTIFACT_BYTES", "200")
+
+    db = data_dir / "q15_coinbase_adv_l2_v1.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE payloads (payload BLOB)")
+        conn.execute("INSERT INTO payloads VALUES (?)", (os.urandom(8192),))
+        conn.commit()
+    finally:
+        conn.close()
+
+    snap, artifacts = lx.build_snapshot(
+        data_dir,
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
+        head_commit=None,
+        build_info=None,
+    )
+
+    meta = snap["databases"]["q15_coinbase_adv_l2_v1.sqlite3"]
+    assert meta["artifact"] is None
+    assert meta["artifact_skipped"] is True
+    assert meta["artifact_skipped_reason"] == "gz_bytes_exceed_limit"
+    assert meta["artifact_max_bytes"] == 200
+    assert meta["gz_bytes"] > 200
+    assert meta["row_counts"]["payloads"] == 1
+    assert "dbs/q15_coinbase_adv_l2_v1.sqlite3.gz" not in artifacts
+
+
+def test_build_snapshot_excludes_high_volume_raw_db_without_gzip(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _point_ledgers_at(monkeypatch, data_dir)
+
+    db = data_dir / "q15_coinbase_adv_l2_v1.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE payloads (payload BLOB)")
+        conn.execute("INSERT INTO payloads VALUES (?)", (b"small",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    snap, artifacts = lx.build_snapshot(
+        data_dir,
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
+        head_commit=None,
+        build_info=None,
+    )
+
+    meta = snap["databases"]["q15_coinbase_adv_l2_v1.sqlite3"]
+    assert meta["artifact"] is None
+    assert meta["artifact_skipped"] is True
+    assert meta["artifact_skipped_reason"] == "raw_artifact_excluded"
+    assert meta["gz_bytes"] is None
+    assert meta["gz_sha256"] is None
+    assert meta["row_counts"]["payloads"] == 1
+    assert artifacts == {}
 
 
 def test_build_snapshot_handles_empty_data_dir(tmp_path, monkeypatch):

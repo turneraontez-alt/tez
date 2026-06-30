@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
@@ -185,24 +186,19 @@ class KalshiWebSocketFeed:
         asyncio.run(self._run_forever())
 
     async def _connect(self, headers):
-        try:
-            return websockets.connect(
-                self.url,
-                additional_headers=headers,
-                ping_interval=20,
-                ping_timeout=20,
-                close_timeout=5,
-                max_queue=10000,
-            )
-        except TypeError:  # websockets < 12
-            return websockets.connect(
-                self.url,
-                extra_headers=headers,
-                ping_interval=20,
-                ping_timeout=20,
-                close_timeout=5,
-                max_queue=10000,
-            )
+        header_kw = (
+            "additional_headers"
+            if "additional_headers" in inspect.signature(websockets.connect).parameters
+            else "extra_headers"
+        )
+        kwargs = {
+            header_kw: headers,
+            "ping_interval": 20,
+            "ping_timeout": 20,
+            "close_timeout": 5,
+            "max_queue": 10000,
+        }
+        return websockets.connect(self.url, **kwargs)
 
     async def _run_forever(self) -> None:
         backoff = 1.0

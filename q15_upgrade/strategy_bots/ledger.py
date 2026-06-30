@@ -14,12 +14,18 @@ from .rules import (
     BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
+    BTC_REGIME_KEYS,
+    COINBASE_L2_KEYS,
     KALSHI_DEPTH_KEYS,
     KALSHI_FLOW_KEYS,
+    KRAKEN_L3_KEYS,
     REJECTED,
     RESEARCH_ONLY,
     SPOT_DEPTH_KEYS,
     STRATEGY_VERSION,
+    TIER_A,
+    TIER_B,
+    TIER_C,
     BotDecision,
     source_rule,
     source_side,
@@ -112,6 +118,39 @@ CREATE TABLE IF NOT EXISTS strategy_bot_decisions (
     btc_model_yes_probability REAL,
     btc_calibrated_yes_probability REAL,
     btc_market_implied_yes_probability REAL,
+    btc_regime TEXT,
+    btc_regime_agreement TEXT,
+    btc_regime_vote_yes REAL,
+    btc_regime_vote_no REAL,
+    btc_regime_vote_detail TEXT,
+    btc_regime_status TEXT,
+    btc_regime_missing_reason TEXT,
+    btc_spot_age_seconds REAL,
+    btc_spot_depth_imbalance REAL,
+    btc_spot_trade_net_notional_15s REAL,
+    btc_spot_trade_net_notional_60s REAL,
+    btc_coinbase_l2_age_seconds REAL,
+    btc_coinbase_l2_last_message_age_seconds REAL,
+    btc_coinbase_l2_top_12_bid_notional REAL,
+    btc_coinbase_l2_top_12_ask_notional REAL,
+    btc_coinbase_l2_top_12_imbalance_notional REAL,
+    btc_coinbase_l2_top_60_bid_notional REAL,
+    btc_coinbase_l2_top_60_ask_notional REAL,
+    btc_coinbase_l2_top_60_imbalance_notional REAL,
+    btc_coinbase_l2_top_250_bid_notional REAL,
+    btc_coinbase_l2_top_250_ask_notional REAL,
+    btc_coinbase_l2_top_250_imbalance_notional REAL,
+    btc_kalshi_book_imbalance REAL,
+    btc_kalshi_taker_net_yes_volume_15s REAL,
+    btc_v95_age_seconds REAL,
+    btc_v95_checkpoint TEXT,
+    btc_v95_grade TEXT,
+    btc_v95_predicted_side TEXT,
+    btc_v95_selected_probability REAL,
+    btc_kraken_l3_age_seconds REAL,
+    btc_kraken_l3_depth_imbalance REAL,
+    btc_kraken_l3_cancel_to_add_60s REAL,
+    btc_kraken_l3_net_matched_buy_notional_60s REAL,
     notification_status TEXT,
     notification_message_id INTEGER,
     notification_error TEXT,
@@ -161,6 +200,8 @@ _COLS = (
     *KALSHI_DEPTH_KEYS,
     *KALSHI_FLOW_KEYS,
     *SPOT_DEPTH_KEYS,
+    *COINBASE_L2_KEYS,
+    *KRAKEN_L3_KEYS,
     "btc_context_json",
     "btc_ticker",
     "btc_depth_contracts",
@@ -170,6 +211,7 @@ _COLS = (
     "btc_model_yes_probability",
     "btc_calibrated_yes_probability",
     "btc_market_implied_yes_probability",
+    *BTC_REGIME_KEYS,
     "notification_status",
     "notification_message_id",
     "notification_error",
@@ -246,12 +288,52 @@ def _source_model(row: Mapping[str, Any]) -> str | None:
     return str(row.get("model_version")) if row.get("model_version") is not None else None
 
 
+def _feature_column_type(name: str) -> str:
+    text_names = {
+        "coinbase_l2_status",
+        "coinbase_l2_missing_reason",
+        "coinbase_l2_product_id",
+        "coinbase_l2_target_source",
+        "coinbase_l2_easier_side",
+        "kraken_l3_status",
+        "kraken_l3_missing_reason",
+        "kraken_l3_symbol",
+        "kraken_l3_checksum",
+        "btc_regime",
+        "btc_regime_agreement",
+        "btc_regime_vote_detail",
+        "btc_regime_status",
+        "btc_regime_missing_reason",
+        "btc_v95_checkpoint",
+        "btc_v95_grade",
+        "btc_v95_predicted_side",
+    }
+    if name in text_names:
+        return "TEXT"
+    if name.endswith("_visible"):
+        return "INTEGER"
+    return "REAL"
+
+
 def _build_record(
     decision: BotDecision,
     row: Mapping[str, Any],
     source_system: str,
 ) -> dict[str, Any]:
     btc = dict(decision.btc_context or {})
+    if not btc:
+        btc_keys = (
+            "btc_ticker",
+            "btc_depth_contracts",
+            "btc_book_pressure_cents",
+            "btc_dominant_side",
+            "btc_model_predicted_side",
+            "btc_model_yes_probability",
+            "btc_calibrated_yes_probability",
+            "btc_market_implied_yes_probability",
+            *BTC_REGIME_KEYS,
+        )
+        btc = {key: row.get(key) for key in btc_keys if row.get(key) is not None}
     created = _num(row.get("created_at")) or time.time()
     out: dict[str, Any] = {
         "created_at": created,
@@ -283,14 +365,38 @@ def _build_record(
         ),
         "spread_cents": row.get("spread_cents"),
         "btc_context_json": _json(btc) if btc else None,
-        "btc_ticker": btc.get("btc_ticker"),
-        "btc_depth_contracts": btc.get("btc_depth_contracts"),
-        "btc_book_pressure_cents": btc.get("btc_book_pressure_cents"),
-        "btc_dominant_side": btc.get("btc_dominant_side"),
-        "btc_model_predicted_side": btc.get("btc_model_predicted_side"),
-        "btc_model_yes_probability": btc.get("btc_model_yes_probability"),
-        "btc_calibrated_yes_probability": btc.get("btc_calibrated_yes_probability"),
-        "btc_market_implied_yes_probability": btc.get("btc_market_implied_yes_probability"),
+        "btc_ticker": btc.get("btc_ticker") if "btc_ticker" in btc else row.get("btc_ticker"),
+        "btc_depth_contracts": (
+            btc.get("btc_depth_contracts") if "btc_depth_contracts" in btc else row.get("btc_depth_contracts")
+        ),
+        "btc_book_pressure_cents": (
+            btc.get("btc_book_pressure_cents")
+            if "btc_book_pressure_cents" in btc
+            else row.get("btc_book_pressure_cents")
+        ),
+        "btc_dominant_side": (
+            btc.get("btc_dominant_side") if "btc_dominant_side" in btc else row.get("btc_dominant_side")
+        ),
+        "btc_model_predicted_side": (
+            btc.get("btc_model_predicted_side")
+            if "btc_model_predicted_side" in btc
+            else row.get("btc_model_predicted_side")
+        ),
+        "btc_model_yes_probability": (
+            btc.get("btc_model_yes_probability")
+            if "btc_model_yes_probability" in btc
+            else row.get("btc_model_yes_probability")
+        ),
+        "btc_calibrated_yes_probability": (
+            btc.get("btc_calibrated_yes_probability")
+            if "btc_calibrated_yes_probability" in btc
+            else row.get("btc_calibrated_yes_probability")
+        ),
+        "btc_market_implied_yes_probability": (
+            btc.get("btc_market_implied_yes_probability")
+            if "btc_market_implied_yes_probability" in btc
+            else row.get("btc_market_implied_yes_probability")
+        ),
         "notification_status": None,
         "notification_message_id": None,
         "notification_error": None,
@@ -306,6 +412,12 @@ def _build_record(
         out[key] = row.get(key)
     for key in SPOT_DEPTH_KEYS:
         out[key] = row.get(key)
+    for key in COINBASE_L2_KEYS:
+        out[key] = row.get(key)
+    for key in KRAKEN_L3_KEYS:
+        out[key] = row.get(key)
+    for key in BTC_REGIME_KEYS:
+        out[key] = btc.get(key) if key in btc else row.get(key)
     return out
 
 
@@ -339,6 +451,12 @@ class StrategyBotLedger:
             "notification_error": "TEXT",
             "notified_at": "REAL",
         }
+        for key in COINBASE_L2_KEYS:
+            added.setdefault(key, _feature_column_type(key))
+        for key in KRAKEN_L3_KEYS:
+            added.setdefault(key, _feature_column_type(key))
+        for key in BTC_REGIME_KEYS:
+            added.setdefault(key, _feature_column_type(key))
         for name, column_type in added.items():
             if name not in existing:
                 try:
@@ -516,6 +634,7 @@ class StrategyBotLedger:
                 min_n,
             ),
             "bnb_system": self._bnb_system(rows, min_n),
+            "tier_confirmation_system": self._tier_confirmation_system(rows, min_n),
             "data_coverage": self._data_coverage(rows),
         }
 
@@ -593,6 +712,9 @@ class StrategyBotLedger:
         def any_present(keys: Sequence[str]) -> int:
             return sum(1 for row in all_rows if any(row.get(k) is not None for k in keys))
 
+        def status_ok(key: str) -> int:
+            return sum(1 for row in all_rows if str(row.get(key) or "").lower() == "ok")
+
         counts = {
             "entry_ask": present("entry_ask_cents"),
             "spread": present("spread_cents"),
@@ -617,6 +739,23 @@ class StrategyBotLedger:
                 "spot_depth_trade_net_qty_60s",
                 "spot_depth_trade_net_notional_60s",
             )),
+            "coinbase_l2_status": present("coinbase_l2_status"),
+            "coinbase_l2_ok": status_ok("coinbase_l2_status"),
+            "coinbase_l2_top12": present("coinbase_l2_top_12_imbalance_notional"),
+            "coinbase_l2_top60": present("coinbase_l2_top_60_imbalance_notional"),
+            "coinbase_l2_top250": present("coinbase_l2_top_250_imbalance_notional"),
+            "coinbase_l2_depth_to_target": any_present((
+                "coinbase_l2_distance_to_target_bps",
+                "coinbase_l2_up_to_target_notional",
+                "coinbase_l2_down_to_target_notional",
+            )),
+            "kraken_l3_status": present("kraken_l3_status"),
+            "kraken_l3_ok": status_ok("kraken_l3_status"),
+            "kraken_l3_depth": present("kraken_l3_depth_imbalance"),
+            "kraken_l3_book_churn": any_present((
+                "kraken_l3_cancel_to_add_15s",
+                "kraken_l3_cancel_to_add_60s",
+            )),
             "btc_context": any_present((
                 "btc_ticker",
                 "btc_depth_contracts",
@@ -633,6 +772,82 @@ class StrategyBotLedger:
             "rows": total,
             "counts": counts,
             "rates": {key: rate(value) for key, value in counts.items()},
+        }
+
+    @classmethod
+    def _tier_confirmation_system(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        min_n: int,
+    ) -> dict[str, Any]:
+        tier_rows = [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER]
+
+        def has(row: Mapping[str, Any], text: str) -> bool:
+            return text in str(row.get("reason_codes") or "")
+
+        def tier(value: str) -> list[Mapping[str, Any]]:
+            return [r for r in tier_rows if str(r.get("tier") or "").upper() == value]
+
+        def rejected_by(rows_in: Sequence[Mapping[str, Any]], needle: str) -> list[Mapping[str, Any]]:
+            return [
+                r for r in rows_in
+                if r.get("decision_status") == REJECTED and has(r, needle)
+            ]
+
+        def saved_losses(rows_in: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+            return [
+                r for r in rows_in
+                if r.get("decision_status") == REJECTED
+                and r.get("official_result") is not None
+                and int(r.get("correct") or 0) == 0
+            ]
+
+        def skipped_winners(rows_in: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+            return [
+                r for r in rows_in
+                if r.get("decision_status") == REJECTED
+                and r.get("official_result") is not None
+                and int(r.get("correct") or 0) == 1
+            ]
+
+        def block(rows_in: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            rows_list = list(rows_in)
+            return {
+                "all": cls._agg(rows_list, min_n),
+                "accepted_confirmed": cls._agg(
+                    [r for r in rows_list if r.get("decision_status") == ACCEPTED],
+                    min_n,
+                ),
+                "research_inconclusive": cls._agg(
+                    [r for r in rows_list if r.get("decision_status") == RESEARCH_ONLY],
+                    min_n,
+                ),
+                "rejected_vetoed": cls._agg(
+                    [r for r in rows_list if r.get("decision_status") == REJECTED],
+                    min_n,
+                ),
+                "rejected_by_top12": cls._agg(
+                    rejected_by(rows_list, "REJECTED_BY_COINBASE_TOP12_CONTRA"),
+                    min_n,
+                ),
+                "rejected_by_combined_contra": cls._agg(
+                    rejected_by(rows_list, "REJECTED_BY_COMBINED_CONTRA"),
+                    min_n,
+                ),
+                "veto_saved_losses": cls._agg(saved_losses(rows_list), min_n),
+                "veto_skipped_winners": cls._agg(skipped_winners(rows_list), min_n),
+                "by_asset_side_status": cls._group(
+                    rows_list,
+                    ("asset", "side", "decision_status"),
+                    min_n,
+                ),
+            }
+
+        return {
+            "all_tiers": block(tier_rows),
+            "tier_a": block(tier(TIER_A)),
+            "tier_b": block(tier(TIER_B)),
+            "tier_c": block(tier(TIER_C)),
         }
 
     @classmethod

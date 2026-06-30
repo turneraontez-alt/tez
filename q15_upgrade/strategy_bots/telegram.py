@@ -42,6 +42,7 @@ def _bot_label(name: str) -> str:
         "bnb_yes_reversal": "BNB YES Reversal",
         "hype_yes_confirmation": "HYPE YES Confirmation",
         "morefire_btc_confirmed": "MoreFire BTC-Confirmed",
+        "hvf_depth_flow_wrapper": "HVF Depth/Flow Wrapper",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -60,6 +61,10 @@ def _is_bnb_combined(row: Mapping[str, Any]) -> bool:
 
 def _is_confidence_tier(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "v3_confidence_tier"
+
+
+def _is_hvf_wrapper(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "hvf_depth_flow_wrapper"
 
 
 def _bnb_action(row: Mapping[str, Any]) -> str:
@@ -140,6 +145,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
             "B": "<b>V3 TIER B / VOLUME EXPANSION</b>",
             "C": "<b>V3 TIER C / RESEARCH ONLY</b>",
         }.get(tier, "<b>V3 CONFIDENCE TIER</b>")
+    elif _is_hvf_wrapper(row):
+        header = "<b>V3 HVF DEPTH/FLOW PICK</b>"
     else:
         header = "<b>V3 RESEARCH YES REVERSAL</b>" if is_reversal else "<b>V3 FILTERED PICK</b>"
     parts = [
@@ -168,10 +175,18 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
     spot = _metric_parts(row, [
         ("imb", "spot_depth_imbalance", ""),
         ("sell15", "spot_depth_trade_sell_notional_15s", ""),
-        ("net60", "spot_depth_trade_net_qty_60s", ""),
+        ("net60qty", "spot_depth_trade_net_qty_60s", ""),
+        ("net60$", "spot_depth_trade_net_notional_60s", ""),
     ])
     if spot:
         parts.append(f"Spot: {spot}")
+    coinbase = _metric_parts(row, [
+        ("top12", "coinbase_l2_top_12_imbalance_notional", ""),
+        ("top60", "coinbase_l2_top_60_imbalance_notional", ""),
+        ("top250", "coinbase_l2_top_250_imbalance_notional", ""),
+    ])
+    if coinbase:
+        parts.append(f"Coinbase L2: {coinbase}")
     btc = _metric_parts(row, [
         ("depth", "btc_depth_contracts", ""),
         ("pressure", "btc_book_pressure_cents", "c"),

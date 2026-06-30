@@ -1,7 +1,10 @@
 # Runtime databases & trading state
 *.sqlite3
+*.sqlite3-*
 *.sqlite
+*.sqlite-*
 *.db
+*.db-*
 data/
 old_data/
 
@@ -35,6 +38,7 @@ backups/
 health_snapshot.json
 
 # Python cache
+.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/

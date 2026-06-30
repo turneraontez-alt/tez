@@ -6,12 +6,16 @@ import logging
 import os
 from typing import Any, Mapping
 
+from .btc_regime import enrich_btc_regime
+from .kraken_l3_depth import enrich_kraken_l3
+from .l2_depth import enrich_coinbase_l2
 from .ledger import StrategyBotLedger
 from .rules import (
     ACCEPTED,
     BOT_BASELINE,
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
+    BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     REJECTED,
     RESEARCH_ONLY,
@@ -55,8 +59,39 @@ def suppress_owned_source_notifications() -> bool:
     return _bool("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", False)
 
 
+def hvf_wrapper_only_notifications() -> bool:
+    return _bool("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", False)
+
+
 def db_path() -> str:
     return os.environ.get("Q15_STRATEGY_BOTS_DB") or "data/q15_strategy_bots_v3.sqlite3"
+
+
+def _enrich_source_row(
+    row: Mapping[str, Any],
+    *,
+    btc_context: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    enriched: Mapping[str, Any] = row
+    try:
+        enriched = enrich_coinbase_l2(enriched)
+    except (OSError, ValueError) as exc:
+        logger.warning("v3 Coinbase L2 enrichment skipped: %s", exc)
+    except Exception:  # noqa: BLE001 - non-critical point-in-time feature path
+        logger.warning("v3 Coinbase L2 enrichment failed", exc_info=True)
+    try:
+        enriched = enrich_kraken_l3(enriched)
+    except (OSError, ValueError) as exc:
+        logger.warning("v3 Kraken L3 enrichment skipped: %s", exc)
+    except Exception:  # noqa: BLE001 - non-critical point-in-time feature path
+        logger.warning("v3 Kraken L3 enrichment failed", exc_info=True)
+    try:
+        enriched = enrich_btc_regime(enriched, btc_context=btc_context)
+    except (OSError, ValueError) as exc:
+        logger.warning("v3 BTC regime enrichment skipped: %s", exc)
+    except Exception:  # noqa: BLE001 - non-critical point-in-time feature path
+        logger.warning("v3 BTC regime enrichment failed", exc_info=True)
+    return enriched
 
 
 def get_ledger() -> StrategyBotLedger | None:
@@ -125,10 +160,11 @@ def record_source_row(
         ledger = get_ledger()
         if ledger is None:
             return 0
+        enriched_row = _enrich_source_row(row, btc_context=btc_context)
         count = 0
-        for decision in decisions_for_row(row, source_system=source_system, btc_context=btc_context):
-            stamped = _with_duplicate_window_guard(ledger, decision, row)
-            row_id = ledger.record_decision(stamped, row, source_system=source_system)
+        for decision in decisions_for_row(enriched_row, source_system=source_system, btc_context=btc_context):
+            stamped = _with_duplicate_window_guard(ledger, decision, enriched_row)
+            row_id = ledger.record_decision(stamped, enriched_row, source_system=source_system)
             if row_id is not None:
                 count += 1
                 _maybe_notify(ledger, row_id, stamped)
@@ -148,12 +184,17 @@ def owns_source_notification(
     try:
         if not enabled():
             return False
+        enriched_row = _enrich_source_row(row, btc_context=btc_context)
         asset = str(row.get("asset") or "").upper()
         if _bool("Q15_V3_SUPPRESS_OLD_BNB_NOTIFICATIONS", False) and asset == "BNB":
             return True
         if not suppress_owned_source_notifications():
             return False
-        for decision in decisions_for_row(row, source_system=source_system, btc_context=btc_context):
+        if hvf_wrapper_only_notifications() and source_system != "high_vol_flip":
+            return False
+        for decision in decisions_for_row(enriched_row, source_system=source_system, btc_context=btc_context):
+            if source_system == "high_vol_flip" and decision.bot_name == BOT_HVF_DEPTH_FLOW:
+                return True
             if decision.bot_name == BOT_BASELINE:
                 continue
             if decision.decision_status == ACCEPTED:
@@ -170,6 +211,20 @@ def owns_source_notification(
 
 
 def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision) -> None:
+    try:
+        recorded = ledger.row_by_id(row_id)
+    except Exception:  # noqa: BLE001 - notification must never block tracking
+        logger.warning("v3 strategy-bot notification lookup failed (ignored)", exc_info=True)
+        return
+    if recorded is None:
+        return
+    if (
+        str(recorded.get("source_system") or "") == "high_vol_flip"
+        and decision.bot_name != BOT_HVF_DEPTH_FLOW
+    ):
+        return
+    if hvf_wrapper_only_notifications() and decision.bot_name != BOT_HVF_DEPTH_FLOW:
+        return
     reversal_research = (
         decision.bot_name == BOT_BNB_YES_REVERSAL
         and decision.decision_status == RESEARCH_ONLY
@@ -185,9 +240,6 @@ def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision)
     ):
         return
     try:
-        recorded = ledger.row_by_id(row_id)
-        if recorded is None:
-            return
         result = get_telegram().send(build_v3_alert(recorded))
         if result.get("delivered"):
             status, mid = "SENT", result.get("message_id")

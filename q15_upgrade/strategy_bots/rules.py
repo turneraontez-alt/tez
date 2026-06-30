@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import os
 from typing import Any, Mapping
 
 
-STRATEGY_VERSION = "filtered-alert-system-v3-confidence-tiers-provisional"
+STRATEGY_VERSION = "filtered-alert-system-v3-hvf-depth-flow-top250-recovery-provisional"
 
 BOT_BASELINE = "baseline_control"
 BOT_CONFIDENCE_TIER = "v3_confidence_tier"
@@ -18,6 +19,8 @@ BOT_BNB_NO = "bnb_no_confirmation"
 BOT_BNB_YES_REVERSAL = "bnb_yes_reversal"
 BOT_HYPE_YES = "hype_yes_confirmation"
 BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
+BOT_HVF_DEPTH_FLOW = "hvf_depth_flow_wrapper"
+BOT_BTC_REGIME = "btc_regime_context_probe"
 
 TIER_A = "A"
 TIER_B = "B"
@@ -85,6 +88,155 @@ KALSHI_DEPTH_KEYS = (
     "kalshi_depth_retry_used",
 )
 
+COINBASE_L2_BANDS = (1, 5, 12, 25, 50, 60, 100, 250)
+
+COINBASE_L2_BASE_KEYS = (
+    "coinbase_l2_status",
+    "coinbase_l2_missing_reason",
+    "coinbase_l2_product_id",
+    "coinbase_l2_age_seconds",
+    "coinbase_l2_snapshot_created_at",
+    "coinbase_l2_last_message_age_seconds",
+    "coinbase_l2_best_bid",
+    "coinbase_l2_best_ask",
+    "coinbase_l2_mid",
+    "coinbase_l2_spread_bps",
+    "coinbase_l2_bid_level_count",
+    "coinbase_l2_ask_level_count",
+    "coinbase_l2_stored_bid_level_count",
+    "coinbase_l2_stored_ask_level_count",
+    "coinbase_l2_update_count_5s",
+    "coinbase_l2_remove_count_5s",
+    "coinbase_l2_remove_rate_5s",
+    "coinbase_l2_update_count_15s",
+    "coinbase_l2_remove_count_15s",
+    "coinbase_l2_remove_rate_15s",
+    "coinbase_l2_update_count_60s",
+    "coinbase_l2_remove_count_60s",
+    "coinbase_l2_remove_rate_60s",
+)
+
+COINBASE_L2_TARGET_KEYS = (
+    "coinbase_l2_target_price",
+    "coinbase_l2_target_source",
+    "coinbase_l2_target_age_seconds",
+    "coinbase_l2_distance_to_target",
+    "coinbase_l2_distance_to_target_pct",
+    "coinbase_l2_distance_to_target_bps",
+    "coinbase_l2_up_to_target_notional",
+    "coinbase_l2_up_to_target_levels",
+    "coinbase_l2_up_to_target_visible",
+    "coinbase_l2_down_to_target_notional",
+    "coinbase_l2_down_to_target_levels",
+    "coinbase_l2_down_to_target_visible",
+    "coinbase_l2_easier_side",
+    "coinbase_l2_easier_side_notional",
+    "coinbase_l2_harder_side_notional",
+    "coinbase_l2_target_notional_ratio",
+    "coinbase_l2_target_side_flow_15s",
+    "coinbase_l2_target_side_flow_60s",
+    "coinbase_l2_flow_needed_seconds_15s",
+    "coinbase_l2_flow_needed_seconds_60s",
+)
+
+COINBASE_L2_BAND_KEYS = tuple(
+    f"coinbase_l2_top_{band}_{suffix}"
+    for band in COINBASE_L2_BANDS
+    for suffix in (
+        "bid_qty",
+        "ask_qty",
+        "bid_notional",
+        "ask_notional",
+        "imbalance_qty",
+        "imbalance_notional",
+    )
+)
+
+COINBASE_L2_KEYS = COINBASE_L2_BASE_KEYS + COINBASE_L2_BAND_KEYS + COINBASE_L2_TARGET_KEYS
+
+KRAKEN_L3_KEYS = (
+    "kraken_l3_status",
+    "kraken_l3_missing_reason",
+    "kraken_l3_symbol",
+    "kraken_l3_age_seconds",
+    "kraken_l3_snapshot_created_at",
+    "kraken_l3_checksum",
+    "kraken_l3_last_message_age_seconds",
+    "kraken_l3_best_bid",
+    "kraken_l3_best_ask",
+    "kraken_l3_mid",
+    "kraken_l3_spread_bps",
+    "kraken_l3_bid_order_count",
+    "kraken_l3_ask_order_count",
+    "kraken_l3_bid_level_count",
+    "kraken_l3_ask_level_count",
+    "kraken_l3_bid_depth_top",
+    "kraken_l3_ask_depth_top",
+    "kraken_l3_bid_depth_levels",
+    "kraken_l3_ask_depth_levels",
+    "kraken_l3_bid_notional_levels",
+    "kraken_l3_ask_notional_levels",
+    "kraken_l3_bid_order_count_levels",
+    "kraken_l3_ask_order_count_levels",
+    "kraken_l3_avg_bid_order_size_levels",
+    "kraken_l3_avg_ask_order_size_levels",
+    "kraken_l3_depth_imbalance",
+    "kraken_l3_add_count_5s",
+    "kraken_l3_update_count_5s",
+    "kraken_l3_delete_count_5s",
+    "kraken_l3_trade_count_5s",
+    "kraken_l3_cancel_to_add_5s",
+    "kraken_l3_add_count_15s",
+    "kraken_l3_update_count_15s",
+    "kraken_l3_delete_count_15s",
+    "kraken_l3_trade_count_15s",
+    "kraken_l3_cancel_to_add_15s",
+    "kraken_l3_add_count_60s",
+    "kraken_l3_update_count_60s",
+    "kraken_l3_delete_count_60s",
+    "kraken_l3_trade_count_60s",
+    "kraken_l3_cancel_to_add_60s",
+    "kraken_l3_matched_buy_notional_60s",
+    "kraken_l3_matched_sell_notional_60s",
+    "kraken_l3_net_matched_buy_notional_60s",
+)
+
+BTC_REGIME_KEYS = (
+    "btc_regime",
+    "btc_regime_agreement",
+    "btc_regime_vote_yes",
+    "btc_regime_vote_no",
+    "btc_regime_vote_detail",
+    "btc_regime_status",
+    "btc_regime_missing_reason",
+    "btc_spot_age_seconds",
+    "btc_spot_depth_imbalance",
+    "btc_spot_trade_net_notional_15s",
+    "btc_spot_trade_net_notional_60s",
+    "btc_coinbase_l2_age_seconds",
+    "btc_coinbase_l2_last_message_age_seconds",
+    "btc_coinbase_l2_top_12_bid_notional",
+    "btc_coinbase_l2_top_12_ask_notional",
+    "btc_coinbase_l2_top_12_imbalance_notional",
+    "btc_coinbase_l2_top_60_bid_notional",
+    "btc_coinbase_l2_top_60_ask_notional",
+    "btc_coinbase_l2_top_60_imbalance_notional",
+    "btc_coinbase_l2_top_250_bid_notional",
+    "btc_coinbase_l2_top_250_ask_notional",
+    "btc_coinbase_l2_top_250_imbalance_notional",
+    "btc_kalshi_book_imbalance",
+    "btc_kalshi_taker_net_yes_volume_15s",
+    "btc_v95_age_seconds",
+    "btc_v95_checkpoint",
+    "btc_v95_grade",
+    "btc_v95_predicted_side",
+    "btc_v95_selected_probability",
+    "btc_kraken_l3_age_seconds",
+    "btc_kraken_l3_depth_imbalance",
+    "btc_kraken_l3_cancel_to_add_60s",
+    "btc_kraken_l3_net_matched_buy_notional_60s",
+)
+
 
 @dataclass(frozen=True)
 class BotDecision:
@@ -109,6 +261,20 @@ def _num(value: Any) -> float | None:
         return out if math.isfinite(out) else None
     except (TypeError, ValueError):
         return None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, str(default)) or default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _side(value: Any) -> str | None:
@@ -238,6 +404,312 @@ def _tier_rule_reason(prefix: str, source_system: str, asset: str, side: str, su
     return f"{prefix}_{source}_{asset}_{side}_{suffix}"
 
 
+def _top12_deadband() -> float:
+    return _env_float("Q15_V3_COINBASE_TOP12_DEADBAND", 0.01, minimum=0.0)
+
+
+def _top60_deadband() -> float:
+    return _env_float("Q15_V3_COINBASE_TOP60_DEADBAND", 0.01, minimum=0.0)
+
+
+def _top12_contra_reject_enabled() -> bool:
+    return _env_bool("Q15_V3_COINBASE_TOP12_CONTRA_REJECT_ENABLED", True)
+
+
+def _top12_required_enabled() -> bool:
+    return _env_bool("Q15_V3_COINBASE_TOP12_REQUIRED_FOR_ACCEPT", True)
+
+
+def _combined_contra_reject_enabled() -> bool:
+    return _env_bool("Q15_V3_COMBINED_CONTRA_REJECT_ENABLED", True)
+
+
+def _top250_deadband() -> float:
+    return _env_float("Q15_V3_COINBASE_TOP250_DEADBAND", 0.05, minimum=0.0)
+
+
+def _kraken_l3_deadband() -> float:
+    return _env_float("Q15_V3_KRAKEN_L3_DEADBAND", 0.10, minimum=0.0)
+
+
+def _kraken_l3_hard_veto_enabled() -> bool:
+    return _env_bool("Q15_V3_KRAKEN_L3_HARD_VETO_ENABLED", False)
+
+
+def _spot_net_notional_60s_min() -> float:
+    return _env_float("Q15_V3_SPOT_NET_NOTIONAL_60S_CONTRA_MIN", 500.0, minimum=0.0)
+
+
+def _kalshi_taker_yes_15s_min() -> float:
+    return _env_float("Q15_V3_KALSHI_TAKER_YES_15S_CONTRA_MIN", 250.0, minimum=0.0)
+
+
+def _hvf_wrapper_enabled() -> bool:
+    return _env_bool("Q15_V3_HVF_DEPTH_FLOW_WRAPPER_ENABLED", True)
+
+
+def _hvf_wrapper_research_on_missing() -> bool:
+    return _env_bool("Q15_V3_HVF_WRAPPER_RESEARCH_ON_MISSING", True)
+
+
+def _hvf_morefire_l2_alignment_enabled() -> bool:
+    return _env_bool("Q15_V3_HVF_MOREFIRE_L2_ALIGNMENT_ENABLED", True)
+
+
+def _hvf_own_strong_top12_recovery_enabled() -> bool:
+    return _env_bool("Q15_V3_HVF_OWN_STRONG_TOP12_RECOVERY_ENABLED", True)
+
+
+def _hvf_own_strong_recovery_entry_max() -> float:
+    return _env_float("Q15_V3_HVF_OWN_STRONG_TOP12_RECOVERY_ENTRY_MAX", 85.0, minimum=0.0)
+
+
+def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
+    value = _num(row.get(key))
+    if value is None:
+        return None, None
+    if value >= deadband:
+        return "YES", value
+    if value <= -deadband:
+        return "NO", value
+    return "NEUTRAL", value
+
+
+def _opposite(side: str) -> str:
+    return "NO" if side == "YES" else "YES"
+
+
+def _flow_side(value: float | None, threshold: float) -> str | None:
+    if value is None:
+        return None
+    if value >= threshold:
+        return "YES"
+    if value <= -threshold:
+        return "NO"
+    return None
+
+
+def _btc_regime_testing_enabled() -> bool:
+    return _env_bool("Q15_V3_BTC_REGIME_TESTING_ENABLED", True)
+
+
+def _btc_regime(row: Mapping[str, Any]) -> str | None:
+    regime = str(row.get("btc_regime") or "").upper()
+    return regime if regime in {"BULLISH", "BEARISH", "CHOP"} else None
+
+
+def _btc_regime_side(regime: str | None) -> str | None:
+    if regime == "BULLISH":
+        return "YES"
+    if regime == "BEARISH":
+        return "NO"
+    return None
+
+
+def _btc_regime_agreement(row: Mapping[str, Any], side: str | None) -> str | None:
+    regime = _btc_regime(row)
+    if regime is None or side is None:
+        return None
+    if regime == "CHOP":
+        return "CHOP"
+    return "AGREES" if _btc_regime_side(regime) == side else "CONTRADICTS"
+
+
+def _kalshi_book_signal(row: Mapping[str, Any], deadband: float = 0.05) -> tuple[str | None, float | None]:
+    yes = _num(row.get("yes_bid_depth_contracts"))
+    no = _num(row.get("no_bid_depth_contracts"))
+    if yes is None or no is None or yes + no <= 0:
+        return None, None
+    imb = (yes - no) / (yes + no)
+    if imb >= deadband:
+        return "YES", imb
+    if imb <= -deadband:
+        return "NO", imb
+    return "NEUTRAL", imb
+
+
+def _side_matches(signal: str | None, side: str | None) -> bool:
+    return side in {"YES", "NO"} and signal == side
+
+
+def _side_contra(signal: str | None, side: str | None) -> bool:
+    return side in {"YES", "NO"} and signal == _opposite(side)
+
+
+def _local_confirmation_profile(row: Mapping[str, Any], side: str | None) -> dict[str, Any]:
+    spot60 = _flow_side(_num(row.get("spot_depth_trade_net_notional_60s")), _spot_net_notional_60s_min())
+    spot15 = _flow_side(_num(row.get("spot_depth_trade_net_notional_15s")), 25.0)
+    taker = _flow_side(_num(row.get("kalshi_taker_net_yes_volume_15s")), _kalshi_taker_yes_15s_min())
+    top12, top12_value = _depth_signal(row, "coinbase_l2_top_12_imbalance_notional", _top12_deadband())
+    top60, top60_value = _depth_signal(row, "coinbase_l2_top_60_imbalance_notional", _top60_deadband())
+    top250, top250_value = _depth_signal(row, "coinbase_l2_top_250_imbalance_notional", _top250_deadband())
+    kraken, kraken_value = _depth_signal(row, "kraken_l3_depth_imbalance", _kraken_l3_deadband())
+    kalshi_book, kalshi_book_value = _kalshi_book_signal(row)
+    signals = {
+        "spot15": spot15,
+        "spot60": spot60,
+        "kalshi_taker": taker,
+        "coinbase_top12": top12,
+        "coinbase_top60": top60,
+        "coinbase_top250": top250,
+        "kraken_l3": kraken,
+        "kalshi_book": kalshi_book,
+    }
+    confirmations = [name for name, signal in signals.items() if _side_matches(signal, side)]
+    contradictions = [name for name, signal in signals.items() if _side_contra(signal, side)]
+    return {
+        "local_confirmation_score": len(confirmations),
+        "local_contradiction_score": len(contradictions),
+        "local_confirmations": confirmations,
+        "local_contradictions": contradictions,
+        "local_strong": len(confirmations) >= 3 and len(contradictions) <= 1,
+        "local_signals": signals,
+        "coinbase_top12_imbalance": top12_value,
+        "coinbase_top60_imbalance": top60_value,
+        "coinbase_top250_imbalance": top250_value,
+        "kraken_l3_imbalance": kraken_value,
+        "kalshi_book_imbalance": kalshi_book_value,
+    }
+
+
+def _coinbase_top12_signal(row: Mapping[str, Any]) -> tuple[str | None, float | None, str | None]:
+    status = str(row.get("coinbase_l2_status") or "").lower()
+    if status and status != "ok":
+        return None, None, f"COINBASE_L2_STATUS_{status.upper()}"
+    value = _num(row.get("coinbase_l2_top_12_imbalance_notional"))
+    if value is None:
+        return None, None, "COINBASE_L2_TOP12_MISSING"
+    deadband = _top12_deadband()
+    if value >= deadband:
+        return "YES", value, None
+    if value <= -deadband:
+        return "NO", value, None
+    return "NEUTRAL", value, None
+
+
+def _apply_top12_confirmation(
+    *,
+    tier: str,
+    side: str,
+    base_status: str,
+    base_reasons: tuple[str, ...],
+    base_profile: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> tuple[str, tuple[str, ...], dict[str, Any]]:
+    signal, imbalance, missing_reason = _coinbase_top12_signal(row)
+    profile = {
+        **base_profile,
+        "coinbase_top12_deadband": _top12_deadband(),
+        "coinbase_top12_signal": signal,
+        "coinbase_top12_imbalance_notional": imbalance,
+        "coinbase_top12_missing_reason": missing_reason,
+        "coinbase_top12_contra_reject_enabled": _top12_contra_reject_enabled(),
+        "coinbase_top12_required_for_accept": _top12_required_enabled(),
+    }
+    reasons = list(base_reasons)
+    if missing_reason:
+        reasons.append(f"V3_TIER_{tier}_TOP12_NOT_CONFIRMED_{missing_reason}")
+        if base_status == ACCEPTED and tier in {TIER_A, TIER_B} and _top12_required_enabled():
+            reasons.append(f"V3_TIER_{tier}_RESEARCH_ONLY_TOP12_MISSING")
+            return RESEARCH_ONLY, tuple(reasons), profile
+        return base_status, tuple(reasons), profile
+    if signal == "NEUTRAL":
+        reasons.append(f"V3_TIER_{tier}_TOP12_NEUTRAL")
+        if base_status == ACCEPTED and tier in {TIER_A, TIER_B} and _top12_required_enabled():
+            reasons.append(f"V3_TIER_{tier}_RESEARCH_ONLY_TOP12_NEUTRAL")
+            return RESEARCH_ONLY, tuple(reasons), profile
+        return base_status, tuple(reasons), profile
+    if signal == side:
+        reasons.append(f"V3_TIER_{tier}_CONFIRMED_COINBASE_TOP12_{side}")
+        return base_status, tuple(reasons), profile
+    reasons.append(f"V3_TIER_{tier}_CONTRADICTED_BY_COINBASE_TOP12_{signal}")
+    if tier == TIER_C:
+        reasons.append(f"V3_TIER_{tier}_RESEARCH_ONLY_TOP12_CONTRA")
+        return base_status, tuple(reasons), profile
+    if _top12_contra_reject_enabled():
+        reasons.append(f"V3_TIER_{tier}_REJECTED_BY_COINBASE_TOP12_CONTRA")
+        return REJECTED, tuple(reasons), profile
+    return base_status, tuple(reasons), profile
+
+
+def _apply_combined_contra_veto(
+    *,
+    tier: str,
+    side: str,
+    base_status: str,
+    base_reasons: tuple[str, ...],
+    base_profile: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> tuple[str, tuple[str, ...], dict[str, Any]]:
+    profile = {
+        **base_profile,
+        "combined_contra_reject_enabled": _combined_contra_reject_enabled(),
+        "coinbase_top250_deadband": _top250_deadband(),
+        "kraken_l3_deadband": _kraken_l3_deadband(),
+        "kraken_l3_hard_veto_enabled": _kraken_l3_hard_veto_enabled(),
+        "spot_net_notional_60s_contra_min": _spot_net_notional_60s_min(),
+        "kalshi_taker_yes_15s_contra_min": _kalshi_taker_yes_15s_min(),
+    }
+    reasons = list(base_reasons)
+    contra: list[str] = []
+    confirm: list[str] = []
+
+    top250_signal, top250_value = _depth_signal(
+        row,
+        "coinbase_l2_top_250_imbalance_notional",
+        _top250_deadband(),
+    )
+    profile["coinbase_top250_signal"] = top250_signal
+    profile["coinbase_top250_imbalance_notional"] = top250_value
+    if top250_signal == side:
+        confirm.append(f"V3_TIER_{tier}_CONFIRMED_COINBASE_TOP250_{side}")
+    elif top250_signal == _opposite(side):
+        contra.append(f"V3_TIER_{tier}_VETO_COINBASE_TOP250_{top250_signal}")
+
+    spot_flow = _num(row.get("spot_depth_trade_net_notional_60s"))
+    spot_flow_side = _flow_side(spot_flow, _spot_net_notional_60s_min())
+    profile["spot_net_notional_60s_side"] = spot_flow_side
+    profile["spot_net_notional_60s"] = spot_flow
+    if spot_flow_side == side:
+        confirm.append(f"V3_TIER_{tier}_CONFIRMED_SPOT_FLOW_60S_{side}")
+    elif spot_flow_side == _opposite(side):
+        contra.append(f"V3_TIER_{tier}_VETO_SPOT_FLOW_60S_{spot_flow_side}")
+
+    taker_yes = _num(row.get("kalshi_taker_net_yes_volume_15s"))
+    taker_side = _flow_side(taker_yes, _kalshi_taker_yes_15s_min())
+    profile["kalshi_taker_net_yes_15s_side"] = taker_side
+    profile["kalshi_taker_net_yes_volume_15s"] = taker_yes
+    if taker_side == side:
+        confirm.append(f"V3_TIER_{tier}_CONFIRMED_KALSHI_TAKER_15S_{side}")
+    elif taker_side == _opposite(side):
+        contra.append(f"V3_TIER_{tier}_VETO_KALSHI_TAKER_15S_{taker_side}")
+
+    kraken_signal, kraken_value = _depth_signal(
+        row,
+        "kraken_l3_depth_imbalance",
+        _kraken_l3_deadband(),
+    )
+    profile["kraken_l3_signal"] = kraken_signal
+    profile["kraken_l3_depth_imbalance"] = kraken_value
+    if kraken_signal == side:
+        confirm.append(f"V3_TIER_{tier}_CONFIRMED_KRAKEN_L3_{side}")
+    elif kraken_signal == _opposite(side):
+        code = f"V3_TIER_{tier}_WARN_KRAKEN_L3_{kraken_signal}"
+        if _kraken_l3_hard_veto_enabled():
+            code = f"V3_TIER_{tier}_VETO_KRAKEN_L3_{kraken_signal}"
+            contra.append(code)
+        else:
+            reasons.append(code)
+
+    reasons.extend(confirm)
+    if contra:
+        reasons.extend(contra)
+        reasons.append(f"V3_TIER_{tier}_REJECTED_BY_COMBINED_CONTRA")
+        if _combined_contra_reject_enabled():
+            return REJECTED, tuple(reasons), profile
+    return base_status, tuple(reasons), profile
+
+
 def confidence_tier_decision(
     row: Mapping[str, Any],
     *,
@@ -299,12 +771,29 @@ def confidence_tier_decision(
     ]
     for passed, reason in tier_a_checks:
         if passed:
+            status, reasons, profile = _apply_top12_confirmation(
+                tier=TIER_A,
+                side=side,
+                base_status=ACCEPTED,
+                base_reasons=("V3_TIER_A_STRICT_7_HIGH_CONFIDENCE", reason),
+                base_profile={**base_profile, "tier": TIER_A},
+                row=row,
+            )
+            if status == ACCEPTED:
+                status, reasons, profile = _apply_combined_contra_veto(
+                    tier=TIER_A,
+                    side=side,
+                    base_status=status,
+                    base_reasons=reasons,
+                    base_profile=profile,
+                    row=row,
+                )
             return BotDecision(
                 BOT_CONFIDENCE_TIER,
-                ACCEPTED,
-                ("V3_TIER_A_STRICT_7_HIGH_CONFIDENCE", reason),
+                status,
+                reasons,
                 tier=TIER_A,
-                threshold_profile={**base_profile, "tier": TIER_A},
+                threshold_profile=profile,
             )
 
     tier_b_checks: list[tuple[bool, str]] = [
@@ -327,12 +816,29 @@ def confidence_tier_decision(
     ]
     for passed, reason in tier_b_checks:
         if passed:
+            status, reasons, profile = _apply_top12_confirmation(
+                tier=TIER_B,
+                side=side,
+                base_status=ACCEPTED,
+                base_reasons=("V3_TIER_B_VOLUME_EXPANSION", reason),
+                base_profile={**base_profile, "tier": TIER_B},
+                row=row,
+            )
+            if status == ACCEPTED:
+                status, reasons, profile = _apply_combined_contra_veto(
+                    tier=TIER_B,
+                    side=side,
+                    base_status=status,
+                    base_reasons=reasons,
+                    base_profile=profile,
+                    row=row,
+                )
             return BotDecision(
                 BOT_CONFIDENCE_TIER,
-                ACCEPTED,
-                ("V3_TIER_B_VOLUME_EXPANSION", reason),
+                status,
+                reasons,
                 tier=TIER_B,
-                threshold_profile={**base_profile, "tier": TIER_B},
+                threshold_profile=profile,
             )
 
     text = _source_text(row)
@@ -364,12 +870,20 @@ def confidence_tier_decision(
     ]
     for passed, reason in tier_c_checks:
         if passed:
+            status, reasons, profile = _apply_top12_confirmation(
+                tier=TIER_C,
+                side=side,
+                base_status=RESEARCH_ONLY,
+                base_reasons=("V3_TIER_C_RESEARCH_ONLY", reason),
+                base_profile={**base_profile, "tier": TIER_C, "research_only": True},
+                row=row,
+            )
             return BotDecision(
                 BOT_CONFIDENCE_TIER,
-                RESEARCH_ONLY,
-                ("V3_TIER_C_RESEARCH_ONLY", reason),
+                status,
+                reasons,
                 tier=TIER_C,
-                threshold_profile={**base_profile, "tier": TIER_C, "research_only": True},
+                threshold_profile=profile,
             )
 
     reason = "V3_CONFIDENCE_TIER_NO_MATCH"
@@ -725,6 +1239,8 @@ def morefire_btc_confirmed_decision(
     model_yes = _num(ctx.get("btc_model_yes_probability"))
     cal_yes = _num(ctx.get("btc_calibrated_yes_probability"))
     market_yes = _num(ctx.get("btc_market_implied_yes_probability"))
+    local = _local_confirmation_profile(row, "YES")
+    local_contra = int(local.get("local_contradiction_score") or 0) >= 2
 
     reasons: list[str] = []
     if not ctx.get("btc_context_available"):
@@ -740,15 +1256,21 @@ def morefire_btc_confirmed_decision(
 
     contra = False
     if dominant == "NO":
-        contra = True
-        reasons.append("BTC_DOMINANT_SIDE_NO")
+        reasons.append("BTC_DOMINANT_SIDE_NO_WARNING")
+        if local_contra:
+            contra = True
+            reasons.append("BTC_DOMINANT_SIDE_NO_WITH_LOCAL_CONTRA")
     if model_side == "NO" and (
         (cal_yes is not None and cal_yes < 0.48)
         or (model_yes is not None and model_yes < 0.48)
         or (market_yes is not None and market_yes < 0.48)
     ):
-        contra = True
-        reasons.append("BTC_MODEL_MARKET_CONTRA")
+        reasons.append("BTC_MODEL_MARKET_CONTRA_WARNING")
+        if local_contra:
+            contra = True
+            reasons.append("BTC_MODEL_MARKET_CONTRA_WITH_LOCAL_CONTRA")
+    if local_contra:
+        reasons.append("LOCAL_DEPTH_FLOW_CONTRA")
 
     if depth is not None and depth >= 1225.0 and pressure is not None and pressure >= 0.0 and not contra:
         return BotDecision(
@@ -768,6 +1290,352 @@ def morefire_btc_confirmed_decision(
     )
 
 
+def hvf_depth_flow_wrapper_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision | None:
+    """Primary V3 alert-owner for HVF rows.
+
+    HVF stays as the source generator/control ledger. This wrapper decides what
+    reaches the V3 Telegram channel and what remains shadow/research tracking.
+    """
+    if not _hvf_wrapper_enabled() or source_system != "high_vol_flip":
+        return None
+    rule = source_rule(row)
+    kind = str(row.get("record_kind") or "")
+    side = source_side(row)
+    thresholds = {
+        "spot_net_notional_60s_contra_min": _spot_net_notional_60s_min(),
+        "kalshi_taker_yes_15s_crowd_min": _kalshi_taker_yes_15s_min(),
+        "coinbase_top12_deadband": _top12_deadband(),
+        "coinbase_top60_deadband": _top60_deadband(),
+        "coinbase_top250_deadband": _top250_deadband(),
+        "morefire_l2_alignment_enabled": _hvf_morefire_l2_alignment_enabled(),
+        "own_strong_top12_recovery_enabled": _hvf_own_strong_top12_recovery_enabled(),
+        "own_strong_top12_recovery_entry_max": _hvf_own_strong_recovery_entry_max(),
+        "morefire_missing_required_data_research_only": _hvf_wrapper_research_on_missing(),
+        "own_strong_spot60_contra_research_only": True,
+        "top_depth_mode": "top250_hard_morefire_top12_recovery_own_strong",
+        "provisional": True,
+        "paper_only": True,
+    }
+    base_profile = {
+        **thresholds,
+        "source_rule": rule,
+        "record_kind": kind,
+        "side": side,
+    }
+    if side not in {"YES", "NO"}:
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            REJECTED,
+            ("HVF_WRAPPER_INVALID_SIDE",),
+            threshold_profile=base_profile,
+        )
+
+    spot60 = _num(row.get("spot_depth_trade_net_notional_60s"))
+    taker_net_yes = _num(row.get("kalshi_taker_net_yes_volume_15s"))
+    selected_ratio = _num(row.get("selected_depth_ratio"))
+    spot60_side = _flow_side(spot60, _spot_net_notional_60s_min())
+    taker_side = _flow_side(taker_net_yes, _kalshi_taker_yes_15s_min())
+    top12_signal, top12_imbalance = _depth_signal(
+        row,
+        "coinbase_l2_top_12_imbalance_notional",
+        _top12_deadband(),
+    )
+    top60_signal, top60_imbalance = _depth_signal(
+        row,
+        "coinbase_l2_top_60_imbalance_notional",
+        _top60_deadband(),
+    )
+    top250_signal, top250_imbalance = _depth_signal(
+        row,
+        "coinbase_l2_top_250_imbalance_notional",
+        _top250_deadband(),
+    )
+    profile = {
+        **base_profile,
+        "spot_net_notional_60s": spot60,
+        "spot_net_notional_60s_side": spot60_side,
+        "kalshi_taker_net_yes_volume_15s": taker_net_yes,
+        "kalshi_taker_net_yes_15s_side": taker_side,
+        "selected_depth_ratio": selected_ratio,
+        "coinbase_top12_signal": top12_signal,
+        "coinbase_top12_imbalance_notional": top12_imbalance,
+        "coinbase_top60_signal": top60_signal,
+        "coinbase_top60_imbalance_notional": top60_imbalance,
+        "coinbase_top250_signal": top250_signal,
+        "coinbase_top250_imbalance_notional": top250_imbalance,
+    }
+
+    is_morefire = rule == "HVF_MORE_FIRE_STRICT" or kind == "MORE_FIRE_STRICT_ALERT"
+    if is_morefire:
+        reasons = ["HVF_WRAPPER_MOREFIRE_DEPTH_FLOW_EVAL"]
+        rejected = False
+        if side != "YES":
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                REJECTED,
+                ("HVF_WRAPPER_MOREFIRE_SIDE_NOT_YES",),
+                threshold_profile=profile,
+            )
+        if spot60_side == "NO":
+            reasons.append("HVF_WRAPPER_MOREFIRE_REJECT_SPOT60_NO")
+            rejected = True
+        if taker_side == "YES":
+            reasons.append("HVF_WRAPPER_MOREFIRE_WARN_KALSHI_TAKER_YES_CROWD")
+        elif taker_side == "NO":
+            reasons.append("HVF_WRAPPER_MOREFIRE_WARN_KALSHI_TAKER_NO_FLOW")
+        if _hvf_morefire_l2_alignment_enabled():
+            if top250_signal is None:
+                reasons.append("HVF_WRAPPER_MOREFIRE_MISSING_COINBASE_TOP250")
+            elif top250_signal == _opposite(side):
+                reasons.append(f"HVF_WRAPPER_MOREFIRE_REJECT_COINBASE_TOP250_{top250_signal}")
+                rejected = True
+            if top12_signal is None:
+                reasons.append("HVF_WRAPPER_MOREFIRE_MISSING_COINBASE_TOP12")
+            elif top12_signal == _opposite(side):
+                reasons.append(f"HVF_WRAPPER_MOREFIRE_RESEARCH_COINBASE_TOP12_{top12_signal}")
+            if top60_signal is None:
+                reasons.append("HVF_WRAPPER_MOREFIRE_MISSING_COINBASE_TOP60")
+            elif top60_signal == _opposite(side):
+                reasons.append(f"HVF_WRAPPER_MOREFIRE_RESEARCH_COINBASE_TOP60_{top60_signal}")
+        if rejected:
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                REJECTED,
+                tuple(reasons),
+                threshold_profile=profile,
+            )
+
+        missing: list[str] = []
+        if selected_ratio is None:
+            missing.append("HVF_WRAPPER_MOREFIRE_MISSING_SELECTED_DEPTH_RATIO")
+        if spot60 is None:
+            missing.append("HVF_WRAPPER_MOREFIRE_MISSING_SPOT60_FLOW")
+        if taker_net_yes is None:
+            missing.append("HVF_WRAPPER_MOREFIRE_MISSING_KALSHI_TAKER_FLOW")
+        if _hvf_morefire_l2_alignment_enabled():
+            if top250_signal is None:
+                missing.append("HVF_WRAPPER_MOREFIRE_MISSING_TOP250_ALIGNMENT")
+            if top12_signal is None:
+                missing.append("HVF_WRAPPER_MOREFIRE_MISSING_TOP12_ALIGNMENT")
+            if top60_signal is None:
+                missing.append("HVF_WRAPPER_MOREFIRE_MISSING_TOP60_ALIGNMENT")
+            if top12_signal == _opposite(side) or top60_signal == _opposite(side):
+                return BotDecision(
+                    BOT_HVF_DEPTH_FLOW,
+                    RESEARCH_ONLY,
+                    tuple(reasons + ["HVF_WRAPPER_MOREFIRE_RESEARCH_ONLY_SHALLOW_L2_CONTRA"]),
+                    threshold_profile=profile,
+                )
+        if missing and _hvf_wrapper_research_on_missing():
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                RESEARCH_ONLY,
+                tuple(reasons + missing + ["HVF_WRAPPER_MOREFIRE_RESEARCH_ONLY_MISSING_DATA"]),
+                threshold_profile=profile,
+            )
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            ACCEPTED,
+            tuple(reasons + ["HVF_WRAPPER_MOREFIRE_ACCEPT_NO_SPOT_TAKER_CONTRA"]),
+            threshold_profile=profile,
+        )
+
+    if rule == "HVF_OWN_STRONG_SELECTED":
+        reasons = ["HVF_WRAPPER_OWN_STRONG_SELECTED_EVAL"]
+        if spot60_side == _opposite(side):
+            ask = _entry_ask(row)
+            if (
+                _hvf_own_strong_top12_recovery_enabled()
+                and top12_signal == side
+                and ask is not None
+                and ask <= _hvf_own_strong_recovery_entry_max()
+            ):
+                return BotDecision(
+                    BOT_HVF_DEPTH_FLOW,
+                    ACCEPTED,
+                    tuple(
+                        reasons
+                        + [
+                            f"HVF_WRAPPER_OWN_STRONG_SPOT60_CONTRA_{spot60_side}",
+                            f"HVF_WRAPPER_OWN_STRONG_ACCEPT_TOP12_RECOVERY_{side}",
+                        ]
+                    ),
+                    threshold_profile=profile,
+                )
+            recovery_reason = "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_NOT_CONFIRMED"
+            if ask is not None and ask > _hvf_own_strong_recovery_entry_max():
+                recovery_reason = "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_ENTRY_TOO_EXPENSIVE"
+            elif top12_signal is None:
+                recovery_reason = "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_TOP12_MISSING"
+            elif top12_signal != side:
+                recovery_reason = f"HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_TOP12_{top12_signal}"
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                RESEARCH_ONLY,
+                tuple(
+                    reasons
+                    + [
+                        f"HVF_WRAPPER_OWN_STRONG_RESEARCH_SPOT60_CONTRA_{spot60_side}",
+                        recovery_reason,
+                    ]
+                ),
+                threshold_profile=profile,
+            )
+        if taker_side == _opposite(side):
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                RESEARCH_ONLY,
+                tuple(reasons + [f"HVF_WRAPPER_OWN_STRONG_RESEARCH_TAKER_CONTRA_{taker_side}"]),
+                threshold_profile=profile,
+            )
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            ACCEPTED,
+            tuple(reasons + ["HVF_WRAPPER_OWN_STRONG_ACCEPT_SOURCE_STRENGTH"]),
+            threshold_profile=profile,
+        )
+
+    if rule == "HVF_OWN_NO_FLASH":
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            ACCEPTED,
+            ("HVF_WRAPPER_OWN_NO_FLASH_ACCEPT_NO_HARD_DEPTH_VETO",),
+            threshold_profile=profile,
+        )
+
+    if rule == "HVF_BTC_FOLLOW_EXTREME":
+        if side == "NO":
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                ACCEPTED,
+                ("HVF_WRAPPER_BTC_FOLLOW_NO_ACCEPT_PROVISIONAL",),
+                threshold_profile=profile,
+            )
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            RESEARCH_ONLY,
+            ("HVF_WRAPPER_BTC_FOLLOW_YES_RESEARCH_WEAK_BASELINE",),
+            threshold_profile=profile,
+        )
+
+    if rule in {
+        "HVF_OWN_EARLY_FLIP",
+        "HVF_HYPE_BULLISH_FLASH",
+        "HVF_HYPE_EARLY_BULLISH_FLIP",
+        "HVF_BTC_DIVERGENCE_ACCEL_WATCH",
+    }:
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            RESEARCH_ONLY,
+            (f"HVF_WRAPPER_{rule}_RESEARCH_SMALL_SAMPLE",),
+            threshold_profile=profile,
+        )
+
+    return BotDecision(
+        BOT_HVF_DEPTH_FLOW,
+        RESEARCH_ONLY,
+        ("HVF_WRAPPER_UNKNOWN_RULE_RESEARCH_ONLY",),
+        threshold_profile=profile,
+    )
+
+
+def btc_regime_context_probe_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision | None:
+    """Record-only BTC lead-market probe for alt rows.
+
+    This intentionally never returns ACCEPTED/REJECTED. It labels what the BTC
+    regime would have done so we can collect out-of-sample evidence before
+    changing live alert routing.
+    """
+    if not _btc_regime_testing_enabled() or _asset(row) == "BTC":
+        return None
+    side = source_side(row)
+    if side not in {"YES", "NO"}:
+        return None
+    regime = _btc_regime(row)
+    agreement = _btc_regime_agreement(row, side)
+    local = _local_confirmation_profile(row, side)
+    local_strong = bool(local.get("local_strong"))
+    asset = _asset(row)
+    rule = source_rule(row)
+    reasons: list[str] = ["BTC_REGIME_PROBE_RESEARCH_ONLY"]
+    profile = {
+        "paper_only": True,
+        "provisional": True,
+        "source_system": source_system,
+        "source_rule": rule,
+        "side": side,
+        "asset": asset,
+        "btc_regime": regime,
+        "btc_regime_agreement": agreement,
+        "btc_regime_vote_yes": _num(row.get("btc_regime_vote_yes")),
+        "btc_regime_vote_no": _num(row.get("btc_regime_vote_no")),
+        "btc_regime_vote_detail": row.get("btc_regime_vote_detail"),
+        **local,
+    }
+    if regime is None:
+        reasons.append("BTC_REGIME_MISSING")
+        reasons.append("BTC_REGIME_WOULD_KEEP_RESEARCH_ONLY_MISSING")
+    else:
+        reasons.append(f"BTC_REGIME_{regime}")
+        if agreement:
+            reasons.append(f"BTC_REGIME_{agreement}")
+        if regime == "CHOP":
+            if local_strong:
+                reasons.append("BTC_REGIME_CHOP_LOCAL_STRONG_WOULD_KEEP")
+            else:
+                reasons.append("BTC_REGIME_CHOP_WOULD_DOWNGRADE_RESEARCH_ONLY")
+        elif agreement == "AGREES":
+            reasons.append("BTC_REGIME_WOULD_BOOST")
+        elif agreement == "CONTRADICTS":
+            if asset in {"ETH", "HYPE"}:
+                reasons.append(f"BTC_REGIME_{asset}_CONTRA_WARNING_ONLY")
+            elif asset == "DOGE":
+                reasons.append("BTC_REGIME_DOGE_CONTRA_WOULD_DOWNGRADE_RESEARCH_ONLY")
+            elif asset == "BNB":
+                reasons.append("BTC_REGIME_BNB_CONTRA_NO_HARD_VETO_KEEP_BNB_LOCAL_RULES_DOMINANT")
+            else:
+                reasons.append("BTC_REGIME_CONTRA_WOULD_WARN")
+
+    if asset == "DOGE":
+        if regime == "CHOP":
+            reasons.append("BTC_REGIME_DOGE_REQUIRES_NON_CHOP_NOT_MET")
+        elif agreement == "AGREES":
+            reasons.append("BTC_REGIME_DOGE_PREFERRED_AGREEMENT_MET")
+        elif agreement == "CONTRADICTS":
+            reasons.append("BTC_REGIME_DOGE_PREFERRED_AGREEMENT_NOT_MET")
+    elif asset == "BNB":
+        if agreement == "AGREES":
+            reasons.append("BTC_REGIME_BNB_AGREEMENT_BOOST_ONLY")
+        reasons.append("BTC_REGIME_BNB_SPOT_KALSHI_VETO_REMAINS_PRIMARY")
+    elif asset in {"ETH", "HYPE"} and agreement == "CONTRADICTS":
+        reasons.append(f"BTC_REGIME_{asset}_NO_HARD_VETO")
+
+    if rule == "HVF_MORE_FIRE_STRICT":
+        local_contra = int(local.get("local_contradiction_score") or 0) >= 2
+        if agreement == "CONTRADICTS" and local_contra:
+            reasons.append("BTC_REGIME_MOREFIRE_CONTRA_WITH_LOCAL_CONTRA_WOULD_DOWNGRADE")
+        elif agreement == "CONTRADICTS":
+            reasons.append("BTC_REGIME_MOREFIRE_CONTRA_WARNING_ONLY")
+        else:
+            reasons.append("BTC_REGIME_MOREFIRE_BTC_AGREEMENT_NOT_MANDATORY_IN_TEST")
+
+    return BotDecision(
+        BOT_BTC_REGIME,
+        RESEARCH_ONLY,
+        tuple(dict.fromkeys(reasons)),
+        threshold_profile=profile,
+        btc_context={key: row.get(key) for key in BTC_REGIME_KEYS if row.get(key) is not None},
+    )
+
+
 def decisions_for_row(
     row: Mapping[str, Any],
     *,
@@ -779,6 +1647,9 @@ def decisions_for_row(
         baseline_decision(row),
         confidence_tier_decision(row, source_system=source_system),
     ]
+    btc_probe = btc_regime_context_probe_decision(row, source_system=source_system)
+    if btc_probe is not None:
+        decisions.append(btc_probe)
     bnb = bnb_no_confirmation_decision(row)
     if bnb is not None:
         decisions.append(bnb)
@@ -793,6 +1664,9 @@ def decisions_for_row(
     if hype is not None:
         decisions.append(hype)
     if source_system == "high_vol_flip":
+        hvf_wrapper = hvf_depth_flow_wrapper_decision(row, source_system=source_system)
+        if hvf_wrapper is not None:
+            decisions.append(hvf_wrapper)
         morefire = morefire_btc_confirmed_decision(row, btc_context)
         if morefire is not None:
             decisions.append(morefire)

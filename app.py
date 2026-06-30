@@ -1313,6 +1313,24 @@ def health():
     except Exception:
         spot_depth_status = {"enabled": False}
 
+    try:
+        from spot_l3 import spot_l3_health
+        spot_l3_status = spot_l3_health()
+    except Exception:
+        spot_l3_status = {"enabled": False}
+
+    try:
+        from coinbase_adv_l2 import coinbase_adv_l2_health
+        coinbase_adv_l2_status = coinbase_adv_l2_health()
+    except Exception:
+        coinbase_adv_l2_status = {"enabled": False}
+
+    try:
+        from kraken_l3 import kraken_l3_health
+        kraken_l3_status = kraken_l3_health()
+    except Exception:
+        kraken_l3_status = {"enabled": False}
+
     deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
 
     # Surface learning-ledger health at the top level so silent learning-layer
@@ -1365,6 +1383,9 @@ def health():
         "websocket_book_ages": wsh.get("book_ages"),
         "spot_ws": spot_ws_status,
         "spot_depth": spot_depth_status,
+        "spot_l3": spot_l3_status,
+        "coinbase_adv_l2": coinbase_adv_l2_status,
+        "kraken_l3": kraken_l3_status,
         "cycle_watchdog": cycle_watchdog.health(),
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
@@ -1396,6 +1417,21 @@ def _start_refresh():
                 start_spot_depth()
             except Exception as exc:
                 logger.warning("Spot depth collector did not start: %s", exc)
+            try:
+                from spot_l3 import start_spot_l3
+                start_spot_l3()
+            except Exception as exc:
+                logger.warning("Coinbase L3 collector did not start: %s", exc)
+            try:
+                from coinbase_adv_l2 import start_coinbase_adv_l2
+                start_coinbase_adv_l2()
+            except Exception as exc:
+                logger.warning("Coinbase Advanced L2 collector did not start: %s", exc)
+            try:
+                from kraken_l3 import start_kraken_l3
+                start_kraken_l3()
+            except Exception as exc:
+                logger.warning("Kraken L3 collector did not start: %s", exc)
             threading.Thread(target=refresh_loop, daemon=True).start()
             _refresh_started = True
             logger.info("Refresh loop started")
