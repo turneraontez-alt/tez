@@ -21,8 +21,9 @@ from .telegram import HighVolFlipTelegram
 
 logger = logging.getLogger("high_vol_flip.runner")
 
+_MORE_FIRE_STRICT_PRIORITY = 760.0
+
 _RULE_PRIORITY = {
-    "HVF_MORE_FIRE_STRICT": 760.0,
     "HVF_HYPE_EARLY_BULLISH_FLIP": 700.0,
     "HVF_OWN_EARLY_FLIP": 680.0,
     "HVF_BTC_EARLY_FOLLOW_LAG": 650.0,
@@ -156,7 +157,11 @@ class HighVolFlipRunner:
                     context_btc = btc or prev_btc
                     if context_btc is not None:
                         row["_btc_context"] = dict(context_btc)
-                    if row.get("record_kind") == RECORD_EARLY_FLIP_WATCH:
+                    if self._mute_more_fire_row(row):
+                        row["record_kind"] = "MORE_FIRE_STRICT_RESEARCH"
+                        row["delivery_status"] = "RESEARCH"
+                        watch_rows.append(row)
+                    elif row.get("record_kind") == RECORD_EARLY_FLIP_WATCH:
                         watch_rows.append(row)
                     else:
                         rows.append(row)
@@ -176,8 +181,18 @@ class HighVolFlipRunner:
                             "updated_at": now,
                         }
 
-    @staticmethod
-    def _rank_row(row: Mapping[str, Any]) -> float:
+    def _mute_more_fire_row(self, row: Mapping[str, Any]) -> bool:
+        return (
+            bool(getattr(self.config, "mute_more_fire", False))
+            and str(row.get("rule_code") or "") == "HVF_MORE_FIRE_STRICT"
+        )
+
+    def _rule_priority(self, rule: str) -> float:
+        if rule == "HVF_MORE_FIRE_STRICT" and not getattr(self.config, "mute_more_fire", False):
+            return _MORE_FIRE_STRICT_PRIORITY
+        return _RULE_PRIORITY.get(rule, 0.0)
+
+    def _rank_row(self, row: Mapping[str, Any]) -> float:
         rule = str(row.get("rule_code") or "")
         side = str(row.get("predicted_outcome") or "").upper()
         model_yes = row.get("model_yes_probability")
@@ -197,7 +212,7 @@ class HighVolFlipRunner:
         early_price_bonus = max(0.0, 20.0 - abs(ask - 58.0))
         expensive_penalty = max(0.0, ask - 65.0) * 2.5
         return (
-            _RULE_PRIORITY.get(rule, 0.0)
+            self._rule_priority(rule)
             + side_prob * 100.0
             + early_price_bonus
             - spread * 4.0
