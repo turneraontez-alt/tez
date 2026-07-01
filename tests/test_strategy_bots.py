@@ -772,7 +772,8 @@ def test_hvf_depth_flow_wrapper_gates_eth_12m_own_strong():
             predicted_outcome="YES",
             rule_code="HVF_OWN_STRONG_SELECTED",
             record_kind="HIGH_VOL_FLIP_ALERT",
-            spot_depth_trade_net_notional_60s=0.0,
+            spot_depth_trade_net_notional_60s=-900.0,
+            spot_depth_trade_net_notional_15s=40.0,
             kalshi_taker_net_yes_volume_15s=0.0,
         ),
         source_system="high_vol_flip",
@@ -781,6 +782,9 @@ def test_hvf_depth_flow_wrapper_gates_eth_12m_own_strong():
     assert d is not None
     assert d.decision_status == RESEARCH_ONLY
     assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_12M_RESEARCH_ONLY" in d.reason_codes
+    assert "V3_HVF_OWN_STRONG_BACKGROUND_RESEARCH_ONLY" in d.reason_codes
+    assert "HVF_REPAIR_ETH_12M_SPOT60_CONTRA" in d.reason_codes
+    assert "HVF_REPAIR_ETH_12M_SPOT15_AGREE" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_gates_sol_12m_no_own_strong():
@@ -794,7 +798,7 @@ def test_hvf_depth_flow_wrapper_gates_sol_12m_no_own_strong():
             rule_code="HVF_OWN_STRONG_SELECTED",
             record_kind="HIGH_VOL_FLIP_ALERT",
             spot_depth_trade_net_notional_60s=0.0,
-            kalshi_taker_net_yes_volume_15s=0.0,
+            kalshi_taker_net_yes_volume_15s=300.0,
         ),
         source_system="high_vol_flip",
     )
@@ -802,6 +806,31 @@ def test_hvf_depth_flow_wrapper_gates_sol_12m_no_own_strong():
     assert d is not None
     assert d.decision_status == RESEARCH_ONLY
     assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_SOL_12M_NO_RESEARCH_ONLY" in d.reason_codes
+    assert "V3_HVF_OWN_STRONG_BACKGROUND_RESEARCH_ONLY" in d.reason_codes
+    assert "HVF_REPAIR_SOL_12M_NO_TAKER_CONTRA" in d.reason_codes
+    assert "HVF_REPAIR_SOL_12M_NO_REPEAT_WINDOW_UNAVAILABLE" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_buckets_sol_12m_no_taker_not_contra():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="SOL",
+            ticker="KXSOL-12M-NO-OWN-STRONG-NOT-CONTRA",
+            interval="12M",
+            predicted_side=None,
+            predicted_outcome="NO",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_trade_net_notional_60s=0.0,
+            kalshi_taker_net_yes_volume_15s=-300.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "HVF_REPAIR_SOL_12M_NO_TAKER_NOT_CONTRA" in d.reason_codes
+    assert "HVF_REPAIR_SOL_12M_NO_TAKER_AGREE" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_allows_eth_9m_yes_own_strong():
@@ -1680,3 +1709,45 @@ def test_hvf_wrapper_only_mode_still_sends_hvf_depth_flow_alert(tmp_path, monkey
     assert wrapper["notification_status"] == "SENT"
     assert len(runtime._telegram.sent) == 1
     assert "V3 HVF DEPTH/FLOW PICK" in runtime._telegram.sent[0]
+
+
+def test_hvf_interval_gated_rows_stay_background(tmp_path, monkeypatch):
+    class _Telegram:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+            return {"delivered": True, "muted": False, "message_id": len(self.sent), "error": None}
+
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", "true")
+    monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
+    runtime._ledger = None
+    runtime._telegram = _Telegram()
+
+    row = _row(
+        asset="ETH",
+        ticker="KXETH-HVF-BACKGROUND",
+        interval="12M",
+        predicted_outcome="YES",
+        predicted_side=None,
+        rule_code="HVF_OWN_STRONG_SELECTED",
+        record_kind="HIGH_VOL_FLIP_ALERT",
+        model_version="high-vol-flip-test",
+        spot_depth_trade_net_notional_60s=-900.0,
+        spot_depth_trade_net_notional_15s=40.0,
+        kalshi_taker_net_yes_volume_15s=0.0,
+    )
+
+    assert runtime.owns_source_notification(row, source_system="high_vol_flip") is True
+    assert runtime.record_source_row(row, source_system="high_vol_flip") == 4
+    led = runtime.get_ledger()
+    assert led is not None
+    wrapper = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_HVF_DEPTH_FLOW)
+    assert wrapper["decision_status"] == RESEARCH_ONLY
+    assert wrapper["notification_status"] is None
+    assert "V3_HVF_OWN_STRONG_BACKGROUND_RESEARCH_ONLY" in wrapper["reason_codes"]
+    assert runtime._telegram.sent == []
