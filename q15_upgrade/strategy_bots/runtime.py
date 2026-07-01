@@ -6,6 +6,8 @@ import logging
 import os
 from typing import Any, Mapping
 
+import cycle_watchdog
+
 from .btc_regime import enrich_btc_regime
 from .kraken_l3_depth import enrich_kraken_l3
 from .l2_depth import enrich_coinbase_l2
@@ -184,6 +186,29 @@ def _with_empirical_delivery_guard(decision: BotDecision, row: Mapping[str, Any]
     )
 
 
+def _with_feed_degraded_stamp(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Stamp outgoing Telegram text when a required data feed is stale."""
+    out = dict(row)
+    try:
+        degraded = cycle_watchdog.degraded_feeds()
+    except Exception:  # noqa: BLE001 - alert stamping must never block delivery
+        logger.debug("v3 degraded-feed stamp skipped", exc_info=True)
+        return out
+    if not degraded:
+        return out
+    out["feed_degraded"] = True
+    out["degraded_feeds"] = ",".join(degraded)
+    existing = str(out.get("reason_codes") or "")
+    codes = [code.strip() for code in existing.split(",") if code.strip()]
+    for feed in degraded:
+        suffix = "".join(ch if ch.isalnum() else "_" for ch in feed.upper()).strip("_")
+        code = f"V3_DEGRADED_FEED_{suffix}"
+        if code not in codes:
+            codes.append(code)
+    out["reason_codes"] = ",".join(codes)
+    return out
+
+
 def record_source_row(
     row: Mapping[str, Any],
     *,
@@ -291,7 +316,7 @@ def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision)
     ):
         return
     try:
-        result = get_telegram().send(build_v3_alert(recorded))
+        result = get_telegram().send(build_v3_alert(_with_feed_degraded_stamp(recorded)))
         if result.get("delivered"):
             status, mid = "SENT", result.get("message_id")
         elif result.get("muted"):

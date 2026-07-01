@@ -4,6 +4,8 @@ import json
 import math
 import sqlite3
 
+import cycle_watchdog
+
 from q15_upgrade.strategy_bots import runtime
 from q15_upgrade.strategy_bots.ledger import StrategyBotLedger, net_pnl_cents
 from q15_upgrade.strategy_bots.rules import (
@@ -1642,6 +1644,59 @@ def test_v3_tier_b_alert_is_labeled_volume_expansion():
     assert "Tier: B" in text
     assert "Mode: paper/research tracking" in text
     assert "n/a" not in text
+
+
+def test_v3_alert_stamps_degraded_when_feed_watchdog_stale(tmp_path, monkeypatch):
+    class _Telegram:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        def send(self, text):
+            self.sent.append(text)
+            return {"delivered": True, "muted": False, "message_id": 123, "error": None}
+
+    cycle_watchdog.reset()
+    cycle_watchdog.observe_feed_ages({"coinbase_adv_l2": 301.0}, now=1000.0)
+    class _Ledger:
+        def __init__(self, recorded):
+            self.recorded = recorded
+            self.marked = None
+
+        def row_by_id(self, row_id):
+            return self.recorded
+
+        def mark_notification(self, row_id, *, status, message_id, error):
+            self.marked = (row_id, status, message_id, error)
+
+    runtime._telegram = _Telegram()
+
+    row = _row(
+        asset="BTC",
+        ticker="KXBTC-DEGRADED",
+        predicted_side="NO",
+        entry_ask_cents=63.0,
+        coinbase_l2_status="ok",
+        coinbase_l2_top_12_imbalance_notional=-0.20,
+        reason_codes="EXPENSIVE_NO_ADMIT",
+    )
+    decision = confidence_tier_decision(row, source_system="ultoim_v2")
+    recorded = {
+        **row,
+        "bot_name": decision.bot_name,
+        "decision_status": decision.decision_status,
+        "tier": decision.tier,
+        "source_rule": "EXPENSIVE_NO_ADMIT",
+        "reason_codes": ",".join(decision.reason_codes),
+    }
+    ledger = _Ledger(recorded)
+
+    runtime._maybe_notify(ledger, 1, decision)
+    text = "\n".join(runtime._telegram.sent)
+    assert "<b>DEGRADED</b>" in text
+    assert "coinbase_adv_l2" in text
+    assert "V3_DEGRADED_FEED_COINBASE_ADV_L2" in text
+    assert ledger.marked == (1, "SENT", 123, None)
+    cycle_watchdog.reset()
 
 
 def test_tier_c_research_notification_requires_flag(tmp_path, monkeypatch):

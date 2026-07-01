@@ -14,6 +14,10 @@ _ENV = [
     "Q15_WATCHDOG_ALERT_SECONDS",
     "Q15_WATCHDOG_ALERT_WARMUP_SECONDS",
     "Q15_WATCHDOG_ALERT_COOLDOWN_SECONDS",
+    "Q15_FEED_WATCHDOG_ENABLED",
+    "Q15_FEED_WATCHDOG_STALE_SECONDS",
+    "Q15_FEED_WATCHDOG_GRACE_SECONDS",
+    "Q15_FEED_WATCHDOG_COOLDOWN_SECONDS",
 ]
 
 
@@ -68,6 +72,36 @@ class TestWatchdogPager(unittest.TestCase):
         os.environ["Q15_WATCHDOG_ALERT_SECONDS"] = "40"
         self._cycle(30.0)  # over the 20s default, but under the custom 40s
         self.assertIsNone(cw.alert_message(now=1000.0, uptime_seconds=300.0))
+
+    def test_feed_watchdog_pages_once_after_grace(self):
+        cw.observe_feed_ages({"coinbase_adv_l2": 301.0}, now=1000.0)
+        self.assertIsNone(cw.feed_alert_message(now=1000.0))
+
+        cw.observe_feed_ages({"coinbase_adv_l2": 900.0}, now=1601.0)
+        msg = cw.feed_alert_message(now=1601.0)
+        self.assertIsNotNone(msg)
+        self.assertIn("Q15 FEED WATCHDOG", msg)
+        self.assertIn("coinbase_adv_l2", msg)
+        self.assertNotIn("V9.5 CHECK", msg)
+        self.assertNotIn("ENTRY RECOMMENDED", msg)
+        self.assertNotIn("NO ENTRY YET", msg)
+
+        cw.observe_feed_ages({"coinbase_adv_l2": 1200.0}, now=2601.0)
+        self.assertIsNone(cw.feed_alert_message(now=2601.0))
+
+    def test_feed_watchdog_recovery_resets_episode(self):
+        cw.observe_feed_ages({"coinbase_adv_l2": 900.0}, now=1000.0)
+        cw.observe_feed_ages({"coinbase_adv_l2": 901.0}, now=1601.0)
+        self.assertIsNotNone(cw.feed_alert_message(now=1601.0))
+
+        cw.observe_feed_ages({"coinbase_adv_l2": 10.0}, now=1700.0)
+        health = cw.feed_health()["feeds"]["coinbase_adv_l2"]
+        self.assertFalse(health["stale"])
+
+        os.environ["Q15_FEED_WATCHDOG_COOLDOWN_SECONDS"] = "30"
+        cw.observe_feed_ages({"coinbase_adv_l2": 901.0}, now=2000.0)
+        cw.observe_feed_ages({"coinbase_adv_l2": 902.0}, now=2601.0)
+        self.assertIsNotNone(cw.feed_alert_message(now=2601.0))
 
 
 if __name__ == "__main__":

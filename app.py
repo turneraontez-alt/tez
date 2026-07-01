@@ -748,6 +748,15 @@ def refresh_loop(max_cycles=None):
             with state_lock:
                 snaps = dict(state)
             ws_health = market_data.health()
+            try:
+                from coinbase_adv_l2 import coinbase_adv_l2_health
+                _coinbase_l2_health = coinbase_adv_l2_health()
+                cycle_watchdog.observe_feed_ages(
+                    {"coinbase_adv_l2": _coinbase_l2_health.get("snapshot_age_seconds")},
+                    now=now,
+                )
+            except Exception:
+                logger.debug("coinbase L2 feed freshness monitor skipped", exc_info=True)
             global _last_cycle_ok, _last_learn
             try:
                 snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
@@ -850,6 +859,9 @@ def refresh_loop(max_cycles=None):
             page = cycle_watchdog.alert_message(now, now - SERVER_STARTED_AT)
             if page:
                 notifier.send(page)
+            feed_page = cycle_watchdog.feed_alert_message(now)
+            if feed_page:
+                notifier.send(feed_page)
         except Exception:
             logger.exception("watchdog pager failed")
         cycles += 1
@@ -1387,6 +1399,7 @@ def health():
         "coinbase_adv_l2": coinbase_adv_l2_status,
         "kraken_l3": kraken_l3_status,
         "cycle_watchdog": cycle_watchdog.health(),
+        "feed_watchdog": cycle_watchdog.feed_health(),
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
         "assets_tracked": len(snaps),

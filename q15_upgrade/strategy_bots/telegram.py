@@ -83,6 +83,13 @@ def _ratio_text(numerator: Any, denominator: Any) -> str | None:
     return _fmt(n / d)
 
 
+def _degraded_line(row: Mapping[str, Any]) -> str | None:
+    if not row.get("feed_degraded"):
+        return None
+    feeds = str(row.get("degraded_feeds") or "feed").replace(",", ", ")
+    return f"<b>DEGRADED</b>: stale feed freshness ({html.escape(feeds)})"
+
+
 def _bnb_action(row: Mapping[str, Any]) -> str:
     bot = str(row.get("bot_name") or "")
     status = str(row.get("decision_status") or "").upper()
@@ -112,6 +119,9 @@ def build_bnb_combined_alert(row: Mapping[str, Any]) -> str:
         f"Rule: {html.escape(str(row.get('source_rule') or 'UNKNOWN'))}",
         f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>",
     ]
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
     if row.get("entry_ask_cents") is not None or row.get("spread_cents") is not None:
         entry = _metric_parts(row, [
             ("ask", "entry_ask_cents", "c"),
@@ -183,6 +193,9 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
             f"{_fmt(row.get('spread_cents'), 'c')} spread"
         ),
     ]
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
     kalshi = _metric_parts(row, [
         ("depth", "depth_contracts", ""),
         ("NO bid depth", "no_bid_depth_contracts", ""),

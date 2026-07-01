@@ -186,6 +186,49 @@ def _has_key_file() -> bool:
         return False
 
 
+def _snapshot_age_health(db_path: str, products: Iterable[str], now: float) -> dict[str, Any]:
+    path = Path(db_path)
+    if not path.exists():
+        return {
+            "snapshot_age_seconds": None,
+            "latest_snapshot_age_seconds": None,
+            "snapshot_age_by_product_seconds": {},
+        }
+    try:
+        conn = sqlite3.connect(str(path), timeout=5.0)
+        try:
+            rows = conn.execute(
+                "SELECT product_id, MAX(created_at) AS latest_at "
+                "FROM coinbase_adv_l2_snapshots GROUP BY product_id"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return {
+            "snapshot_age_seconds": None,
+            "latest_snapshot_age_seconds": None,
+            "snapshot_age_by_product_seconds": {},
+            "snapshot_age_error": str(exc)[:200],
+        }
+    configured = {str(p).upper() for p in products}
+    ages: dict[str, float] = {}
+    for product_id, latest_at in rows:
+        product = str(product_id or "").upper()
+        if configured and product not in configured:
+            continue
+        try:
+            ts = float(latest_at)
+        except (TypeError, ValueError):
+            continue
+        age = max(0.0, now - ts)
+        ages[product] = round(age, 3)
+    return {
+        "snapshot_age_seconds": round(max(ages.values()), 3) if ages else None,
+        "latest_snapshot_age_seconds": round(min(ages.values()), 3) if ages else None,
+        "snapshot_age_by_product_seconds": ages,
+    }
+
+
 class CoinbaseAdvancedL2Collector:
     """Authenticated Advanced Trade L2 collector."""
 
@@ -218,6 +261,9 @@ class CoinbaseAdvancedL2Collector:
         self._last_prune_at = 0.0
         self._conn: sqlite3.Connection | None = None
         self._thread: threading.Thread | None = None
+        self._thread_started_at: float | None = None
+        self._thread_exited_at: float | None = None
+        self._thread_error: str | None = None
         self._stop = threading.Event()
 
     def start(self) -> None:
@@ -235,6 +281,9 @@ class CoinbaseAdvancedL2Collector:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._thread_started_at = time.time()
+        self._thread_exited_at = None
+        self._thread_error = None
         self._thread = threading.Thread(target=self._thread_main, name="coinbase-adv-l2", daemon=True)
         self._thread.start()
 
@@ -244,7 +293,8 @@ class CoinbaseAdvancedL2Collector:
     def health(self) -> dict[str, Any]:
         now = time.time()
         with self._lock:
-            return {
+            thread_alive = bool(self._thread and self._thread.is_alive())
+            info = {
                 "enabled": _enabled(),
                 "have_ws": _HAVE_WS,
                 "authenticated_key_loaded": _has_key_file(),
@@ -266,9 +316,17 @@ class CoinbaseAdvancedL2Collector:
                 "retention_days": self.retention_days,
                 "estimated_summary_rows_per_day": self._estimated_summary_rows_per_day(),
                 "estimated_summary_mb_per_day": self._estimated_summary_mb_per_day(),
+                "thread_alive": thread_alive,
+                "thread_started_at": self._thread_started_at,
+                "thread_exit_age_seconds": (
+                    round(now - self._thread_exited_at, 3) if self._thread_exited_at else None
+                ),
+                "thread_error": self._thread_error,
                 "last_error": dict(self._last_error),
                 "status": self._status_locked(),
             }
+        info.update(_snapshot_age_health(self.db_path, self.products, now))
+        return info
 
     def _status_locked(self) -> str:
         if not _enabled():
@@ -279,6 +337,8 @@ class CoinbaseAdvancedL2Collector:
             return "missing_or_bad_key_file"
         if self._connected:
             return "connected"
+        if self._thread_exited_at and not self._stop.is_set():
+            return "thread_exited"
         return "starting"
 
     def _estimated_summary_rows_per_day(self) -> int:
@@ -485,7 +545,15 @@ class CoinbaseAdvancedL2Collector:
         try:
             asyncio.run(self._run())
         except Exception as exc:  # pragma: no cover - thread guard
+            err = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._thread_error = err[:200]
+                self._last_error["thread"] = err[:200]
             logger.warning("Coinbase Advanced L2 thread exited: %s", exc)
+        finally:
+            with self._lock:
+                self._connected = False
+                self._thread_exited_at = time.time()
 
     async def _run(self) -> None:
         await asyncio.gather(self._provider_loop(), self._recorder_loop())
@@ -577,16 +645,19 @@ def start_coinbase_adv_l2() -> None:
 
 
 def coinbase_adv_l2_health() -> dict[str, Any]:
+    products = _configured_products()
+    db_path = _db_path()
     info = {
         "enabled": _enabled(),
         "have_ws": _HAVE_WS,
         "authenticated_key_loaded": _has_key_file(),
         "key_file": _key_file(),
-        "products": _configured_products(),
-        "db_path": _db_path(),
+        "products": products,
+        "db_path": db_path,
         "summary_levels": _summary_levels(),
         "retention_days": _retention_days(),
     }
+    info.update(_snapshot_age_health(db_path, products, time.time()))
     if not _enabled() or _feed is None:
         if _enabled() and not _has_key_file():
             info["status"] = "missing_or_bad_key_file"

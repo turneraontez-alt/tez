@@ -14,6 +14,28 @@ Tests:
   remaining failures are the pre-existing Windows SQLite temp-file cleanup issue. WSL/Docker are not
   available in this workspace, so a Linux full-suite green run remains blocked here.
 
+## Shipped THIS session - item 2: Coinbase L2 feed-age watchdog and V3 degraded stamp
+Added feed freshness state to `cycle_watchdog`: the refresh loop samples Coinbase Advanced L2 DB-backed
+snapshot age before V3 notification work, exposes `feed_watchdog` on `/api/health`, and sends one
+distinct Telegram page (`Q15 FEED WATCHDOG`, no checkpoint markers) after a feed is stale for 10 minutes
+over the 300s threshold. This is page-only; no auto-restart path was added.
+
+V3 Telegram alerts now get a send-time `DEGRADED` line plus `V3_DEGRADED_FEED_*` reason stamp when a
+feed is stale, without changing the recorded strategy-bot decision status or champion/ranking behavior.
+Coinbase L2 health now also reports DB snapshot ages even when the collector thread is absent, plus
+thread alive/exit/error diagnostics so a fatal `_thread_main` exit is visible instead of only logged.
+
+Diagnosis from the current local repo shell: `coinbase_adv_l2_health()` reports DB snapshots about
+`184445s` old and `authenticated_key_loaded=False` with the collector disabled in this shell. In the live
+app environment, if the flag is enabled but the key path is missing/bad, health should now make that state
+and stale DB age explicit; if the thread actually exits, `thread_error` and `thread_exit_age_seconds` will
+identify it.
+
+Tests:
+- Focused item 2 suite: `.venv\Scripts\python.exe -m pytest tests/test_cycle_watchdog.py tests/test_cycle_watchdog_pager.py tests/test_coinbase_adv_l2.py tests/test_strategy_bots.py -q` -> `92 passed`.
+- Full suite after item 2 on this Windows runner: `1486 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures are the same Windows SQLite temp-file cleanup blocker recorded above.
+
 Working notes so a fresh session resumes cheaply. See `CLAUDE.md` (architecture)
 and `SYNC.md` (Replit sync). Live app on Replit (`python3 app.py`). **The owner
 trades REAL money manually off the alerts**, so reliability + honest data

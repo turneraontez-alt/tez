@@ -13,6 +13,7 @@ decision, it only measures.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -55,8 +56,46 @@ def _blank_state() -> dict:
 _state = _blank_state()
 
 
+def _blank_feed_state() -> dict:
+    return {
+        "feeds": {},
+        "last_alert_at": 0.0,
+    }
+
+
+_feed_state = _blank_feed_state()
+
+
 def threshold_seconds() -> float:
     return _env_float("Q15_CYCLE_WATCHDOG_SECONDS", 10.0, 0.5, 3600.0)
+
+
+def feed_stale_seconds() -> float:
+    return _env_float("Q15_FEED_WATCHDOG_STALE_SECONDS", 300.0, 1.0, 86400.0)
+
+
+def feed_grace_seconds() -> float:
+    return _env_float("Q15_FEED_WATCHDOG_GRACE_SECONDS", 600.0, 0.0, 86400.0)
+
+
+def feed_alert_cooldown_seconds() -> float:
+    return _env_float("Q15_FEED_WATCHDOG_COOLDOWN_SECONDS", 86400.0, 30.0, 86400.0 * 7)
+
+
+def _iso_from_epoch(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _clean_age(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out < 0:
+        return None
+    return out
 
 
 class CycleTimer:
@@ -122,6 +161,100 @@ def health() -> dict:
     return snap
 
 
+def observe_feed_ages(feed_ages: dict[str, float | None], *, now: float | None = None) -> dict:
+    """Record latest feed ages and stale episodes for operator-facing paging.
+
+    A feed becomes stale as soon as its snapshot age exceeds
+    ``Q15_FEED_WATCHDOG_STALE_SECONDS``. Paging is delayed until that stale state
+    has held for ``Q15_FEED_WATCHDOG_GRACE_SECONDS`` so short collector hiccups
+    do not alert.
+    """
+    current = time.time() if now is None else float(now)
+    threshold = feed_stale_seconds()
+    grace = feed_grace_seconds()
+    with _pager_lock:
+        feeds = _feed_state["feeds"]
+        for name, raw_age in feed_ages.items():
+            feed_name = str(name)
+            age = _clean_age(raw_age)
+            prev = dict(feeds.get(feed_name) or {})
+            stale = bool(age is not None and age > threshold)
+            if stale:
+                stale_since = float(prev.get("stale_since_epoch") or current)
+                alerted_at = prev.get("alerted_at_epoch")
+            else:
+                stale_since = None
+                alerted_at = None
+            stale_for = (current - stale_since) if stale_since is not None else 0.0
+            feeds[feed_name] = {
+                "age_seconds": round(age, 3) if age is not None else None,
+                "stale": stale,
+                "stale_for_seconds": round(max(0.0, stale_for), 3),
+                "stale_since_epoch": stale_since,
+                "stale_since_iso": _iso_from_epoch(stale_since),
+                "alert_ready": bool(stale and stale_for >= grace),
+                "alerted_at_epoch": alerted_at,
+                "alerted_at_iso": _iso_from_epoch(float(alerted_at)) if alerted_at else None,
+            }
+    return feed_health()
+
+
+def feed_health() -> dict:
+    with _pager_lock:
+        feeds = {
+            name: {
+                key: value
+                for key, value in info.items()
+                if key not in {"stale_since_epoch", "alerted_at_epoch"}
+            }
+            for name, info in _feed_state["feeds"].items()
+        }
+        last_alert_at = float(_feed_state.get("last_alert_at") or 0.0)
+    return {
+        "enabled": _env_bool("Q15_FEED_WATCHDOG_ENABLED", True),
+        "stale_seconds": feed_stale_seconds(),
+        "grace_seconds": feed_grace_seconds(),
+        "cooldown_seconds": feed_alert_cooldown_seconds(),
+        "last_alert_at_iso": _iso_from_epoch(last_alert_at) if last_alert_at else None,
+        "feeds": feeds,
+    }
+
+
+def degraded_feeds() -> list[str]:
+    with _pager_lock:
+        return sorted(name for name, info in _feed_state["feeds"].items() if info.get("stale"))
+
+
+def feed_alert_message(now: float | None = None) -> str | None:
+    """Return one rate-limited Telegram page for stale feeds, or None."""
+    if not _env_bool("Q15_FEED_WATCHDOG_ENABLED", True):
+        return None
+    current = time.time() if now is None else float(now)
+    cooldown = feed_alert_cooldown_seconds()
+    with _pager_lock:
+        last_alert_at = float(_feed_state.get("last_alert_at") or 0.0)
+        if last_alert_at and current - last_alert_at < cooldown:
+            return None
+        ready: list[tuple[str, dict]] = []
+        for name, info in _feed_state["feeds"].items():
+            if not info.get("stale") or not info.get("alert_ready") or info.get("alerted_at_epoch"):
+                continue
+            ready.append((name, dict(info)))
+        if not ready:
+            return None
+        _feed_state["last_alert_at"] = current
+        for name, _info in ready:
+            _feed_state["feeds"][name]["alerted_at_epoch"] = current
+            _feed_state["feeds"][name]["alerted_at_iso"] = _iso_from_epoch(current)
+    lines = ["<b>Q15 FEED WATCHDOG</b>", "Collector snapshot freshness is stale; no restart attempted."]
+    for name, info in ready:
+        age = info.get("age_seconds")
+        stale_for = info.get("stale_for_seconds")
+        lines.append(f"{name}: age {age:.0f}s, stale for {stale_for:.0f}s.")
+    lines.append("Check /api/health -> feed_watchdog and collector logs.")
+    return "\n".join(lines)
+
+
 # --- Pager: turn a freeze into a Telegram alert instead of silence -----------
 _pager_lock = threading.Lock()
 _pager_state = {"last_alert_at": 0.0}
@@ -169,3 +302,5 @@ def reset() -> None:
         _state.update(_blank_state())
     with _pager_lock:
         _pager_state["last_alert_at"] = 0.0
+        _feed_state.clear()
+        _feed_state.update(_blank_feed_state())
