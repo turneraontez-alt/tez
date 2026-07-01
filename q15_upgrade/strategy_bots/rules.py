@@ -476,6 +476,10 @@ def _v3_hype_yes_accept_enabled() -> bool:
     return _env_bool("Q15_V3_HYPE_YES_ACCEPT_ENABLED", False)
 
 
+def _v3_hvf_own_strong_interval_gate_enabled() -> bool:
+    return _env_bool("Q15_V3_HVF_OWN_STRONG_INTERVAL_GATE_ENABLED", True)
+
+
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
     value = _num(row.get(key))
     if value is None:
@@ -1342,6 +1346,7 @@ def hvf_depth_flow_wrapper_decision(
     kind = str(row.get("record_kind") or "")
     side = source_side(row)
     asset = _asset(row)
+    interval = str(row.get("interval") or "").upper()
     thresholds = {
         "spot_net_notional_60s_contra_min": _spot_net_notional_60s_min(),
         "kalshi_taker_yes_15s_crowd_min": _kalshi_taker_yes_15s_min(),
@@ -1356,6 +1361,7 @@ def hvf_depth_flow_wrapper_decision(
         "top_depth_mode": "top250_hard_morefire_top12_recovery_own_strong",
         "positive_ev_gate_enabled": _v3_positive_ev_gate_enabled(),
         "morefire_accept_override_enabled": _v3_morefire_accept_enabled(),
+        "own_strong_interval_gate_enabled": _v3_hvf_own_strong_interval_gate_enabled(),
         "provisional": True,
         "paper_only": True,
     }
@@ -1364,6 +1370,7 @@ def hvf_depth_flow_wrapper_decision(
         "source_rule": rule,
         "record_kind": kind,
         "side": side,
+        "interval": interval,
     }
     if side not in {"YES", "NO"}:
         return BotDecision(
@@ -1494,6 +1501,19 @@ def hvf_depth_flow_wrapper_decision(
 
     if rule == "HVF_OWN_STRONG_SELECTED":
         reasons = ["HVF_WRAPPER_OWN_STRONG_SELECTED_EVAL"]
+        if _v3_positive_ev_gate_enabled() and _v3_hvf_own_strong_interval_gate_enabled():
+            interval_gate_reason: str | None = None
+            if asset == "ETH" and interval == "12M":
+                interval_gate_reason = "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_12M_RESEARCH_ONLY"
+            elif asset == "SOL" and interval == "12M" and side == "NO":
+                interval_gate_reason = "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_SOL_12M_NO_RESEARCH_ONLY"
+            if interval_gate_reason is not None:
+                return BotDecision(
+                    BOT_HVF_DEPTH_FLOW,
+                    RESEARCH_ONLY,
+                    tuple(reasons + [interval_gate_reason]),
+                    threshold_profile=profile,
+                )
         if spot60_side == _opposite(side):
             ask = _entry_ask(row)
             if (
@@ -1538,13 +1558,6 @@ def hvf_depth_flow_wrapper_decision(
                 BOT_HVF_DEPTH_FLOW,
                 RESEARCH_ONLY,
                 tuple(reasons + [f"HVF_WRAPPER_OWN_STRONG_RESEARCH_TAKER_CONTRA_{taker_side}"]),
-                threshold_profile=profile,
-            )
-        if _v3_positive_ev_gate_enabled() and asset == "ETH" and side == "YES":
-            return BotDecision(
-                BOT_HVF_DEPTH_FLOW,
-                RESEARCH_ONLY,
-                tuple(reasons + ["V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_YES_RESEARCH_ONLY"]),
                 threshold_profile=profile,
             )
         if _v3_positive_ev_gate_enabled():

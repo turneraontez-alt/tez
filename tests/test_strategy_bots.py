@@ -762,11 +762,12 @@ def test_hvf_depth_flow_wrapper_keeps_own_strong_research_when_recovery_expensiv
     assert "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_ENTRY_TOO_EXPENSIVE" in d.reason_codes
 
 
-def test_hvf_depth_flow_wrapper_gates_eth_yes_own_strong():
+def test_hvf_depth_flow_wrapper_gates_eth_12m_own_strong():
     d = hvf_depth_flow_wrapper_decision(
         _row(
             asset="ETH",
-            ticker="KXETH-OWN-STRONG-GATE",
+            ticker="KXETH-12M-OWN-STRONG-GATE",
+            interval="12M",
             predicted_side=None,
             predicted_outcome="YES",
             rule_code="HVF_OWN_STRONG_SELECTED",
@@ -779,7 +780,71 @@ def test_hvf_depth_flow_wrapper_gates_eth_yes_own_strong():
 
     assert d is not None
     assert d.decision_status == RESEARCH_ONLY
-    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_YES_RESEARCH_ONLY" in d.reason_codes
+    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_12M_RESEARCH_ONLY" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_gates_sol_12m_no_own_strong():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="SOL",
+            ticker="KXSOL-12M-NO-OWN-STRONG-GATE",
+            interval="12M",
+            predicted_side=None,
+            predicted_outcome="NO",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_trade_net_notional_60s=0.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_SOL_12M_NO_RESEARCH_ONLY" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_allows_eth_9m_yes_own_strong():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="ETH",
+            ticker="KXETH-9M-YES-OWN-STRONG",
+            interval="9M",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_trade_net_notional_60s=0.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == ACCEPTED
+    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_interval_gate_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("Q15_V3_HVF_OWN_STRONG_INTERVAL_GATE_ENABLED", "false")
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="ETH",
+            ticker="KXETH-12M-OWN-STRONG-GATE-DISABLED",
+            interval="12M",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_trade_net_notional_60s=0.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == ACCEPTED
+    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_gates_xrp_no_flash():
