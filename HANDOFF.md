@@ -1,5 +1,20 @@
 # Session handoff
 
+## Shipped THIS session - item 4: HVF MORE_FIRE_STRICT mute flag
+Added `Q15_HVF_MUTE_MORE_FIRE` (default OFF). When the owner flips it ON, `HVF_MORE_FIRE_STRICT` still
+records gradeable research rows (`MORE_FIRE_STRICT_RESEARCH`, `delivery_status=RESEARCH`) but never sends
+Telegram, never enters the alert table, and does not consume alert slots or same-ticker alert uniqueness.
+The static `_RULE_PRIORITY` table no longer carries the 760 MORE_FIRE slot; default behavior restores the
+760 boost only through `_rule_priority()` while the mute flag is OFF.
+
+Owner action needed: set `Q15_HVF_MUTE_MORE_FIRE=true` in the live environment to mute this negative rule.
+Evidence basis from the request: n=166 resolved, 59.6% accuracy, -1,699c; HVF book without it +281c.
+
+Tests:
+- Focused HVF suite: `.venv\Scripts\python.exe -m pytest tests/test_high_vol_flip.py -q` -> `21 passed`.
+- Full suite after item 4 on this Windows runner: `1493 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue.
+
 ## Shipped THIS session - item 3: Ultoim V2 exit-warning delivery hardening
 Added `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX` (default OFF) and `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX_DB` so defensive
 exit-warning cards can route through the persistent V9 Telegram outbox when explicitly enabled. The warning
