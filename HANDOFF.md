@@ -1,5 +1,23 @@
 # Session handoff
 
+## Shipped THIS session - item 3: Ultoim V2 exit-warning delivery hardening
+Added `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX` (default OFF) and `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX_DB` so defensive
+exit-warning cards can route through the persistent V9 Telegram outbox when explicitly enabled. The warning
+decision and ledger record are unchanged: records are still written first, actual `SENT` credit is only given
+after true Telegram delivery, and queued retry rows remain recorded-but-not-SENT until the outbox confirms.
+
+Close-time TTL is enforced before delivery: if a warning is recorded at/after its window close it is marked
+`EXPIRED` with `window_settled` and no Telegram/outbox send occurs. Startup now logs an unconfigured V2 exit
+channel and exposes a one-shot `Q15 ULTOIM V2 EXIT CHANNEL` alert message for the main app to send through the
+canonical notifier, avoiding the broken V2 channel itself. The canonical hourly report now includes a 24h
+recorded-vs-SENT line for Ultoim V2 exit warnings so muted/unconfigured delivery gaps are visible.
+
+Tests:
+- Focused item 3 suite: `.venv\Scripts\python.exe -m pytest tests/test_ultoim_v2.py tests/test_q15_learning_scoreboard.py::TestHourlyReportScoreboard::test_full_report_includes_ultoim_v2_exit_warning_delivery_gap -q` -> `123 passed`.
+- Full suite after item 3 on this Windows runner: `1492 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue; no focused
+  item 3 failures remain.
+
 ## Shipped THIS session - item 1: Ultoim V2 delivery-quality guard default-OFF
 Restored the default-OFF invariant for `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD`: code default is now
 false, while `.replit` pins it true so live local/Replit behavior remains unchanged. Added direct gate

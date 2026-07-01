@@ -76,3 +76,7 @@ class UltoimV2Telegram:
                 time.sleep(self.sleep_seconds)
         return {"ok": False, "delivered": False, "muted": False,
                 "message_id": None, "error": last_error}
+
+    def send_with_result(self, text: str) -> dict[str, Any]:
+        """Notifier-compatible rich result used by the persistent outbox."""
+        return self.send(text)

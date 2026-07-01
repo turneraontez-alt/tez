@@ -29,6 +29,8 @@ from .telegram import UltoimV2Telegram
 
 logger = logging.getLogger("ultoim_v2.runner")
 
+_EXIT_WARN_OUTBOX_PREFIX = "ultoim-v2-exit:"
+
 SPOT_DEPTH_KEYS = (
     "spot_depth_status",
     "spot_depth_missing_reason",
@@ -147,6 +149,25 @@ class UltoimV2Runner:
         self.telegram = UltoimV2Telegram(
             config.telegram_chat_id if getattr(config, "telegram_enabled", True) else ""
         )
+        self.exit_warning_outbox = None
+        if getattr(config, "exit_warn_outbox_enabled", False):
+            try:
+                from notifications.outbox_v9 import ReliableTelegramOutbox
+
+                self.exit_warning_outbox = ReliableTelegramOutbox(
+                    None,
+                    self.telegram,
+                    sqlite_path=getattr(config, "exit_warn_outbox_path", None),
+                )
+            except Exception:
+                logger.warning("ultoim_v2 exit warning outbox init failed; using direct delivery", exc_info=True)
+        if getattr(config, "exit_warnings_enabled", True) and self.telegram.status() != "configured":
+            logger.warning(
+                "ultoim_v2 exit warning Telegram channel unconfigured: status=%s; "
+                "warnings will record but may not deliver",
+                self.telegram.status(),
+            )
+        self._exit_warning_startup_alert_sent = False
         self._jobs: "queue.Queue[tuple[str, dict]]" = queue.Queue(maxsize=512)
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
@@ -160,6 +181,21 @@ class UltoimV2Runner:
         self._gate_ctx: dict[int, tuple[float | None, float | None]] = {}
 
     # -- worker plumbing ------------------------------------------------------
+    def exit_warning_startup_alert_message(self) -> str | None:
+        if self._exit_warning_startup_alert_sent:
+            return None
+        if not getattr(self.config, "exit_warnings_enabled", True):
+            return None
+        status = self.telegram.status()
+        if status == "configured":
+            return None
+        self._exit_warning_startup_alert_sent = True
+        return (
+            "<b>Q15 ULTOIM V2 EXIT CHANNEL</b>\n"
+            f"Exit warning Telegram channel is unconfigured ({status}); "
+            "warnings will record but may not deliver."
+        )
+
     def _ensure_worker(self) -> None:
         with self._worker_lock:
             if self._worker is None or not self._worker.is_alive():
@@ -1050,6 +1086,73 @@ class UltoimV2Runner:
         self._fire_exit_warning(cand, entry, window_key, now, st)
         self._exit_state.pop(key, None)
 
+    @staticmethod
+    def _exit_warning_idempotency_key(cfg: UltoimV2Config, row: Mapping[str, Any]) -> str:
+        ticker = str(row.get("ticker") or "unknown")
+        window = str(row.get("window_key") or "0")
+        return f"{_EXIT_WARN_OUTBOX_PREFIX}{cfg.model_version}:{ticker}:{window}"
+
+    @staticmethod
+    def _window_settled(row: Mapping[str, Any], now: float) -> bool:
+        close_time = _num(row.get("close_time"))
+        return close_time is not None and now >= close_time
+
+    def _send_exit_warning(self, warning_id: int, row: Mapping[str, Any],
+                           text: str, now: float) -> None:
+        if self._window_settled(row, now):
+            self.ledger.mark_exit_delivery(warning_id, "EXPIRED", None, "window_settled")
+            return
+        cfg = self.config
+        outbox = getattr(self, "exit_warning_outbox", None)
+        if getattr(cfg, "exit_warn_outbox_enabled", False) and outbox is not None and getattr(outbox, "enabled", False):
+            key = self._exit_warning_idempotency_key(cfg, row)
+            result = outbox.send_with_result(text, idempotency_key=key)
+            try:
+                queued_status = outbox.status_by_key(key)
+            except Exception:
+                queued_status = None
+            if result.get("delivered"):
+                self.ledger.mark_exit_delivery(warning_id, "SENT", result.get("message_id"), None)
+            elif result.get("muted"):
+                self.ledger.mark_exit_delivery(warning_id, "MUTED", None, "telegram_muted")
+            elif queued_status:
+                # Retryable outbox rows are counted as recorded-but-not-SENT until
+                # the worker confirms true delivery.
+                self.ledger.mark_exit_delivery(warning_id, "PENDING", None, f"outbox:{key}")
+            else:
+                self.ledger.mark_exit_delivery(
+                    warning_id, "DELIVERY_FAILED", None, result.get("error") or "outbox_enqueue_failed"
+                )
+            return
+
+        result = self.telegram.send(text)
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        self.ledger.mark_exit_delivery(warning_id, status, mid, result.get("error"))
+
+    def refresh_exit_warning_delivery_statuses(self) -> None:
+        outbox = getattr(self, "exit_warning_outbox", None)
+        if outbox is None or not getattr(outbox, "enabled", False):
+            return
+        for row in self.ledger.pending_exit_outbox_rows(self.config.model_version):
+            err = str(row.get("delivery_error") or "")
+            if not err.startswith("outbox:"):
+                continue
+            key = err[len("outbox:"):]
+            status = outbox.status_by_key(key)
+            if status == "SENT":
+                self.ledger.mark_exit_delivery(int(row["id"]), "SENT", None, None)
+            elif status == "DEAD_LETTER":
+                self.ledger.mark_exit_delivery(int(row["id"]), "DELIVERY_FAILED", None, f"outbox_dead_letter:{key}")
+
+    def exit_warning_delivery_counts_24h(self, now: float | None = None) -> dict[str, Any]:
+        self.refresh_exit_warning_delivery_statuses()
+        return self.ledger.exit_warning_delivery_counts_24h(self.config.model_version, now=now)
+
     def _fire_exit_warning(self, cand: dict[str, Any], entry: Mapping[str, Any],
                            window_key: int, now: float, st: Mapping[str, float]) -> None:
         cfg = self.config
@@ -1103,14 +1206,7 @@ class UltoimV2Runner:
             return  # already recorded (dedup / concurrent)
         sb = self.ledger.exit_warning_scoreboard(cfg.model_version, min_n=cfg.min_scoreboard_n)
         text = panel.build_exit_warning(row, sb, cfg)
-        result = self.telegram.send(text)
-        if result.get("delivered"):
-            status, mid = "SENT", result.get("message_id")
-        elif result.get("muted"):
-            status, mid = "MUTED", None
-        else:
-            status, mid = "DELIVERY_FAILED", None
-        self.ledger.mark_exit_delivery(warning_id, status, mid, result.get("error"))
+        self._send_exit_warning(warning_id, row, text, now)
         # OPT-IN EXECUTOR (default-OFF): on a confirmed flip warning, tell the live-order
         # layer to SELL the position (it no-ops if disabled / holds no position).
         try:
@@ -1181,6 +1277,7 @@ class UltoimV2Runner:
     def _recap_sync(self, *, now: float) -> None:
         try:
             mv = self.config.model_version
+            self.refresh_exit_warning_delivery_statuses()
             sb = self.ledger.scoreboard(mv, min_n=self.config.min_scoreboard_n)
             sb["exit_warnings"] = self.ledger.exit_warning_scoreboard(
                 mv, min_n=self.config.min_scoreboard_n)

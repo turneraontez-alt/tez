@@ -830,6 +830,9 @@ def refresh_loop(max_cycles=None):
                 from q15_upgrade.ultoim_v2.runner import get_runner as _ultoim_v2_runner
                 _u2r = _ultoim_v2_runner()
                 if _u2r is not None:
+                    _u2_startup_alert = _u2r.exit_warning_startup_alert_message()
+                    if _u2_startup_alert:
+                        notifier.send(_u2_startup_alert)
                     _u2r.reconcile(now, market_cache)
                     _u2r.maybe_send_recap(now)
             except Exception:

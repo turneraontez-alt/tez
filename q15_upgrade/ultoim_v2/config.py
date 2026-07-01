@@ -470,6 +470,18 @@ class UltoimV2Config:
     exit_warnings_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARNINGS", True)
     )
+    # Defensive-exit warning delivery hardening (DEFAULT OFF). When enabled,
+    # warning cards go through the persistent V9 Telegram outbox so transient
+    # delivery failures retry. The warning decision/ledger recording is unchanged.
+    exit_warn_outbox_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARN_OUTBOX", False)
+    )
+    exit_warn_outbox_path: str = field(
+        default_factory=lambda: _str(
+            "Q15_ULTOIM_V2_EXIT_WARN_OUTBOX_DB",
+            os.environ.get("Q15_V9_OUTBOX_SQLITE_PATH", "data/q15_telegram_outbox.sqlite3"),
+        )
+    )
     # Watch for the flip from this many seconds remaining onward. Default 600 (10M), raised from
     # 480 (8M): with the book now 10M-ONLY, the watcher should cover an open 10M entry's WHOLE life.
     # The 10M counterfactual on the real exit-warning ledger found ~23/86 true flips were already

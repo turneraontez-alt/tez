@@ -398,6 +398,34 @@ class HourlyReporter:
         except Exception as e:
             logger.error(f"hourly report failed: {e}")
 
+    def _ultoim_v2_exit_warning_lines(self):
+        try:
+            from q15_upgrade.ultoim_v2.runner import get_runner
+
+            runner = get_runner()
+        except Exception as e:
+            logger.debug("ultoim_v2 exit warning counter unavailable: %s", e)
+            return []
+        if runner is None or not hasattr(runner, "exit_warning_delivery_counts_24h"):
+            return []
+        try:
+            stats = runner.exit_warning_delivery_counts_24h()
+        except Exception as e:
+            logger.warning("ultoim_v2 exit warning counter failed: %s", e)
+            return []
+        recorded = int(stats.get("recorded") or 0)
+        if recorded <= 0:
+            return []
+        sent = int(stats.get("sent") or 0)
+        counts = stats.get("counts") or {}
+        tail = []
+        for key in ("PENDING", "MUTED", "DELIVERY_FAILED", "EXPIRED"):
+            n = int(counts.get(key) or 0)
+            if n:
+                tail.append(f"{key.lower()} {n}")
+        suffix = f" ({', '.join(tail)})" if tail else ""
+        return ["", f"Ultoim V2 exit warnings 24h: recorded {recorded} · SENT {sent}/{recorded}{suffix}"]
+
     # -- report body ----------------------------------------------------
     def build_report(self):
         hh = _eastern_header()
@@ -443,6 +471,10 @@ class HourlyReporter:
                 tot = stats.get("total_realized_return")
                 tail = f" \u00b7 realized {tot:+.0f}\u00a2" if isinstance(tot, (int, float)) else ""
                 body.append(f"\nSent alerts: {rr['wins']}W/{rr['losses']}L ({_pct(rr.get('win_rate'))}){tail}")
+
+        # Defensive-exit warnings are recorded before Telegram delivery; this
+        # exposes the recorded-vs-SENT gap when the exit channel is muted/down.
+        body.extend(self._ultoim_v2_exit_warning_lines())
 
         # Scalp record, one line.
         try:
