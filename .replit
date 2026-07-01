@@ -95,6 +95,7 @@ LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_TELEGRAM_ENABLED = "false" # V2 still records/settles; V3 owns Telegram notifications
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
+Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD = "true"
 Q15_ULTOIM_V2_DELIVER_TOP_N = "2"  # show top 2 10M choices per 15-min window
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"

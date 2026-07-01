@@ -339,12 +339,13 @@ class UltoimV2Config:
     require_inverse_edge: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE", True)
     )
-    # Empirical DELIVERY-quality guard. DEFAULT ON after the 2026-07-01 local ledger review:
-    # delivered V2 rows were roughly flat overall, while losses clustered in HYPE/SOL, ask<60c,
-    # and spread>=3c. This suppresses DELIVERY/YES-notify only; research_fired and row recording
-    # stay intact so those slices can earn their way back on fresh settled data.
+    # Empirical DELIVERY-quality guard. DEFAULT OFF per the default-OFF invariant for
+    # model-behavior changes; live deployments can pin Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD=true.
+    # The 2026-07-01 local ledger review found delivered V2 rows roughly flat overall, while
+    # losses clustered in HYPE/SOL, ask<60c, and spread>=3c. This suppresses DELIVERY/YES-notify
+    # only; research_fired and row recording stay intact so those slices can earn their way back.
     delivery_quality_guard_enabled: bool = field(
-        default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD", True)
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD", False)
     )
     delivery_block_assets: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_ULTOIM_V2_DELIVERY_BLOCK_ASSETS", "HYPE,SOL")

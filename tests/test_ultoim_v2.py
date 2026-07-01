@@ -213,7 +213,7 @@ def test_owner_default_config_is_aggressive():
     assert cfg.btc_confirm_margin == 0.15
     assert cfg.btc_confirm_margin_yes == 0.10  # asymmetric YES cutoff (BTC>=0.60)
     assert cfg.require_inverse_edge is True          # drop the positive-edge coin-flips
-    assert cfg.delivery_quality_guard_enabled is True
+    assert cfg.delivery_quality_guard_enabled is False  # behavior change flags default OFF
     assert cfg.delivery_block_assets == frozenset({"HYPE", "SOL"})
     assert cfg.delivery_min_ask_cents == 60.0
     assert cfg.delivery_max_spread_cents == 3.0
@@ -224,7 +224,8 @@ def test_owner_default_config_is_aggressive():
 
 def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research():
     cfg = UltoimV2Config(
-        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False
+        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
+        delivery_quality_guard_enabled=True,
     )
     low_ask = gate.evaluate(
         _candidate(asset="BTC", selected_probability=0.70, entry_ask_cents=55.0,
@@ -238,8 +239,14 @@ def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research()
         cfg,
         interval="10M",
     )
-    blocked_asset = gate.evaluate(
+    blocked_hype = gate.evaluate(
         _candidate(asset="HYPE", selected_probability=0.75, entry_ask_cents=65.0,
+                   spread_cents=2.0, total_cost_cents=0.0),
+        cfg,
+        interval="10M",
+    )
+    blocked_sol = gate.evaluate(
+        _candidate(asset="SOL", selected_probability=0.75, entry_ask_cents=65.0,
                    spread_cents=2.0, total_cost_cents=0.0),
         cfg,
         interval="10M",
@@ -249,23 +256,37 @@ def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research()
     assert "DELIVERY_ASK_BELOW_PROVEN_MIN" in low_ask["reason_codes"]
     assert wide["fired"] is False and wide["research_fired"] is True
     assert "DELIVERY_SPREAD_TOO_WIDE" in wide["reason_codes"]
-    assert blocked_asset["fired"] is False and blocked_asset["research_fired"] is True
-    assert "DELIVERY_ASSET_BLOCK" in blocked_asset["reason_codes"]
+    assert blocked_hype["fired"] is False and blocked_hype["research_fired"] is True
+    assert "DELIVERY_ASSET_BLOCK" in blocked_hype["reason_codes"]
+    assert blocked_sol["fired"] is False and blocked_sol["research_fired"] is True
+    assert "DELIVERY_ASSET_BLOCK" in blocked_sol["reason_codes"]
 
 
-def test_delivery_quality_guard_can_be_disabled():
+def test_delivery_quality_guard_off_is_byte_identical_for_blocked_slices():
     cfg = UltoimV2Config(
         enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
         delivery_quality_guard_enabled=False,
     )
-    v = gate.evaluate(
-        _candidate(asset="HYPE", selected_probability=0.70, entry_ask_cents=55.0,
-                   spread_cents=5.0, total_cost_cents=0.0),
-        cfg,
-        interval="10M",
+    neutral = UltoimV2Config(
+        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
+        delivery_quality_guard_enabled=True, delivery_block_assets=frozenset(),
+        delivery_min_ask_cents=0.0, delivery_max_spread_cents=999.0,
     )
+    cand = _candidate(asset="HYPE", selected_probability=0.70, entry_ask_cents=55.0,
+                      spread_cents=5.0, total_cost_cents=0.0)
+    v = gate.evaluate(cand, cfg, interval="10M")
+    expected = gate.evaluate(cand, neutral, interval="10M")
+    assert v == expected
     assert v["fired"] is True
     assert not any(code.startswith("DELIVERY_") for code in v["reason_codes"])
+
+
+def test_delivery_quality_guard_env_can_enable_default(monkeypatch):
+    monkeypatch.setenv("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD", "true")
+    cfg = UltoimV2Config()
+    assert cfg.delivery_quality_guard_enabled is True
+    monkeypatch.delenv("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD")
+    assert UltoimV2Config().delivery_quality_guard_enabled is False
 
 
 def test_gate_missing_data():

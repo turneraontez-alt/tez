@@ -1,5 +1,19 @@
 # Session handoff
 
+## Shipped THIS session - item 1: Ultoim V2 delivery-quality guard default-OFF
+Restored the default-OFF invariant for `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD`: code default is now
+false, while `.replit` pins it true so live local/Replit behavior remains unchanged. Added direct gate
+coverage for the three delivery blocks (HYPE/SOL assets, ask < 60c, spread >= 3c), verified
+research_fired stays true, and strengthened the guard-off test to compare byte-identical output against
+a neutral guard configuration.
+
+Tests:
+- Focused Ultoim suite: `.venv\Scripts\python.exe -m pytest tests/test_ultoim_v2.py tests/test_ultoim_v2_btc_confirm.py tests/test_ultoim_v2_distance_gate.py tests/test_ultoim_v2_inverse_edge.py tests/test_ultoim_v2_risk_tier.py tests/test_ultoim_v2_s15.py tests/test_ultoim_v2_skip_7m_no.py -q` -> `171 passed`.
+- Full suite after item 1 on this Windows runner: `1482 passed, 4 skipped, 164 failed, 2 errors`.
+  This is improved from the pre-change baseline `1465 passed, 4 skipped, 180 failed, 2 errors`; the
+  remaining failures are the pre-existing Windows SQLite temp-file cleanup issue. WSL/Docker are not
+  available in this workspace, so a Linux full-suite green run remains blocked here.
+
 Working notes so a fresh session resumes cheaply. See `CLAUDE.md` (architecture)
 and `SYNC.md` (Replit sync). Live app on Replit (`python3 app.py`). **The owner
 trades REAL money manually off the alerts**, so reliability + honest data
