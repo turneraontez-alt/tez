@@ -2799,6 +2799,52 @@ class V95Ledger:
             "by_pushed": by_pushed, "pushed_by_checkpoint": pushed_by_checkpoint,
         }
 
+    def rank_quality_scoreboard(self, *, limit: int = 300) -> dict[str, Any]:
+        """Report-only rank-quality check over the latest resolved rows.
+
+        For each checkpoint, compare #1 against #2-3 and the unranked/rest pool.
+        ``rank_inverted`` flags only when #1 accuracy is below the non-#1 pool's
+        Wilson lower bound. This never changes ranking or model behaviour.
+        """
+        if not self._available:
+            return {"available": False, "by_checkpoint": {}}
+        row_limit = max(1, min(int(limit), 5000))
+        by_checkpoint: dict[str, Any] = {}
+        with self._lock, closing(self._connect()) as connection:
+            for cp in TRACKED_CHECKPOINTS:
+                rows = list(connection.execute(
+                    "SELECT checkpoint, correct, rank FROM predictions "
+                    "WHERE model_version=? AND checkpoint=? "
+                    "AND official_result IS NOT NULL AND correct IS NOT NULL "
+                    "ORDER BY COALESCE(resolved_at, created_at) DESC, prediction_id DESC "
+                    "LIMIT ?",
+                    (MODEL_VERSION, cp, row_limit),
+                ))
+                rank1 = [r for r in rows if self._rank_bucket(r) == "1"]
+                rank23 = [r for r in rows if self._rank_bucket(r) in {"2", "3"}]
+                rest = [r for r in rows if self._rank_bucket(r) == "other"]
+                pool = [r for r in rows if self._rank_bucket(r) != "1"]
+                rank1_stats = self._win_loss(rank1)
+                pool_stats = self._win_loss(pool)
+                rank1_acc = rank1_stats.get("accuracy")
+                pool_low = pool_stats.get("ci_low")
+                by_checkpoint[cp] = {
+                    "n": len(rows),
+                    "limit": row_limit,
+                    "rank1": rank1_stats,
+                    "rank23": self._win_loss(rank23),
+                    "rest": self._win_loss(rest),
+                    "pool": pool_stats,
+                    "rank_inverted": bool(
+                        isinstance(rank1_acc, (int, float))
+                        and isinstance(pool_low, (int, float))
+                        and rank1_stats.get("n")
+                        and pool_stats.get("n")
+                        and rank1_acc < pool_low
+                    ),
+                }
+        return {"available": True, "limit": row_limit, "by_checkpoint": by_checkpoint}
+
     def resolved_setup_rows(self, checkpoint: str = "10M") -> list[dict[str, Any]]:
         """Read-only export of settled predictions for the setup miner: each row's
         DECISION-TIME feature values + regime + final outcome, ordered by time.

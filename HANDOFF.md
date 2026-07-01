@@ -1,5 +1,19 @@
 # Session handoff
 
+## Shipped THIS session - item 6: rank-inversion scoreboard line
+Added a report-only `rank_quality_scoreboard(limit=300)` to the frozen V9.5 ledger. For each checkpoint it
+reads the latest resolved rows only, splits #1 vs #2-3 vs rest, computes Wilson CIs, and flags
+`rank_inverted` when #1 accuracy trails the non-#1 pool's Wilson lower bound. No champion weights, ranking
+formula, challenger promotion, or recalibration behavior changed.
+
+The hourly report now prints compact per-checkpoint lines such as `Rank quality 10M last 300: #1 ...; #2-3
+...; rest ... RANK INVERTED` inside the existing `Hourly Report —` panel.
+
+Tests:
+- Focused rank-quality tests: `.venv\Scripts\python.exe -m pytest tests/test_q15_learning_scoreboard.py::TestLedgerScoreboard::test_rank_quality_flags_inverted_top_pick tests/test_q15_learning_scoreboard.py::TestHourlyReportScoreboard::test_full_report_includes_rank_quality_inversion_line tests/test_q15_learning_scoreboard.py::TestHourlyReportScoreboard::test_full_report_is_one_pre_panel -q` -> `3 passed`.
+- Full suite after item 6 on this Windows runner: `1498 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue.
+
 ## Shipped THIS session - item 5: durable heartbeat watchdog pager
 Added a durable refresh-loop heartbeat at the top of every production cycle (`Q15_HEARTBEAT_PATH`, default
 `work/local-run/q15_cycle_heartbeat.json`) and exposes `heartbeat_watchdog` on `/api/health`. A tiny daemon

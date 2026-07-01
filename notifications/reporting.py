@@ -129,6 +129,45 @@ class HourlyReporter:
             table.append("* under 10 settled — not yet reliable")
         return [headline, ""] + table + self._pushed_vs_background_lines(sb) + self._manipulation_lines(sb)
 
+    @staticmethod
+    def _rank_quality_bucket(label, d):
+        n = (d or {}).get("n") or 0
+        if not n:
+            return f"{label} n=0"
+        acc = d.get("accuracy")
+        lo, hi = d.get("ci_low"), d.get("ci_high")
+        acc_s = _pct(acc)
+        ci_s = (
+            f"[{lo * 100:.0f}-{hi * 100:.0f}]"
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float))
+            else "[n/a]"
+        )
+        return f"{label} {acc_s} {ci_s} n={n}"
+
+    def _rank_quality_lines(self):
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "rank_quality_scoreboard"):
+            return []
+        try:
+            sb = ledger.rank_quality_scoreboard(limit=300)
+        except Exception as e:
+            logger.warning(f"rank quality scoreboard skipped: {e}")
+            return []
+        by_cp = (sb or {}).get("by_checkpoint") or {}
+        lines = []
+        for cp in ("15M", "10M", "7M"):
+            d = by_cp.get(cp) or {}
+            if not d.get("n"):
+                continue
+            flag = " RANK INVERTED" if d.get("rank_inverted") else ""
+            lines.append(
+                f"Rank quality {cp} last {d.get('n')}: "
+                f"{self._rank_quality_bucket('#1', d.get('rank1'))}; "
+                f"{self._rank_quality_bucket('#2-3', d.get('rank23'))}; "
+                f"{self._rank_quality_bucket('rest', d.get('rest'))}{flag}"
+            )
+        return ["", *lines] if lines else []
+
     def _setup_scan_lines(self):
         """Compact, honest 10M setup-scan block for the hourly report. Reads only
         settled rows; runs the leakage-safe miner; reports whether anything holds
@@ -438,6 +477,9 @@ class HourlyReporter:
 
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
         body.extend(self._scoreboard_table())
+
+        # Report-only rank inversion diagnostic. No ranking formula changes.
+        body.extend(self._rank_quality_lines())
 
         # Flip-warning track record, rendered in the same table as the intervals.
         body.extend(self._flip_scoreboard())
