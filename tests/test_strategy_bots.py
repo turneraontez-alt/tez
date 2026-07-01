@@ -416,11 +416,30 @@ def test_hype_yes_requires_spot_and_kalshi_confirmation_with_missing_taker():
 
     assert weak is not None and weak.decision_status == REJECTED
     assert "TAKER_MISSING_WITH_WEAK_CONFIRM" in weak.reason_codes
-    assert strong is not None and strong.decision_status == ACCEPTED
+    assert strong is not None and strong.decision_status == RESEARCH_ONLY
     assert "TAKER_FLOW_MISSING_STRONGER_CONFIRM_REQUIRED" in strong.reason_codes
+    assert "V3_POSITIVE_EV_GATE_HYPE_YES_RESEARCH_ONLY" in strong.reason_codes
 
 
-def test_morefire_btc_confirmed_accepts_only_with_btc_support():
+def test_hype_yes_override_restores_acceptance(monkeypatch):
+    monkeypatch.setenv("Q15_V3_HYPE_YES_ACCEPT_ENABLED", "true")
+
+    d = hype_yes_confirmation_decision(_row(
+        asset="HYPE",
+        ticker="KXHYPE-OVERRIDE",
+        predicted_side="YES",
+        spot_depth_imbalance=0.02,
+        spot_depth_trade_net_qty_60s=40.0,
+        yes_ask_depth_contracts=300.0,
+        kalshi_taker_net_yes_volume_15s=None,
+    ))
+
+    assert d is not None
+    assert d.decision_status == ACCEPTED
+    assert "V3_POSITIVE_EV_GATE_HYPE_YES_ALLOWED_BY_OVERRIDE" in d.reason_codes
+
+
+def test_morefire_btc_confirmed_research_only_even_with_btc_support():
     row = _row(
         asset="SOL",
         ticker="KXSOL-1",
@@ -429,7 +448,7 @@ def test_morefire_btc_confirmed_accepts_only_with_btc_support():
         rule_code="HVF_MORE_FIRE_STRICT",
         record_kind="MORE_FIRE_STRICT_ALERT",
     )
-    accepted = morefire_btc_confirmed_decision(row, {
+    gated = morefire_btc_confirmed_decision(row, {
         "ticker": "KXBTC-1",
         "depth_contracts": 1300.0,
         "yes_mid_cents": 56.0,
@@ -448,12 +467,38 @@ def test_morefire_btc_confirmed_accepts_only_with_btc_support():
         "model_yes_probability": 0.44,
     })
 
-    assert accepted is not None and accepted.decision_status == ACCEPTED
-    assert "BTC_DEPTH_GE_1225" in accepted.reason_codes
+    assert gated is not None and gated.decision_status == RESEARCH_ONLY
+    assert "BTC_DEPTH_GE_1225" in gated.reason_codes
+    assert "V3_POSITIVE_EV_GATE_MOREFIRE_RESEARCH_ONLY" in gated.reason_codes
     assert weak is not None and weak.decision_status == RESEARCH_ONLY
     assert "BTC_DEPTH_WEAK_OR_MISSING" in weak.reason_codes
     assert "BTC_DOMINANT_SIDE_NO_WARNING" in weak.reason_codes
     assert "BTC_MODEL_MARKET_CONTRA_WARNING" in weak.reason_codes
+
+
+def test_morefire_btc_override_restores_acceptance(monkeypatch):
+    monkeypatch.setenv("Q15_V3_MOREFIRE_ACCEPT_ENABLED", "true")
+    row = _row(
+        asset="SOL",
+        ticker="KXSOL-OVERRIDE",
+        predicted_side=None,
+        predicted_outcome="YES",
+        rule_code="HVF_MORE_FIRE_STRICT",
+        record_kind="MORE_FIRE_STRICT_ALERT",
+    )
+    d = morefire_btc_confirmed_decision(row, {
+        "ticker": "KXBTC-1",
+        "depth_contracts": 1300.0,
+        "yes_mid_cents": 56.0,
+        "no_mid_cents": 44.0,
+        "dominant_side": "YES",
+        "predicted_side": "YES",
+        "model_yes_probability": 0.61,
+    })
+
+    assert d is not None
+    assert d.decision_status == ACCEPTED
+    assert "V3_POSITIVE_EV_GATE_MOREFIRE_ALLOWED_BY_OVERRIDE" in d.reason_codes
 
 
 def test_morefire_btc_contra_only_hardens_when_local_depth_flow_contradicts():
@@ -507,7 +552,7 @@ def test_hvf_depth_flow_wrapper_rejects_morefire_spot60_contra():
     assert "HVF_WRAPPER_MOREFIRE_REJECT_SPOT60_NO" in d.reason_codes
 
 
-def test_hvf_depth_flow_wrapper_warns_morefire_taker_yes_crowd():
+def test_hvf_depth_flow_wrapper_gates_morefire_taker_yes_crowd():
     d = hvf_depth_flow_wrapper_decision(
         _row(
             asset="ETH",
@@ -527,8 +572,9 @@ def test_hvf_depth_flow_wrapper_warns_morefire_taker_yes_crowd():
     )
 
     assert d is not None
-    assert d.decision_status == ACCEPTED
+    assert d.decision_status == RESEARCH_ONLY
     assert "HVF_WRAPPER_MOREFIRE_WARN_KALSHI_TAKER_YES_CROWD" in d.reason_codes
+    assert "V3_POSITIVE_EV_GATE_MOREFIRE_RESEARCH_ONLY" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_rejects_morefire_top250_contra():
@@ -580,7 +626,7 @@ def test_hvf_depth_flow_wrapper_researches_morefire_shallow_l2_contra():
     assert "HVF_WRAPPER_MOREFIRE_RESEARCH_ONLY_SHALLOW_L2_CONTRA" in d.reason_codes
 
 
-def test_hvf_depth_flow_wrapper_accepts_clean_morefire():
+def test_hvf_depth_flow_wrapper_gates_clean_morefire():
     d = hvf_depth_flow_wrapper_decision(
         _row(
             asset="XRP",
@@ -600,8 +646,34 @@ def test_hvf_depth_flow_wrapper_accepts_clean_morefire():
     )
 
     assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "V3_POSITIVE_EV_GATE_MOREFIRE_RESEARCH_ONLY" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_morefire_override_accepts_clean_candidate(monkeypatch):
+    monkeypatch.setenv("Q15_V3_MOREFIRE_ACCEPT_ENABLED", "true")
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="XRP",
+            ticker="KXXRP-1-OVERRIDE",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_MORE_FIRE_STRICT",
+            record_kind="MORE_FIRE_STRICT_ALERT",
+            selected_depth_ratio=4.0,
+            spot_depth_trade_net_notional_60s=200.0,
+            kalshi_taker_net_yes_volume_15s=-50.0,
+            coinbase_l2_top_12_imbalance_notional=0.20,
+            coinbase_l2_top_60_imbalance_notional=0.20,
+            coinbase_l2_top_250_imbalance_notional=0.20,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
     assert d.decision_status == ACCEPTED
     assert "HVF_WRAPPER_MOREFIRE_ACCEPT_NO_SPOT_TAKER_CONTRA" in d.reason_codes
+    assert "V3_POSITIVE_EV_GATE_MOREFIRE_ALLOWED_BY_OVERRIDE" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_downgrades_morefire_missing_required_data():
@@ -665,6 +737,7 @@ def test_hvf_depth_flow_wrapper_accepts_own_strong_top12_recovery():
     assert d is not None
     assert d.decision_status == ACCEPTED
     assert "HVF_WRAPPER_OWN_STRONG_ACCEPT_TOP12_RECOVERY_YES" in d.reason_codes
+    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_keeps_own_strong_research_when_recovery_expensive():
@@ -687,6 +760,45 @@ def test_hvf_depth_flow_wrapper_keeps_own_strong_research_when_recovery_expensiv
     assert d is not None
     assert d.decision_status == RESEARCH_ONLY
     assert "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_ENTRY_TOO_EXPENSIVE" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_gates_eth_yes_own_strong():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="ETH",
+            ticker="KXETH-OWN-STRONG-GATE",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_trade_net_notional_60s=0.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_YES_RESEARCH_ONLY" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_gates_xrp_no_flash():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="XRP",
+            ticker="KXXRP-NO-FLASH-GATE",
+            predicted_side="NO",
+            rule_code="HVF_OWN_NO_FLASH",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_trade_net_notional_60s=0.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "V3_POSITIVE_EV_GATE_HVF_XRP_NO_FLASH_RESEARCH_ONLY" in d.reason_codes
 
 
 def test_confidence_tier_prioritizes_a_over_b():
@@ -1002,6 +1114,65 @@ def test_scoreboard_includes_tiers_and_data_coverage(tmp_path):
     assert coverage["counts"]["settlement"] == 1
 
 
+def test_scoreboard_includes_positive_ev_gate_breakouts(tmp_path):
+    led = StrategyBotLedger(tmp_path / "v3.sqlite3")
+    blocked_row = _row(
+        asset="HYPE",
+        ticker="KXHYPE-GATE",
+        predicted_side="YES",
+        spot_depth_trade_net_qty_60s=45.0,
+        yes_ask_depth_contracts=320.0,
+        kalshi_taker_net_yes_volume_15s=None,
+    )
+    blocked = hype_yes_confirmation_decision(blocked_row)
+    allowed_row = _row(
+        asset="SOL",
+        ticker="KXSOL-GATE",
+        predicted_side=None,
+        predicted_outcome="YES",
+        rule_code="HVF_OWN_STRONG_SELECTED",
+        record_kind="HIGH_VOL_FLIP_ALERT",
+        spot_depth_trade_net_notional_60s=200.0,
+        kalshi_taker_net_yes_volume_15s=0.0,
+    )
+    allowed = hvf_depth_flow_wrapper_decision(
+        allowed_row,
+        source_system="high_vol_flip",
+    )
+
+    assert blocked is not None
+    assert blocked.decision_status == RESEARCH_ONLY
+    assert allowed is not None
+    assert allowed.decision_status == ACCEPTED
+    assert led.record_decision(blocked, blocked_row, source_system="ultoim_v2") is not None
+    assert led.record_decision(allowed, allowed_row, source_system="high_vol_flip") is not None
+    assert led.resolve(
+        source_system="ultoim_v2",
+        source_model_version="ultoim-v2",
+        ticker="KXHYPE-GATE",
+        official_result="YES",
+        now=1600.0,
+    ) == 1
+    assert led.resolve(
+        source_system="high_vol_flip",
+        source_model_version="ultoim-v2",
+        ticker="KXSOL-GATE",
+        official_result="YES",
+        now=1600.0,
+    ) == 1
+
+    gate = led.scoreboard(STRATEGY_VERSION, min_n=1)["positive_ev_gate"]
+    assert gate["all"]["rows"] == 2
+    assert gate["research_blocks"]["rows"] == 1
+    assert gate["allowed_candidates"]["rows"] == 1
+    assert gate["by_bot_rule_status"]["hype_yes_confirmation|TEST|RESEARCH_ONLY"]["rows"] == 1
+    assert (
+        gate["by_bot_rule_status"]
+        ["hvf_depth_flow_wrapper|HVF_OWN_STRONG_SELECTED|ACCEPTED"]["rows"]
+        == 1
+    )
+
+
 def test_tier_confirmation_scoreboard_tracks_saved_losses_and_skipped_winners(tmp_path):
     led = StrategyBotLedger(tmp_path / "v3.sqlite3")
     saved_loss = _row(
@@ -1094,6 +1265,7 @@ def test_runtime_suppresses_duplicate_hype_window_and_marks_muted_notification(t
     monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
     monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
     monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
+    monkeypatch.setenv("Q15_V3_HYPE_YES_ACCEPT_ENABLED", "true")
     runtime._ledger = None
     runtime._telegram = None
 
@@ -1321,6 +1493,7 @@ def test_hvf_wrapper_is_only_hvf_v3_notification_owner(tmp_path, monkeypatch):
     monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
     monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
     monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
+    monkeypatch.setenv("Q15_V3_MOREFIRE_ACCEPT_ENABLED", "true")
     runtime._ledger = None
     runtime._telegram = None
 
@@ -1377,6 +1550,7 @@ def test_hvf_wrapper_only_mode_mutes_generic_v3_notifications(tmp_path, monkeypa
     monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
     monkeypatch.setenv("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", "true")
     monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
+    monkeypatch.setenv("Q15_V3_HYPE_YES_ACCEPT_ENABLED", "true")
     runtime._ledger = None
     runtime._telegram = _Telegram()
 
@@ -1421,8 +1595,8 @@ def test_hvf_wrapper_only_mode_still_sends_hvf_depth_flow_alert(tmp_path, monkey
         ticker="KXSOL-HVF-SEND",
         predicted_outcome="YES",
         predicted_side=None,
-        rule_code="HVF_MORE_FIRE_STRICT",
-        record_kind="MORE_FIRE_STRICT_ALERT",
+        rule_code="HVF_OWN_STRONG_SELECTED",
+        record_kind="HIGH_VOL_FLIP_ALERT",
         model_version="high-vol-flip-test",
         selected_depth_ratio=5.0,
         spot_depth_trade_net_notional_60s=200.0,
@@ -1433,7 +1607,7 @@ def test_hvf_wrapper_only_mode_still_sends_hvf_depth_flow_alert(tmp_path, monkey
     )
 
     assert runtime.owns_source_notification(row, source_system="high_vol_flip") is True
-    assert runtime.record_source_row(row, source_system="high_vol_flip") == 5
+    assert runtime.record_source_row(row, source_system="high_vol_flip") == 4
     led = runtime.get_ledger()
     assert led is not None
     wrapper = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_HVF_DEPTH_FLOW)

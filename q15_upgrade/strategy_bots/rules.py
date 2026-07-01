@@ -464,6 +464,18 @@ def _hvf_own_strong_recovery_entry_max() -> float:
     return _env_float("Q15_V3_HVF_OWN_STRONG_TOP12_RECOVERY_ENTRY_MAX", 85.0, minimum=0.0)
 
 
+def _v3_positive_ev_gate_enabled() -> bool:
+    return _env_bool("Q15_V3_POSITIVE_EV_GATE_ENABLED", True)
+
+
+def _v3_morefire_accept_enabled() -> bool:
+    return _env_bool("Q15_V3_MOREFIRE_ACCEPT_ENABLED", False)
+
+
+def _v3_hype_yes_accept_enabled() -> bool:
+    return _env_bool("Q15_V3_HYPE_YES_ACCEPT_ENABLED", False)
+
+
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
     value = _num(row.get(key))
     if value is None:
@@ -1090,6 +1102,8 @@ def hype_yes_confirmation_decision(row: Mapping[str, Any]) -> BotDecision | None
         "yes_ask_depth_contracts_min": 260.0,
         "kalshi_yes_pressure_cents_min": -2.0,
         "kalshi_taker_net_yes_volume_15s_min": -25.0,
+        "positive_ev_gate_enabled": _v3_positive_ev_gate_enabled(),
+        "hype_yes_accept_override_enabled": _v3_hype_yes_accept_enabled(),
         "provisional": True,
     }
     if side != "YES":
@@ -1130,10 +1144,20 @@ def hype_yes_confirmation_decision(row: Mapping[str, Any]) -> BotDecision | None
     taker_ok = taker_net is not None and taker_net >= -25.0
     missing_taker_ok = taker_net is None and strong_spot and book_ok
     if spot_reasons and book_ok and (taker_ok or missing_taker_ok):
+        accepted_reasons = spot_reasons + kalshi_reasons
+        if _v3_positive_ev_gate_enabled() and not _v3_hype_yes_accept_enabled():
+            return BotDecision(
+                BOT_HYPE_YES,
+                RESEARCH_ONLY,
+                tuple(accepted_reasons + ["V3_POSITIVE_EV_GATE_HYPE_YES_RESEARCH_ONLY"]),
+                threshold_profile=thresholds,
+            )
+        if _v3_positive_ev_gate_enabled():
+            accepted_reasons.append("V3_POSITIVE_EV_GATE_HYPE_YES_ALLOWED_BY_OVERRIDE")
         return BotDecision(
             BOT_HYPE_YES,
             ACCEPTED,
-            tuple(spot_reasons + kalshi_reasons),
+            tuple(accepted_reasons),
             threshold_profile=thresholds,
         )
 
@@ -1219,6 +1243,8 @@ def morefire_btc_confirmed_decision(
         "btc_depth_contracts_min": 1225.0,
         "btc_book_pressure_cents_min": 0.0,
         "btc_model_yes_probability_floor_for_no_veto": 0.48,
+        "positive_ev_gate_enabled": _v3_positive_ev_gate_enabled(),
+        "morefire_accept_override_enabled": _v3_morefire_accept_enabled(),
         "provisional": True,
     }
     side = source_side(row)
@@ -1273,6 +1299,16 @@ def morefire_btc_confirmed_decision(
         reasons.append("LOCAL_DEPTH_FLOW_CONTRA")
 
     if depth is not None and depth >= 1225.0 and pressure is not None and pressure >= 0.0 and not contra:
+        if _v3_positive_ev_gate_enabled() and not _v3_morefire_accept_enabled():
+            return BotDecision(
+                BOT_MOREFIRE_BTC,
+                RESEARCH_ONLY,
+                tuple(reasons + ["V3_POSITIVE_EV_GATE_MOREFIRE_RESEARCH_ONLY"]),
+                threshold_profile=thresholds,
+                btc_context=ctx,
+            )
+        if _v3_positive_ev_gate_enabled():
+            reasons.append("V3_POSITIVE_EV_GATE_MOREFIRE_ALLOWED_BY_OVERRIDE")
         return BotDecision(
             BOT_MOREFIRE_BTC,
             ACCEPTED,
@@ -1305,6 +1341,7 @@ def hvf_depth_flow_wrapper_decision(
     rule = source_rule(row)
     kind = str(row.get("record_kind") or "")
     side = source_side(row)
+    asset = _asset(row)
     thresholds = {
         "spot_net_notional_60s_contra_min": _spot_net_notional_60s_min(),
         "kalshi_taker_yes_15s_crowd_min": _kalshi_taker_yes_15s_min(),
@@ -1317,6 +1354,8 @@ def hvf_depth_flow_wrapper_decision(
         "morefire_missing_required_data_research_only": _hvf_wrapper_research_on_missing(),
         "own_strong_spot60_contra_research_only": True,
         "top_depth_mode": "top250_hard_morefire_top12_recovery_own_strong",
+        "positive_ev_gate_enabled": _v3_positive_ev_gate_enabled(),
+        "morefire_accept_override_enabled": _v3_morefire_accept_enabled(),
         "provisional": True,
         "paper_only": True,
     }
@@ -1437,6 +1476,15 @@ def hvf_depth_flow_wrapper_decision(
                 tuple(reasons + missing + ["HVF_WRAPPER_MOREFIRE_RESEARCH_ONLY_MISSING_DATA"]),
                 threshold_profile=profile,
             )
+        if _v3_positive_ev_gate_enabled() and not _v3_morefire_accept_enabled():
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                RESEARCH_ONLY,
+                tuple(reasons + ["V3_POSITIVE_EV_GATE_MOREFIRE_RESEARCH_ONLY"]),
+                threshold_profile=profile,
+            )
+        if _v3_positive_ev_gate_enabled():
+            reasons.append("V3_POSITIVE_EV_GATE_MOREFIRE_ALLOWED_BY_OVERRIDE")
         return BotDecision(
             BOT_HVF_DEPTH_FLOW,
             ACCEPTED,
@@ -1454,16 +1502,16 @@ def hvf_depth_flow_wrapper_decision(
                 and ask is not None
                 and ask <= _hvf_own_strong_recovery_entry_max()
             ):
+                recovery_reasons = reasons + [
+                    f"HVF_WRAPPER_OWN_STRONG_SPOT60_CONTRA_{spot60_side}",
+                    f"HVF_WRAPPER_OWN_STRONG_ACCEPT_TOP12_RECOVERY_{side}",
+                ]
+                if _v3_positive_ev_gate_enabled():
+                    recovery_reasons.append("V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED")
                 return BotDecision(
                     BOT_HVF_DEPTH_FLOW,
                     ACCEPTED,
-                    tuple(
-                        reasons
-                        + [
-                            f"HVF_WRAPPER_OWN_STRONG_SPOT60_CONTRA_{spot60_side}",
-                            f"HVF_WRAPPER_OWN_STRONG_ACCEPT_TOP12_RECOVERY_{side}",
-                        ]
-                    ),
+                    tuple(recovery_reasons),
                     threshold_profile=profile,
                 )
             recovery_reason = "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_NOT_CONFIRMED"
@@ -1492,6 +1540,15 @@ def hvf_depth_flow_wrapper_decision(
                 tuple(reasons + [f"HVF_WRAPPER_OWN_STRONG_RESEARCH_TAKER_CONTRA_{taker_side}"]),
                 threshold_profile=profile,
             )
+        if _v3_positive_ev_gate_enabled() and asset == "ETH" and side == "YES":
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                RESEARCH_ONLY,
+                tuple(reasons + ["V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ETH_YES_RESEARCH_ONLY"]),
+                threshold_profile=profile,
+            )
+        if _v3_positive_ev_gate_enabled():
+            reasons.append("V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED")
         return BotDecision(
             BOT_HVF_DEPTH_FLOW,
             ACCEPTED,
@@ -1500,10 +1557,23 @@ def hvf_depth_flow_wrapper_decision(
         )
 
     if rule == "HVF_OWN_NO_FLASH":
+        if _v3_positive_ev_gate_enabled() and asset == "XRP":
+            return BotDecision(
+                BOT_HVF_DEPTH_FLOW,
+                RESEARCH_ONLY,
+                (
+                    "HVF_WRAPPER_OWN_NO_FLASH_EVAL",
+                    "V3_POSITIVE_EV_GATE_HVF_XRP_NO_FLASH_RESEARCH_ONLY",
+                ),
+                threshold_profile=profile,
+            )
+        reasons = ["HVF_WRAPPER_OWN_NO_FLASH_ACCEPT_NO_HARD_DEPTH_VETO"]
+        if _v3_positive_ev_gate_enabled():
+            reasons.append("V3_POSITIVE_EV_GATE_HVF_OWN_NO_FLASH_ALLOWED")
         return BotDecision(
             BOT_HVF_DEPTH_FLOW,
             ACCEPTED,
-            ("HVF_WRAPPER_OWN_NO_FLASH_ACCEPT_NO_HARD_DEPTH_VETO",),
+            tuple(reasons),
             threshold_profile=profile,
         )
 

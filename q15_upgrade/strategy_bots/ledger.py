@@ -633,6 +633,7 @@ class StrategyBotLedger:
                 ("bot_name", "asset", "side", "source_rule", "interval", "delivery_status"),
                 min_n,
             ),
+            "positive_ev_gate": self._positive_ev_gate(rows, min_n),
             "bnb_system": self._bnb_system(rows, min_n),
             "tier_confirmation_system": self._tier_confirmation_system(rows, min_n),
             "data_coverage": self._data_coverage(rows),
@@ -670,6 +671,42 @@ class StrategyBotLedger:
             "avg_pnl_cents": None if not pnls else sum(pnls) / len(pnls),
             "net_pnl_cents": None if not pnls else sum(pnls),
             "provisional": n < int(min_n),
+        }
+
+    @classmethod
+    def _positive_ev_gate(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        min_n: int,
+    ) -> dict[str, Any]:
+        gate_rows = [
+            r for r in rows
+            if "V3_POSITIVE_EV_GATE_" in str(r.get("reason_codes") or "")
+        ]
+        allowed = [
+            r for r in gate_rows
+            if r.get("decision_status") == ACCEPTED
+            and "_ALLOWED" in str(r.get("reason_codes") or "")
+        ]
+        research_blocks = [
+            r for r in gate_rows
+            if r.get("decision_status") == RESEARCH_ONLY
+            and "_RESEARCH_ONLY" in str(r.get("reason_codes") or "")
+        ]
+        return {
+            "all": cls._agg(gate_rows, min_n),
+            "allowed_candidates": cls._agg(allowed, min_n),
+            "research_blocks": cls._agg(research_blocks, min_n),
+            "by_bot_rule_status": cls._group(
+                gate_rows,
+                ("bot_name", "source_rule", "decision_status"),
+                min_n,
+            ),
+            "by_asset_side_rule_status": cls._group(
+                gate_rows,
+                ("asset", "side", "source_rule", "decision_status"),
+                min_n,
+            ),
         }
 
     @classmethod
