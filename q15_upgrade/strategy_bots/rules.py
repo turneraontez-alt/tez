@@ -505,6 +505,26 @@ def _flow_side(value: float | None, threshold: float) -> str | None:
     return None
 
 
+def _signal_bucket(signal: str | None, side: str | None) -> str:
+    if signal is None:
+        return "MISSING"
+    if signal == "NEUTRAL":
+        return "NEUTRAL"
+    if side in {"YES", "NO"} and signal == side:
+        return "AGREE"
+    if side in {"YES", "NO"} and signal == _opposite(side):
+        return "CONTRA"
+    return "UNKNOWN"
+
+
+def _flow_bucket(value: float | None, signal: str | None, side: str | None) -> str:
+    if value is None:
+        return "MISSING"
+    if signal is None:
+        return "NEUTRAL"
+    return _signal_bucket(signal, side)
+
+
 def _btc_regime_testing_enabled() -> bool:
     return _env_bool("Q15_V3_BTC_REGIME_TESTING_ENABLED", True)
 
@@ -1362,6 +1382,8 @@ def hvf_depth_flow_wrapper_decision(
         "positive_ev_gate_enabled": _v3_positive_ev_gate_enabled(),
         "morefire_accept_override_enabled": _v3_morefire_accept_enabled(),
         "own_strong_interval_gate_enabled": _v3_hvf_own_strong_interval_gate_enabled(),
+        "own_strong_repair_buckets_enabled": True,
+        "own_strong_repeat_window_bucket_available": False,
         "provisional": True,
         "paper_only": True,
     }
@@ -1381,9 +1403,11 @@ def hvf_depth_flow_wrapper_decision(
         )
 
     spot60 = _num(row.get("spot_depth_trade_net_notional_60s"))
+    spot15 = _num(row.get("spot_depth_trade_net_notional_15s"))
     taker_net_yes = _num(row.get("kalshi_taker_net_yes_volume_15s"))
     selected_ratio = _num(row.get("selected_depth_ratio"))
     spot60_side = _flow_side(spot60, _spot_net_notional_60s_min())
+    spot15_side = _flow_side(spot15, 25.0)
     taker_side = _flow_side(taker_net_yes, _kalshi_taker_yes_15s_min())
     top12_signal, top12_imbalance = _depth_signal(
         row,
@@ -1404,6 +1428,8 @@ def hvf_depth_flow_wrapper_decision(
         **base_profile,
         "spot_net_notional_60s": spot60,
         "spot_net_notional_60s_side": spot60_side,
+        "spot_net_notional_15s": spot15,
+        "spot_net_notional_15s_side": spot15_side,
         "kalshi_taker_net_yes_volume_15s": taker_net_yes,
         "kalshi_taker_net_yes_15s_side": taker_side,
         "selected_depth_ratio": selected_ratio,
@@ -1508,10 +1534,32 @@ def hvf_depth_flow_wrapper_decision(
             elif asset == "SOL" and interval == "12M" and side == "NO":
                 interval_gate_reason = "V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_SOL_12M_NO_RESEARCH_ONLY"
             if interval_gate_reason is not None:
+                background_reasons = [interval_gate_reason, "V3_HVF_OWN_STRONG_BACKGROUND_RESEARCH_ONLY"]
+                if asset == "ETH" and interval == "12M":
+                    background_reasons.extend(
+                        [
+                            f"HVF_REPAIR_ETH_12M_SPOT60_{_flow_bucket(spot60, spot60_side, side)}",
+                            f"HVF_REPAIR_ETH_12M_SPOT15_{_flow_bucket(spot15, spot15_side, side)}",
+                        ]
+                    )
+                elif asset == "SOL" and interval == "12M" and side == "NO":
+                    taker_bucket = _flow_bucket(taker_net_yes, taker_side, side)
+                    if taker_bucket == "CONTRA":
+                        background_reasons.append("HVF_REPAIR_SOL_12M_NO_TAKER_CONTRA")
+                    elif taker_bucket in {"AGREE", "NEUTRAL"}:
+                        background_reasons.extend(
+                            [
+                                "HVF_REPAIR_SOL_12M_NO_TAKER_NOT_CONTRA",
+                                f"HVF_REPAIR_SOL_12M_NO_TAKER_{taker_bucket}",
+                            ]
+                        )
+                    else:
+                        background_reasons.append(f"HVF_REPAIR_SOL_12M_NO_TAKER_{taker_bucket}")
+                    background_reasons.append("HVF_REPAIR_SOL_12M_NO_REPEAT_WINDOW_UNAVAILABLE")
                 return BotDecision(
                     BOT_HVF_DEPTH_FLOW,
                     RESEARCH_ONLY,
-                    tuple(reasons + [interval_gate_reason]),
+                    tuple(reasons + background_reasons),
                     threshold_profile=profile,
                 )
         if spot60_side == _opposite(side):
