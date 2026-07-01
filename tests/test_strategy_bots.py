@@ -12,6 +12,7 @@ from q15_upgrade.strategy_bots.rules import (
     BOT_BNB_YES_REVERSAL,
     BOT_BTC_REGIME,
     BOT_CONFIDENCE_TIER,
+    BOT_DEPTH_FORMULA_15M,
     BOT_HYPE_YES,
     BOT_HVF_DEPTH_FLOW,
     BOT_MOREFIRE_BTC,
@@ -22,6 +23,7 @@ from q15_upgrade.strategy_bots.rules import (
     bnb_no_confirmation_decision,
     bnb_yes_reversal_decision,
     confidence_tier_decision,
+    depth_formula_15m_research_decision,
     hvf_depth_flow_wrapper_decision,
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
@@ -1556,6 +1558,72 @@ def test_v3_hvf_wrapper_alert_is_labeled_as_active_depth_flow_pick():
     assert "n/a" not in text
 
 
+def test_15m_depth_formula_records_research_only_pass():
+    row = _row(
+        asset="XRP",
+        ticker="KXXRP-15M-DEPTH",
+        interval="15M",
+        predicted_side="NO",
+        entry_ask_cents=54.0,
+        spread_cents=2.0,
+        depth_contracts=40.0,
+        no_bid_depth_contracts=16.0,
+        no_ask_depth_contracts=40.0,
+    )
+
+    decision = depth_formula_15m_research_decision(row)
+
+    assert decision is not None
+    assert decision.bot_name == BOT_DEPTH_FORMULA_15M
+    assert decision.decision_status == RESEARCH_ONLY
+    assert "V3_15M_DEPTH_FORMULA_BID_ASK_RATIO_GTE_0_25" in decision.reason_codes
+    assert decision.threshold_profile["selected_bid_to_ask_depth_ratio"] == 0.4
+    assert decision.threshold_profile["passed"] is True
+
+
+def test_15m_depth_formula_rejects_missing_bid_support():
+    row = _row(
+        asset="XRP",
+        ticker="KXXRP-15M-DEPTH-MISSING",
+        interval="15M",
+        predicted_side="NO",
+        entry_ask_cents=54.0,
+        spread_cents=2.0,
+        depth_contracts=40.0,
+        no_bid_depth_contracts=None,
+    )
+
+    decision = depth_formula_15m_research_decision(row)
+
+    assert decision is not None
+    assert decision.decision_status == REJECTED
+    assert "V3_15M_DEPTH_FORMULA_SELECTED_BID_DEPTH_MISSING" in decision.reason_codes
+    assert decision.threshold_profile["passed"] is False
+
+
+def test_v3_depth_formula_alert_is_labeled_research():
+    text = build_v3_alert({
+        "asset": "XRP",
+        "side": "NO",
+        "interval": "15M",
+        "bot_name": BOT_DEPTH_FORMULA_15M,
+        "source_rule": "DEPTH_FORMULA_RESEARCH",
+        "ticker": "KXXRP-15M-DEPTH",
+        "entry_ask_cents": 54.0,
+        "spread_cents": 2.0,
+        "depth_contracts": 40.0,
+        "no_bid_depth_contracts": 16.0,
+        "no_ask_depth_contracts": 40.0,
+        "reason_codes": "V3_15M_DEPTH_FORMULA_RESEARCH_EVAL",
+    })
+
+    assert "V3 15M DEPTH FORMULA / RESEARCH" in text
+    assert "15M Depth Formula Research" in text
+    assert "NO bid / selected ask depth ratio 0.4" in text
+    assert "Mode: research-only tracking" in text
+    assert "n/a" not in text
+
+
 def test_v3_tier_b_alert_is_labeled_volume_expansion():
     text = build_v3_alert({
         "asset": "BTC",
@@ -1715,6 +1783,47 @@ def test_hvf_wrapper_only_mode_mutes_generic_v3_notifications(tmp_path, monkeypa
     assert hype["decision_status"] == ACCEPTED
     assert hype["notification_status"] is None
     assert runtime._telegram.sent == []
+
+
+def test_depth_formula_research_sends_in_v3_channel_without_owning_source(tmp_path, monkeypatch):
+    class _Telegram:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+            return {"delivered": True, "muted": False, "message_id": len(self.sent), "error": None}
+
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", "true")
+    monkeypatch.setenv("Q15_V3_DEPTH_FORMULA_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
+    runtime._ledger = None
+    runtime._telegram = _Telegram()
+
+    row = _row(
+        asset="XRP",
+        ticker="KXXRP-15M-DEPTH-SEND",
+        interval="15M",
+        predicted_side="NO",
+        entry_ask_cents=54.0,
+        spread_cents=2.0,
+        depth_contracts=40.0,
+        no_bid_depth_contracts=16.0,
+        no_ask_depth_contracts=40.0,
+    )
+
+    assert runtime.owns_source_notification(row, source_system="ultoim_v2") is False
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
+    led = runtime.get_ledger()
+    assert led is not None
+    depth = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_DEPTH_FORMULA_15M)
+    assert depth["decision_status"] == RESEARCH_ONLY
+    assert depth["notification_status"] == "SENT"
+    assert len(runtime._telegram.sent) == 1
+    assert "V3 15M DEPTH FORMULA / RESEARCH" in runtime._telegram.sent[0]
 
 
 def test_hvf_wrapper_only_mode_still_sends_hvf_depth_flow_alert(tmp_path, monkeypatch):

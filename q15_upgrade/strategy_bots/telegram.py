@@ -43,6 +43,7 @@ def _bot_label(name: str) -> str:
         "hype_yes_confirmation": "HYPE YES Confirmation",
         "morefire_btc_confirmed": "MoreFire BTC-Confirmed",
         "hvf_depth_flow_wrapper": "HVF Depth/Flow Wrapper",
+        "v3_15m_depth_formula_research": "15M Depth Formula Research",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -65,6 +66,21 @@ def _is_confidence_tier(row: Mapping[str, Any]) -> bool:
 
 def _is_hvf_wrapper(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "hvf_depth_flow_wrapper"
+
+
+def _is_depth_formula(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "v3_15m_depth_formula_research"
+
+
+def _ratio_text(numerator: Any, denominator: Any) -> str | None:
+    try:
+        n = float(numerator)
+        d = float(denominator)
+    except (TypeError, ValueError):
+        return None
+    if d <= 0:
+        return None
+    return _fmt(n / d)
 
 
 def _bnb_action(row: Mapping[str, Any]) -> str:
@@ -147,6 +163,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         }.get(tier, "<b>V3 CONFIDENCE TIER</b>")
     elif _is_hvf_wrapper(row):
         header = "<b>V3 HVF DEPTH/FLOW PICK</b>"
+    elif _is_depth_formula(row):
+        header = "<b>V3 15M DEPTH FORMULA / RESEARCH</b>"
     else:
         header = "<b>V3 RESEARCH YES REVERSAL</b>" if is_reversal else "<b>V3 FILTERED PICK</b>"
     parts = [
@@ -167,11 +185,17 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
     ]
     kalshi = _metric_parts(row, [
         ("depth", "depth_contracts", ""),
+        ("NO bid depth", "no_bid_depth_contracts", ""),
+        ("NO ask depth", "no_ask_depth_contracts", ""),
         ("YES ask depth", "yes_ask_depth_contracts", ""),
         ("taker net YES 15s", "kalshi_taker_net_yes_volume_15s", ""),
     ])
     if kalshi:
         parts.append(f"Kalshi: {kalshi}")
+    if _is_depth_formula(row):
+        ratio = _ratio_text(row.get("no_bid_depth_contracts"), row.get("depth_contracts"))
+        if ratio is not None:
+            parts.append(f"Depth formula: NO bid / selected ask depth ratio {ratio}")
     spot = _metric_parts(row, [
         ("imb", "spot_depth_imbalance", ""),
         ("sell15", "spot_depth_trade_sell_notional_15s", ""),
@@ -200,7 +224,7 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
     if tier:
         parts.append(f"Tier: {html.escape(tier)}")
     parts.append(f"Reasons: {html.escape(reasons)}")
-    if tier == "C":
+    if tier == "C" or _is_depth_formula(row):
         parts.append("Mode: research-only tracking")
     else:
         parts.append("Mode: research-only tracking" if is_reversal else "Mode: paper/research tracking")

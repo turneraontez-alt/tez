@@ -16,6 +16,7 @@ from .rules import (
     BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
+    BOT_DEPTH_FORMULA_15M,
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     REJECTED,
@@ -54,6 +55,10 @@ def telegram_enabled() -> bool:
 
 def research_telegram_enabled() -> bool:
     return _bool("Q15_V3_RESEARCH_TELEGRAM_ENABLED", False)
+
+
+def depth_formula_telegram_enabled() -> bool:
+    return _bool("Q15_V3_DEPTH_FORMULA_TELEGRAM_ENABLED", True)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -256,10 +261,8 @@ def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision)
         return
     if (
         str(recorded.get("source_system") or "") == "high_vol_flip"
-        and decision.bot_name != BOT_HVF_DEPTH_FLOW
+        and decision.bot_name not in {BOT_HVF_DEPTH_FLOW, BOT_DEPTH_FORMULA_15M}
     ):
-        return
-    if hvf_wrapper_only_notifications() and decision.bot_name != BOT_HVF_DEPTH_FLOW:
         return
     reversal_research = (
         decision.bot_name == BOT_BNB_YES_REVERSAL
@@ -270,9 +273,21 @@ def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision)
         and decision.decision_status == RESEARCH_ONLY
         and research_telegram_enabled()
     )
+    depth_formula_research = (
+        decision.bot_name == BOT_DEPTH_FORMULA_15M
+        and decision.decision_status == RESEARCH_ONLY
+        and depth_formula_telegram_enabled()
+    )
+    if hvf_wrapper_only_notifications() and decision.bot_name != BOT_HVF_DEPTH_FLOW and not depth_formula_research:
+        return
     if (
         decision.bot_name == BOT_BASELINE
-        or (decision.decision_status != ACCEPTED and not reversal_research and not tier_research)
+        or (
+            decision.decision_status != ACCEPTED
+            and not reversal_research
+            and not tier_research
+            and not depth_formula_research
+        )
     ):
         return
     try:

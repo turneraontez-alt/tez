@@ -11,7 +11,7 @@ import os
 from typing import Any, Mapping
 
 
-STRATEGY_VERSION = "filtered-alert-system-v3-hvf-depth-flow-top250-recovery-provisional"
+STRATEGY_VERSION = "filtered-alert-system-v3-15m-depth-formula-research-provisional"
 
 BOT_BASELINE = "baseline_control"
 BOT_CONFIDENCE_TIER = "v3_confidence_tier"
@@ -21,6 +21,7 @@ BOT_HYPE_YES = "hype_yes_confirmation"
 BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
 BOT_HVF_DEPTH_FLOW = "hvf_depth_flow_wrapper"
 BOT_BTC_REGIME = "btc_regime_context_probe"
+BOT_DEPTH_FORMULA_15M = "v3_15m_depth_formula_research"
 
 TIER_A = "A"
 TIER_B = "B"
@@ -488,6 +489,26 @@ def _hvf_yes_spot_imbalance_deadband() -> float:
     return _env_float("Q15_V3_HVF_YES_SPOT_IMBALANCE_DEADBAND", 0.01, minimum=0.0)
 
 
+def _depth_formula_research_enabled() -> bool:
+    return _env_bool("Q15_V3_DEPTH_FORMULA_RESEARCH_ENABLED", True)
+
+
+def _depth_formula_spread_max() -> float:
+    return _env_float("Q15_V3_DEPTH_FORMULA_SPREAD_MAX_CENTS", 10.0, minimum=0.0)
+
+
+def _depth_formula_entry_ask_max() -> float:
+    return _env_float("Q15_V3_DEPTH_FORMULA_ENTRY_ASK_MAX_CENTS", 55.0, minimum=0.0)
+
+
+def _depth_formula_selected_ask_depth_max() -> float:
+    return _env_float("Q15_V3_DEPTH_FORMULA_SELECTED_ASK_DEPTH_MAX", 50.0, minimum=0.0)
+
+
+def _depth_formula_bid_ask_ratio_min() -> float:
+    return _env_float("Q15_V3_DEPTH_FORMULA_BID_ASK_RATIO_MIN", 0.25, minimum=0.0)
+
+
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
     value = _num(row.get(key))
     if value is None:
@@ -501,6 +522,14 @@ def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[st
 
 def _opposite(side: str) -> str:
     return "NO" if side == "YES" else "YES"
+
+
+def _selected_bid_depth(row: Mapping[str, Any], side: str | None) -> float | None:
+    if side == "YES":
+        return _num(row.get("yes_bid_depth_contracts"))
+    if side == "NO":
+        return _num(row.get("no_bid_depth_contracts"))
+    return None
 
 
 def _flow_side(value: float | None, threshold: float) -> str | None:
@@ -1790,6 +1819,94 @@ def btc_regime_context_probe_decision(
     )
 
 
+def depth_formula_15m_research_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Research-only replay of the measured 15M NO depth-support formula."""
+    if not _depth_formula_research_enabled():
+        return None
+    interval = str(row.get("interval") or "").upper()
+    if interval != "15M":
+        return None
+    side = source_side(row)
+    ask = _entry_ask(row)
+    spread = _num(row.get("spread_cents"))
+    selected_ask_depth = _num(row.get("depth_contracts"))
+    selected_bid_depth = _selected_bid_depth(row, side)
+    ratio = None
+    if selected_ask_depth is not None and selected_ask_depth > 0 and selected_bid_depth is not None:
+        ratio = selected_bid_depth / selected_ask_depth
+    thresholds = {
+        "paper_only": True,
+        "research_only": True,
+        "data_source": "q15_strategy_bots_v3 historical 15M depth/PnL scan",
+        "observed_formula_pnl_cents": 2489.0,
+        "observed_formula_rows": 141,
+        "observed_formula_win_rate_pct": 70.2127659574468,
+        "observed_baseline_pnl_cents": -8769.0,
+        "observed_baseline_rows": 907,
+        "observed_baseline_win_rate_pct": 49.72436604189636,
+        "chronological_train_pnl_cents": 2025.0,
+        "chronological_train_rows": 87,
+        "chronological_test_pnl_cents": 464.0,
+        "chronological_test_rows": 54,
+        "side_required": "NO",
+        "interval_required": "15M",
+        "spread_cents_lt": _depth_formula_spread_max(),
+        "entry_ask_cents_lt": _depth_formula_entry_ask_max(),
+        "selected_ask_depth_lt": _depth_formula_selected_ask_depth_max(),
+        "selected_bid_to_ask_depth_ratio_gte": _depth_formula_bid_ask_ratio_min(),
+        "side": side,
+        "entry_ask_cents": ask,
+        "spread_cents": spread,
+        "selected_ask_depth": selected_ask_depth,
+        "selected_bid_depth": selected_bid_depth,
+        "selected_bid_to_ask_depth_ratio": ratio,
+    }
+    reasons: list[str] = ["V3_15M_DEPTH_FORMULA_RESEARCH_EVAL"]
+    failures: list[str] = []
+    if side != "NO":
+        failures.append("V3_15M_DEPTH_FORMULA_SIDE_NOT_NO")
+    if ask is None:
+        failures.append("V3_15M_DEPTH_FORMULA_ENTRY_ASK_MISSING")
+    elif ask >= _depth_formula_entry_ask_max():
+        failures.append("V3_15M_DEPTH_FORMULA_ENTRY_ASK_TOO_HIGH")
+    if spread is None:
+        failures.append("V3_15M_DEPTH_FORMULA_SPREAD_MISSING")
+    elif spread >= _depth_formula_spread_max():
+        failures.append("V3_15M_DEPTH_FORMULA_SPREAD_TOO_WIDE")
+    if selected_ask_depth is None:
+        failures.append("V3_15M_DEPTH_FORMULA_SELECTED_ASK_DEPTH_MISSING")
+    elif selected_ask_depth >= _depth_formula_selected_ask_depth_max():
+        failures.append("V3_15M_DEPTH_FORMULA_SELECTED_ASK_DEPTH_TOO_DEEP")
+    if selected_bid_depth is None:
+        failures.append("V3_15M_DEPTH_FORMULA_SELECTED_BID_DEPTH_MISSING")
+    elif ratio is None:
+        failures.append("V3_15M_DEPTH_FORMULA_DEPTH_RATIO_UNAVAILABLE")
+    elif ratio < _depth_formula_bid_ask_ratio_min():
+        failures.append("V3_15M_DEPTH_FORMULA_BID_ASK_RATIO_TOO_LOW")
+    if failures:
+        return BotDecision(
+            BOT_DEPTH_FORMULA_15M,
+            REJECTED,
+            tuple(reasons + failures),
+            threshold_profile={**thresholds, "passed": False},
+        )
+    return BotDecision(
+        BOT_DEPTH_FORMULA_15M,
+        RESEARCH_ONLY,
+        tuple(
+            reasons
+            + [
+                "V3_15M_DEPTH_FORMULA_NO_SIDE",
+                "V3_15M_DEPTH_FORMULA_SPREAD_LT_10",
+                "V3_15M_DEPTH_FORMULA_ENTRY_ASK_LT_55",
+                "V3_15M_DEPTH_FORMULA_SELECTED_ASK_DEPTH_LT_50",
+                "V3_15M_DEPTH_FORMULA_BID_ASK_RATIO_GTE_0_25",
+            ]
+        ),
+        threshold_profile={**thresholds, "passed": True},
+    )
+
+
 def decisions_for_row(
     row: Mapping[str, Any],
     *,
@@ -1801,6 +1918,9 @@ def decisions_for_row(
         baseline_decision(row),
         confidence_tier_decision(row, source_system=source_system),
     ]
+    depth_formula = depth_formula_15m_research_decision(row)
+    if depth_formula is not None:
+        decisions.append(depth_formula)
     btc_probe = btc_regime_context_probe_decision(row, source_system=source_system)
     if btc_probe is not None:
         decisions.append(btc_probe)
