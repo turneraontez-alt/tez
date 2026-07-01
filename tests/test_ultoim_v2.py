@@ -88,7 +88,7 @@ def _config(tmp_path, **over):
         skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
         cap_7m_ask=False, enable_11m=False, enable_12m=False,
         btc_confirm_enabled=False, require_inverse_edge=False, skip_7m=False,
-        exit_watch_from_seconds=420.0,
+        exit_watch_from_seconds=420.0, delivery_quality_guard_enabled=False,
     )
     base.update(over)
     return UltoimV2Config(**base)
@@ -169,7 +169,10 @@ def test_gate_blocks_edge_below_min():
 def test_no_edge_waive_fires_sub_min_edge_no():
     # The WAIVE behaviour (now opt-in; production default is ENFORCED after the ROI sweep): with
     # the waive ON, a NO with sub-min stated edge in the [ask_lo, ask_hi] band FIRES. Pinned ON here.
-    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=True)   # pin the waive ON to test it
+    cfg = UltoimV2Config(
+        enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=True,
+        delivery_quality_guard_enabled=False,
+    )   # pin the waive ON to test it
     v = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=59.0,
                                  total_cost_cents=0.0), cfg)        # edge 1.0 < 2.0
     assert v["fired"] is True and v["gate_c"] is True
@@ -210,9 +213,59 @@ def test_owner_default_config_is_aggressive():
     assert cfg.btc_confirm_margin == 0.15
     assert cfg.btc_confirm_margin_yes == 0.10  # asymmetric YES cutoff (BTC>=0.60)
     assert cfg.require_inverse_edge is True          # drop the positive-edge coin-flips
+    assert cfg.delivery_quality_guard_enabled is True
+    assert cfg.delivery_block_assets == frozenset({"HYPE", "SOL"})
+    assert cfg.delivery_min_ask_cents == 60.0
+    assert cfg.delivery_max_spread_cents == 3.0
     assert cfg.no_only is False                      # YES harvest on (paper; BTC-gated)
     assert cfg.skip_7m is False                      # C5: 10M+7M (7M strong under the gates)
     assert cfg.exit_watch_from_seconds == 600.0      # exit-watch from the 10M mark
+
+
+def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research():
+    cfg = UltoimV2Config(
+        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False
+    )
+    low_ask = gate.evaluate(
+        _candidate(asset="BTC", selected_probability=0.70, entry_ask_cents=55.0,
+                   spread_cents=2.0, total_cost_cents=0.0),
+        cfg,
+        interval="10M",
+    )
+    wide = gate.evaluate(
+        _candidate(asset="BTC", selected_probability=0.75, entry_ask_cents=65.0,
+                   spread_cents=3.0, total_cost_cents=0.0),
+        cfg,
+        interval="10M",
+    )
+    blocked_asset = gate.evaluate(
+        _candidate(asset="HYPE", selected_probability=0.75, entry_ask_cents=65.0,
+                   spread_cents=2.0, total_cost_cents=0.0),
+        cfg,
+        interval="10M",
+    )
+
+    assert low_ask["fired"] is False and low_ask["research_fired"] is True
+    assert "DELIVERY_ASK_BELOW_PROVEN_MIN" in low_ask["reason_codes"]
+    assert wide["fired"] is False and wide["research_fired"] is True
+    assert "DELIVERY_SPREAD_TOO_WIDE" in wide["reason_codes"]
+    assert blocked_asset["fired"] is False and blocked_asset["research_fired"] is True
+    assert "DELIVERY_ASSET_BLOCK" in blocked_asset["reason_codes"]
+
+
+def test_delivery_quality_guard_can_be_disabled():
+    cfg = UltoimV2Config(
+        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
+        delivery_quality_guard_enabled=False,
+    )
+    v = gate.evaluate(
+        _candidate(asset="HYPE", selected_probability=0.70, entry_ask_cents=55.0,
+                   spread_cents=5.0, total_cost_cents=0.0),
+        cfg,
+        interval="10M",
+    )
+    assert v["fired"] is True
+    assert not any(code.startswith("DELIVERY_") for code in v["reason_codes"])
 
 
 def test_gate_missing_data():
@@ -224,7 +277,10 @@ def test_gate_missing_data():
 
 
 def test_gate_inclusive_bounds():
-    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
+    cfg = UltoimV2Config(
+        enabled=True, no_only=True, require_inverse_edge=False,
+        delivery_quality_guard_enabled=False,
+    )
     # ask exactly 50 (lo) passes the band; conf high enough; edge ok
     lo = gate.evaluate(_candidate(selected_probability=0.60, entry_ask_cents=50.0,
                                   total_cost_cents=0.0), cfg)
@@ -702,7 +758,10 @@ def _extract(runner, analyses, canonicals, now):
 def test_gate_edge_float_boundary_admits_true_two_cent_edge():
     """0.58*100 - 56 == 1.999999999999993 in binary float; the inclusive 2.0¢ bar
     must still admit a mathematically-exact 2.0¢ edge (the one fitted knob)."""
-    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=False)   # isolate the edge bar
+    cfg = UltoimV2Config(
+        enabled=True, no_only=True, require_inverse_edge=False, no_edge_waive=False,
+        delivery_quality_guard_enabled=False,
+    )   # isolate the edge bar
     assert 0.58 * 100.0 - 56.0 < 2.0  # the float underflow is real
     v = gate.evaluate(_candidate(predicted_side="NO", selected_probability=0.58,
                                  entry_ask_cents=56.0, total_cost_cents=0.0), cfg)
@@ -982,7 +1041,10 @@ def test_gate_research_fired_yes_side_never_delivers():
 
 
 def test_gate_collects_every_failing_reason():
-    cfg = UltoimV2Config(enabled=True, no_only=True, require_inverse_edge=False)
+    cfg = UltoimV2Config(
+        enabled=True, no_only=True, require_inverse_edge=False,
+        delivery_quality_guard_enabled=False,
+    )
     v = gate.evaluate(_candidate(predicted_side="YES", selected_probability=0.40,
                                  entry_ask_cents=45.0, total_cost_cents=0.0), cfg)
     assert set(v["reason_codes"]) == {

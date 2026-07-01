@@ -552,7 +552,9 @@ def test_hvf_depth_flow_wrapper_rejects_morefire_spot60_contra():
     assert "HVF_WRAPPER_MOREFIRE_REJECT_SPOT60_NO" in d.reason_codes
 
 
-def test_hvf_depth_flow_wrapper_gates_morefire_taker_yes_crowd():
+def test_hvf_depth_flow_wrapper_gates_morefire_taker_yes_crowd(monkeypatch):
+    monkeypatch.setenv("Q15_V3_MOREFIRE_ACCEPT_ENABLED", "true")
+
     d = hvf_depth_flow_wrapper_decision(
         _row(
             asset="ETH",
@@ -573,8 +575,51 @@ def test_hvf_depth_flow_wrapper_gates_morefire_taker_yes_crowd():
 
     assert d is not None
     assert d.decision_status == RESEARCH_ONLY
-    assert "HVF_WRAPPER_MOREFIRE_WARN_KALSHI_TAKER_YES_CROWD" in d.reason_codes
-    assert "V3_POSITIVE_EV_GATE_MOREFIRE_RESEARCH_ONLY" in d.reason_codes
+    assert "HVF_WRAPPER_YES_AUDIT_VETO" in d.reason_codes
+    assert "HVF_WRAPPER_YES_TAKER_CROWD_VETO" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_vetoes_yes_spot_imbalance_contra():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="ETH",
+            ticker="KXETH-SPOTIMB",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            spot_depth_imbalance=-0.03,
+            spot_depth_trade_net_notional_60s=100.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "HVF_WRAPPER_YES_SPOT_IMB_CONTRA_VETO" in d.reason_codes
+
+
+def test_hvf_depth_flow_wrapper_vetoes_yes_kalshi_book_contra():
+    d = hvf_depth_flow_wrapper_decision(
+        _row(
+            asset="ETH",
+            ticker="KXETH-KBOOK",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_OWN_STRONG_SELECTED",
+            record_kind="HIGH_VOL_FLIP_ALERT",
+            yes_bid_depth_contracts=100.0,
+            no_bid_depth_contracts=300.0,
+            spot_depth_trade_net_notional_60s=100.0,
+            kalshi_taker_net_yes_volume_15s=0.0,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == RESEARCH_ONLY
+    assert "HVF_WRAPPER_YES_KALSHI_BOOK_CONTRA_VETO" in d.reason_codes
 
 
 def test_hvf_depth_flow_wrapper_rejects_morefire_top250_contra():
@@ -717,7 +762,9 @@ def test_hvf_depth_flow_wrapper_downgrades_own_strong_spot60_contra():
     assert "HVF_WRAPPER_OWN_STRONG_RESEARCH_SPOT60_CONTRA_NO" in d.reason_codes
 
 
-def test_hvf_depth_flow_wrapper_accepts_own_strong_top12_recovery():
+def test_hvf_depth_flow_wrapper_accepts_own_strong_top12_recovery(monkeypatch):
+    monkeypatch.setenv("Q15_V3_HVF_YES_CONTRA_VETO_ENABLED", "false")
+
     d = hvf_depth_flow_wrapper_decision(
         _row(
             asset="SOL",
@@ -1360,6 +1407,7 @@ def test_runtime_suppresses_duplicate_hype_window_and_marks_muted_notification(t
     monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
     monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
     monkeypatch.setenv("Q15_V3_HYPE_YES_ACCEPT_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_EMPIRICAL_DELIVERY_GUARD", "false")
     runtime._ledger = None
     runtime._telegram = None
 
@@ -1588,6 +1636,7 @@ def test_hvf_wrapper_is_only_hvf_v3_notification_owner(tmp_path, monkeypatch):
     monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
     monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
     monkeypatch.setenv("Q15_V3_MOREFIRE_ACCEPT_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_EMPIRICAL_DELIVERY_GUARD", "false")
     runtime._ledger = None
     runtime._telegram = None
 
@@ -1645,6 +1694,7 @@ def test_hvf_wrapper_only_mode_mutes_generic_v3_notifications(tmp_path, monkeypa
     monkeypatch.setenv("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", "true")
     monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
     monkeypatch.setenv("Q15_V3_HYPE_YES_ACCEPT_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_EMPIRICAL_DELIVERY_GUARD", "false")
     runtime._ledger = None
     runtime._telegram = _Telegram()
 
@@ -1681,6 +1731,7 @@ def test_hvf_wrapper_only_mode_still_sends_hvf_depth_flow_alert(tmp_path, monkey
     monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
     monkeypatch.setenv("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", "true")
     monkeypatch.setenv("Q15_V3_SUPPRESS_OWNED_SOURCE_NOTIFICATIONS", "true")
+    monkeypatch.setenv("Q15_V3_EMPIRICAL_DELIVERY_GUARD", "false")
     runtime._ledger = None
     runtime._telegram = _Telegram()
 
@@ -1709,6 +1760,70 @@ def test_hvf_wrapper_only_mode_still_sends_hvf_depth_flow_alert(tmp_path, monkey
     assert wrapper["notification_status"] == "SENT"
     assert len(runtime._telegram.sent) == 1
     assert "V3 HVF DEPTH/FLOW PICK" in runtime._telegram.sent[0]
+
+
+def test_empirical_delivery_guard_downgrades_yes_and_late_interval(tmp_path, monkeypatch):
+    class _Telegram:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+            return {"delivered": True, "muted": False, "message_id": len(self.sent), "error": None}
+
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_HYPE_YES_ACCEPT_ENABLED", "true")
+    runtime._ledger = None
+    runtime._telegram = _Telegram()
+
+    row = _row(
+        asset="HYPE",
+        ticker="KXHYPE-GUARD",
+        predicted_side="YES",
+        interval="10M",
+        spot_depth_trade_net_qty_60s=45.0,
+        yes_ask_depth_contracts=320.0,
+        kalshi_taker_net_yes_volume_15s=None,
+    )
+
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
+    led = runtime.get_ledger()
+    assert led is not None
+    hype = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_HYPE_YES)
+    assert hype["decision_status"] == RESEARCH_ONLY
+    assert "V3_EMPIRICAL_GUARD_YES_RESEARCH_ONLY" in hype["reason_codes"]
+    assert "V3_EMPIRICAL_GUARD_INTERVAL_10M_RESEARCH_ONLY" in hype["reason_codes"]
+    assert hype["notification_status"] is None
+    assert runtime._telegram.sent == []
+
+
+def test_empirical_delivery_guard_preserves_measured_positive_bnb_no(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "false")
+    runtime._ledger = None
+    runtime._telegram = None
+
+    row = _row(
+        asset="BNB",
+        ticker="KXBNB-GUARD",
+        predicted_side="NO",
+        interval="10M",
+        spot_depth_trade_sell_notional_15s=41.0,
+        spot_depth_imbalance=-0.021,
+        spot_depth_trade_net_notional_60s=-1.0,
+        spot_depth_trade_net_qty_60s=-0.1,
+        kalshi_taker_net_yes_volume_15s=-1.0,
+    )
+
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
+    led = runtime.get_ledger()
+    assert led is not None
+    bnb_no = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_BNB_NO)
+    assert bnb_no["decision_status"] == ACCEPTED
+    assert "V3_EMPIRICAL_GUARD_INTERVAL_10M_RESEARCH_ONLY" not in bnb_no["reason_codes"]
 
 
 def test_hvf_interval_gated_rows_stay_background(tmp_path, monkeypatch):

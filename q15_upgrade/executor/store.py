@@ -86,6 +86,94 @@ def classify_fill(res: Mapping[str, Any], requested_count: int) -> tuple[str, in
         return UNKNOWN, None, None
 
 
+def _count(value: Any) -> int | None:
+    num = _num(value)
+    return int(num) if num is not None else None
+
+
+def _first_num(order: Mapping[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = _num(order.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def classify_final_order(order: Mapping[str, Any], requested_count: int) -> dict[str, Any]:
+    """Best-effort FINAL order classification from account order history.
+
+    This is intentionally schema-tolerant: Kalshi account history has used both
+    count/fill-count naming variants. Unknown shapes stay UNKNOWN instead of
+    being promoted to a fill.
+    """
+    try:
+        data = _inner_order(order)
+        status = str(data.get("status") or "").lower()
+        filled = _count(
+            data.get("fill_count")
+            if data.get("fill_count") is not None
+            else data.get("filled_count")
+        )
+        remaining = _count(
+            data.get("remaining_count")
+            if data.get("remaining_count") is not None
+            else data.get("remaining_contracts")
+        )
+        req = int(requested_count) if requested_count else 0
+        if filled is None and remaining is not None and req:
+            filled = max(0, req - remaining)
+
+        if filled is not None:
+            if req and filled >= req:
+                fill_status = FILLED
+            elif filled > 0:
+                fill_status = PARTIAL
+            elif status in {"canceled", "cancelled", "expired"}:
+                fill_status = CANCELED
+            elif status in {"resting", "pending", "open", "live"}:
+                fill_status = RESTED
+            else:
+                fill_status = UNKNOWN
+        elif status in {"executed", "filled", "matched"}:
+            fill_status = FILLED
+        elif status in {"canceled", "cancelled", "expired"}:
+            fill_status = CANCELED
+        elif status in {"resting", "pending", "open", "live"}:
+            fill_status = RESTED
+        else:
+            fill_status = UNKNOWN
+
+        return {
+            "status": status or None,
+            "fill_status": fill_status,
+            "filled_count": filled,
+            "remaining_count": remaining,
+            "average_fill_price": _first_num(
+                data,
+                "average_fill_price",
+                "avg_fill_price",
+                "average_price",
+                "avg_price",
+            ),
+            "average_fee_paid": _first_num(
+                data,
+                "average_fee_paid",
+                "avg_fee_paid",
+                "fee_paid",
+                "fees",
+            ),
+        }
+    except Exception:  # noqa: BLE001 - final reconciliation must be fail-safe
+        return {
+            "status": None,
+            "fill_status": UNKNOWN,
+            "filled_count": None,
+            "remaining_count": None,
+            "average_fill_price": None,
+            "average_fee_paid": None,
+        }
+
+
 _COLS = (
     "created_at", "action", "ticker", "asset", "interval", "window_key",
     "client_order_id", "order_id", "requested_count", "filled_count",
@@ -93,6 +181,17 @@ _COLS = (
     "fill_status", "snapshot_age_ms", "balance_latency_ms", "order_latency_ms",
     "response_json",
 )
+
+_FINAL_COLS = {
+    "final_status": "TEXT",
+    "final_fill_status": "TEXT",
+    "final_filled_count": "INTEGER",
+    "final_remaining_count": "INTEGER",
+    "final_average_fill_price": "REAL",
+    "final_average_fee_paid": "REAL",
+    "final_reconciled_at": "REAL",
+    "final_response_json": "TEXT",
+}
 
 
 class ExecutorStore:
@@ -113,7 +212,24 @@ class ExecutorStore:
                 stake_cents INTEGER, mode TEXT, http_ok INTEGER, http_status INTEGER,
                 fill_status TEXT, snapshot_age_ms REAL, balance_latency_ms REAL,
                 order_latency_ms REAL, response_json TEXT)""")
+        self._ensure_columns()
         self._conn.commit()
+
+    def _ensure_columns(self) -> None:
+        """Migrate old local order stores without disturbing existing immediate-fill rows."""
+        existing = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(executor_orders)").fetchall()
+        }
+        for name, column_type in _FINAL_COLS.items():
+            if name not in existing:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE executor_orders ADD COLUMN {name} {column_type}"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
 
     def record(self, **fields: Any) -> None:
         """Insert one order row (parameterized). Best-effort — swallows its own errors."""
@@ -170,6 +286,109 @@ class ExecutorStore:
                     "fill_rate": (filled / live if live else None)}
         except Exception:  # noqa: BLE001
             logger.exception("fill_summary failed")
+            return {"total": 0, "by_status": {}, "missed": 0, "filled": 0, "partial": 0,
+                    "live_orders": 0, "fill_rate": None}
+
+    def reconcile_orders(
+        self,
+        account_orders: list[Mapping[str, Any]],
+        *,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Attach final broker order state to local order rows.
+
+        Matching is by broker ``order_id`` first, then by Kalshi's deterministic UUID
+        form of our raw ``client_order_id``. The original immediate-fill columns are
+        left untouched so placement-time and final outcomes can be compared.
+        """
+        try:
+            from .trading_client import _coid_uuid
+
+            ts = __import__("time").time() if now is None else float(now)
+            rows = self._conn.execute(
+                "SELECT id, order_id, client_order_id, requested_count FROM executor_orders"
+            ).fetchall()
+            by_key: dict[str, tuple[Any, ...]] = {}
+            for row in rows:
+                local_id, order_id, client_order_id, _requested = row
+                if order_id:
+                    by_key[f"order:{order_id}"] = row
+                if client_order_id:
+                    raw = str(client_order_id)
+                    by_key[f"client:{raw}"] = row
+                    by_key[f"client:{_coid_uuid(raw)}"] = row
+
+            matched_local_ids: set[int] = set()
+            updated = 0
+            for account_order in account_orders:
+                order = _inner_order(account_order)
+                order_id = order.get("order_id") if order.get("order_id") is not None else order.get("id")
+                client_order_id = order.get("client_order_id")
+                match = None
+                if order_id is not None:
+                    match = by_key.get(f"order:{order_id}")
+                if match is None and client_order_id is not None:
+                    match = by_key.get(f"client:{client_order_id}")
+                if match is None:
+                    continue
+                local_id, _local_order_id, _local_client_order_id, requested_count = match
+                final = classify_final_order(order, int(requested_count or 0))
+                self._conn.execute(
+                    "UPDATE executor_orders SET final_status=?, final_fill_status=?, "
+                    "final_filled_count=?, final_remaining_count=?, final_average_fill_price=?, "
+                    "final_average_fee_paid=?, final_reconciled_at=?, final_response_json=? "
+                    "WHERE id=?",
+                    (
+                        final["status"],
+                        final["fill_status"],
+                        final["filled_count"],
+                        final["remaining_count"],
+                        final["average_fill_price"],
+                        final["average_fee_paid"],
+                        ts,
+                        json.dumps(order, default=str)[:4000],
+                        local_id,
+                    ),
+                )
+                matched_local_ids.add(int(local_id))
+                updated += 1
+            self._conn.commit()
+            return {
+                "input": len(account_orders),
+                "matched": len(matched_local_ids),
+                "updated": updated,
+                "unmatched": len(account_orders) - updated,
+            }
+        except Exception:  # noqa: BLE001 - reconciliation must not corrupt executor operation
+            logger.exception("reconcile_orders failed")
+            return {"input": len(account_orders or []), "matched": 0, "updated": 0,
+                    "unmatched": len(account_orders or [])}
+
+    def final_fill_summary(self, *, action: str | None = None) -> dict[str, Any]:
+        """Counts by reconciled final_fill_status; unreconciled rows are excluded."""
+        try:
+            clauses = ["final_fill_status IS NOT NULL"]
+            args: list[Any] = []
+            if action:
+                clauses.append("action=?")
+                args.append(action)
+            where = "WHERE " + " AND ".join(clauses)
+            rows = self._conn.execute(
+                f"SELECT final_fill_status, COUNT(*), COALESCE(SUM(stake_cents),0) "
+                f"FROM executor_orders {where} GROUP BY final_fill_status",
+                tuple(args),
+            ).fetchall()
+            by = {r[0]: {"n": r[1], "stake_cents": r[2]} for r in rows}
+            total = sum(v["n"] for v in by.values())
+            missed = sum(by.get(s, {}).get("n", 0) for s in MISSED_LABELS)
+            filled = by.get(FILLED, {}).get("n", 0)
+            partial = by.get(PARTIAL, {}).get("n", 0)
+            live = total - by.get(DRY_RUN, {}).get("n", 0) - by.get(FAILED, {}).get("n", 0)
+            return {"total": total, "by_status": by, "missed": missed, "filled": filled,
+                    "partial": partial, "live_orders": live,
+                    "fill_rate": (filled / live if live else None)}
+        except Exception:  # noqa: BLE001
+            logger.exception("final_fill_summary failed")
             return {"total": 0, "by_status": {}, "missed": 0, "filled": 0, "partial": 0,
                     "live_orders": 0, "fill_rate": None}
 

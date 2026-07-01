@@ -13,6 +13,7 @@ from .ledger import StrategyBotLedger
 from .rules import (
     ACCEPTED,
     BOT_BASELINE,
+    BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
     BOT_HVF_DEPTH_FLOW,
@@ -61,6 +62,15 @@ def suppress_owned_source_notifications() -> bool:
 
 def hvf_wrapper_only_notifications() -> bool:
     return _bool("Q15_V3_HVF_DEPTH_FLOW_NOTIFICATIONS_ONLY", False)
+
+
+def empirical_delivery_guard_enabled() -> bool:
+    return _bool("Q15_V3_EMPIRICAL_DELIVERY_GUARD", True)
+
+
+def empirical_guard_late_intervals() -> set[str]:
+    raw = os.environ.get("Q15_V3_EMPIRICAL_LATE_INTERVALS", "10M,11M,12M,13M,14M,15M")
+    return {part.strip().upper() for part in raw.split(",") if part.strip()}
 
 
 def db_path() -> str:
@@ -145,6 +155,30 @@ def _with_duplicate_window_guard(
         return decision
 
 
+def _with_empirical_delivery_guard(decision: BotDecision, row: Mapping[str, Any]) -> BotDecision:
+    """Downgrade measured weak delivery slices to research while keeping full tracking."""
+    if (
+        not empirical_delivery_guard_enabled()
+        or decision.decision_status != ACCEPTED
+        or decision.bot_name == BOT_BASELINE
+    ):
+        return decision
+    side = source_side(row)
+    interval = str(row.get("interval") or "").upper()
+    reasons: list[str] = []
+    if side == "YES":
+        reasons.append("V3_EMPIRICAL_GUARD_YES_RESEARCH_ONLY")
+    if decision.bot_name != BOT_BNB_NO and interval in empirical_guard_late_intervals():
+        reasons.append(f"V3_EMPIRICAL_GUARD_INTERVAL_{interval}_RESEARCH_ONLY")
+    if not reasons:
+        return decision
+    return replace(
+        decision,
+        decision_status=RESEARCH_ONLY,
+        reason_codes=tuple(decision.reason_codes) + tuple(reasons),
+    )
+
+
 def record_source_row(
     row: Mapping[str, Any],
     *,
@@ -164,6 +198,7 @@ def record_source_row(
         count = 0
         for decision in decisions_for_row(enriched_row, source_system=source_system, btc_context=btc_context):
             stamped = _with_duplicate_window_guard(ledger, decision, enriched_row)
+            stamped = _with_empirical_delivery_guard(stamped, enriched_row)
             row_id = ledger.record_decision(stamped, enriched_row, source_system=source_system)
             if row_id is not None:
                 count += 1
@@ -193,6 +228,7 @@ def owns_source_notification(
         if hvf_wrapper_only_notifications() and source_system != "high_vol_flip":
             return False
         for decision in decisions_for_row(enriched_row, source_system=source_system, btc_context=btc_context):
+            decision = _with_empirical_delivery_guard(decision, enriched_row)
             if source_system == "high_vol_flip" and decision.bot_name == BOT_HVF_DEPTH_FLOW:
                 return True
             if decision.bot_name == BOT_BASELINE:

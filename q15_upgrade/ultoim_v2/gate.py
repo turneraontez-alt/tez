@@ -48,6 +48,9 @@ REASON_CODES = (
     "POSITIVE_EDGE_BLOCK",
     "RISK_LOW",
     "RISK_HIGH",
+    "DELIVERY_ASSET_BLOCK",
+    "DELIVERY_ASK_BELOW_PROVEN_MIN",
+    "DELIVERY_SPREAD_TOO_WIDE",
 )
 
 # Tolerance for the inclusive edge comparator — absorbs float-repr slack only
@@ -335,6 +338,25 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
     if positive_edge_block:
         reason_codes.append("POSITIVE_EDGE_BLOCK")
 
+    # Empirical delivery-quality guard (DEFAULT ON). It only suppresses delivery
+    # surfaces; research_fired is left untouched so blocked slices remain measurable.
+    asset = str(candidate.get("asset") or "").upper()
+    spread = _clean_num(candidate.get("spread_cents"))
+    blocked_assets = {str(a).upper() for a in getattr(cfg, "delivery_block_assets", frozenset())}
+    delivery_quality_block = False
+    if getattr(cfg, "delivery_quality_guard_enabled", False):
+        if asset and asset in blocked_assets:
+            delivery_quality_block = True
+            reason_codes.append("DELIVERY_ASSET_BLOCK")
+        min_ask = getattr(cfg, "delivery_min_ask_cents", None)
+        if min_ask is not None and ask < float(min_ask):
+            delivery_quality_block = True
+            reason_codes.append("DELIVERY_ASK_BELOW_PROVEN_MIN")
+        max_spread = getattr(cfg, "delivery_max_spread_cents", None)
+        if max_spread is not None and spread is not None and spread >= float(max_spread):
+            delivery_quality_block = True
+            reason_codes.append("DELIVERY_SPREAD_TOO_WIDE")
+
     # PAPER YES-NOTIFICATION admit (DEFAULT OFF). A high-conviction YES -- V2 calibrated_yes AND the
     # market both decisively YES -- that BTC contemporaneously CONFIRMS (``btc_unconfirmed`` already
     # uses the YES margin above) delivers a Telegram NOTIFICATION. Kept as a SEPARATE signal from
@@ -352,12 +374,14 @@ def evaluate(candidate: Mapping[str, Any], cfg: Any, *, interval: str | None = N
         and mkt_yes is not None and mkt_yes >= getattr(cfg, "hiconv_yes_market_min", 0.60)
         and gate_b_conf and gate_b_ask_lo
         and not btc_unconfirmed
+        and not delivery_quality_block
     )
     if yes_notify:
         reason_codes.append("YES_NOTIFY")
 
     fired = (gate_a and research_fired and not near_block and not floor_12m_block
-             and not btc_unconfirmed and not positive_edge_block and not skip_7m_no_block)
+             and not btc_unconfirmed and not positive_edge_block and not skip_7m_no_block
+             and not delivery_quality_block)
     return {
         "fired": bool(fired),
         "yes_notify": bool(yes_notify),

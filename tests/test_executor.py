@@ -211,6 +211,89 @@ def test_fill_summary_partitions_entry_vs_exit(tmp_path):
     assert empty.fill_summary(action="exit")["total"] == 0
 
 
+def test_executor_store_reconciles_final_orders_by_uuid_client_id(tmp_path):
+    import sqlite3
+
+    from q15_upgrade.executor.store import ExecutorStore
+    from q15_upgrade.executor.trading_client import _coid_uuid
+
+    raw_client_order_id = "v2x-1-T-BTC-entry"
+    s = ExecutorStore(str(tmp_path / "orders.sqlite3"))
+    s.record(
+        action="entry",
+        ticker="T-BTC",
+        client_order_id=raw_client_order_id,
+        requested_count=10,
+        filled_count=0,
+        fill_status="RESTED",
+        stake_cents=600,
+    )
+
+    summary = s.reconcile_orders([
+        {
+            "order_id": "broker-order-1",
+            "client_order_id": _coid_uuid(raw_client_order_id),
+            "status": "executed",
+            "fill_count": 10,
+            "remaining_count": 0,
+            "average_fill_price": "0.4000",
+            "average_fee_paid": "0.0000",
+        }
+    ], now=123.0)
+
+    assert summary == {"input": 1, "matched": 1, "updated": 1, "unmatched": 0}
+    final = s.final_fill_summary(action="entry")
+    assert final["total"] == 1
+    assert final["filled"] == 1
+    assert final["fill_rate"] == 1.0
+    conn = sqlite3.connect(str(tmp_path / "orders.sqlite3"))
+    try:
+        row = conn.execute(
+            "SELECT final_status, final_fill_status, final_filled_count, final_reconciled_at "
+            "FROM executor_orders"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("executed", "FILLED", 10, 123.0)
+
+
+def test_executor_exit_counterfactual_compares_exit_to_hold():
+    from q15_upgrade.executor.reporting import reconstruct_order_pnl
+
+    rows = [
+        {
+            "id": 1,
+            "created_at": 1.0,
+            "action": "entry",
+            "ticker": "T-BTC",
+            "client_order_id": "v2x-1-T-BTC-entry",
+            "fill_status": "FILLED",
+            "filled_count": 10,
+            "response_json": '{"average_fill_price":"0.4000","average_fee_paid":"0.0000"}',
+        },
+        {
+            "id": 2,
+            "created_at": 2.0,
+            "action": "exit",
+            "ticker": "T-BTC",
+            "client_order_id": "v2x-1-T-BTC-exit",
+            "fill_status": "FILLED",
+            "filled_count": 10,
+            "response_json": '{"average_fill_price":"0.7500","average_fee_paid":"0.0000"}',
+        },
+    ]
+
+    report = reconstruct_order_pnl(rows, {"T-BTC": "NO"})
+
+    assert report["summary"]["exit_pnl_cents"] == -350.0
+    assert report["summary"]["total_pnl_cents"] == -350.0
+    closed = report["closed_trades"][0]
+    assert closed["entry_price_cents"] == 60.0
+    assert closed["exit_price_cents"] == 25.0
+    assert closed["hold_pnl_cents"] == 400.0
+    assert closed["exit_minus_hold_cents"] == -750.0
+
+
 def test_on_fire_records_order_to_store(tmp_path):
     """End-to-end: a fire with recording on persists one row with a fill classification."""
     from q15_upgrade.executor.store import ExecutorStore

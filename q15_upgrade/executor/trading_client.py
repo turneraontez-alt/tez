@@ -114,6 +114,13 @@ class KalshiTradingClient:
             return (r.get("data") or {}).get("market_positions") or []
         return []
 
+    def get_orders(self) -> list[dict[str, Any]]:
+        """Read account orders for final fill reconciliation."""
+        r = self._request("GET", "/portfolio/orders")
+        if r.get("ok"):
+            return (r.get("data") or {}).get("orders") or []
+        return []
+
     # -- write (the live-money path) — Kalshi V2 events/orders schema -------------
     def place_order(self, *, ticker: str, side: str, count: int, price_cents: int,
                     action: str = "buy", client_order_id: str) -> dict[str, Any]:

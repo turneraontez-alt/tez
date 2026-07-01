@@ -480,6 +480,14 @@ def _v3_hvf_own_strong_interval_gate_enabled() -> bool:
     return _env_bool("Q15_V3_HVF_OWN_STRONG_INTERVAL_GATE_ENABLED", True)
 
 
+def _hvf_yes_contra_veto_enabled() -> bool:
+    return _env_bool("Q15_V3_HVF_YES_CONTRA_VETO_ENABLED", True)
+
+
+def _hvf_yes_spot_imbalance_deadband() -> float:
+    return _env_float("Q15_V3_HVF_YES_SPOT_IMBALANCE_DEADBAND", 0.01, minimum=0.0)
+
+
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
     value = _num(row.get(key))
     if value is None:
@@ -1424,6 +1432,12 @@ def hvf_depth_flow_wrapper_decision(
         "coinbase_l2_top_250_imbalance_notional",
         _top250_deadband(),
     )
+    spot_imb_signal, spot_imbalance = _depth_signal(
+        row,
+        "spot_depth_imbalance",
+        _hvf_yes_spot_imbalance_deadband(),
+    )
+    kalshi_book_signal, kalshi_book_imbalance = _kalshi_book_signal(row)
     profile = {
         **base_profile,
         "spot_net_notional_60s": spot60,
@@ -1439,7 +1453,35 @@ def hvf_depth_flow_wrapper_decision(
         "coinbase_top60_imbalance_notional": top60_imbalance,
         "coinbase_top250_signal": top250_signal,
         "coinbase_top250_imbalance_notional": top250_imbalance,
+        "spot_depth_imbalance_signal": spot_imb_signal,
+        "spot_depth_imbalance_value": spot_imbalance,
+        "kalshi_book_signal": kalshi_book_signal,
+        "kalshi_book_imbalance": kalshi_book_imbalance,
     }
+
+    audit_veto_reasons: list[str] = []
+    if side == "YES" and _hvf_yes_contra_veto_enabled():
+        if spot60_side == "NO":
+            audit_veto_reasons.append("HVF_WRAPPER_YES_SPOT60_CONTRA_VETO")
+        if spot_imb_signal == "NO":
+            audit_veto_reasons.append("HVF_WRAPPER_YES_SPOT_IMB_CONTRA_VETO")
+        if kalshi_book_signal == "NO":
+            audit_veto_reasons.append("HVF_WRAPPER_YES_KALSHI_BOOK_CONTRA_VETO")
+        if taker_side == "YES":
+            audit_veto_reasons.append("HVF_WRAPPER_YES_TAKER_CROWD_VETO")
+
+    def _hvf_decision(status: str, reasons: list[str] | tuple[str, ...]) -> BotDecision:
+        final_status = status
+        final_reasons = list(reasons)
+        if status == ACCEPTED and audit_veto_reasons:
+            final_status = RESEARCH_ONLY
+            final_reasons.extend(["HVF_WRAPPER_YES_AUDIT_VETO", *audit_veto_reasons])
+        return BotDecision(
+            BOT_HVF_DEPTH_FLOW,
+            final_status,
+            tuple(dict.fromkeys(final_reasons)),
+            threshold_profile=profile,
+        )
 
     is_morefire = rule == "HVF_MORE_FIRE_STRICT" or kind == "MORE_FIRE_STRICT_ALERT"
     if is_morefire:
@@ -1518,11 +1560,9 @@ def hvf_depth_flow_wrapper_decision(
             )
         if _v3_positive_ev_gate_enabled():
             reasons.append("V3_POSITIVE_EV_GATE_MOREFIRE_ALLOWED_BY_OVERRIDE")
-        return BotDecision(
-            BOT_HVF_DEPTH_FLOW,
+        return _hvf_decision(
             ACCEPTED,
-            tuple(reasons + ["HVF_WRAPPER_MOREFIRE_ACCEPT_NO_SPOT_TAKER_CONTRA"]),
-            threshold_profile=profile,
+            reasons + ["HVF_WRAPPER_MOREFIRE_ACCEPT_NO_SPOT_TAKER_CONTRA"],
         )
 
     if rule == "HVF_OWN_STRONG_SELECTED":
@@ -1576,12 +1616,7 @@ def hvf_depth_flow_wrapper_decision(
                 ]
                 if _v3_positive_ev_gate_enabled():
                     recovery_reasons.append("V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED")
-                return BotDecision(
-                    BOT_HVF_DEPTH_FLOW,
-                    ACCEPTED,
-                    tuple(recovery_reasons),
-                    threshold_profile=profile,
-                )
+                return _hvf_decision(ACCEPTED, recovery_reasons)
             recovery_reason = "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_NOT_CONFIRMED"
             if ask is not None and ask > _hvf_own_strong_recovery_entry_max():
                 recovery_reason = "HVF_WRAPPER_OWN_STRONG_TOP12_RECOVERY_ENTRY_TOO_EXPENSIVE"
@@ -1610,11 +1645,9 @@ def hvf_depth_flow_wrapper_decision(
             )
         if _v3_positive_ev_gate_enabled():
             reasons.append("V3_POSITIVE_EV_GATE_HVF_OWN_STRONG_ALLOWED")
-        return BotDecision(
-            BOT_HVF_DEPTH_FLOW,
+        return _hvf_decision(
             ACCEPTED,
-            tuple(reasons + ["HVF_WRAPPER_OWN_STRONG_ACCEPT_SOURCE_STRENGTH"]),
-            threshold_profile=profile,
+            reasons + ["HVF_WRAPPER_OWN_STRONG_ACCEPT_SOURCE_STRENGTH"],
         )
 
     if rule == "HVF_OWN_NO_FLASH":
@@ -1631,21 +1664,11 @@ def hvf_depth_flow_wrapper_decision(
         reasons = ["HVF_WRAPPER_OWN_NO_FLASH_ACCEPT_NO_HARD_DEPTH_VETO"]
         if _v3_positive_ev_gate_enabled():
             reasons.append("V3_POSITIVE_EV_GATE_HVF_OWN_NO_FLASH_ALLOWED")
-        return BotDecision(
-            BOT_HVF_DEPTH_FLOW,
-            ACCEPTED,
-            tuple(reasons),
-            threshold_profile=profile,
-        )
+        return _hvf_decision(ACCEPTED, reasons)
 
     if rule == "HVF_BTC_FOLLOW_EXTREME":
         if side == "NO":
-            return BotDecision(
-                BOT_HVF_DEPTH_FLOW,
-                ACCEPTED,
-                ("HVF_WRAPPER_BTC_FOLLOW_NO_ACCEPT_PROVISIONAL",),
-                threshold_profile=profile,
-            )
+            return _hvf_decision(ACCEPTED, ("HVF_WRAPPER_BTC_FOLLOW_NO_ACCEPT_PROVISIONAL",))
         return BotDecision(
             BOT_HVF_DEPTH_FLOW,
             RESEARCH_ONLY,
