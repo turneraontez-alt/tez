@@ -1,5 +1,22 @@
 # Session handoff
 
+## Shipped THIS session - item 5: durable heartbeat watchdog pager
+Added a durable refresh-loop heartbeat at the top of every production cycle (`Q15_HEARTBEAT_PATH`, default
+`work/local-run/q15_cycle_heartbeat.json`) and exposes `heartbeat_watchdog` on `/api/health`. A tiny daemon
+supervisor thread starts only for the production infinite loop, checks heartbeat age, and sends a stdlib-only
+Telegram page (`Q15 HEARTBEAT WATCHDOG`) when age exceeds `Q15_HEARTBEAT_STALE_SECONDS` (default 120s).
+It is page-only: no auto-restart path was added.
+
+The heartbeat pager cooldown is persisted in `Q15_HEARTBEAT_COOLDOWN_PATH` (default
+`work/local-run/q15_cycle_heartbeat_cooldown.json`) so restarts do not re-fire immediately. The same
+dependency-free path sends one rate-limited `Q15 PROCESS EXIT` page on interpreter exit. Telegram delivery uses
+only stdlib `urllib` and never logs token values; tests inject a sender and never touch the network.
+
+Tests:
+- Focused watchdog suite: `.venv\Scripts\python.exe -m pytest tests/test_cycle_watchdog.py tests/test_cycle_watchdog_pager.py -q` -> `17 passed`.
+- Full suite after item 5 on this Windows runner: `1496 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue.
+
 ## Shipped THIS session - item 4: HVF MORE_FIRE_STRICT mute flag
 Added `Q15_HVF_MUTE_MORE_FIRE` (default OFF). When the owner flips it ON, `HVF_MORE_FIRE_STRICT` still
 records gradeable research rows (`MORE_FIRE_STRICT_RESEARCH`, `delivery_status=RESEARCH`) but never sends

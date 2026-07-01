@@ -534,11 +534,15 @@ def refresh_loop(max_cycles=None):
     # worker threads (the bounded-test path shuts down explicitly before return).
     atexit.register(executor.shutdown, wait=False)
     atexit.register(detail_executor.shutdown, wait=False)
+    if max_cycles is None:
+        cycle_watchdog.write_heartbeat(status="startup")
+        cycle_watchdog.start_heartbeat_supervisor()
     cycles = 0
     while True:
         cycle_clock = time.monotonic()
         cycle_start = time.time()
         now = cycle_start
+        cycle_watchdog.write_heartbeat(now=now, cycle=cycles, status="cycle_start")
         ct = cycle_watchdog.CycleTimer()
         try:
             # -- discovery --
@@ -1403,6 +1407,7 @@ def health():
         "kraken_l3": kraken_l3_status,
         "cycle_watchdog": cycle_watchdog.health(),
         "feed_watchdog": cycle_watchdog.feed_health(),
+        "heartbeat_watchdog": cycle_watchdog.heartbeat_status(now=now),
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
         "assets_tracked": len(snaps),

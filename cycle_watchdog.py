@@ -12,12 +12,17 @@ decision, it only measures.
 """
 from __future__ import annotations
 
+import json
+import atexit
 import logging
 import math
 import os
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib import parse, request
+from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 _lock = threading.Lock()
+_heartbeat_lock = threading.Lock()
+_supervisor_lock = threading.Lock()
+_supervisor_started = False
 
 
 def _blank_state() -> dict:
@@ -82,6 +90,35 @@ def feed_alert_cooldown_seconds() -> float:
     return _env_float("Q15_FEED_WATCHDOG_COOLDOWN_SECONDS", 86400.0, 30.0, 86400.0 * 7)
 
 
+def heartbeat_enabled() -> bool:
+    return _env_bool("Q15_HEARTBEAT_ENABLED", True)
+
+
+def heartbeat_path() -> Path:
+    return Path(os.environ.get("Q15_HEARTBEAT_PATH", "work/local-run/q15_cycle_heartbeat.json"))
+
+
+def heartbeat_cooldown_path() -> Path:
+    return Path(
+        os.environ.get(
+            "Q15_HEARTBEAT_COOLDOWN_PATH",
+            "work/local-run/q15_cycle_heartbeat_cooldown.json",
+        )
+    )
+
+
+def heartbeat_stale_seconds() -> float:
+    return _env_float("Q15_HEARTBEAT_STALE_SECONDS", 120.0, 5.0, 86400.0)
+
+
+def heartbeat_supervisor_interval_seconds() -> float:
+    return _env_float("Q15_HEARTBEAT_SUPERVISOR_INTERVAL_SECONDS", 15.0, 1.0, 3600.0)
+
+
+def heartbeat_pager_cooldown_seconds() -> float:
+    return _env_float("Q15_HEARTBEAT_PAGER_COOLDOWN_SECONDS", 600.0, 30.0, 86400.0)
+
+
 def _iso_from_epoch(value: float | None) -> str | None:
     if value is None:
         return None
@@ -96,6 +133,196 @@ def _clean_age(value) -> float | None:
     if not math.isfinite(out) or out < 0:
         return None
     return out
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
+def write_heartbeat(*, now: float | None = None, cycle: int | None = None,
+                    status: str = "cycle_start") -> None:
+    """Durably stamp the refresh loop heartbeat. Best-effort and non-fatal."""
+    if not heartbeat_enabled():
+        return
+    current = time.time() if now is None else float(now)
+    payload = {
+        "pid": os.getpid(),
+        "timestamp": current,
+        "timestamp_iso": _iso_from_epoch(current),
+        "cycle": cycle,
+        "status": status,
+    }
+    try:
+        with _heartbeat_lock:
+            _write_json_atomic(heartbeat_path(), payload)
+    except Exception:
+        logger.debug("heartbeat write failed", exc_info=True)
+
+
+def heartbeat_status(*, now: float | None = None) -> dict:
+    current = time.time() if now is None else float(now)
+    path = heartbeat_path()
+    payload = _read_json(path)
+    ts = _clean_age(payload.get("timestamp"))
+    age = None if ts is None else max(0.0, current - ts)
+    stale_threshold = heartbeat_stale_seconds()
+    exists = path.exists()
+    return {
+        "enabled": heartbeat_enabled(),
+        "path": str(path),
+        "exists": exists,
+        "pid": payload.get("pid"),
+        "cycle": payload.get("cycle"),
+        "status": payload.get("status"),
+        "last_heartbeat_iso": _iso_from_epoch(ts),
+        "age_seconds": None if age is None else round(age, 3),
+        "stale_seconds": stale_threshold,
+        "stale": bool(exists and age is not None and age > stale_threshold),
+        "supervisor_interval_seconds": heartbeat_supervisor_interval_seconds(),
+        "cooldown_seconds": heartbeat_pager_cooldown_seconds(),
+        "cooldown_path": str(heartbeat_cooldown_path()),
+    }
+
+
+def _claim_persistent_cooldown(kind: str, now: float, cooldown: float) -> bool:
+    path = heartbeat_cooldown_path()
+    with _heartbeat_lock:
+        data = _read_json(path)
+        key = f"{kind}_alert_at"
+        last = _clean_age(data.get(key)) or 0.0
+        if last and now - last < cooldown:
+            return False
+        data[key] = float(now)
+        data[f"{kind}_alert_at_iso"] = _iso_from_epoch(float(now))
+        try:
+            _write_json_atomic(path, data)
+        except Exception:
+            logger.debug("heartbeat cooldown write failed", exc_info=True)
+        return True
+
+
+def _telegram_target() -> tuple[str | None, str | None]:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or None
+    chat = (
+        os.environ.get("Q15_HEARTBEAT_TELEGRAM_CHAT_ID")
+        or os.environ.get("TELEGRAM_CHAT_ID")
+        or None
+    )
+    return token, chat
+
+
+def send_dependency_free_telegram(text: str) -> dict:
+    """Send a Telegram page with only stdlib urllib. Never logs secret values."""
+    token, chat = _telegram_target()
+    if not token or not chat:
+        return {"ok": False, "delivered": False, "error": "telegram_unconfigured"}
+    body = parse.urlencode({
+        "chat_id": chat,
+        "text": str(text),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
+    }).encode("utf-8")
+    req = request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=8) as resp:  # noqa: S310 - Telegram API target from env token.
+            ok = 200 <= int(getattr(resp, "status", 0) or 0) < 300
+            return {"ok": ok, "delivered": ok, "error": None if ok else f"HTTP {resp.status}"}
+    except URLError as exc:
+        return {"ok": False, "delivered": False, "error": type(exc).__name__}
+    except Exception as exc:
+        return {"ok": False, "delivered": False, "error": type(exc).__name__}
+
+
+def heartbeat_alert_message(status: dict | None = None, *, now: float | None = None) -> str | None:
+    current_status = heartbeat_status(now=now) if status is None else status
+    if not current_status.get("enabled") or not current_status.get("stale"):
+        return None
+    age = current_status.get("age_seconds")
+    threshold = current_status.get("stale_seconds")
+    return (
+        "<b>Q15 HEARTBEAT WATCHDOG</b>\n"
+        f"Refresh-loop heartbeat age is {age:.0f}s (threshold {threshold:.0f}s).\n"
+        "The loop may be hung; no restart attempted."
+    )
+
+
+def heartbeat_supervisor_tick(*, now: float | None = None, send_fn=None) -> str | None:
+    """One testable supervisor pass. Sends at most one stale-heartbeat page."""
+    current = time.time() if now is None else float(now)
+    status = heartbeat_status(now=current)
+    msg = heartbeat_alert_message(status, now=current)
+    if not msg:
+        return None
+    if not _claim_persistent_cooldown("stale", current, heartbeat_pager_cooldown_seconds()):
+        return None
+    sender = send_fn or send_dependency_free_telegram
+    try:
+        sender(msg)
+    except Exception:
+        logger.debug("heartbeat stale page send failed", exc_info=True)
+    return msg
+
+
+def process_exit_alert_message(*, now: float | None = None) -> str | None:
+    if not heartbeat_enabled() or not _env_bool("Q15_HEARTBEAT_EXIT_ALERT_ENABLED", True):
+        return None
+    current = time.time() if now is None else float(now)
+    return (
+        "<b>Q15 PROCESS EXIT</b>\n"
+        f"Monitor process is exiting at {_iso_from_epoch(current)}.\n"
+        "No restart attempted."
+    )
+
+
+def send_process_exit_alert(*, now: float | None = None, send_fn=None) -> str | None:
+    current = time.time() if now is None else float(now)
+    msg = process_exit_alert_message(now=current)
+    if not msg:
+        return None
+    if not _claim_persistent_cooldown("exit", current, heartbeat_pager_cooldown_seconds()):
+        return None
+    sender = send_fn or send_dependency_free_telegram
+    try:
+        sender(msg)
+    except Exception:
+        logger.debug("heartbeat exit page send failed", exc_info=True)
+    return msg
+
+
+def start_heartbeat_supervisor() -> bool:
+    """Start the background heartbeat checker once. It pages only; no restart."""
+    global _supervisor_started
+    if not heartbeat_enabled():
+        return False
+    with _supervisor_lock:
+        if _supervisor_started:
+            return False
+        _supervisor_started = True
+
+        def _run() -> None:
+            while True:
+                time.sleep(heartbeat_supervisor_interval_seconds())
+                heartbeat_supervisor_tick()
+
+        thread = threading.Thread(target=_run, name="q15-heartbeat-supervisor", daemon=True)
+        thread.start()
+        atexit.register(send_process_exit_alert)
+        return True
 
 
 class CycleTimer:
