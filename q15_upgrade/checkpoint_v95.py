@@ -4271,7 +4271,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "primary_learning_checkpoint": self.ledger.primary_learning_checkpoint,
             "learning_enabled_by_checkpoint": dict(self.ledger.learning_enabled_by_checkpoint),
             "automatic_promotion": False, "order_placement": False,
-            "ledger": self.ledger.status(), "public_market_data": self.market_data.health(),
+            "ledger": self.ledger.status(),
+            "grading": self.ledger.reconcile_backlog_status(),
+            "public_market_data": self.market_data.health(),
             "parent_v94": parent,
         }
 

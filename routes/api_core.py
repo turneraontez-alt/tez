@@ -245,9 +245,15 @@ def register(flask_app, host):
         except Exception as e:
             ledger_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
 
+        try:
+            grading_health = _app.checkpoint_v95.ledger.reconcile_backlog_status(now=now)
+        except Exception as e:
+            grading_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
+
         return _app.jsonify({
             "status": "ok",
             "ledger": ledger_health,
+            "grading": grading_health,
             "q15_v9_5": _app.checkpoint_v95.health(),
             "q15_v9_1": _app.checkpoint_v95.health(),
             "q15_v9_2": _app.checkpoint_v95.health(),

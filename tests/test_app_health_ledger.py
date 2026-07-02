@@ -50,6 +50,32 @@ class TestHealthLedgerSurface(unittest.TestCase):
         finally:
             appmod.checkpoint_v95.ledger.status = orig
 
+    def test_health_includes_grading_backlog_block(self):
+        orig = appmod.checkpoint_v95.ledger.reconcile_backlog_status
+
+        def fake_grading(*, now=None):
+            return {
+                "available": True,
+                "resolved_24h": 7,
+                "unresolved_pastclose": 42,
+                "oldest_unresolved_age_seconds": 900,
+                "newest_resolved_at": 123.0,
+                "newest_resolved_age_seconds": 60,
+                "parked": 3,
+            }
+
+        appmod.checkpoint_v95.ledger.reconcile_backlog_status = fake_grading
+        try:
+            resp = self.client.get("/api/health")
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json()
+            self.assertEqual(body["grading"]["resolved_24h"], 7)
+            self.assertEqual(body["grading"]["unresolved_pastclose"], 42)
+            self.assertEqual(body["grading"]["parked"], 3)
+            self.assertEqual(body["q15_v9_5"]["grading"]["resolved_24h"], 7)
+        finally:
+            appmod.checkpoint_v95.ledger.reconcile_backlog_status = orig
+
 
 if __name__ == "__main__":
     unittest.main()

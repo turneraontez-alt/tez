@@ -78,6 +78,68 @@ class HourlyReporter:
         flag = " *" if d.get("low_n") else ""
         return f"{label:<8}{wl:>5}{acc_s:>6}{pnl:>7}{flag}"
 
+    @staticmethod
+    def _age_label(seconds):
+        if seconds is None:
+            return "n/a"
+        try:
+            seconds = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            return "n/a"
+        minutes = int(seconds // 60)
+        if minutes < 1:
+            return "<1m"
+        if minutes < 60:
+            return f"{minutes}m"
+        hours = minutes // 60
+        if hours < 48:
+            return f"{hours}h"
+        days, rem_hours = divmod(hours, 24)
+        return f"{days}d{rem_hours}h" if rem_hours else f"{days}d"
+
+    def _grading_status(self):
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "reconcile_backlog_status"):
+            return {}
+        try:
+            return ledger.reconcile_backlog_status() or {}
+        except Exception as e:
+            logger.warning("grading backlog status skipped: %s", e)
+            return {}
+
+    def _staleness_suffix(self, status=None):
+        status = status if status is not None else self._grading_status()
+        if not status or not status.get("available", True):
+            return ""
+        ts = status.get("newest_resolved_at")
+        if ts is None:
+            return ""
+        try:
+            ts_f = float(ts)
+            age = status.get("newest_resolved_age_seconds")
+            age_f = float(age) if age is not None else datetime.now(timezone.utc).timestamp() - ts_f
+        except (TypeError, ValueError):
+            return ""
+        if age_f <= 86400.0:
+            return ""
+        stamp = datetime.fromtimestamp(ts_f, timezone.utc).strftime("%m-%d")
+        return f" (data through {stamp})"
+
+    def _grading_lines(self):
+        status = self._grading_status()
+        if not status:
+            return []
+        if not status.get("available", True):
+            return ["", "Grading: unavailable"]
+        return [
+            "",
+            "Grading: "
+            f"{int(status.get('resolved_24h') or 0)} resolved 24h · "
+            f"backlog {int(status.get('unresolved_pastclose') or 0)} · "
+            f"oldest {self._age_label(status.get('oldest_unresolved_age_seconds'))} · "
+            f"parked {int(status.get('parked') or 0)}",
+        ]
+
     def _scoreboard_table(self):
         """Canonical track record: a compact monospace table by interval, rank, asset."""
         ledger = getattr(self, "v95_ledger", None)
@@ -96,7 +158,7 @@ class HourlyReporter:
         acc_s = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "n/a"
         pnl = overall.get("realized_total_cents")
         pnl_s = f" · P/L {pnl:+.0f}¢" if (isinstance(pnl, (int, float)) and overall.get("pnl_n")) else ""
-        headline = f"Settled {overall['n']} · {acc_s} right{pnl_s}"
+        headline = f"Settled {overall['n']} · {acc_s} right{pnl_s}{self._staleness_suffix()}"
 
         by_cp, by_asset = sb.get("by_checkpoint", {}), sb.get("by_asset", {})
         # Rank record per interval on its own — the #1/#2/#3 pick judged within that
@@ -155,13 +217,14 @@ class HourlyReporter:
             return []
         by_cp = (sb or {}).get("by_checkpoint") or {}
         lines = []
+        stale = self._staleness_suffix()
         for cp in ("15M", "10M", "7M"):
             d = by_cp.get(cp) or {}
             if not d.get("n"):
                 continue
             flag = " RANK INVERTED" if d.get("rank_inverted") else ""
             lines.append(
-                f"Rank quality {cp} last {d.get('n')}: "
+                f"Rank quality {cp} last {d.get('n')}{stale}: "
                 f"{self._rank_quality_bucket('#1', d.get('rank1'))}; "
                 f"{self._rank_quality_bucket('#2-3', d.get('rank23'))}; "
                 f"{self._rank_quality_bucket('rest', d.get('rest'))}{flag}"
@@ -480,6 +543,10 @@ class HourlyReporter:
 
         # Report-only rank inversion diagnostic. No ranking formula changes.
         body.extend(self._rank_quality_lines())
+
+        # Resolution lag must be visible in every hourly report: stale grading can
+        # make otherwise-correct scoreboards read current when they are frozen.
+        body.extend(self._grading_lines())
 
         # Flip-warning track record, rendered in the same table as the intervals.
         body.extend(self._flip_scoreboard())

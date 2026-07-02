@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -173,10 +174,23 @@ class TestSevenMinuteDetection(unittest.TestCase):
 
 
 class _FakeLedger:
-    def __init__(self, sb):
+    def __init__(self, sb, grading=None):
         self._sb = sb
+        self._grading = grading
     def scoreboard(self):
         return self._sb
+    def reconcile_backlog_status(self):
+        if self._grading is not None:
+            return dict(self._grading)
+        return {
+            "available": True,
+            "resolved_24h": 0,
+            "unresolved_pastclose": 0,
+            "oldest_unresolved_age_seconds": None,
+            "newest_resolved_at": None,
+            "newest_resolved_age_seconds": None,
+            "parked": 0,
+        }
 
 
 class TestHourlyReportScoreboard(unittest.TestCase):
@@ -339,6 +353,70 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         self.assertIn("#1 20% [4-62] n=5", text)
         self.assertIn("#2-3 100% [84-100] n=20", text)
         self.assertIn("RANK INVERTED", text)
+
+    def test_full_report_includes_grading_backlog_line(self):
+        sb = {
+            "available": True,
+            "overall": {"right": 5, "wrong": 3, "n": 8, "accuracy": 0.625},
+            "by_checkpoint": {"10M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+        grading = {
+            "available": True,
+            "resolved_24h": 17,
+            "unresolved_pastclose": 12255,
+            "oldest_unresolved_age_seconds": 2 * 86400 + 3600,
+            "newest_resolved_at": None,
+            "newest_resolved_age_seconds": None,
+            "parked": 6,
+        }
+
+        text = self._reporter(_FakeLedger(sb, grading)).build_report()
+
+        self.assertIn("Grading: 17 resolved 24h · backlog 12255 · oldest 2d1h · parked 6", text)
+
+    def test_scoreboard_and_rank_quality_stamp_stale_resolved_data_only(self):
+        sb = {
+            "available": True,
+            "overall": {"right": 5, "wrong": 3, "n": 8, "accuracy": 0.625},
+            "by_checkpoint": {"10M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+        stale_grading = {
+            "available": True,
+            "resolved_24h": 0,
+            "unresolved_pastclose": 10,
+            "oldest_unresolved_age_seconds": 3600,
+            "newest_resolved_at": datetime(2026, 6, 25, tzinfo=timezone.utc).timestamp(),
+            "newest_resolved_age_seconds": 25 * 3600,
+            "parked": 0,
+        }
+        fresh_grading = {
+            **stale_grading,
+            "newest_resolved_age_seconds": 3600,
+        }
+
+        class _RankLedger(_FakeLedger):
+            def rank_quality_scoreboard(self, limit=300):
+                return {
+                    "available": True,
+                    "limit": limit,
+                    "by_checkpoint": {
+                        "10M": {
+                            "n": 30,
+                            "rank1": {"n": 5, "accuracy": 0.2, "ci_low": 0.04, "ci_high": 0.62},
+                            "rank23": {"n": 20, "accuracy": 1.0, "ci_low": 0.84, "ci_high": 1.0},
+                            "rest": {"n": 5, "accuracy": 1.0, "ci_low": 0.57, "ci_high": 1.0},
+                        }
+                    },
+                }
+
+        stale_text = self._reporter(_RankLedger(sb, stale_grading)).build_report()
+        fresh_text = self._reporter(_RankLedger(sb, fresh_grading)).build_report()
+
+        self.assertIn("Settled 8 · 62% right (data through 06-25)", stale_text)
+        self.assertIn("Rank quality 10M last 30 (data through 06-25):", stale_text)
+        self.assertNotIn("data through", fresh_text)
 
     def test_header_is_eastern_time(self):
         reporter = reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=None)
