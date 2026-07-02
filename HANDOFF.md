@@ -9,11 +9,33 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1507 passed / 4 skipped here** (8 app tests uncollectable
-in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
-issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+Tests: `python3 -m pytest tests/ -q` → **1620 passed / 13 skipped here** (needs
+`pip install --user coinbase-advanced-py cffi cryptography` too in a fresh container, else 3 test
+files error on collection — env issue, not the diff; skip/error count varies with install state).
 
-## ✅ Shipped THIS session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
+## ✅ Shipped THIS session — Stage 0 refactor precondition: suite green, guard back to default-OFF
+**Suite 1620 passed / 13 skipped** (was 16 FAILED / 1596 after the local "Auto sync" commits landed
+the delivery-quality guard default-ON). This is Stage 0 of the owner-approved staged refactor; the
+red suite blocked everything else.
+- **`ultoim_v2/config.py`: `delivery_quality_guard_enabled` default True → False**, restoring the
+  repo's default-OFF standard for model-behavior changes. **Live behavior unchanged**:
+  `.replit` now pins `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD="true"` (owner opt-in, instantly
+  reversible) — ⚠️ deploy-pending: the Repl must restart to read the new env var, and until then
+  the code default OFF means the guard is INACTIVE once this code syncs. Restart promptly after
+  the Relay picks this up, and confirm no Replit Secret overrides the var.
+- **New `tests/test_ultoim_v2_delivery_quality_guard.py` (8 tests):** default-OFF, byte-identical
+  when off, HYPE/SOL block, ask<60 block + 60c boundary, spread>=3 block + 2.9 pass,
+  clean-candidate fires, yes_notify also suppressed, missing-spread fails open. The guard's
+  data case (ask<60 NOs 39.4%/-1,047c; HYPE -785c; SOL -387c settled) is real — the fix was the
+  DEFAULT, not the guard.
+- The 16 pre-existing gate-test failures (btc_confirm/distance_gate/inverse_edge/risk_tier/s15/
+  skip_7m_no — fixtures use ask=55c which the guard blocks) pass again unmodified; the two
+  guard-assuming tests in `test_ultoim_v2.py` now opt in explicitly / assert default-OFF.
+- `.env.example`: documented the 4 guard vars.
+- Next refactor stages (owner-approved, not yet started): config registry, app.py route/loop
+  split (golden-master first), telegram-client unification, rename/move pass.
+
+## ✅ Shipped a prior session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
 **Suite 1507 / 4 skipped** (+28 tests). Two fleets confirmed the 15m taker market is efficient net of
 fees (−2 to −4c/contract); the only validated edge is **NO @ 10M** (+11.5c delivered-strict, CI lower
 bound > 0, survives LOAO + time-split), while **7M NO is break-even noise** (+0.75c, CI spans 0) that

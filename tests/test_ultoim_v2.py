@@ -213,7 +213,9 @@ def test_owner_default_config_is_aggressive():
     assert cfg.btc_confirm_margin == 0.15
     assert cfg.btc_confirm_margin_yes == 0.10  # asymmetric YES cutoff (BTC>=0.60)
     assert cfg.require_inverse_edge is True          # drop the positive-edge coin-flips
-    assert cfg.delivery_quality_guard_enabled is True
+    # Guard is default-OFF in code (repo default-OFF standard); the live Repl opts in via
+    # Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD=true in .replit.
+    assert cfg.delivery_quality_guard_enabled is False
     assert cfg.delivery_block_assets == frozenset({"HYPE", "SOL"})
     assert cfg.delivery_min_ask_cents == 60.0
     assert cfg.delivery_max_spread_cents == 3.0
@@ -224,7 +226,8 @@ def test_owner_default_config_is_aggressive():
 
 def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research():
     cfg = UltoimV2Config(
-        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False
+        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
+        delivery_quality_guard_enabled=True,
     )
     low_ask = gate.evaluate(
         _candidate(asset="BTC", selected_probability=0.70, entry_ask_cents=55.0,
