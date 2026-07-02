@@ -104,6 +104,12 @@ class HighVolFlipConfig:
     more_fire_strict_enabled: bool = field(
         default_factory=lambda: _bool("Q15_HVF_MORE_FIRE_STRICT_ENABLED", False)
     )
+    # Default OFF: when enabled, the historically negative MORE_FIRE_STRICT rule
+    # remains measured as research but never sends Telegram or competes for alert
+    # priority/slots.
+    mute_more_fire: bool = field(
+        default_factory=lambda: _bool("Q15_HVF_MUTE_MORE_FIRE", False)
+    )
     more_fire_strict_assets: frozenset[str] = field(
         default_factory=lambda: _csv_set("Q15_HVF_MORE_FIRE_STRICT_ASSETS", "ETH,SOL,XRP")
     )

@@ -95,6 +95,7 @@ LEARNING_EXPORT_INTERVAL = "1200"
 Q15_ULTOIM_V2_ENABLED = "true"
 Q15_ULTOIM_V2_TELEGRAM_ENABLED = "false" # V2 still records/settles; V3 owns Telegram notifications
 Q15_ULTOIM_V2_RECORD_XFLOW = "true"
+Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD = "true"
 Q15_ULTOIM_V2_DELIVER_TOP_N = "2"  # show top 2 10M choices per 15-min window
 Q15_ULTOIM_V2_DELIVER_BY_RR = "true"
 Q15_ULTOIM_V2_SKIP_15M = "true"
@@ -147,11 +148,6 @@ Q15_ULTOIM_V2_10M_EXPENSIVE_NO_ASK_HI = "85"
 Q15_ULTOIM_V2_SKIP_7M_NO = "false"
 Q15_ULTOIM_V2_YES_NOTIFY = "false" # V3 sends filtered YES notifications; keep old V2 YES cards muted
 Q15_ULTOIM_V2_EXIT_WATCH_SECONDS = "600"
-# Empirical delivery-quality guard (2026-07-01 ledger review): blocks DELIVERY of HYPE/SOL,
-# ask<60c, spread>=3c slices (ask<60 NOs ran 39%/-1,047c settled). Code default is OFF per the
-# repo's default-OFF standard for model-behavior changes; the live Repl opts in here.
-# Set false to revert instantly, no code change.
-Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD = "true"
 Q15_STRATEGY_BOTS_ENABLED = "true"
 Q15_STRATEGY_BOTS_DB = "data/q15_strategy_bots_v3.sqlite3"
 Q15_V3_TELEGRAM_ENABLED = "true"

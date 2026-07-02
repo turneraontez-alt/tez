@@ -993,6 +993,38 @@ class UltoimV2Ledger:
             )
             self._conn.commit()
 
+    def pending_exit_outbox_rows(self, model_version: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, delivery_error FROM ultoim_v2_exit_warnings "
+                "WHERE model_version=? "
+                "AND delivery_status IN ('PENDING','DELIVERY_FAILED') "
+                "AND delivery_error LIKE 'outbox:%' "
+                "ORDER BY created_at ASC LIMIT ?",
+                (model_version, max(1, min(int(limit), 1000))),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def exit_warning_delivery_counts_24h(self, model_version: str,
+                                         now: float | None = None) -> dict[str, Any]:
+        ts = time.time() if now is None else float(now)
+        since = ts - 86400.0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT delivery_status, COUNT(*) AS n FROM ultoim_v2_exit_warnings "
+                "WHERE model_version=? AND created_at>=? "
+                "GROUP BY delivery_status",
+                (model_version, since),
+            ).fetchall()
+        counts = {str(r["delivery_status"] or "PENDING"): int(r["n"]) for r in rows}
+        recorded = sum(counts.values())
+        return {
+            "recorded": recorded,
+            "sent": int(counts.get("SENT", 0)),
+            "counts": counts,
+            "since": since,
+        }
+
     def unresolved_exit_warnings(self, model_version: str, now: float) -> list[str]:
         with self._lock:
             rows = self._conn.execute(

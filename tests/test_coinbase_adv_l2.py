@@ -9,7 +9,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
-from coinbase_adv_l2 import CoinbaseAdvancedL2Collector, load_cdp_key
+from coinbase_adv_l2 import CoinbaseAdvancedL2Collector, coinbase_adv_l2_health, load_cdp_key
 
 
 def test_load_cdp_key_accepts_name_or_id(tmp_path):
@@ -108,3 +108,49 @@ def test_l2_retention_prunes_old_rows(tmp_path):
         assert conn.execute("SELECT count(*) FROM coinbase_adv_l2_snapshots").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_health_reports_db_snapshot_age_when_thread_absent(tmp_path, monkeypatch):
+    db = str(tmp_path / "adv_l2.sqlite3")
+    now = time.time()
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE coinbase_adv_l2_snapshots ("
+            "created_at REAL, product_id TEXT, sequence_num INTEGER, last_message_age_seconds REAL, "
+            "best_bid REAL, best_ask REAL, mid REAL, spread_bps REAL, bid_level_count INTEGER, "
+            "ask_level_count INTEGER, stored_bid_level_count INTEGER, stored_ask_level_count INTEGER, "
+            "bid_depth_levels REAL, ask_depth_levels REAL, bid_notional_levels REAL, "
+            "ask_notional_levels REAL, depth_imbalance REAL, bid_levels_json TEXT, "
+            "ask_levels_json TEXT, update_count_5s INTEGER, remove_count_5s INTEGER, "
+            "update_count_15s INTEGER, remove_count_15s INTEGER, update_count_60s INTEGER, "
+            "remove_count_60s INTEGER, snapshot_loaded INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO coinbase_adv_l2_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                now - 450.0, "BTC-USD", None, None, 1, 2, 1.5, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 0, "[]", "[]", 0, 0, 0, 0, 0, 0, 1,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO coinbase_adv_l2_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                now - 30.0, "ETH-USD", None, None, 1, 2, 1.5, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 0, "[]", "[]", 0, 0, 0, 0, 0, 0, 1,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_ENABLED", "true")
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_DB", db)
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_PRODUCTS", "BTC-USD,ETH-USD")
+    info = coinbase_adv_l2_health()
+
+    assert info["snapshot_age_seconds"] >= 400.0
+    assert info["latest_snapshot_age_seconds"] < 120.0
+    assert info["snapshot_age_by_product_seconds"]["BTC-USD"] >= 400.0
+    assert info["snapshot_age_by_product_seconds"]["ETH-USD"] < 120.0

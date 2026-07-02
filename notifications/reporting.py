@@ -129,6 +129,45 @@ class HourlyReporter:
             table.append("* under 10 settled — not yet reliable")
         return [headline, ""] + table + self._pushed_vs_background_lines(sb) + self._manipulation_lines(sb)
 
+    @staticmethod
+    def _rank_quality_bucket(label, d):
+        n = (d or {}).get("n") or 0
+        if not n:
+            return f"{label} n=0"
+        acc = d.get("accuracy")
+        lo, hi = d.get("ci_low"), d.get("ci_high")
+        acc_s = _pct(acc)
+        ci_s = (
+            f"[{lo * 100:.0f}-{hi * 100:.0f}]"
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float))
+            else "[n/a]"
+        )
+        return f"{label} {acc_s} {ci_s} n={n}"
+
+    def _rank_quality_lines(self):
+        ledger = getattr(self, "v95_ledger", None)
+        if ledger is None or not hasattr(ledger, "rank_quality_scoreboard"):
+            return []
+        try:
+            sb = ledger.rank_quality_scoreboard(limit=300)
+        except Exception as e:
+            logger.warning(f"rank quality scoreboard skipped: {e}")
+            return []
+        by_cp = (sb or {}).get("by_checkpoint") or {}
+        lines = []
+        for cp in ("15M", "10M", "7M"):
+            d = by_cp.get(cp) or {}
+            if not d.get("n"):
+                continue
+            flag = " RANK INVERTED" if d.get("rank_inverted") else ""
+            lines.append(
+                f"Rank quality {cp} last {d.get('n')}: "
+                f"{self._rank_quality_bucket('#1', d.get('rank1'))}; "
+                f"{self._rank_quality_bucket('#2-3', d.get('rank23'))}; "
+                f"{self._rank_quality_bucket('rest', d.get('rest'))}{flag}"
+            )
+        return ["", *lines] if lines else []
+
     def _setup_scan_lines(self):
         """Compact, honest 10M setup-scan block for the hourly report. Reads only
         settled rows; runs the leakage-safe miner; reports whether anything holds
@@ -398,6 +437,34 @@ class HourlyReporter:
         except Exception as e:
             logger.error(f"hourly report failed: {e}")
 
+    def _ultoim_v2_exit_warning_lines(self):
+        try:
+            from q15_upgrade.ultoim_v2.runner import get_runner
+
+            runner = get_runner()
+        except Exception as e:
+            logger.debug("ultoim_v2 exit warning counter unavailable: %s", e)
+            return []
+        if runner is None or not hasattr(runner, "exit_warning_delivery_counts_24h"):
+            return []
+        try:
+            stats = runner.exit_warning_delivery_counts_24h()
+        except Exception as e:
+            logger.warning("ultoim_v2 exit warning counter failed: %s", e)
+            return []
+        recorded = int(stats.get("recorded") or 0)
+        if recorded <= 0:
+            return []
+        sent = int(stats.get("sent") or 0)
+        counts = stats.get("counts") or {}
+        tail = []
+        for key in ("PENDING", "MUTED", "DELIVERY_FAILED", "EXPIRED"):
+            n = int(counts.get(key) or 0)
+            if n:
+                tail.append(f"{key.lower()} {n}")
+        suffix = f" ({', '.join(tail)})" if tail else ""
+        return ["", f"Ultoim V2 exit warnings 24h: recorded {recorded} · SENT {sent}/{recorded}{suffix}"]
+
     # -- report body ----------------------------------------------------
     def build_report(self):
         hh = _eastern_header()
@@ -410,6 +477,9 @@ class HourlyReporter:
 
         # Canonical record: the V9.5 prediction ledger (P&L, CIs, regime-aware).
         body.extend(self._scoreboard_table())
+
+        # Report-only rank inversion diagnostic. No ranking formula changes.
+        body.extend(self._rank_quality_lines())
 
         # Flip-warning track record, rendered in the same table as the intervals.
         body.extend(self._flip_scoreboard())
@@ -443,6 +513,10 @@ class HourlyReporter:
                 tot = stats.get("total_realized_return")
                 tail = f" \u00b7 realized {tot:+.0f}\u00a2" if isinstance(tot, (int, float)) else ""
                 body.append(f"\nSent alerts: {rr['wins']}W/{rr['losses']}L ({_pct(rr.get('win_rate'))}){tail}")
+
+        # Defensive-exit warnings are recorded before Telegram delivery; this
+        # exposes the recorded-vs-SENT gap when the exit channel is muted/down.
+        body.extend(self._ultoim_v2_exit_warning_lines())
 
         # Scalp record, one line.
         try:

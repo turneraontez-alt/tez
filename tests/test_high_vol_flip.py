@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from q15_upgrade.high_vol_flip.config import HighVolFlipConfig
 from q15_upgrade.high_vol_flip.ledger import HighVolFlipLedger, kalshi_fee_cents
-from q15_upgrade.high_vol_flip.runner import HighVolFlipRunner
+from q15_upgrade.high_vol_flip.runner import HighVolFlipRunner, _RULE_PRIORITY
 from q15_upgrade.high_vol_flip.rules import extract_candidate
 
 
@@ -328,6 +328,39 @@ def test_more_fire_strict_uses_checkpoint_jump_depth_and_excludes_bnb_hype(tmp_p
     assert rows[0]["spot_depth_last_trade_side"] == "buy"
     assert "MORE-FIRE STRICT" in r.telegram.sent[0]
     assert "Depth ratio: 3.75" in r.telegram.sent[0]
+
+
+def test_mute_more_fire_records_research_only_without_send(tmp_path):
+    assert "HVF_MORE_FIRE_STRICT" not in _RULE_PRIORITY
+    r = _runner(
+        tmp_path,
+        assets=frozenset({"SOL"}),
+        intervals=frozenset({"9M"}),
+        more_fire_strict_enabled=True,
+        mute_more_fire=True,
+        more_fire_strict_intervals=frozenset({"12M"}),
+    )
+    close = 1800.0
+    prev = _cand(
+        "SOL", "YES", 60, 63, 0.58, ticker="T-SOL", secs=780, close=close,
+        quote_extra={"yes_bid_depth_contracts": 150, "yes_ask_depth_contracts": 40},
+    )
+    now = _cand(
+        "SOL", "YES", 66, 69, 0.62, ticker="T-SOL", secs=720, close=close,
+        quote_extra={"yes_bid_depth_contracts": 150, "yes_ask_depth_contracts": 40},
+    )
+
+    r._observe_sync(candidates=[prev], now=1000.0)
+    r._observe_sync(candidates=[now], now=1060.0)
+
+    assert r.ledger.rows(r.config.model_version) == []
+    rows = r.ledger.watch_rows(r.config.model_version)
+    assert len(rows) == 1
+    assert rows[0]["rule_code"] == "HVF_MORE_FIRE_STRICT"
+    assert rows[0]["record_kind"] == "MORE_FIRE_STRICT_RESEARCH"
+    assert rows[0]["delivery_status"] == "RESEARCH"
+    assert r._rule_priority("HVF_MORE_FIRE_STRICT") == 0.0
+    assert r.telegram.sent == []
 
 
 def test_more_fire_strict_requires_yes_depth_ratio(tmp_path):

@@ -137,6 +137,26 @@ class TestLedgerScoreboard(unittest.TestCase):
         led2 = V95Ledger(path)
         self.assertEqual(led2.scoreboard()["by_rank"]["2"]["right"], 1)
 
+    def test_rank_quality_flags_inverted_top_pick(self):
+        led = _mk_ledger()
+        # #1 goes 1/5 while the non-#1 pool goes 25/25, so #1 trails the
+        # comparison pool's Wilson lower bound. This is report-only.
+        for i in range(5):
+            _record(led, f"R1-{i}", "10M", "YES", 1)
+            led.resolve_ticker(f"R1-{i}", "YES" if i == 0 else "NO")
+        for i in range(20):
+            _record(led, f"R2-{i}", "10M", "YES", 2)
+            led.resolve_ticker(f"R2-{i}", "YES")
+        for i in range(5):
+            _record(led, f"REST-{i}", "10M", "YES", 4)
+            led.resolve_ticker(f"REST-{i}", "YES")
+
+        rq = led.rank_quality_scoreboard(limit=300)["by_checkpoint"]["10M"]
+        self.assertEqual(rq["rank1"]["n"], 5)
+        self.assertEqual(rq["rank23"]["n"], 20)
+        self.assertEqual(rq["rest"]["n"], 5)
+        self.assertTrue(rq["rank_inverted"])
+
 
 class TestSevenMinuteDetection(unittest.TestCase):
     def test_explicit_7m(self):
@@ -265,6 +285,60 @@ class TestHourlyReportScoreboard(unittest.TestCase):
         # Body content lives inside the panel.
         self.assertIn("Track record", panel)
         self.assertIn("Settled 8", panel)
+
+    def test_full_report_includes_ultoim_v2_exit_warning_delivery_gap(self):
+        sb = {
+            "available": True,
+            "overall": {"right": 5, "wrong": 3, "n": 8, "accuracy": 0.625},
+            "by_checkpoint": {"10M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+
+        class _ExitRunner:
+            def exit_warning_delivery_counts_24h(self):
+                return {
+                    "recorded": 18,
+                    "sent": 2,
+                    "counts": {"SENT": 2, "MUTED": 16},
+                }
+
+        with patch("q15_upgrade.ultoim_v2.runner.get_runner", return_value=_ExitRunner()):
+            text = self._reporter(_FakeLedger(sb)).build_report()
+
+        self.assertIn("Hourly Report", text)
+        self.assertIn("Ultoim V2 exit warnings 24h: recorded 18", text)
+        self.assertIn("SENT 2/18", text)
+        self.assertIn("muted 16", text)
+
+    def test_full_report_includes_rank_quality_inversion_line(self):
+        sb = {
+            "available": True,
+            "overall": {"right": 5, "wrong": 3, "n": 8, "accuracy": 0.625},
+            "by_checkpoint": {"10M": {"right": 2, "wrong": 1, "n": 3, "accuracy": 0.667}},
+            "by_rank": {}, "rank_by_checkpoint": {},
+        }
+
+        class _RankLedger(_FakeLedger):
+            def rank_quality_scoreboard(self, limit=300):
+                return {
+                    "available": True,
+                    "limit": limit,
+                    "by_checkpoint": {
+                        "10M": {
+                            "n": 30,
+                            "rank1": {"n": 5, "accuracy": 0.2, "ci_low": 0.04, "ci_high": 0.62},
+                            "rank23": {"n": 20, "accuracy": 1.0, "ci_low": 0.84, "ci_high": 1.0},
+                            "rest": {"n": 5, "accuracy": 1.0, "ci_low": 0.57, "ci_high": 1.0},
+                            "rank_inverted": True,
+                        }
+                    },
+                }
+
+        text = self._reporter(_RankLedger(sb)).build_report()
+        self.assertIn("Rank quality 10M last 30", text)
+        self.assertIn("#1 20% [4-62] n=5", text)
+        self.assertIn("#2-3 100% [84-100] n=20", text)
+        self.assertIn("RANK INVERTED", text)
 
     def test_header_is_eastern_time(self):
         reporter = reporting.HourlyReporter(None, None, None, None, None, None, v95_ledger=None)

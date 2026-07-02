@@ -534,11 +534,15 @@ def refresh_loop(max_cycles=None):
     # worker threads (the bounded-test path shuts down explicitly before return).
     atexit.register(executor.shutdown, wait=False)
     atexit.register(detail_executor.shutdown, wait=False)
+    if max_cycles is None:
+        cycle_watchdog.write_heartbeat(status="startup")
+        cycle_watchdog.start_heartbeat_supervisor()
     cycles = 0
     while True:
         cycle_clock = time.monotonic()
         cycle_start = time.time()
         now = cycle_start
+        cycle_watchdog.write_heartbeat(now=now, cycle=cycles, status="cycle_start")
         ct = cycle_watchdog.CycleTimer()
         try:
             # -- discovery --
@@ -748,6 +752,15 @@ def refresh_loop(max_cycles=None):
             with state_lock:
                 snaps = dict(state)
             ws_health = market_data.health()
+            try:
+                from coinbase_adv_l2 import coinbase_adv_l2_health
+                _coinbase_l2_health = coinbase_adv_l2_health()
+                cycle_watchdog.observe_feed_ages(
+                    {"coinbase_adv_l2": _coinbase_l2_health.get("snapshot_age_seconds")},
+                    now=now,
+                )
+            except Exception:
+                logger.debug("coinbase L2 feed freshness monitor skipped", exc_info=True)
             global _last_cycle_ok, _last_learn
             try:
                 snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
@@ -821,6 +834,9 @@ def refresh_loop(max_cycles=None):
                 from q15_upgrade.ultoim_v2.runner import get_runner as _ultoim_v2_runner
                 _u2r = _ultoim_v2_runner()
                 if _u2r is not None:
+                    _u2_startup_alert = _u2r.exit_warning_startup_alert_message()
+                    if _u2_startup_alert:
+                        notifier.send(_u2_startup_alert)
                     _u2r.reconcile(now, market_cache)
                     _u2r.maybe_send_recap(now)
             except Exception:
@@ -850,6 +866,9 @@ def refresh_loop(max_cycles=None):
             page = cycle_watchdog.alert_message(now, now - SERVER_STARTED_AT)
             if page:
                 notifier.send(page)
+            feed_page = cycle_watchdog.feed_alert_message(now)
+            if feed_page:
+                notifier.send(feed_page)
         except Exception:
             logger.exception("watchdog pager failed")
         cycles += 1
@@ -1387,6 +1406,8 @@ def health():
         "coinbase_adv_l2": coinbase_adv_l2_status,
         "kraken_l3": kraken_l3_status,
         "cycle_watchdog": cycle_watchdog.health(),
+        "feed_watchdog": cycle_watchdog.feed_health(),
+        "heartbeat_watchdog": cycle_watchdog.heartbeat_status(now=now),
         "current_market_window": current_window,
         "assets_subscribed": [s.get("asset") for s in live],
         "assets_tracked": len(snaps),

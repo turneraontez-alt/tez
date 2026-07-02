@@ -11,7 +11,7 @@ import os
 from typing import Any, Mapping
 
 
-STRATEGY_VERSION = "filtered-alert-system-v3-15m-depth-formula-research-provisional"
+STRATEGY_VERSION = "filtered-alert-system-v3-13m-sniper-provisional"
 
 BOT_BASELINE = "baseline_control"
 BOT_CONFIDENCE_TIER = "v3_confidence_tier"
@@ -22,6 +22,7 @@ BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
 BOT_HVF_DEPTH_FLOW = "hvf_depth_flow_wrapper"
 BOT_BTC_REGIME = "btc_regime_context_probe"
 BOT_DEPTH_FORMULA_15M = "v3_15m_depth_formula_research"
+BOT_THIRTEEN_M_SNIPER = "thirteen_m_sniper"
 
 TIER_A = "A"
 TIER_B = "B"
@@ -507,6 +508,34 @@ def _depth_formula_selected_ask_depth_max() -> float:
 
 def _depth_formula_bid_ask_ratio_min() -> float:
     return _env_float("Q15_V3_DEPTH_FORMULA_BID_ASK_RATIO_MIN", 0.25, minimum=0.0)
+
+
+def _thirteen_m_sniper_enabled() -> bool:
+    return _env_bool("Q15_V3_13M_SNIPER", False)
+
+
+def _thirteen_m_conviction_min() -> float:
+    return _env_float("Q15_V3_13M_CONVICTION_MIN", 0.10, minimum=0.0)
+
+
+def _thirteen_m_market_asleep_max_cents() -> float:
+    return _env_float("Q15_V3_13M_MARKET_ASLEEP_MAX_CENTS", 58.0, minimum=0.0)
+
+
+def _thirteen_m_flip_max() -> float:
+    return _env_float("Q15_V3_13M_FLIP_MAX", 30.0, minimum=0.0)
+
+
+def _thirteen_m_ev_floor_cents() -> float:
+    return _env_float("Q15_V3_13M_EV_FLOOR_CENTS", 3.0, minimum=0.0)
+
+
+def _thirteen_m_auto_mute_min_n() -> int:
+    return int(_env_float("Q15_V3_13M_AUTO_MUTE_MIN_N", 80.0, minimum=1.0))
+
+
+def _thirteen_m_auto_mute_wilson_lb_min() -> float:
+    return _env_float("Q15_V3_13M_AUTO_MUTE_WILSON_LB_MIN", 0.55, minimum=0.0)
 
 
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
@@ -1907,6 +1936,209 @@ def depth_formula_15m_research_decision(row: Mapping[str, Any]) -> BotDecision |
     )
 
 
+def _model_side_from_calibrated(calibrated_yes: float | None, row: Mapping[str, Any]) -> str | None:
+    source = source_side(row)
+    if calibrated_yes is None:
+        return source
+    derived = "YES" if calibrated_yes >= 0.5 else "NO"
+    if source in {"YES", "NO"}:
+        if source == "YES" and calibrated_yes >= 0.5:
+            return source
+        if source == "NO" and calibrated_yes < 0.5:
+            return source
+    return derived
+
+
+def _model_side_probability(side: str | None, calibrated_yes: float | None) -> float | None:
+    if side == "YES" and calibrated_yes is not None:
+        return calibrated_yes
+    if side == "NO" and calibrated_yes is not None:
+        return 1.0 - calibrated_yes
+    return None
+
+
+def _model_side_ask(row: Mapping[str, Any], side: str | None) -> float | None:
+    if side not in {"YES", "NO"}:
+        return None
+    explicit = _num(row.get(f"{side.lower()}_ask_cents"))
+    if explicit is not None:
+        return explicit
+    if source_side(row) == side:
+        return _entry_ask(row)
+    return None
+
+
+def _kalshi_fee_cents(entry_ask_cents: float | int | None) -> int | None:
+    ask = _num(entry_ask_cents)
+    if ask is None:
+        return None
+    p = max(0.0, min(100.0, ask)) / 100.0
+    if p <= 0.0 or p >= 1.0:
+        return 0
+    return int(math.ceil(7.0 * p * (1.0 - p)))
+
+
+def _flow_percentile_70(row: Mapping[str, Any]) -> float | None:
+    for key in (
+        "spot_depth_trade_net_notional_60s_abs_p70",
+        "spot_depth_flow_abs_p70",
+        "thirteen_m_flow_abs_p70",
+    ):
+        value = _num(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def thirteen_m_sniper_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision | None:
+    """Live V3 13M early-entry alert, paper/read-only only.
+
+    The gate intentionally wants the model side before market makers have fully
+    priced it. A market-side quote above the configured band is a hard rejection,
+    because the researched edge decayed once the market already agreed.
+    """
+    if not _thirteen_m_sniper_enabled() or source_system != "ultoim_v2":
+        return None
+    interval = str(row.get("interval") or "").upper()
+    if interval != "13M":
+        return None
+
+    cal_yes = _num(row.get("calibrated_yes_probability"))
+    side = _model_side_from_calibrated(cal_yes, row)
+    side_prob = _model_side_probability(side, cal_yes)
+    quote = _model_side_ask(row, side)
+    flip = _num(row.get("flip_probability"))
+    flow = _num(row.get("spot_depth_trade_net_notional_60s"))
+    flow_p70 = _flow_percentile_70(row)
+    resolved_n = int(_num(row.get("thirteen_m_sniper_resolved_n")) or 0)
+    resolved_accuracy = _num(row.get("thirteen_m_sniper_accuracy"))
+    empirical_lb = _num(row.get("thirteen_m_sniper_wilson_lb"))
+    conviction_min = _thirteen_m_conviction_min()
+    market_max = _thirteen_m_market_asleep_max_cents()
+    flip_max = _thirteen_m_flip_max()
+    ev_floor = _thirteen_m_ev_floor_cents()
+    auto_mute_min_n = _thirteen_m_auto_mute_min_n()
+    auto_mute_lb_min = _thirteen_m_auto_mute_wilson_lb_min()
+
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "provisional": True,
+        "source_system": source_system,
+        "interval_required": "13M",
+        "conviction_min_abs": conviction_min,
+        "market_asleep_model_side_price_max_cents": market_max,
+        "flip_probability_lt": flip_max,
+        "ev_floor_cents": ev_floor,
+        "auto_mute_min_n": auto_mute_min_n,
+        "auto_mute_wilson_lb_min": auto_mute_lb_min,
+        "calibrated_yes_probability": cal_yes,
+        "model_side": side,
+        "model_side_probability": side_prob,
+        "model_side_ask_cents": quote,
+        "flip_probability": flip,
+        "manipulation_suspected": bool(row.get("manipulation_suspected")),
+        "spot_depth_trade_net_notional_60s": flow,
+        "spot_depth_trade_net_notional_60s_abs_p70": flow_p70,
+        "resolved_n": resolved_n,
+        "resolved_accuracy": resolved_accuracy,
+        "resolved_wilson_lb": empirical_lb,
+    }
+    reasons: list[str] = ["V3_13M_SNIPER_EVAL"]
+    failures: list[str] = []
+
+    if cal_yes is None or side_prob is None or side not in {"YES", "NO"}:
+        failures.append("CONVICTION_MISSING")
+    else:
+        conviction = abs(cal_yes - 0.5)
+        profile["conviction_abs"] = conviction
+        if conviction >= conviction_min:
+            reasons.append("CONVICTION")
+        else:
+            failures.append("CONVICTION_BELOW_MIN")
+
+    if quote is None:
+        failures.append("MARKET_PRICE_MISSING")
+    elif quote > market_max:
+        failures.append("MARKET_ALREADY_PRICED")
+    else:
+        reasons.append("MARKET_ASLEEP")
+
+    if flip is None:
+        failures.append("FLIP_MISSING")
+    elif flip < flip_max:
+        reasons.append("FLIP_SAFE")
+    else:
+        failures.append("FLIP_UNSAFE")
+    if row.get("manipulation_suspected"):
+        reasons.append("MANIPULATION_SUSPECTED_ALLOWED")
+
+    flow_contra = False
+    if flow is None:
+        reasons.append("FLOW_OK_MISSING_FEED_FAIL_OPEN")
+    elif flow_p70 is None or flow_p70 <= 0.0:
+        reasons.append("FLOW_OK_MISSING_P70_FAIL_OPEN")
+    else:
+        flow_side = "YES" if flow > 0 else "NO" if flow < 0 else "NEUTRAL"
+        profile["spot_flow_side"] = flow_side
+        if side in {"YES", "NO"} and flow_side == _opposite(side) and abs(flow) > flow_p70:
+            flow_contra = True
+            failures.append("FLOW_CONTRA_STRONG")
+        else:
+            reasons.append("FLOW_OK")
+    profile["flow_contradiction"] = flow_contra
+
+    fee = _kalshi_fee_cents(quote)
+    win_probability = side_prob
+    if resolved_n >= 30 and empirical_lb is not None and win_probability is not None:
+        win_probability = min(win_probability, empirical_lb)
+        reasons.append("EV_USES_EMPIRICAL_WILSON_LB")
+    if quote is None or fee is None or win_probability is None:
+        failures.append("EV_MISSING_INPUT")
+        ev_cents = None
+    else:
+        ev_cents = win_probability * 100.0 - quote - float(fee)
+        if ev_cents >= ev_floor:
+            reasons.append("EV_FLOOR")
+        else:
+            failures.append("EV_BELOW_FLOOR")
+    profile.update({
+        "ev_win_probability": win_probability,
+        "kalshi_fee_cents": fee,
+        "ev_cents": ev_cents,
+    })
+
+    auto_muted = bool(
+        resolved_n >= auto_mute_min_n
+        and empirical_lb is not None
+        and empirical_lb < auto_mute_lb_min
+    )
+    profile["auto_mute_active"] = auto_muted
+
+    if failures:
+        return BotDecision(
+            BOT_THIRTEEN_M_SNIPER,
+            REJECTED,
+            tuple(reasons + failures),
+            threshold_profile={**profile, "passed": False},
+            side_override=side,
+        )
+    if auto_muted:
+        reasons.append("AUTO_MUTE_ACTIVE_WILSON_LB_LT_MIN")
+    return BotDecision(
+        BOT_THIRTEEN_M_SNIPER,
+        ACCEPTED,
+        tuple(reasons),
+        threshold_profile={**profile, "passed": True},
+        side_override=side,
+        entry_ask_cents=quote,
+        use_entry_ask_override=quote is not None,
+    )
+
+
 def decisions_for_row(
     row: Mapping[str, Any],
     *,
@@ -1921,6 +2153,9 @@ def decisions_for_row(
     depth_formula = depth_formula_15m_research_decision(row)
     if depth_formula is not None:
         decisions.append(depth_formula)
+    thirteen_m = thirteen_m_sniper_decision(row, source_system=source_system)
+    if thirteen_m is not None:
+        decisions.append(thirteen_m)
     btc_probe = btc_regime_context_probe_decision(row, source_system=source_system)
     if btc_probe is not None:
         decisions.append(btc_probe)

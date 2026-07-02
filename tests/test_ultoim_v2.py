@@ -28,6 +28,10 @@ class _StubTelegram:
         self.delivered = delivered
         self.message_id = message_id
         self.sent: list[str] = []
+        self.enabled = True
+
+    def status(self):
+        return "configured" if self.enabled else "disabled"
 
     def send(self, text):
         self.sent.append(text)
@@ -36,6 +40,9 @@ class _StubTelegram:
                     "message_id": self.message_id, "error": None}
         return {"ok": False, "delivered": False, "muted": False,
                 "message_id": None, "error": "boom"}
+
+    def send_with_result(self, text):
+        return self.send(text)
 
 
 def _canon(ticker, secs, close, feed_ages=None):
@@ -213,9 +220,7 @@ def test_owner_default_config_is_aggressive():
     assert cfg.btc_confirm_margin == 0.15
     assert cfg.btc_confirm_margin_yes == 0.10  # asymmetric YES cutoff (BTC>=0.60)
     assert cfg.require_inverse_edge is True          # drop the positive-edge coin-flips
-    # Guard is default-OFF in code (repo default-OFF standard); the live Repl opts in via
-    # Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD=true in .replit.
-    assert cfg.delivery_quality_guard_enabled is False
+    assert cfg.delivery_quality_guard_enabled is False  # behavior change flags default OFF
     assert cfg.delivery_block_assets == frozenset({"HYPE", "SOL"})
     assert cfg.delivery_min_ask_cents == 60.0
     assert cfg.delivery_max_spread_cents == 3.0
@@ -241,8 +246,14 @@ def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research()
         cfg,
         interval="10M",
     )
-    blocked_asset = gate.evaluate(
+    blocked_hype = gate.evaluate(
         _candidate(asset="HYPE", selected_probability=0.75, entry_ask_cents=65.0,
+                   spread_cents=2.0, total_cost_cents=0.0),
+        cfg,
+        interval="10M",
+    )
+    blocked_sol = gate.evaluate(
+        _candidate(asset="SOL", selected_probability=0.75, entry_ask_cents=65.0,
                    spread_cents=2.0, total_cost_cents=0.0),
         cfg,
         interval="10M",
@@ -252,23 +263,37 @@ def test_delivery_quality_guard_blocks_weak_delivery_slices_but_keeps_research()
     assert "DELIVERY_ASK_BELOW_PROVEN_MIN" in low_ask["reason_codes"]
     assert wide["fired"] is False and wide["research_fired"] is True
     assert "DELIVERY_SPREAD_TOO_WIDE" in wide["reason_codes"]
-    assert blocked_asset["fired"] is False and blocked_asset["research_fired"] is True
-    assert "DELIVERY_ASSET_BLOCK" in blocked_asset["reason_codes"]
+    assert blocked_hype["fired"] is False and blocked_hype["research_fired"] is True
+    assert "DELIVERY_ASSET_BLOCK" in blocked_hype["reason_codes"]
+    assert blocked_sol["fired"] is False and blocked_sol["research_fired"] is True
+    assert "DELIVERY_ASSET_BLOCK" in blocked_sol["reason_codes"]
 
 
-def test_delivery_quality_guard_can_be_disabled():
+def test_delivery_quality_guard_off_is_byte_identical_for_blocked_slices():
     cfg = UltoimV2Config(
         enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
         delivery_quality_guard_enabled=False,
     )
-    v = gate.evaluate(
-        _candidate(asset="HYPE", selected_probability=0.70, entry_ask_cents=55.0,
-                   spread_cents=5.0, total_cost_cents=0.0),
-        cfg,
-        interval="10M",
+    neutral = UltoimV2Config(
+        enabled=True, no_only=True, btc_confirm_enabled=False, require_inverse_edge=False,
+        delivery_quality_guard_enabled=True, delivery_block_assets=frozenset(),
+        delivery_min_ask_cents=0.0, delivery_max_spread_cents=999.0,
     )
+    cand = _candidate(asset="HYPE", selected_probability=0.70, entry_ask_cents=55.0,
+                      spread_cents=5.0, total_cost_cents=0.0)
+    v = gate.evaluate(cand, cfg, interval="10M")
+    expected = gate.evaluate(cand, neutral, interval="10M")
+    assert v == expected
     assert v["fired"] is True
     assert not any(code.startswith("DELIVERY_") for code in v["reason_codes"])
+
+
+def test_delivery_quality_guard_env_can_enable_default(monkeypatch):
+    monkeypatch.setenv("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD", "true")
+    cfg = UltoimV2Config()
+    assert cfg.delivery_quality_guard_enabled is True
+    monkeypatch.delenv("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD")
+    assert UltoimV2Config().delivery_quality_guard_enabled is False
 
 
 def test_gate_missing_data():
@@ -1446,6 +1471,14 @@ def _ew_cfg_over():
                 exit_min_flip_conf=0.55, exit_watch_from_seconds=420.0)
 
 
+def _exit_warning_rows(runner):
+    with runner.ledger._lock:
+        rows = runner.ledger._conn.execute(
+            "SELECT * FROM ultoim_v2_exit_warnings ORDER BY id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def test_exit_watch_from_seconds_default_is_600(monkeypatch):
     # Data-backed default: watch from 8M so flips already present at 7M aren't clipped
     # (n=51 live warnings, 84% correct; 11 correct exits were capped at the old 420s).
@@ -1453,6 +1486,13 @@ def test_exit_watch_from_seconds_default_is_600(monkeypatch):
     assert UltoimV2Config().exit_watch_from_seconds == 600.0
     monkeypatch.setenv("Q15_ULTOIM_V2_EXIT_WATCH_SECONDS", "420")
     assert UltoimV2Config().exit_watch_from_seconds == 420.0
+
+
+def test_exit_warning_outbox_default_off(monkeypatch):
+    monkeypatch.delenv("Q15_ULTOIM_V2_EXIT_WARN_OUTBOX", raising=False)
+    assert UltoimV2Config().exit_warn_outbox_enabled is False
+    monkeypatch.setenv("Q15_ULTOIM_V2_EXIT_WARN_OUTBOX", "true")
+    assert UltoimV2Config().exit_warn_outbox_enabled is True
 
 
 def test_exit_warning_fires_only_on_sustained_flip(tmp_path):
@@ -1481,6 +1521,105 @@ def test_exit_warning_fires_only_on_sustained_flip(tmp_path):
     r._observe_sync(candidates=_extract(r, af, {"BTC": _canon("T-BTC", 360.0, 9000.0)},
                                         now=1230.0), now=1230.0)
     assert len(tg.sent) == 2
+
+
+def test_exit_warning_outbox_queues_retry_without_counting_sent(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_V9_DISABLE_NETWORK", "true")
+    monkeypatch.setenv("Q15_V9_OUTBOX_WORKER", "false")
+    from notifications.outbox_v9 import ReliableTelegramOutbox
+
+    tg = _StubTelegram()
+    outbox_path = str(tmp_path / "exit_outbox.sqlite3")
+    r = _runner(
+        tmp_path,
+        telegram=tg,
+        exit_warn_outbox_enabled=True,
+        exit_warn_outbox_path=outbox_path,
+        **_ew_cfg_over(),
+    )
+    r.exit_warning_outbox = ReliableTelegramOutbox(None, tg, sqlite_path=outbox_path)
+    window_key = _window_key(9000.0, 1000.0)
+    r.ledger.record_decision(_row(ticker="T-BTC", window_key=window_key, close_time=9000.0))
+    entry = r.ledger.find_fired_entry("ultoim-v2", "T-BTC", window_key)
+    cand = {
+        "asset": "BTC", "ticker": "T-BTC", "predicted_side": "YES",
+        "selected_probability": 0.66, "calibrated_yes_probability": 0.66,
+        "market_implied_yes_probability": 0.66, "seconds_remaining": 390.0,
+        "close_time": 9000.0,
+    }
+    r._fire_exit_warning(cand, entry, window_key, 1215.0,
+                         {"first_seen": 1200.0, "count": 2.0})
+
+    assert tg.sent == []  # network-disabled outbox queued but did not attempt
+    rows = _exit_warning_rows(r)
+    assert rows[0]["delivery_status"] == "PENDING"
+    assert rows[0]["delivery_error"].startswith("outbox:ultoim-v2-exit:")
+    assert r.exit_warning_outbox.rows()[0]["status"] == "PENDING"
+    counts = r.exit_warning_delivery_counts_24h(now=1220.0)
+    assert counts["recorded"] == 1 and counts["sent"] == 0
+
+
+def test_exit_warning_close_time_ttl_never_sends_after_settlement(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_V9_OUTBOX_WORKER", "false")
+    from notifications.outbox_v9 import ReliableTelegramOutbox
+
+    tg = _StubTelegram()
+    outbox_path = str(tmp_path / "exit_outbox.sqlite3")
+    r = _runner(
+        tmp_path,
+        telegram=tg,
+        exit_warn_outbox_enabled=True,
+        exit_warn_outbox_path=outbox_path,
+        **_ew_cfg_over(),
+    )
+    r.exit_warning_outbox = ReliableTelegramOutbox(None, tg, sqlite_path=outbox_path)
+    window_key = _window_key(9000.0, 1000.0)
+    r.ledger.record_decision(_row(ticker="T-BTC", window_key=window_key, close_time=9000.0))
+    entry = r.ledger.find_fired_entry("ultoim-v2", "T-BTC", window_key)
+    cand = {
+        "asset": "BTC", "ticker": "T-BTC", "predicted_side": "YES",
+        "selected_probability": 0.66, "calibrated_yes_probability": 0.66,
+        "market_implied_yes_probability": 0.66, "seconds_remaining": 0.0,
+        "close_time": 9000.0,
+    }
+    r._fire_exit_warning(cand, entry, window_key, 9000.0,
+                         {"first_seen": 8980.0, "count": 2.0})
+
+    assert tg.sent == []
+    assert r.exit_warning_outbox.rows() == []
+    rows = _exit_warning_rows(r)
+    assert rows[0]["delivery_status"] == "EXPIRED"
+    assert rows[0]["delivery_error"] == "window_settled"
+
+
+def test_exit_warning_delivery_counts_last_24h(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    now = 100000.0
+    base = {"model_version": "ultoim-v2", "window_key": 1, "entry_side": "NO",
+            "close_time": now + 900.0, "ticker": "W", "entry_ask_cents": 60.0}
+    for i, status in enumerate(("SENT", "PENDING", "MUTED")):
+        led.record_exit_warning({**base, "created_at": now - 100.0, "ticker": f"W{i}",
+                                 "window_key": i, "delivery_status": status})
+    led.record_exit_warning({**base, "created_at": now - 90000.0, "ticker": "OLD",
+                             "window_key": 99, "delivery_status": "SENT"})
+
+    counts = led.exit_warning_delivery_counts_24h("ultoim-v2", now=now)
+    assert counts["recorded"] == 3
+    assert counts["sent"] == 1
+    assert counts["counts"] == {"MUTED": 1, "PENDING": 1, "SENT": 1}
+    led.close()
+
+
+def test_exit_warning_startup_logs_unconfigured_channel(tmp_path, caplog):
+    caplog.set_level("WARNING", logger="ultoim_v2.runner")
+    r = _runner(tmp_path, telegram_chat_id="", exit_warnings_enabled=True)
+    assert "exit warning Telegram channel unconfigured" in caplog.text
+    msg = r.exit_warning_startup_alert_message()
+    assert msg is not None and "Q15 ULTOIM V2 EXIT CHANNEL" in msg
+    assert "unconfigured" in msg
+    for marker in ("V9.5 CHECK", "ENTRY RECOMMENDED", "NO ENTRY YET", "Hourly Report —"):
+        assert marker not in msg
+    assert r.exit_warning_startup_alert_message() is None
 
 
 def test_exit_warning_requires_a_prior_suggested_entry(tmp_path):

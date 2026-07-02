@@ -339,12 +339,11 @@ class UltoimV2Config:
     require_inverse_edge: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_REQUIRE_INVERSE_EDGE", True)
     )
-    # Empirical DELIVERY-quality guard (2026-07-01 local ledger review): delivered V2 rows
-    # were roughly flat overall, while losses clustered in HYPE/SOL, ask<60c, and spread>=3c.
-    # It suppresses DELIVERY/YES-notify only; research_fired and row recording stay intact so
-    # those slices can earn their way back on fresh settled data. Default OFF per the repo's
-    # default-OFF standard for model-behavior changes — the live Repl enables it via
-    # Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD=true in .replit.
+    # Empirical DELIVERY-quality guard. DEFAULT OFF per the default-OFF invariant for
+    # model-behavior changes; live deployments can pin Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD=true.
+    # The 2026-07-01 local ledger review found delivered V2 rows roughly flat overall, while
+    # losses clustered in HYPE/SOL, ask<60c, and spread>=3c. This suppresses DELIVERY/YES-notify
+    # only; research_fired and row recording stay intact so those slices can earn their way back.
     delivery_quality_guard_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD", False)
     )
@@ -470,6 +469,18 @@ class UltoimV2Config:
     # and how much it would have recovered). Default ON when the overlay is enabled.
     exit_warnings_enabled: bool = field(
         default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARNINGS", True)
+    )
+    # Defensive-exit warning delivery hardening (DEFAULT OFF). When enabled,
+    # warning cards go through the persistent V9 Telegram outbox so transient
+    # delivery failures retry. The warning decision/ledger recording is unchanged.
+    exit_warn_outbox_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_ULTOIM_V2_EXIT_WARN_OUTBOX", False)
+    )
+    exit_warn_outbox_path: str = field(
+        default_factory=lambda: _str(
+            "Q15_ULTOIM_V2_EXIT_WARN_OUTBOX_DB",
+            os.environ.get("Q15_V9_OUTBOX_SQLITE_PATH", "data/q15_telegram_outbox.sqlite3"),
+        )
     )
     # Watch for the flip from this many seconds remaining onward. Default 600 (10M), raised from
     # 480 (8M): with the book now 10M-ONLY, the watcher should cover an open 10M entry's WHOLE life.

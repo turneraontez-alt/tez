@@ -1,5 +1,105 @@
 # Session handoff
 
+## Shipped THIS session - item 6: rank-inversion scoreboard line
+Added a report-only `rank_quality_scoreboard(limit=300)` to the frozen V9.5 ledger. For each checkpoint it
+reads the latest resolved rows only, splits #1 vs #2-3 vs rest, computes Wilson CIs, and flags
+`rank_inverted` when #1 accuracy trails the non-#1 pool's Wilson lower bound. No champion weights, ranking
+formula, challenger promotion, or recalibration behavior changed.
+
+The hourly report now prints compact per-checkpoint lines such as `Rank quality 10M last 300: #1 ...; #2-3
+...; rest ... RANK INVERTED` inside the existing `Hourly Report —` panel.
+
+Tests:
+- Focused rank-quality tests: `.venv\Scripts\python.exe -m pytest tests/test_q15_learning_scoreboard.py::TestLedgerScoreboard::test_rank_quality_flags_inverted_top_pick tests/test_q15_learning_scoreboard.py::TestHourlyReportScoreboard::test_full_report_includes_rank_quality_inversion_line tests/test_q15_learning_scoreboard.py::TestHourlyReportScoreboard::test_full_report_is_one_pre_panel -q` -> `3 passed`.
+- Full suite after item 6 on this Windows runner: `1498 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue.
+
+## Shipped THIS session - item 5: durable heartbeat watchdog pager
+Added a durable refresh-loop heartbeat at the top of every production cycle (`Q15_HEARTBEAT_PATH`, default
+`work/local-run/q15_cycle_heartbeat.json`) and exposes `heartbeat_watchdog` on `/api/health`. A tiny daemon
+supervisor thread starts only for the production infinite loop, checks heartbeat age, and sends a stdlib-only
+Telegram page (`Q15 HEARTBEAT WATCHDOG`) when age exceeds `Q15_HEARTBEAT_STALE_SECONDS` (default 120s).
+It is page-only: no auto-restart path was added.
+
+The heartbeat pager cooldown is persisted in `Q15_HEARTBEAT_COOLDOWN_PATH` (default
+`work/local-run/q15_cycle_heartbeat_cooldown.json`) so restarts do not re-fire immediately. The same
+dependency-free path sends one rate-limited `Q15 PROCESS EXIT` page on interpreter exit. Telegram delivery uses
+only stdlib `urllib` and never logs token values; tests inject a sender and never touch the network.
+
+Tests:
+- Focused watchdog suite: `.venv\Scripts\python.exe -m pytest tests/test_cycle_watchdog.py tests/test_cycle_watchdog_pager.py -q` -> `17 passed`.
+- Full suite after item 5 on this Windows runner: `1496 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue.
+
+## Shipped THIS session - item 4: HVF MORE_FIRE_STRICT mute flag
+Added `Q15_HVF_MUTE_MORE_FIRE` (default OFF). When the owner flips it ON, `HVF_MORE_FIRE_STRICT` still
+records gradeable research rows (`MORE_FIRE_STRICT_RESEARCH`, `delivery_status=RESEARCH`) but never sends
+Telegram, never enters the alert table, and does not consume alert slots or same-ticker alert uniqueness.
+The static `_RULE_PRIORITY` table no longer carries the 760 MORE_FIRE slot; default behavior restores the
+760 boost only through `_rule_priority()` while the mute flag is OFF.
+
+Owner action needed: set `Q15_HVF_MUTE_MORE_FIRE=true` in the live environment to mute this negative rule.
+Evidence basis from the request: n=166 resolved, 59.6% accuracy, -1,699c; HVF book without it +281c.
+
+Tests:
+- Focused HVF suite: `.venv\Scripts\python.exe -m pytest tests/test_high_vol_flip.py -q` -> `21 passed`.
+- Full suite after item 4 on this Windows runner: `1493 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue.
+
+## Shipped THIS session - item 3: Ultoim V2 exit-warning delivery hardening
+Added `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX` (default OFF) and `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX_DB` so defensive
+exit-warning cards can route through the persistent V9 Telegram outbox when explicitly enabled. The warning
+decision and ledger record are unchanged: records are still written first, actual `SENT` credit is only given
+after true Telegram delivery, and queued retry rows remain recorded-but-not-SENT until the outbox confirms.
+
+Close-time TTL is enforced before delivery: if a warning is recorded at/after its window close it is marked
+`EXPIRED` with `window_settled` and no Telegram/outbox send occurs. Startup now logs an unconfigured V2 exit
+channel and exposes a one-shot `Q15 ULTOIM V2 EXIT CHANNEL` alert message for the main app to send through the
+canonical notifier, avoiding the broken V2 channel itself. The canonical hourly report now includes a 24h
+recorded-vs-SENT line for Ultoim V2 exit warnings so muted/unconfigured delivery gaps are visible.
+
+Tests:
+- Focused item 3 suite: `.venv\Scripts\python.exe -m pytest tests/test_ultoim_v2.py tests/test_q15_learning_scoreboard.py::TestHourlyReportScoreboard::test_full_report_includes_ultoim_v2_exit_warning_delivery_gap -q` -> `123 passed`.
+- Full suite after item 3 on this Windows runner: `1492 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures/errors are still the pre-existing Windows SQLite temp-file cleanup/lock issue; no focused
+  item 3 failures remain.
+
+## Shipped THIS session - item 1: Ultoim V2 delivery-quality guard default-OFF
+Restored the default-OFF invariant for `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD`: code default is now
+false, while `.replit` pins it true so live local/Replit behavior remains unchanged. Added direct gate
+coverage for the three delivery blocks (HYPE/SOL assets, ask < 60c, spread >= 3c), verified
+research_fired stays true, and strengthened the guard-off test to compare byte-identical output against
+a neutral guard configuration.
+
+Tests:
+- Focused Ultoim suite: `.venv\Scripts\python.exe -m pytest tests/test_ultoim_v2.py tests/test_ultoim_v2_btc_confirm.py tests/test_ultoim_v2_distance_gate.py tests/test_ultoim_v2_inverse_edge.py tests/test_ultoim_v2_risk_tier.py tests/test_ultoim_v2_s15.py tests/test_ultoim_v2_skip_7m_no.py -q` -> `171 passed`.
+- Full suite after item 1 on this Windows runner: `1482 passed, 4 skipped, 164 failed, 2 errors`.
+  This is improved from the pre-change baseline `1465 passed, 4 skipped, 180 failed, 2 errors`; the
+  remaining failures are the pre-existing Windows SQLite temp-file cleanup issue. WSL/Docker are not
+  available in this workspace, so a Linux full-suite green run remains blocked here.
+
+## Shipped THIS session - item 2: Coinbase L2 feed-age watchdog and V3 degraded stamp
+Added feed freshness state to `cycle_watchdog`: the refresh loop samples Coinbase Advanced L2 DB-backed
+snapshot age before V3 notification work, exposes `feed_watchdog` on `/api/health`, and sends one
+distinct Telegram page (`Q15 FEED WATCHDOG`, no checkpoint markers) after a feed is stale for 10 minutes
+over the 300s threshold. This is page-only; no auto-restart path was added.
+
+V3 Telegram alerts now get a send-time `DEGRADED` line plus `V3_DEGRADED_FEED_*` reason stamp when a
+feed is stale, without changing the recorded strategy-bot decision status or champion/ranking behavior.
+Coinbase L2 health now also reports DB snapshot ages even when the collector thread is absent, plus
+thread alive/exit/error diagnostics so a fatal `_thread_main` exit is visible instead of only logged.
+
+Diagnosis from the current local repo shell: `coinbase_adv_l2_health()` reports DB snapshots about
+`184445s` old and `authenticated_key_loaded=False` with the collector disabled in this shell. In the live
+app environment, if the flag is enabled but the key path is missing/bad, health should now make that state
+and stale DB age explicit; if the thread actually exits, `thread_error` and `thread_exit_age_seconds` will
+identify it.
+
+Tests:
+- Focused item 2 suite: `.venv\Scripts\python.exe -m pytest tests/test_cycle_watchdog.py tests/test_cycle_watchdog_pager.py tests/test_coinbase_adv_l2.py tests/test_strategy_bots.py -q` -> `92 passed`.
+- Full suite after item 2 on this Windows runner: `1486 passed, 4 skipped, 164 failed, 2 errors`.
+  Remaining failures are the same Windows SQLite temp-file cleanup blocker recorded above.
+
 Working notes so a fresh session resumes cheaply. See `CLAUDE.md` (architecture)
 and `SYNC.md` (Replit sync). Live app on Replit (`python3 app.py`). **The owner
 trades REAL money manually off the alerts**, so reliability + honest data
@@ -13,25 +113,20 @@ Tests: `python3 -m pytest tests/ -q` → **1620 passed / 13 skipped here** (need
 `pip install --user coinbase-advanced-py cffi cryptography` too in a fresh container, else 3 test
 files error on collection — env issue, not the diff; skip/error count varies with install state).
 
-## ✅ Shipped THIS session — Stage 0 refactor precondition: suite green, guard back to default-OFF
-**Suite 1620 passed / 13 skipped** (was 16 FAILED / 1596 after the local "Auto sync" commits landed
-the delivery-quality guard default-ON). This is Stage 0 of the owner-approved staged refactor; the
-red suite blocked everything else.
-- **`ultoim_v2/config.py`: `delivery_quality_guard_enabled` default True → False**, restoring the
-  repo's default-OFF standard for model-behavior changes. **Live behavior unchanged**:
-  `.replit` now pins `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD="true"` (owner opt-in, instantly
-  reversible) — ⚠️ deploy-pending: the Repl must restart to read the new env var, and until then
-  the code default OFF means the guard is INACTIVE once this code syncs. Restart promptly after
-  the Relay picks this up, and confirm no Replit Secret overrides the var.
+## ✅ Shipped THIS session — Stage 0 refactor precondition: dedicated guard tests + env docs
+**Suite 1620 passed / 13 skipped** (this container). Stage 0 of the owner-approved staged
+refactor was "green the suite" (16 gate tests failed while the delivery-quality guard defaulted
+ON). The default→OFF flip + test alignment **landed on `main` in parallel from the owner's local
+stack** (main also pins `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD="true"` in `.replit`, whose header
+now reflects the **local-Windows cutover — Replit runtime disabled, local stack is source of
+truth**). This branch merged main in (conflicts resolved taking main's side) and contributes the
+missing pieces:
 - **New `tests/test_ultoim_v2_delivery_quality_guard.py` (8 tests):** default-OFF, byte-identical
   when off, HYPE/SOL block, ask<60 block + 60c boundary, spread>=3 block + 2.9 pass,
   clean-candidate fires, yes_notify also suppressed, missing-spread fails open. The guard's
-  data case (ask<60 NOs 39.4%/-1,047c; HYPE -785c; SOL -387c settled) is real — the fix was the
-  DEFAULT, not the guard.
-- The 16 pre-existing gate-test failures (btc_confirm/distance_gate/inverse_edge/risk_tier/s15/
-  skip_7m_no — fixtures use ask=55c which the guard blocks) pass again unmodified; the two
-  guard-assuming tests in `test_ultoim_v2.py` now opt in explicitly / assert default-OFF.
-- `.env.example`: documented the 4 guard vars.
+  data case (ask<60 NOs 39.4%/-1,047c; HYPE -785c; SOL -387c settled) is real — the issue was
+  only the DEFAULT.
+- `.env.example`: documented the 4 guard vars (previously undocumented).
 - Next refactor stages (owner-approved, not yet started): config registry, app.py route/loop
   split (golden-master first), telegram-client unification, rename/move pass.
 
