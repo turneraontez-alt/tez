@@ -113,6 +113,15 @@ Tests: `python3 -m pytest tests/ -q` → **1620 passed / 13 skipped here** (need
 `pip install --user coinbase-advanced-py cffi cryptography` too in a fresh container, else 3 test
 files error on collection — env issue, not the diff; skip/error count varies with install state).
 
+## ✅ Shipped THIS session — bug fix: 13M sniper auto-mute notice could never send
+`strategy_bots/runtime.py:254` calls `ledger.claim_meta_once(key)` but `StrategyBotLedger`
+never had that method — the AttributeError was swallowed by the notice's catch-all, so the
+auto-mute Telegram notice silently never sent (its test failed on Linux; the Windows runner's
+pre-existing SQLite failures masked it). Added `strategy_bot_meta` table +
+`StrategyBotLedger.claim_meta_once()` (INSERT OR IGNORE on PRIMARY KEY: durable, atomic,
+once-per-key across restarts). `test_13m_sniper_auto_mute_records_and_sends_notice_once` now
+passes. **Suite 1643 passed / 13 skipped.**
+
 ## ✅ Shipped THIS session — Stage 0 refactor precondition: dedicated guard tests + env docs
 **Suite 1620 passed / 13 skipped** (this container). Stage 0 of the owner-approved staged
 refactor was "green the suite" (16 gate tests failed while the delivery-quality guard defaulted
