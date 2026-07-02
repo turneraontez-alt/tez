@@ -113,6 +113,36 @@ Tests: `python3 -m pytest tests/ -q` → **1620 passed / 13 skipped here** (need
 `pip install --user coinbase-advanced-py cffi cryptography` too in a fresh container, else 3 test
 files error on collection — env issue, not the diff; skip/error count varies with install state).
 
+## ✅ Shipped THIS session — staged refactor, Stages 1–5 (behavior-preserving)
+**Suite 1703 passed / 4 skipped** (up from 1643/13: flask now installed in the container un-skipped
+the app tests, and the stages added ~60 tests). Four parallel work streams, each on its own branch,
+merged after independent green runs. NO trading-logic changes anywhere; frozen v91–v94 chain,
+executor order logic, ledger schemas, and Telegram markers untouched.
+- **Stage 1 — config audit tooling** (`tools/config_audit.py`, `tools/config_baseline.json`,
+  8 tests): AST inventory of every env read — **899 vars, 317 documented, 582 baselined as frozen
+  debt**. `--check` fails on any NEW undocumented var; `--write-baseline` regenerates consciously.
+- **Stage 2 — app.py split** (`routes/{api_core,api_v95_books,api_legacy}.py`, route-table test):
+  59 route functions moved out verbatim (free names lazily qualified `_app.<name>` against the
+  host module passed as `sys.modules[__name__]` — never `import app`, which double-boots under
+  `python3 app.py`). app.py 1,449 → 1,103 lines. All 83 url rules + endpoint names byte-identical,
+  pinned by `tests/test_route_table.py` + `tests/data_route_table.json`; 16-route client smoke all 200.
+- **Stage 3 — run_cycle decomposition** (`checkpoint_v95.py`): pure extract-method, 584 → 63 lines
+  + six `_`-methods in call order (`_analyse_cycle_assets`, `_record_cycle_predictions`,
+  `_dispatch_research_overlays`, `_deliver_checkpoint_alerts`, `_dispatch_post_cycle_alerts`,
+  `_finalize_cycle_state`). Moved blocks verified byte-identical modulo dedent against HEAD~ by
+  script; outer try/except scope and `super().run_cycle` untouched; 335 v95/checkpoint tests green.
+- **Stage 4 — telegram unification** (`notifications/telegram_client.py`, 18 tests): the three
+  book senders (strategy_bots / high_vol_flip / ultoim_v2) were byte-identical in mechanics and now
+  delegate to one injectable client; per-adapter ctor/env-gate semantics preserved exactly
+  (V3 default-OFF gate, HVF `enabled=` AND, V2 token+chat, `send_with_result` outbox alias).
+  **Champion path (`notifier.py`/`outbox_v9.py`) deliberately NOT touched.**
+- **Stage 5-lite — CLAUDE.md map updated** for routes/, telegram_client, config_audit. Physical
+  file moves were SKIPPED deliberately: the local Windows stack references current paths; move
+  churn is risk with zero behavior gain.
+- Post-deploy check for the owner: boot the local stack, confirm dashboard + `/api/health` +
+  one checkpoint alert with `V9.5 CHECK` marker intact, and watch one full cycle's timing
+  (cycle-time budget unchanged; the split is registration-time only).
+
 ## ✅ Shipped THIS session — bug fix: 13M sniper auto-mute notice could never send
 `strategy_bots/runtime.py:254` calls `ledger.claim_meta_once(key)` but `StrategyBotLedger`
 never had that method — the AttributeError was swallowed by the notice's catch-all, so the
