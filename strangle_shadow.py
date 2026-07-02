@@ -22,6 +22,7 @@ for P&L — `last_yes_mid` is recorded for side-level analytics only.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -52,6 +53,10 @@ CREATE TABLE IF NOT EXISTS strangle_windows (
     pnl_cents REAL,              -- fixed at LOCKED/HEDGED/EXPIRED; outcome-independent
     last_yes_mid REAL,           -- convergence proxy for side analytics
     finalized_at REAL,
+    utc_hour INTEGER,            -- session tag at quote time
+    ttl_s REAL, hedge_delay_s REAL,
+    spread_at_first_fill REAL,   -- market spread when the first leg filled
+    postfill_mids_json TEXT,     -- [(dt_s, yes_mid)...] for 120s after first fill
     UNIQUE(asset, close_time)
 );
 """
@@ -100,6 +105,14 @@ class StrangleShadow:
         # both-fill with end-of-window knowledge (look-ahead); this delay is the
         # honest, implementable version that the shadow exists to measure.
         self.hedge_delay = _env_float("Q15_STRANGLE_SHADOW_HEDGE_DELAY_S", 20.0)
+        # Round-2 finding: liquidity is ASSET-stratified, not session-stratified —
+        # thin-alts (spread>=3c 60-65% of the time) are the primary maker venue.
+        # Empty = quote all assets.
+        raw_assets = os.environ.get("Q15_STRANGLE_SHADOW_ASSETS", "")
+        self.assets = frozenset(a.strip().upper() for a in raw_assets.split(",") if a.strip())
+        # Post-fill mid path recording (seconds) — the instrumentation every
+        # promotion test (fill-fade overlay, session TTL, vol skew) depends on.
+        self.postfill_track_s = _env_float("Q15_STRANGLE_SHADOW_POSTFILL_TRACK_S", 120.0)
         self.db_path = db_path or os.environ.get(
             "Q15_STRANGLE_SHADOW_DB", "data/q15_strangle_shadow_v1.sqlite3"
         )
@@ -132,7 +145,10 @@ class StrangleShadow:
         ts = time.time() if now is None else float(now)
         sr = float(seconds_remaining)
         yb, ya = _num(yes_bid), _num(yes_ask)
-        key = (str(asset).upper(), float(close_time))
+        a_up = str(asset).upper()
+        if self.assets and a_up not in self.assets:
+            return
+        key = (a_up, float(close_time))
         with self._lock:
             st = self._live.get(key)
             if st is None:
@@ -160,9 +176,12 @@ class StrangleShadow:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO strangle_windows "
                 "(created_at, asset, close_time, quote_sr, mid0, width, yes_bid, no_bid,"
-                " spread0, state) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " spread0, state, utc_hour, ttl_s, hedge_delay_s)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ts, asset, close_time, sr, mid, self.width,
-                 our_yes_bid, our_no_bid, spread, state))
+                 our_yes_bid, our_no_bid, spread, state,
+                 int(time.gmtime(ts).tm_hour),
+                 max(0.0, sr - self.cancel_sr), self.hedge_delay))
             self._conn.commit()
             if cur.rowcount == 0:       # restart mid-window: never re-quote
                 self._live[key] = {"state": "DONE"}
@@ -184,18 +203,30 @@ class StrangleShadow:
         # opposing ASK trades at/below it (a seller crossed to us). The mid
         # merely touching our level does NOT fill — that optimism is what this
         # module exists to remove.
+        if (st["yes_fill"] or st["no_fill"]) and st.get("first_fill_ts"):
+            # instrumentation: sample the mid for postfill_track_s after first fill
+            if ts - st["first_fill_ts"] <= self.postfill_track_s:
+                st.setdefault("postfill", []).append(
+                    (round(ts - st["first_fill_ts"], 1), round(st["last_mid"], 2)))
         if st["yes_fill"] is None and ya <= st["yes_bid"]:
             st["yes_fill"] = (ts, st["yes_bid"])
+            if st.get("first_fill_ts") is None:
+                st["first_fill_ts"] = ts
+                self._write(key, spread_at_first_fill=ya - yb)
             self._write(key, yes_fill_ts=ts, yes_fill_px=st["yes_bid"])
         no_ask = 100.0 - yb              # buying NO lifts the NO ask = 100 - yes_bid
         if st["no_fill"] is None and no_ask <= st["no_bid"]:
             st["no_fill"] = (ts, st["no_bid"])
+            if st.get("first_fill_ts") is None:
+                st["first_fill_ts"] = ts
+                self._write(key, spread_at_first_fill=ya - yb)
             self._write(key, no_fill_ts=ts, no_fill_px=st["no_bid"])
 
         if st["yes_fill"] and st["no_fill"]:
             pnl = 100.0 - (st["yes_bid"] + st["no_bid"])      # locked, fee-free
             st["state"] = "DONE"
-            self._write(key, state="LOCKED", pnl_cents=pnl, finalized_at=ts)
+            self._write(key, state="LOCKED", pnl_cents=pnl, finalized_at=ts,
+                        postfill_mids_json=json.dumps(st.get("postfill", [])))
         elif (st["yes_fill"] or st["no_fill"]) and st.get("hedge_deadline") is None:
             # First fill: arm the hedge timer; give the second maker fill a
             # hedge_delay window to arrive before we cross the spread.
@@ -213,7 +244,8 @@ class StrangleShadow:
             st["state"] = "DONE"
             self._write(key, state="HEDGED", hedge_ts=ts, hedge_side=hedge_side,
                         hedge_px=hedge_px, hedge_fee=fee, pnl_cents=pnl,
-                        finalized_at=ts)
+                        finalized_at=ts,
+                        postfill_mids_json=json.dumps(st.get("postfill", [])))
         elif sr < self.cancel_sr:                              # TTL: cancel both
             st["state"] = "DONE"
             self._write(key, state="EXPIRED", pnl_cents=0.0, finalized_at=ts,

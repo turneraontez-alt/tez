@@ -1,5 +1,26 @@
 # Session handoff
 
+## ✅ Shipped THIS session — hunt round 2 verdicts + quoter instrumentation
+Round-2 fleet (5 miners + synthesis) results, folded into the 13M book:
+- **KILLED:** taker latency bot (index/mid ~contemporaneous at 2.5s; ≤1.7c capturable < costs);
+  standalone fill-fade (−7.1c all cells); fade-side hedge overweight (−18.6c vs hedged-1x — KEEP 1x);
+  asleep-session taker retest (−13.5c); session-gated asleep (it's DATE decay, not sessions);
+  buy-favorite taker; 15M ladder arb (VACUOUS — one market/window, no ladder exists on 15M).
+- **Round-1 numbers superseded:** fill-fade +4.19c → 0 (unproven, artifact-risk; only testable as an
+  overlay on REAL quoter fills, pre-registered test in the synthesis); "index leads 3–6s" → book fact,
+  not an edge.
+- **Best genuine discovery: implied/realized vol = 1.39** (6/7 assets, both halves same sign) — a pin
+  premium the maker quoter can passively harvest. One 2.2h day; promotion needs ≥5/7 days ≥5/7 assets.
+- **Structural facts now canonical:** liquidity is ASSET-stratified (thin-alts spread≥3c 60–65% always;
+  majors 1c) → quoter venue = thin-alts first; base flip-rate curve 35.7%@10m→1.9%@1m is the null for
+  all flip claims; depth_contracts are all-zero before 2026-06-27 10:19 (epoch filter forever).
+- **Quoter instrumentation shipped** (this commit): utc_hour/ttl/hedge_delay stamped per window,
+  spread_at_first_fill, and a 120s post-fill mid path (postfill_mids_json) — the pre-registered
+  promotion tests for fill-fade overlay, session TTL, and vol skew all read from these columns.
+  Plus Q15_STRANGLE_SHADOW_ASSETS allowlist (venue = thin-alts).
+- **OWNER ACTIONS on the live stack:** set `Q15_STRANGLE_SHADOW=true` (start measuring) and
+  `Q15_FEED_LIQ=true` (liq feed has ZERO rows — wiring exists, flag was never enabled), restart.
+
 ## ✅ Shipped THIS session — shadow strangle quoter (paper maker research, default OFF)
 New `strangle_shadow.py` + app-loop wiring + 10 tests + learning-export registration. Places
 VIRTUAL both-side maker bids (mid±width) at the ~13M mark, conservative fill detection (the
