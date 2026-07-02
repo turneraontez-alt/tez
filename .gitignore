@@ -49,3 +49,4 @@ build/
 # Replit internals
 .replit-artifact
 .backups/
+.claude/worktrees/

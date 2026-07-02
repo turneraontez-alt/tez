@@ -99,16 +99,8 @@ logger.info("BUILD %s (%s) shipped=%s — %s · tests=%s",
             f"{_bi.get('summary')} stale={_bi.get('build_info_stale')}", _bi.get("tests"))
 
 
-@app.route("/version")
-def version_text_ep():
-    # Human-readable in a browser: the build the RUNNING app is on.
-    return app.response_class(build_version.version_text(), mimetype="text/plain")
 
 
-@app.route("/api/version")
-@app.route("/data/version")
-def version_json_ep():
-    return jsonify(build_version.version_payload())
 
 # Asset -> series ticker mapping for 15-min markets
 SERIES_MAP = {
@@ -887,23 +879,10 @@ def add_no_cache_headers(resp):
     return resp
 
 
-@app.route("/")
-def index():
-    return render_template("index.html")
 
 
-@app.route("/favicon.ico")
-def favicon():
-    return ("", 204)
 
 
-@app.route("/api/snapshot")
-@app.route("/data/snapshot")
-def snapshot():
-    with state_lock:
-        data = list(state.values())
-    data.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
-    return jsonify(data)
 
 
 _COMPACT_FIELDS = (
@@ -980,71 +959,18 @@ _COMPACT_FIELDS = (
 )
 
 
-@app.route("/api/compact")
-@app.route("/data/compact")
-def compact():
-    with state_lock:
-        data = list(state.values())
-    out = []
-    for d in data:
-        rec = {k: d.get(k) for k in _COMPACT_FIELDS}
-        rec["confirmation_count"] = len(d.get("confirmation_reasons") or [])
-        out.append(rec)
-    out.sort(key=lambda x: (x.get("estimated_edge") or -999), reverse=True)
-    return jsonify(out)
 
 
-@app.route("/api/summary")
-@app.route("/data/summary")
-def summary():
-    sigs = signal_engine.get_active_signals()
-    lines = []
-    for s in sigs:
-        edge = s.get("edge")
-        edge_s = f"{edge:+.1f}pp" if isinstance(edge, (int, float)) else "n/a"
-        alt = " (alt)" if s.get("is_alternative") else ""
-        lines.append(
-            f"{s['state']}: {s['asset']} {s.get('side') or ''} "
-            f"edge {edge_s} conf {s.get('confirmation_count')}{alt}"
-        )
-    text = "\n".join(lines) if lines else "No active signals \u2014 NO TRADE across all markets."
-    return jsonify({"summary": text, "active_count": len(sigs),
-                    "generated_at": _iso_now()})
 
 
-@app.route("/api/signals")
-@app.route("/data/signals")
-def signals_ep():
-    return jsonify(signal_engine.get_active_signals())
 
 
-@app.route("/api/alerts")
-@app.route("/data/alerts")
-def alerts_ep():
-    limit = 100
-    return jsonify(store.recent_alerts(limit))
 
 
-@app.route("/api/performance")
-@app.route("/data/performance")
-def performance_ep():
-    return jsonify(perf.stats())
 
 
-@app.route("/api/learning")
-@app.route("/data/learning")
-def learning_ep():
-    payload = learner.summary()
-    if not isinstance(payload, dict):
-        payload = {"legacy": payload}
-    payload["two_window"] = focus_manager.learning_summary()
-    return jsonify(payload)
 
 
-@app.route("/api/end-predictions")
-@app.route("/data/end-predictions")
-def end_predictions_ep():
-    return jsonify(learner.end_predictions())
 
 
 
@@ -1065,364 +991,62 @@ def end_predictions_ep():
 
 
 
-@app.route("/api/q15-v9-4/unified/predictions")
-def q15_v94_unified_predictions_ep():
-    return jsonify(checkpoint_v95.unified_predictions())
 
-@app.route("/api/q15-v9-4/unified/learning")
-def q15_v94_unified_learning_ep():
-    return jsonify(checkpoint_v95.unified_learning_status())
 
-@app.route("/api/q15-v9-4/unified/decision-stats")
-def q15_v94_unified_decision_stats_ep():
-    return jsonify(checkpoint_v95.decision_stats())
 
 
 
-@app.route("/api/q15-v9-5/diagnostics")
-def q15_v95_diagnostics_ep():
-    return jsonify(checkpoint_v95.diagnostics())
-
-@app.route("/api/q15-v9-5/predictions")
-def q15_v95_predictions_ep():
-    return jsonify(checkpoint_v95.predictions())
-
-@app.route("/api/q15-v9-5/market-data")
-def q15_v95_market_data_ep():
-    return jsonify(checkpoint_v95.market_data_status())
-
-@app.route("/api/q15-v9-5/calibration")
-def q15_v95_calibration_ep():
-    return jsonify(checkpoint_v95.calibration_status())
-
-@app.route("/api/q15-v9-5/learning")
-def q15_v95_learning_ep():
-    return jsonify(checkpoint_v95.learning_status())
-
-@app.route("/api/q15-v9-5/decision-stats")
-def q15_v95_decision_stats_ep():
-    return jsonify(checkpoint_v95.decision_stats())
-
-@app.route("/api/q15-v9-5/scoreboard")
-@app.route("/data/q15-v9-5/scoreboard")
-def q15_v95_scoreboard_ep():
-    return jsonify(checkpoint_v95.scoreboard())
-
-@app.route("/api/q15-v9-5/accuracy")
-@app.route("/data/q15-v9-5/accuracy")
-def q15_v95_accuracy_ep():
-    return jsonify(checkpoint_v95.accuracy_report())
-
-@app.route("/api/q15-v9-5/shadow-signals")
-@app.route("/data/q15-v9-5/shadow-signals")
-def q15_v95_shadow_signals_ep():
-    return jsonify(checkpoint_v95.shadow_signal_experiment())
-
-@app.route("/api/q15-hvf/scoreboard")
-@app.route("/data/q15-hvf/scoreboard")
-def q15_hvf_scoreboard_ep():
-    try:
-        from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
-        runner = _hvf_runner()
-        if runner is None:
-            return jsonify({"available": False, "enabled": False, "model_version": "high-vol-flip-v1"})
-        return jsonify(runner.scoreboard())
-    except Exception as exc:
-        return jsonify({"available": False, "error": str(exc)})
-
-@app.route("/api/q15-v3/scoreboard")
-@app.route("/data/q15-v3/scoreboard")
-def q15_v3_scoreboard_ep():
-    try:
-        from q15_upgrade.strategy_bots import runtime as _v3_runtime
-        return jsonify(_v3_runtime.scoreboard())
-    except Exception as exc:
-        return jsonify({"available": False, "error": str(exc)})
-
-@app.route("/api/market-cache")
-@app.route("/data/market-cache")
-def market_cache_ep():
-    return jsonify(market_cache.stats())
-
-@app.route("/api/q15-v9-4/diagnostics")
-def q15_v94_diagnostics_ep():
-    return jsonify(checkpoint_v95.diagnostics())
-
-@app.route("/api/q15-v9-4/context")
-def q15_v94_context_ep():
-    return jsonify(checkpoint_v95.context_status())
-
-@app.route("/api/q15-v9-4/decision-stats")
-def q15_v94_decision_stats_ep():
-    return jsonify(checkpoint_v95.decision_stats())
-
-@app.route("/api/q15-v9-3/diagnostics")
-def q15_v93_diagnostics_ep():
-    return jsonify(checkpoint_v95.diagnostics())
-
-@app.route("/api/q15-v9-3/wick-analysis")
-def q15_v93_wick_analysis_ep():
-    return jsonify(checkpoint_v95.wick_status())
-
-@app.route("/api/q15-v9-3/decision-stats")
-def q15_v93_decision_stats_ep():
-    return jsonify(checkpoint_v95.decision_stats())
-
-@app.route("/api/q15-v9-2/diagnostics")
-def q15_v92_diagnostics_ep():
-    return jsonify(checkpoint_v95.diagnostics())
-
-@app.route("/api/q15-v9-2/consensus")
-def q15_v92_consensus_ep():
-    return jsonify(checkpoint_v95.consensus_status())
-
-@app.route("/api/q15-v9-2/decision-stats")
-def q15_v92_decision_stats_ep():
-    return jsonify(checkpoint_v95.decision_stats())
-
-@app.route("/api/q15-v9-1/diagnostics")
-def q15_v91_diagnostics_ep():
-    return jsonify(checkpoint_v95.diagnostics())
-
-@app.route("/api/q15-v9-1/rolling")
-def q15_v91_rolling_ep():
-    return jsonify(checkpoint_v95.rolling_status())
-
-@app.route("/api/q15-v9-1/predictions")
-def q15_v91_predictions_ep():
-    return jsonify(checkpoint_v95.predictions_status())
-
-@app.route("/api/q15-v9/backtest")
-def q15_v9_backtest_ep():
-    return jsonify(oos_v9.backtest_report())
-
-@app.route("/api/q15-v9/out-of-sample")
-def q15_v9_oos_ep():
-    return jsonify(oos_v9.out_of_sample_report())
-
-@app.route("/api/q15-v9/model-comparison")
-def q15_v9_model_comparison_ep():
-    return jsonify(oos_v9.model_comparison())
-
-@app.route("/api/q15-v9/telegram-outbox")
-def q15_v9_telegram_outbox_ep():
-    return jsonify({"version": "q15-v9-telegram-outbox", "rows": telegram_outbox.rows(100), "read_only": True})
-
-@app.route("/api/q15-v9/telegram-health")
-def q15_v9_telegram_health_ep():
-    return jsonify(telegram_outbox.health())
-
-@app.route("/api/q15-v9/dead-letters")
-def q15_v9_dead_letters_ep():
-    return jsonify({"version": "q15-v9-telegram-outbox", "rows": telegram_outbox.dead_letters(100), "read_only": True})
-
-@app.route("/api/q15-v9/diagnostics")
-def q15_v9_diagnostics_ep():
-    oos = oos_v9.out_of_sample_report()
-    return jsonify({
-        "version": "q15-v9-edge-proof-alert-reliability",
-        "probability_pipeline": "market baseline used once + independent residual",
-        "economics_version": "q15-v9-canonical-economics",
-        "duplicate_market_anchor_check": "patched",
-        "side_preservation": "selected side is used for probability, quote, and economics",
-        "checkpoint_sequence": "15M independent; 10M compares with saved 15M",
-        "telegram_outbox": telegram_outbox.health(),
-        "out_of_sample_metric_availability": bool(oos.get("available")),
-        "out_of_sample_reason": oos.get("reason"),
-        "read_only": True,
-    })
-
-@app.route("/api/q15-v7/diagnostics")
-@app.route("/data/q15-v7/diagnostics")
-def q15_v7_diagnostics_ep():
-    return jsonify(professional_v7.summary())
-
-
-@app.route("/api/q15-v7/near-misses")
-def q15_v7_near_misses_ep():
-    return jsonify({"version": "q15-v7-professional-liveness", "near_misses": professional_v7.near_misses(50), "read_only": True})
-
-
-@app.route("/api/q15-v7/liveness")
-def q15_v7_liveness_ep():
-    return jsonify(professional_v7.liveness_diagnosis())
-
-
-@app.route("/api/q15-v7/gate-ablation")
-def q15_v7_gate_ablation_ep():
-    return jsonify({"version": "q15-v7-professional-liveness", "gate_ablation": professional_v7.gate_ablation(), "read_only": True})
-
-
-@app.route("/api/q15-v7/threshold-sensitivity")
-def q15_v7_threshold_sensitivity_ep():
-    return jsonify(professional_v7.threshold_sensitivity())
-
-
-@app.route("/api/q15-v7/hourly-report")
-def q15_v7_hourly_report_ep():
-    return jsonify({"version": "q15-v7-professional-liveness", "message": professional_v7.hourly_report(), "read_only": True})
-
-@app.route("/api/calibrated-edge")
-@app.route("/data/calibrated-edge")
-def calibrated_edge_ep():
-    return jsonify(calibrated_edge.summary())
-
-@app.route("/api/focus")
-@app.route("/data/focus")
-def focus_ep():
-    return jsonify(focus_manager.focus_status())
-
-
-@app.route("/api/two-predictions")
-@app.route("/data/two-predictions")
-def two_predictions_ep():
-    return jsonify(focus_manager.predictions_status())
-
-@app.route("/api/final10m-review")
-@app.route("/data/final10m-review")
-def final10m_review_ep():
-    return jsonify(focus_manager.self_review_status())
-
-@app.route("/api/scalps")
-@app.route("/data/scalps")
-def scalps_ep():
-    return jsonify({"record": scalp_engine.record(),
-                    "open": scalp_engine.open_positions()})
-
-
-@app.route("/api/report-preview")
-@app.route("/data/report-preview")
-def report_preview_ep():
-    return jsonify({"report": reporter.build_report()})
-
-
-@app.route("/api/health")
-@app.route("/data/health")
-def health():
-    now = time.time()
-    with state_lock:
-        snaps = list(state.values())
-        live = [s for s in snaps if s.get("market_state") == "live"]
-        ages = []
-        for a in ASSETS:
-            s = next((x for x in live if x.get("asset") == a), None)
-            ts = engine_update_ts.get(a)
-            if s is not None and ts:
-                ages.append(now - ts)
-    data_age = round(max(ages), 2) if ages else None
-
-    closes = sorted([s.get("close_time") for s in live if s.get("close_time")])
-    secs = next((s.get("seconds_remaining") for s in live if s.get("close_time") == closes[0]), None) if closes else None
-    current_window = {"close_time": closes[0], "seconds_remaining": secs} if closes else None
-
-    try:
-        wsh = market_data.health() or {}
-    except Exception:
-        wsh = {}
-
-    try:
-        from spot_ws import spot_ws_health
-        spot_ws_status = spot_ws_health()
-    except Exception:
-        spot_ws_status = {"enabled": False}
-
-    try:
-        from spot_depth import spot_depth_health
-        spot_depth_status = spot_depth_health()
-    except Exception:
-        spot_depth_status = {"enabled": False}
-
-    try:
-        from spot_l3 import spot_l3_health
-        spot_l3_status = spot_l3_health()
-    except Exception:
-        spot_l3_status = {"enabled": False}
-
-    try:
-        from coinbase_adv_l2 import coinbase_adv_l2_health
-        coinbase_adv_l2_status = coinbase_adv_l2_health()
-    except Exception:
-        coinbase_adv_l2_status = {"enabled": False}
-
-    try:
-        from kraken_l3 import kraken_l3_health
-        kraken_l3_status = kraken_l3_health()
-    except Exception:
-        kraken_l3_status = {"enabled": False}
-
-    deployment_type = "reserved-vm" if os.environ.get("REPLIT_DEPLOYMENT") else "development"
-
-    # Surface learning-ledger health at the top level so silent learning-layer
-    # degradation is visible without digging into q15_v9_5.ledger. The owner trades
-    # off these alerts, so a calibration that has silently fallen back to identity
-    # (calibration_unconverged_fallbacks) or a shadow challenger that has stopped
-    # learning (shadow_errors / last_shadow_error) must surface here, not just in
-    # logs. Never let a ledger hiccup break the health route itself.
-    try:
-        ls = checkpoint_v95.ledger.status()
-        ledger_health = {
-            "available": bool(ls.get("available")),
-            "path": ls.get("path"),
-            "error": ls.get("error"),
-            "unique_predictions": ls.get("unique_predictions"),
-            "unique_resolved": ls.get("unique_resolved"),
-            "dropped_feature_rows": ls.get("dropped_feature_rows"),
-            "calibration_unconverged_fallbacks": ls.get("calibration_unconverged_fallbacks"),
-            "shadow_errors": ls.get("shadow_errors"),
-            "last_shadow_error": ls.get("last_shadow_error"),
-        }
-    except Exception as e:
-        ledger_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
-
-    return jsonify({
-        "status": "ok",
-        "ledger": ledger_health,
-        "q15_v9_5": checkpoint_v95.health(),
-        "q15_v9_1": checkpoint_v95.health(),
-        "q15_v9_2": checkpoint_v95.health(),
-        "q15_v9_3": checkpoint_v95.health(),
-        "q15_v9_4": checkpoint_v95.health(),
-        "two_prediction_focus": focus_manager.health(),
-        "calibrated_edge": calibrated_edge.health(),
-        "q15_v7": professional_v7.health(),
-        "q15_v9": {
-            "version": "q15-v9-edge-proof-alert-reliability",
-            "enabled": True, "read_only": True,
-            "canonical_economics": True,
-            "persistent_telegram_outbox": True,
-            "out_of_sample_framework": True,
-            "live_parameter_updates": False,
-            "telegram": telegram_outbox.health(),
-            "resolved_outcome_metrics_available": bool(oos_v9.out_of_sample_report().get("available")),
-        },
-        "server_started_at": SERVER_STARTED_AT_ISO,
-        "uptime_seconds": round(now - SERVER_STARTED_AT),
-        "websocket_connected": bool(wsh.get("connected")),
-        "websocket_last_message_at": wsh.get("last_message_at"),
-        "websocket_book_ages": wsh.get("book_ages"),
-        "spot_ws": spot_ws_status,
-        "spot_depth": spot_depth_status,
-        "spot_l3": spot_l3_status,
-        "coinbase_adv_l2": coinbase_adv_l2_status,
-        "kraken_l3": kraken_l3_status,
-        "cycle_watchdog": cycle_watchdog.health(),
-        "feed_watchdog": cycle_watchdog.feed_health(),
-        "heartbeat_watchdog": cycle_watchdog.heartbeat_status(now=now),
-        "current_market_window": current_window,
-        "assets_subscribed": [s.get("asset") for s in live],
-        "assets_tracked": len(snaps),
-        "telegram_status": notifier.status(),
-        "model_accuracy": checkpoint_v95.accuracy_summary(),
-        "data_age_seconds": data_age,
-        "alerts_generated": store.count_alerts(),
-        "deployment_type": deployment_type,
-        "mode": "ws-primary" if wsh.get("connected") else "rest-polling",
-        "persistence": "postgres" if store.enabled else "disabled",
-        "last_successful_cycle_age_s": round(now - _last_cycle_ok, 2) if _last_cycle_ok else None,
-        "q15_settings": asdict(upgrade.settings),
-        "learning_v4": learner.health_summary(),
-        "config": config.as_dict(),
-    })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 _refresh_started = False
@@ -1457,6 +1081,15 @@ def _start_refresh():
             _refresh_started = True
             logger.info("Refresh loop started")
 
+
+# ---- Route registration (Stage 2 refactor) ------------------------------
+# All HTTP routes live in routes/. Registered here, after every singleton
+# above exists; bodies resolve host globals lazily so this ordering is the
+# only constraint. sys.modules[__name__] (not "import app") keeps this safe
+# under both `python3 app.py` (__main__) and `import app` (tests).
+import routes as _routes  # noqa: E402  (deliberate late import; see above)
+
+_routes.register_all(app, sys.modules[__name__])
 
 # Autostart on import keeps deployment behavior unchanged. Set
 # Q15_AUTOSTART_REFRESH=0 to import the app (routes, globals) without spawning
