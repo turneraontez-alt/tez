@@ -1,5 +1,49 @@
 # Session handoff
 
+## Local THIS session - Q15 collector feeds wired; activation blocked
+Run time: 2026-07-02T03:48:52Z.
+
+Implemented and wired five default-OFF read-only collectors plus learning export support:
+- `settlement_index.py` (`Q15_FEED_SETTLE_INDEX`): Kalshi CF Benchmarks RTI websocket reference feed, DB
+  `data/q15_settlement_index_v1.sqlite3`, candidate/interval additive columns `index_px`, `basis_cents`,
+  `index_age_s`.
+- `ladder_probe.py` (`Q15_FEED_LADDER`): Kalshi strike-ladder checkpoint snapshots, DB
+  `data/q15_ladder_probe_v1.sqlite3`, stores implied sigma/skew/arb flag.
+- `market_activity.py` (`Q15_FEED_MARKET_ACTIVITY`): cumulative volume/open-interest/book-staleness/asleep score,
+  DB `data/q15_market_activity_v1.sqlite3`, additive candidate stamps.
+- `path_recorder.py` (`Q15_FEED_PATH_RECORDER`): bounded final-15m ring buffer, compressed `window_paths`, DB
+  `data/q15_path_recorder_v1.sqlite3`. Shakeout found and fixed a missed-rollover flush by calling
+  `flush_expired()` each refresh cycle.
+- `liq_feed.py` (`Q15_FEED_LIQ`): Binance futures public forceOrder websocket, DB
+  `data/q15_liq_feed_v1.sqlite3`, additive candidate stamps `liq_notional_60s` / `liq_side`.
+- `tools/learning_export.py` now discovers configured non-default paths for all five DBs.
+
+Verification:
+- Focused collectors/exporter: `python -m pytest tests/test_settlement_index.py tests/test_ladder_probe.py tests/test_market_activity.py tests/test_path_recorder.py tests/test_liq_feed.py tests/test_learning_export.py -q` -> `43 passed`.
+- Adjacent Ultoim V2 + interval research: `231 passed`.
+- Full suite under Python 3.11: `python -m pytest tests/ -q` -> `1695 passed, 4 skipped`.
+- Bare `python3 -m pytest tests/ -q` is blocked locally because Windows `python3` resolves to Python 3.13;
+  repo/app guard requires Python 3.11. `python` is Python 3.11.9 here.
+- Local shakeout with all five flags ON ran across the 03:15, 03:30, and 03:45 UTC rollovers. Health stayed OK.
+  Final observed row counts: settlement index 3726, ladder 210, market activity 4026, path recorder 24,
+  liquidation events 0. Liquidation websocket was connected, but Binance emitted no tracked forceOrder events during
+  the run, so the live liq table did not satisfy the "nonzero rows" activation criterion.
+- Final health: status OK, data age ~0.45s, settlement/path/market-activity feed ages fresh, ladder fresh, liq
+  connected with null age because no event was received. Slow cycles were startup/rollover-bound and attributed to
+  existing `run_cycle`/settlement/report stages, not collector queues.
+- Logs had no tracebacks or ERROR/CRITICAL entries for the new collectors. Existing unrelated warnings persisted:
+  Coinbase Advanced L2 missing/bad local key path, repeated Kraken crossed-book snapshot refreshes, and missing
+  Ultoim V2 exit-warning Telegram channel.
+
+Activation/deploy status:
+- Commit `318373b8` (`Auto sync local Q15 changes 2026-07-01 23:14`) is already on `origin/main`; it was created by
+  the hourly auto-sync while the shakeout was running and includes these collector changes plus pre-existing local
+  13M/strategy-bot edits.
+- `.replit` flags were intentionally NOT enabled because the local shakeout did not produce a nonzero
+  `liquidation_events` row. To activate later, add the five `Q15_FEED_*` flags set to `true` in `.replit` with a
+  restart-required comment, restart the Repl, then confirm within one hour that `learning_snapshot.json` lists the new
+  DB tables with nonzero row counts. Do not touch `learning-snapshots`.
+
 ## Local THIS session - V3 13M early-entry sniper (activation blocked)
 Implemented the local code/test changes for the owner-requested V3 `thirteen_m_sniper` alert, but did **not**
 flip `.replit` live flags or merge because the required full-suite gate is not green in this Windows workspace.
