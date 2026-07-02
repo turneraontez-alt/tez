@@ -21,7 +21,14 @@ checkpoints, sends Telegram alerts, and learns from officially settled results.
 - Config is entirely env-driven (`Q15_*`); see `.env.example`. No secrets in code.
 
 ## Where things live (read these first for most tasks)
-- `app.py` — Flask routes + the ~1s refresh loop that drives every subsystem.
+- `app.py` — wiring + the ~1s refresh loop that drives every subsystem.
+- `routes/` — ALL HTTP routes (`api_core`, `api_v95_books`, `api_legacy`), extracted from
+  `app.py`; endpoints/rules are frozen by `tests/test_route_table.py`.
+- `notifications/telegram_client.py` — shared Telegram send mechanics for the three book
+  senders (strategy_bots / high_vol_flip / ultoim_v2 adapters); the champion path
+  (`notifier.py`/`outbox_v9.py`) is deliberately NOT on it.
+- `tools/config_audit.py` — env-var inventory/`--check` (899 Q15_*/env reads; undocumented
+  ones must be in `.env.example` or consciously baselined in `tools/config_baseline.json`).
 - `analysis.py` — builds the per-asset snapshot (spot, candles, orderbook, target).
 - `spot_client.py`, `q15_upgrade/market_data_v95.py` — price/flow feeds
   (Coinbase / Kraken / OKX / Deribit), with a bounded last-good spot fallback.
