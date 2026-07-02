@@ -5,12 +5,11 @@ import html
 import json
 import logging
 import os
-import time
 from typing import Any, Mapping
 
-logger = logging.getLogger("strategy_bots.telegram")
+from notifications.telegram_client import TelegramSendClient
 
-_API = "https://api.telegram.org/bot{token}/sendMessage"
+logger = logging.getLogger("strategy_bots.telegram")
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -334,52 +333,33 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
 
 
 class V3Telegram:
+    """Thin adapter over the shared ``notifications.telegram_client``.
+
+    Keeps the historical env resolution: dedicated chat id
+    (``Q15_V3_TELEGRAM_CHAT_ID`` — never the live room) and the
+    ``Q15_V3_TELEGRAM_ENABLED`` gate, which defaults OFF.
+    """
+
     def __init__(self, *, token: str | None = None, chat_id: str | None = None,
                  enabled: bool | None = None, retries: int = 2,
                  sleep_seconds: float = 0.5) -> None:
-        self.token = token if token is not None else os.environ.get("TELEGRAM_BOT_TOKEN")
-        self.chat_id = (
-            chat_id
-            if chat_id is not None
-            else (os.environ.get("Q15_V3_TELEGRAM_CHAT_ID") or "")
-        )
         active = _bool("Q15_V3_TELEGRAM_ENABLED", False) if enabled is None else bool(enabled)
-        self.enabled = bool(active and self.token and self.chat_id)
-        self.retries = max(0, int(retries))
-        self.sleep_seconds = max(0.0, float(sleep_seconds))
+        self._client = TelegramSendClient(
+            token if token is not None else os.environ.get("TELEGRAM_BOT_TOKEN"),
+            (
+                chat_id
+                if chat_id is not None
+                else (os.environ.get("Q15_V3_TELEGRAM_CHAT_ID") or "")
+            ),
+            enabled=active,
+            retries=retries,
+            sleep_seconds=sleep_seconds,
+        )
+        self.token = self._client.token
+        self.chat_id = self._client.chat_id
+        self.enabled = self._client.enabled
+        self.retries = self._client.retries
+        self.sleep_seconds = self._client.sleep_seconds
 
     def send(self, text: str) -> dict[str, Any]:
-        if not self.enabled:
-            return {"ok": False, "delivered": False, "muted": True,
-                    "message_id": None, "error": "telegram_unconfigured"}
-        import requests
-
-        last_error: str | None = None
-        for attempt in range(self.retries + 1):
-            try:
-                resp = requests.post(
-                    _API.format(token=self.token),
-                    json={
-                        "chat_id": self.chat_id,
-                        "text": text,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=8,
-                )
-            except requests.RequestException as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-            else:
-                if resp.status_code == 200:
-                    message_id = None
-                    try:
-                        message_id = int(resp.json()["result"]["message_id"])
-                    except (ValueError, KeyError, TypeError):
-                        message_id = None
-                    return {"ok": True, "delivered": True, "muted": False,
-                            "message_id": message_id, "error": None}
-                last_error = f"HTTP {resp.status_code}"
-            if attempt < self.retries and self.sleep_seconds > 0:
-                time.sleep(self.sleep_seconds)
-        return {"ok": False, "delivered": False, "muted": False,
-                "message_id": None, "error": last_error}
+        return self._client.send(text)
