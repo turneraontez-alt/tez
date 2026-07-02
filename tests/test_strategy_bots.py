@@ -5,6 +5,7 @@ import math
 import sqlite3
 
 import cycle_watchdog
+import pytest
 
 from q15_upgrade.strategy_bots import runtime
 from q15_upgrade.strategy_bots.ledger import StrategyBotLedger, net_pnl_cents
@@ -18,6 +19,7 @@ from q15_upgrade.strategy_bots.rules import (
     BOT_HYPE_YES,
     BOT_HVF_DEPTH_FLOW,
     BOT_MOREFIRE_BTC,
+    BOT_THIRTEEN_M_SNIPER,
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
@@ -29,6 +31,7 @@ from q15_upgrade.strategy_bots.rules import (
     hvf_depth_flow_wrapper_decision,
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
+    thirteen_m_sniper_decision,
 )
 from q15_upgrade.strategy_bots.btc_regime import enrich_btc_regime
 from q15_upgrade.strategy_bots.l2_depth import enrich_coinbase_l2
@@ -1624,6 +1627,227 @@ def test_v3_depth_formula_alert_is_labeled_research():
     assert "NO bid / selected ask depth ratio 0.4" in text
     assert "Mode: research-only tracking" in text
     assert "n/a" not in text
+
+
+def _thirteen_row(**over):
+    base = _row(
+        asset="BTC",
+        ticker="KXBTC-13M",
+        interval="13M",
+        predicted_side="YES",
+        calibrated_yes_probability=0.65,
+        entry_ask_cents=55.0,
+        spread_cents=2.0,
+        flip_probability=20.0,
+        spot_depth_trade_net_notional_60s=50.0,
+        spot_depth_trade_net_notional_60s_abs_p70=100.0,
+        manipulation_suspected=False,
+    )
+    base.update(over)
+    return base
+
+
+def test_13m_sniper_gate_matrix(monkeypatch):
+    monkeypatch.setenv("Q15_V3_13M_SNIPER", "true")
+
+    accepted = thirteen_m_sniper_decision(_thirteen_row(), source_system="ultoim_v2")
+    assert accepted is not None
+    assert accepted.bot_name == BOT_THIRTEEN_M_SNIPER
+    assert accepted.decision_status == ACCEPTED
+    assert {"CONVICTION", "MARKET_ASLEEP", "FLIP_SAFE", "FLOW_OK", "EV_FLOOR"}.issubset(
+        set(accepted.reason_codes)
+    )
+
+    cases = [
+        (
+            "conviction",
+            _thirteen_row(calibrated_yes_probability=0.58, entry_ask_cents=50.0),
+            "CONVICTION_BELOW_MIN",
+        ),
+        (
+            "market",
+            _thirteen_row(calibrated_yes_probability=0.70, entry_ask_cents=59.0),
+            "MARKET_ALREADY_PRICED",
+        ),
+        ("flip", _thirteen_row(flip_probability=30.0), "FLIP_UNSAFE"),
+        (
+            "flow",
+            _thirteen_row(spot_depth_trade_net_notional_60s=-1000.0,
+                          spot_depth_trade_net_notional_60s_abs_p70=100.0),
+            "FLOW_CONTRA_STRONG",
+        ),
+        (
+            "ev",
+            _thirteen_row(calibrated_yes_probability=0.62, entry_ask_cents=58.0),
+            "EV_BELOW_FLOOR",
+        ),
+    ]
+    for _name, row, reason in cases:
+        decision = thirteen_m_sniper_decision(row, source_system="ultoim_v2")
+        assert decision is not None
+        assert decision.decision_status == REJECTED
+        assert reason in decision.reason_codes
+        other_failures = [
+            code for code in decision.reason_codes
+            if code in {
+                "CONVICTION_BELOW_MIN",
+                "MARKET_ALREADY_PRICED",
+                "FLIP_UNSAFE",
+                "FLOW_CONTRA_STRONG",
+                "EV_BELOW_FLOOR",
+            }
+        ]
+        assert other_failures == [reason]
+
+
+def test_13m_sniper_missing_flow_fails_open_and_manipulation_is_stamped(monkeypatch):
+    monkeypatch.setenv("Q15_V3_13M_SNIPER", "true")
+
+    decision = thirteen_m_sniper_decision(
+        _thirteen_row(
+            spot_depth_trade_net_notional_60s=None,
+            spot_depth_trade_net_notional_60s_abs_p70=None,
+            manipulation_suspected=True,
+        ),
+        source_system="ultoim_v2",
+    )
+
+    assert decision is not None
+    assert decision.decision_status == ACCEPTED
+    assert "FLOW_OK_MISSING_FEED_FAIL_OPEN" in decision.reason_codes
+    assert "MANIPULATION_SUSPECTED_ALLOWED" in decision.reason_codes
+
+
+def test_13m_sniper_ev_uses_fee_math_and_empirical_wilson_lb(monkeypatch):
+    monkeypatch.setenv("Q15_V3_13M_SNIPER", "true")
+
+    floor = thirteen_m_sniper_decision(
+        _thirteen_row(calibrated_yes_probability=0.63, entry_ask_cents=58.0),
+        source_system="ultoim_v2",
+    )
+    assert floor is not None
+    assert floor.decision_status == ACCEPTED
+    assert floor.threshold_profile["kalshi_fee_cents"] == 2
+    assert floor.threshold_profile["ev_cents"] == pytest.approx(3.0)
+
+    empirical = thirteen_m_sniper_decision(
+        _thirteen_row(
+            calibrated_yes_probability=0.77,
+            entry_ask_cents=55.0,
+            thirteen_m_sniper_resolved_n=30,
+            thirteen_m_sniper_wilson_lb=0.60,
+        ),
+        source_system="ultoim_v2",
+    )
+    assert empirical is not None
+    assert empirical.decision_status == ACCEPTED
+    assert "EV_USES_EMPIRICAL_WILSON_LB" in empirical.reason_codes
+    assert empirical.threshold_profile["ev_win_probability"] == pytest.approx(0.60)
+    assert empirical.threshold_profile["ev_cents"] == pytest.approx(3.0)
+
+
+def test_13m_sniper_telegram_dedups_per_ticker_window(tmp_path, monkeypatch):
+    class _Telegram:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+            return {"delivered": True, "muted": False, "message_id": len(self.sent), "error": None}
+
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_13M_SNIPER", "true")
+    monkeypatch.setenv("Q15_V3_13M_SNIPER_NOTIFY", "true")
+    runtime._ledger = None
+    runtime._telegram = _Telegram()
+
+    row = _thirteen_row(window_key=1300, model_version="ultoim-v2")
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 3
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 0
+
+    led = runtime.get_ledger()
+    assert led is not None
+    sniper = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_THIRTEEN_M_SNIPER]
+    assert len(sniper) == 1
+    assert sniper[0]["notification_status"] == "SENT"
+    assert len(runtime._telegram.sent) == 1
+
+
+def test_13m_sniper_alert_marker_safety():
+    text = build_v3_alert({
+        "asset": "BTC",
+        "side": "YES",
+        "interval": "13M",
+        "bot_name": BOT_THIRTEEN_M_SNIPER,
+        "source_rule": "RESEARCH_ONLY_MARK",
+        "ticker": "KXBTC-13M",
+        "entry_ask_cents": 55.0,
+        "reason_codes": "V3_13M_SNIPER_EVAL,MARKET_ASLEEP,EV_FLOOR",
+        "threshold_json": json.dumps({
+            "model_side_probability": 0.65,
+            "ev_cents": 8.0,
+            "resolved_n": 12,
+            "resolved_accuracy": 0.667,
+            "spot_depth_trade_net_notional_60s_abs_p70": 100.0,
+        }),
+        "spot_depth_trade_net_notional_60s": 25.0,
+    })
+
+    assert "V3 13M EARLY" in text
+    assert "PROVISIONAL (n=12, acc=66.7%)" in text
+    assert "ENTRY RECOMMENDED" not in text
+    assert "NO ENTRY YET" not in text
+    assert "V9.5 CHECK" not in text
+    assert "Hourly Report" not in text
+    assert "Mode: paper/read-only alert; no executor route" in text
+    assert "n/a" not in text
+
+
+def test_13m_sniper_auto_mute_records_and_sends_notice_once(tmp_path, monkeypatch):
+    class _Telegram:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+            return {"delivered": True, "muted": False, "message_id": len(self.sent), "error": None}
+
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_ENABLED", "true")
+    monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(tmp_path / "v3.sqlite3"))
+    monkeypatch.setenv("Q15_V3_TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("Q15_V3_13M_SNIPER", "true")
+    monkeypatch.setenv("Q15_V3_13M_SNIPER_NOTIFY", "true")
+    runtime._ledger = None
+    runtime._telegram = _Telegram()
+
+    first = _thirteen_row(
+        ticker="KXBTC-MUTE-1",
+        window_key=2001,
+        thirteen_m_sniper_resolved_n=80,
+        thirteen_m_sniper_accuracy=0.60,
+        thirteen_m_sniper_wilson_lb=0.54,
+        entry_ask_cents=49.0,
+    )
+    second = _thirteen_row(
+        ticker="KXBTC-MUTE-2",
+        window_key=2001,
+        thirteen_m_sniper_resolved_n=80,
+        thirteen_m_sniper_accuracy=0.60,
+        thirteen_m_sniper_wilson_lb=0.54,
+        entry_ask_cents=49.0,
+    )
+
+    runtime.record_source_row(first, source_system="ultoim_v2")
+    runtime.record_source_row(second, source_system="ultoim_v2")
+
+    led = runtime.get_ledger()
+    assert led is not None
+    sniper = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_THIRTEEN_M_SNIPER]
+    assert [r["notification_status"] for r in sniper] == ["AUTO_MUTED", "AUTO_MUTED"]
+    assert len(runtime._telegram.sent) == 1
+    assert "V3 13M EARLY AUTO-MUTED" in runtime._telegram.sent[0]
 
 
 def test_v3_tier_b_alert_is_labeled_volume_expansion():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import time
@@ -44,6 +45,7 @@ def _bot_label(name: str) -> str:
         "morefire_btc_confirmed": "MoreFire BTC-Confirmed",
         "hvf_depth_flow_wrapper": "HVF Depth/Flow Wrapper",
         "v3_15m_depth_formula_research": "15M Depth Formula Research",
+        "thirteen_m_sniper": "13M Early Sniper",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -70,6 +72,28 @@ def _is_hvf_wrapper(row: Mapping[str, Any]) -> bool:
 
 def _is_depth_formula(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "v3_15m_depth_formula_research"
+
+
+def _is_thirteen_m_sniper(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "thirteen_m_sniper"
+
+
+def _thresholds(row: Mapping[str, Any]) -> dict[str, Any]:
+    raw = row.get("threshold_json")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _pct(value: Any) -> str:
+    try:
+        return _fmt(float(value) * 100.0, "%")
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def _ratio_text(numerator: Any, denominator: Any) -> str | None:
@@ -158,9 +182,74 @@ def build_bnb_combined_alert(row: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def build_thirteen_m_sniper_alert(row: Mapping[str, Any]) -> str:
+    thresholds = _thresholds(row)
+    reasons = str(row.get("reason_codes") or "").replace(",", ", ")
+    side = row.get("side") or thresholds.get("model_side") or ""
+    price = row.get("entry_ask_cents")
+    if price is None:
+        price = thresholds.get("model_side_ask_cents")
+    probability = thresholds.get("ev_win_probability")
+    if probability is None:
+        probability = thresholds.get("model_side_probability")
+    ev = thresholds.get("ev_cents")
+    resolved_n = int(float(thresholds.get("resolved_n") or 0))
+    acc = thresholds.get("resolved_accuracy")
+    provisional = f"PROVISIONAL (n={resolved_n}, acc={_pct(acc)})"
+    parts = [
+        "<b>V3 13M EARLY</b>",
+        (
+            f"{html.escape(str(row.get('asset') or ''))} "
+            f"{html.escape(str(side))} "
+            f"{html.escape(str(row.get('interval') or '13M'))}"
+        ),
+        f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>",
+        (
+            "Entry: "
+            f"{_fmt(price, 'c')} model-side ask, "
+            f"prob {_pct(probability)}, "
+            f"EV {_fmt(ev, 'c')}"
+        ),
+        provisional,
+    ]
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
+    flow = row.get("spot_depth_trade_net_notional_60s")
+    p70 = thresholds.get("spot_depth_trade_net_notional_60s_abs_p70")
+    if flow is not None or p70 is not None:
+        parts.append(f"Flow: net60$ {_fmt(flow)}, p70 {_fmt(p70)}")
+    if thresholds.get("auto_mute_active"):
+        parts.append("Notify guard: auto-muted; recording continues")
+    parts.append(f"Reasons: {html.escape(reasons)}")
+    parts.append("Mode: paper/read-only alert; no executor route")
+    return "\n".join(parts)
+
+
+def build_v3_auto_mute_alert(row: Mapping[str, Any]) -> str:
+    thresholds = _thresholds(row)
+    resolved_n = int(float(thresholds.get("resolved_n") or 0))
+    acc = thresholds.get("resolved_accuracy")
+    lb = thresholds.get("resolved_wilson_lb")
+    parts = [
+        "<b>V3 13M EARLY AUTO-MUTED</b>",
+        (
+            "Notify guard tripped: "
+            f"n={resolved_n}, acc={_pct(acc)}, Wilson LB={_pct(lb)}"
+        ),
+        "Recording continues; Telegram alerts are muted until thresholds recover or config changes.",
+    ]
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
+    return "\n".join(parts)
+
+
 def build_v3_alert(row: Mapping[str, Any]) -> str:
     if _is_bnb_combined(row):
         return build_bnb_combined_alert(row)
+    if _is_thirteen_m_sniper(row):
+        return build_thirteen_m_sniper_alert(row)
 
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"

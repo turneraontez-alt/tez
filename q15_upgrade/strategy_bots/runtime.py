@@ -21,6 +21,7 @@ from .rules import (
     BOT_DEPTH_FORMULA_15M,
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
+    BOT_THIRTEEN_M_SNIPER,
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
@@ -28,7 +29,7 @@ from .rules import (
     decisions_for_row,
     source_side,
 )
-from .telegram import V3Telegram, build_v3_alert
+from .telegram import V3Telegram, build_v3_alert, build_v3_auto_mute_alert
 
 logger = logging.getLogger("strategy_bots.runtime")
 
@@ -61,6 +62,10 @@ def research_telegram_enabled() -> bool:
 
 def depth_formula_telegram_enabled() -> bool:
     return _bool("Q15_V3_DEPTH_FORMULA_TELEGRAM_ENABLED", True)
+
+
+def thirteen_m_sniper_notify_enabled() -> bool:
+    return _bool("Q15_V3_13M_SNIPER_NOTIFY", False)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -127,6 +132,35 @@ def get_telegram() -> V3Telegram:
     return _telegram
 
 
+def _with_thirteen_m_sniper_context(
+    ledger: StrategyBotLedger,
+    row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if str(row.get("interval") or "").upper() != "13M":
+        return row
+    out = dict(row)
+    try:
+        stats = ledger.bot_accepted_resolved_stats(bot_name=BOT_THIRTEEN_M_SNIPER)
+        out.setdefault("thirteen_m_sniper_resolved_n", stats.get("n"))
+        out.setdefault("thirteen_m_sniper_correct", stats.get("correct"))
+        out.setdefault("thirteen_m_sniper_accuracy", stats.get("accuracy"))
+        out.setdefault("thirteen_m_sniper_wilson_lb", stats.get("wilson_lb"))
+    except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
+        logger.debug("v3 13M sniper stats unavailable", exc_info=True)
+    try:
+        flow_p70 = ledger.trailing_abs_flow_percentile(
+            asset=str(row.get("asset") or "").upper() or None,
+            created_before=float(row.get("created_at")) if row.get("created_at") is not None else None,
+        )
+        if flow_p70 is not None and out.get("spot_depth_trade_net_notional_60s_abs_p70") is None:
+            out["spot_depth_trade_net_notional_60s_abs_p70"] = flow_p70
+    except (TypeError, ValueError):
+        logger.debug("v3 13M sniper flow percentile skipped for invalid created_at")
+    except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
+        logger.debug("v3 13M sniper flow percentile unavailable", exc_info=True)
+    return out
+
+
 def _with_duplicate_window_guard(
     ledger: StrategyBotLedger,
     decision: BotDecision,
@@ -167,7 +201,7 @@ def _with_empirical_delivery_guard(decision: BotDecision, row: Mapping[str, Any]
     if (
         not empirical_delivery_guard_enabled()
         or decision.decision_status != ACCEPTED
-        or decision.bot_name == BOT_BASELINE
+        or decision.bot_name in {BOT_BASELINE, BOT_THIRTEEN_M_SNIPER}
     ):
         return decision
     side = source_side(row)
@@ -209,6 +243,21 @@ def _with_feed_degraded_stamp(row: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _maybe_send_thirteen_m_auto_mute_notice(
+    ledger: StrategyBotLedger,
+    row: Mapping[str, Any],
+) -> None:
+    if not thirteen_m_sniper_notify_enabled():
+        return
+    key = f"{STRATEGY_VERSION}:{BOT_THIRTEEN_M_SNIPER}:auto_mute_notice"
+    try:
+        if not ledger.claim_meta_once(key):
+            return
+        get_telegram().send(build_v3_auto_mute_alert(_with_feed_degraded_stamp(row)))
+    except Exception:  # noqa: BLE001 - notice must never block tracking
+        logger.warning("v3 13M sniper auto-mute notice failed (ignored)", exc_info=True)
+
+
 def record_source_row(
     row: Mapping[str, Any],
     *,
@@ -224,7 +273,10 @@ def record_source_row(
         ledger = get_ledger()
         if ledger is None:
             return 0
-        enriched_row = _enrich_source_row(row, btc_context=btc_context)
+        enriched_row = _with_thirteen_m_sniper_context(
+            ledger,
+            _enrich_source_row(row, btc_context=btc_context),
+        )
         count = 0
         for decision in decisions_for_row(enriched_row, source_system=source_system, btc_context=btc_context):
             stamped = _with_duplicate_window_guard(ledger, decision, enriched_row)
@@ -303,7 +355,29 @@ def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision)
         and decision.decision_status == RESEARCH_ONLY
         and depth_formula_telegram_enabled()
     )
-    if hvf_wrapper_only_notifications() and decision.bot_name != BOT_HVF_DEPTH_FLOW and not depth_formula_research:
+    thirteen_m_sniper_alert = (
+        decision.bot_name == BOT_THIRTEEN_M_SNIPER
+        and decision.decision_status == ACCEPTED
+    )
+    if thirteen_m_sniper_alert and not thirteen_m_sniper_notify_enabled():
+        return
+    if thirteen_m_sniper_alert and bool(decision.threshold_profile.get("auto_mute_active")):
+        _maybe_send_thirteen_m_auto_mute_notice(ledger, recorded)
+        try:
+            ledger.mark_notification(
+                row_id,
+                status="AUTO_MUTED",
+                message_id=None,
+                error="auto_mute_wilson_lb_lt_min",
+            )
+        except Exception:  # noqa: BLE001 - notification status is best-effort
+            logger.debug("v3 13M sniper auto-mute mark failed", exc_info=True)
+        return
+    if (
+        hvf_wrapper_only_notifications()
+        and decision.bot_name not in {BOT_HVF_DEPTH_FLOW, BOT_THIRTEEN_M_SNIPER}
+        and not depth_formula_research
+    ):
         return
     if (
         decision.bot_name == BOT_BASELINE
