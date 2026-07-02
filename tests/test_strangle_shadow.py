@@ -130,3 +130,48 @@ def test_scoreboard_shape(quoter):
     sb = quoter.scoreboard()
     assert sb["available"] and sb["graded_windows"] == 1
     assert sb["by_state"]["LOCKED"]["n"] == 1
+
+
+def test_multi_round_harvests_each_mark(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW", "true")
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_DB", str(tmp_path / "mr.sqlite3"))
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_WIDTH", "5")
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_OPEN_MARKS", "780,600")
+    q = ss.StrangleShadow()
+    obs(q, 779, 48, 52)               # round 780 quotes
+    obs(q, 700, 44, 45)               # YES fills (timer arms)
+    obs(q, 695, 55, 58)               # NO fills within delay -> LOCKED round 780
+    obs(q, 599, 48, 52)               # round 600 opens fresh quotes
+    obs(q, 470, 48, 52)               # below 600-120 -> round 600 EXPIRED unfilled
+    rows = q._conn.execute(
+        "SELECT round_mark, state, pnl_cents FROM strangle_windows ORDER BY round_mark DESC"
+    ).fetchall()
+    assert [(r["round_mark"], r["state"]) for r in rows] == [(780.0, "LOCKED"), (600.0, "EXPIRED")]
+    assert rows[0]["pnl_cents"] == pytest.approx(10.0)
+
+
+def test_legacy_db_degrades_to_single_round(tmp_path, monkeypatch):
+    # build a legacy DB (no round_mark, UNIQUE(asset, close_time))
+    import sqlite3 as s3
+    db = str(tmp_path / "legacy.sqlite3")
+    c = s3.connect(db)
+    c.execute("""CREATE TABLE strangle_windows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,
+        asset TEXT NOT NULL, close_time REAL NOT NULL, quote_sr REAL, mid0 REAL,
+        width REAL, yes_bid REAL, no_bid REAL, spread0 REAL, state TEXT NOT NULL,
+        yes_fill_ts REAL, yes_fill_px REAL, no_fill_ts REAL, no_fill_px REAL,
+        hedge_ts REAL, hedge_side TEXT, hedge_px REAL, hedge_fee REAL,
+        pnl_cents REAL, last_yes_mid REAL, finalized_at REAL, utc_hour INTEGER,
+        ttl_s REAL, hedge_delay_s REAL, spread_at_first_fill REAL,
+        postfill_mids_json TEXT, UNIQUE(asset, close_time))""")
+    c.commit(); c.close()
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW", "true")
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_DB", db)
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_OPEN_MARKS", "780,600")
+    q = ss.StrangleShadow()
+    assert q.enabled                                  # migration succeeded
+    obs(q, 779, 48, 52)                               # round 780 works
+    assert row(q)["state"] == "QUOTED"
+    obs(q, 599, 48, 52)                               # round 600 silently ignored (legacy UNIQUE)
+    n = q._conn.execute("SELECT COUNT(*) FROM strangle_windows").fetchone()[0]
+    assert n == 1
