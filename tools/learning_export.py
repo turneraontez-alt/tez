@@ -101,6 +101,7 @@ _LEDGER_ENV_DEFAULTS = {
     "market_activity": ("Q15_FEED_MARKET_ACTIVITY_DB", "data/q15_market_activity_v1.sqlite3"),
     "path_recorder": ("Q15_FEED_PATH_RECORDER_DB", "data/q15_path_recorder_v1.sqlite3"),
     "liq_feed": ("Q15_FEED_LIQ_DB", "data/q15_liq_feed_v1.sqlite3"),
+    "strangle_shadow": ("Q15_STRANGLE_SHADOW_DB", "data/q15_strangle_shadow_v1.sqlite3"),
 }
 
 

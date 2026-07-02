@@ -271,6 +271,22 @@ def _observe_path_recorder(asset, snap, close_time_epoch, now):
         logger.debug("path recorder observe skipped", exc_info=True)
 
 
+def _observe_strangle_shadow(asset, snap, close_time_epoch, now):
+    try:
+        from strangle_shadow import get_strangle_shadow
+
+        get_strangle_shadow().observe(
+            asset=asset,
+            close_time=close_time_epoch,
+            seconds_remaining=snap.get("seconds_remaining"),
+            yes_bid=snap.get("yes_bid"),
+            yes_ask=snap.get("yes_ask"),
+            now=now,
+        )
+    except Exception:
+        logger.debug("strangle shadow observe skipped", exc_info=True)
+
+
 def _flush_path_recorder(asset, close_time_str, now):
     try:
         from path_recorder import get_path_recorder
@@ -291,6 +307,12 @@ def _flush_expired_path_records(now):
         get_path_recorder().flush_expired(now=now)
     except Exception:
         logger.debug("expired path recorder flush skipped", exc_info=True)
+    try:
+        from strangle_shadow import get_strangle_shadow
+
+        get_strangle_shadow().finalize_expired(now=now)
+    except Exception:
+        logger.debug("strangle shadow finalize skipped", exc_info=True)
 
 
 def discover_single(asset):
@@ -777,6 +799,7 @@ def refresh_loop(max_cycles=None):
                     )
                     _observe_ladder_probe(a, close_epoch, snap.get("seconds_remaining"), now)
                     _observe_path_recorder(a, snap, close_epoch, now)
+                    _observe_strangle_shadow(a, snap, close_epoch, now)
                     eng.candles.evict(now)
                     with state_lock:
                         state[a] = snap

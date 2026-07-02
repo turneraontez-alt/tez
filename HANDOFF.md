@@ -1,5 +1,18 @@
 # Session handoff
 
+## ✅ Shipped THIS session — shadow strangle quoter (paper maker research, default OFF)
+New `strangle_shadow.py` + app-loop wiring + 10 tests + learning-export registration. Places
+VIRTUAL both-side maker bids (mid±width) at the ~13M mark, conservative fill detection (the
+opposing ask must trade at/below our bid — mid-touch does NOT fill), waits
+`Q15_STRANGLE_SHADOW_HEDGE_DELAY_S` (20s) for the second maker fill (→ LOCKED, fee-free
+100−2·width) else hedges at the observed ask + slip (→ HEDGED, bounded small loss,
+outcome-independent P&L). Restart-safe (UNIQUE window row, never re-quotes). Grades the path-study
+finding (+4.8..8.0c/window, n=44 — that sim's both-fill classification had look-ahead; this
+module measures the honest policy). **To start measuring: set `Q15_STRANGLE_SHADOW=true` on the
+live stack and restart.** Promotion bar (pre-registered, in module docstring): ≥500 windows,
+≥15 days, clustered t≥2, both halves positive, both-fill rate ≥40%. DB exports as
+`q15_strangle_shadow_v1` on learning-snapshots.
+
 ## Local THIS session - Q15 grading repair stages 1-5
 Run time: 2026-07-02T04:38:59Z.
 
