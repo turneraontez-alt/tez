@@ -250,15 +250,16 @@ def register(flask_app, host):
         except Exception as e:
             grading_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
 
+        q15_v95_health = _app.checkpoint_v95.health()
         return _app.jsonify({
             "status": "ok",
             "ledger": ledger_health,
             "grading": grading_health,
-            "q15_v9_5": _app.checkpoint_v95.health(),
-            "q15_v9_1": _app.checkpoint_v95.health(),
-            "q15_v9_2": _app.checkpoint_v95.health(),
-            "q15_v9_3": _app.checkpoint_v95.health(),
-            "q15_v9_4": _app.checkpoint_v95.health(),
+            "q15_v9_5": q15_v95_health,
+            "q15_v9_1": q15_v95_health,
+            "q15_v9_2": q15_v95_health,
+            "q15_v9_3": q15_v95_health,
+            "q15_v9_4": q15_v95_health,
             "two_prediction_focus": _app.focus_manager.health(),
             "calibrated_edge": _app.calibrated_edge.health(),
             "q15_v7": _app.professional_v7.health(),
