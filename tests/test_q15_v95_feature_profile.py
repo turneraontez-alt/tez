@@ -7,6 +7,7 @@ time and `feature_profile_health` ranks stages by total time.
 import os
 import unittest
 
+from q15_upgrade import checkpoint_v95
 from q15_upgrade.checkpoint_v95 import (
     _timed, feature_profile_health, feature_profile_reset, _feature_profile_enabled,
 )
@@ -41,8 +42,9 @@ class FeatureProfileTest(unittest.TestCase):
         self.assertIn("avg_ms", health["stages"]["flow"])
 
     def test_ranked_by_total_time(self):
-        _timed(True, "fast", lambda: None)
-        _timed(True, "slow", lambda: sum(range(200000)))
+        with checkpoint_v95._FEATURE_PROFILE_LOCK:
+            checkpoint_v95._FEATURE_PROFILE["fast"] = {"calls": 1.0, "total_s": 0.001}
+            checkpoint_v95._FEATURE_PROFILE["slow"] = {"calls": 1.0, "total_s": 0.01}
         names = list(feature_profile_health()["stages"].keys())
         self.assertEqual(names[0], "slow")  # most total time first
 

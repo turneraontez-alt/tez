@@ -240,7 +240,7 @@ class UltoimV2Runner:
             # not just via the call-site catch).
             try:
                 cand = self._extract_candidate(
-                    asset, analysis, (canonicals or {}).get(asset), market_flow)
+                    asset, analysis, (canonicals or {}).get(asset), market_flow, now)
             except Exception:  # noqa: BLE001 - skip the bad asset, keep the rest of the cycle
                 logger.debug("ultoim_v2 candidate extraction failed for %s (skipped)",
                              asset, exc_info=True)
@@ -256,7 +256,7 @@ class UltoimV2Runner:
             logger.debug("ultoim_v2 observe queue full; cycle dropped")
 
     def _extract_candidate(self, asset: Any, analysis: Mapping[str, Any], canonical: Any,
-                           market_flow: float | None) -> dict[str, Any] | None:
+                           market_flow: float | None, now: float | None = None) -> dict[str, Any] | None:
         """Pull one candidate's compact, race-free fields from the (read-only) analysis /
         canonical. Returns the candidate dict, or None to skip (missing canonical, not in
         a window yet, or no prediction available). Pure extraction — never gates; raises
@@ -284,6 +284,35 @@ class UltoimV2Runner:
         structural = analysis.get("structural") or {}
         feature_values = analysis.get("feature_values") or {}
         close_time = getattr(canonical, "settlement_time", None)
+        try:
+            from settlement_index import settlement_index_context
+
+            settlement_index = settlement_index_context(
+                str(asset),
+                spot_px=getattr(canonical, "spot", None),
+                now=now,
+            )
+        except Exception:  # noqa: BLE001 - record-only context must never block extraction
+            settlement_index = {"index_px": None, "basis_cents": None, "index_age_s": None}
+        try:
+            from market_activity import market_activity_context
+
+            market_activity = market_activity_context(
+                asset=str(asset), ticker=str(ticker), now=now)
+        except Exception:  # noqa: BLE001 - record-only context must never block extraction
+            market_activity = {
+                "market_volume": None,
+                "open_interest": None,
+                "seconds_since_last_book_change": None,
+                "asleep_score": None,
+                "market_activity_age_s": None,
+            }
+        try:
+            from liq_feed import liq_context
+
+            liquidation = liq_context(str(asset), now=now)
+        except Exception:  # noqa: BLE001 - record-only context must never block extraction
+            liquidation = {"liq_notional_60s": None, "liq_side": None, "liq_age_s": None}
         total_cost = costs.get("total_cost_cents")
         if total_cost is None:
             total_cost = costs.get("total_cents")
@@ -322,6 +351,17 @@ class UltoimV2Runner:
             "book_resiliency": signals.get("book_resiliency"),
             "prediction_stability": signals.get("prediction_stability"),
             "x_market_flow": market_flow,
+            "index_px": settlement_index.get("index_px"),
+            "basis_cents": settlement_index.get("basis_cents"),
+            "index_age_s": settlement_index.get("index_age_s"),
+            "market_volume": market_activity.get("market_volume"),
+            "open_interest": market_activity.get("open_interest"),
+            "seconds_since_last_book_change": market_activity.get("seconds_since_last_book_change"),
+            "asleep_score": market_activity.get("asleep_score"),
+            "market_activity_age_s": market_activity.get("market_activity_age_s"),
+            "liq_notional_60s": liquidation.get("liq_notional_60s"),
+            "liq_side": liquidation.get("liq_side"),
+            "liq_age_s": liquidation.get("liq_age_s"),
             "pin_break_drift": structural.get("z_score"),
             "threshold_interaction": feature_values.get("threshold_interaction"),
             # Champion per-asset directional flow factor — the flow-against-NO abstain
@@ -393,8 +433,10 @@ class UltoimV2Runner:
                 # ~break-even overall). Default OFF -> byte-identical. Exits are unaffected.
                 if getattr(cfg, "skip_7m", False) and interval == "7M":
                     continue
-                # 11M/12M are MEASURE-FIRST marks: inert unless explicitly enabled, so the
+                # 13M/11M/12M are MEASURE-FIRST marks: inert unless explicitly enabled, so the
                 # added INTERVAL_MARKS entries are byte-identical no-ops by default.
+                if interval == "13M" and not cfg.enable_13m:
+                    continue
                 if interval == "11M" and not cfg.enable_11m:
                     continue
                 if interval == "12M" and not cfg.enable_12m:
@@ -808,6 +850,17 @@ class UltoimV2Runner:
             "book_resiliency": cand.get("book_resiliency"),
             "prediction_stability": cand.get("prediction_stability"),
             "x_market_flow": cand.get("x_market_flow"),
+            "index_px": cand.get("index_px"),
+            "basis_cents": cand.get("basis_cents"),
+            "index_age_s": cand.get("index_age_s"),
+            "market_volume": cand.get("market_volume"),
+            "open_interest": cand.get("open_interest"),
+            "seconds_since_last_book_change": cand.get("seconds_since_last_book_change"),
+            "asleep_score": cand.get("asleep_score"),
+            "market_activity_age_s": cand.get("market_activity_age_s"),
+            "liq_notional_60s": cand.get("liq_notional_60s"),
+            "liq_side": cand.get("liq_side"),
+            "liq_age_s": cand.get("liq_age_s"),
             "pin_break_drift": cand.get("pin_break_drift"),
             "threshold_interaction": cand.get("threshold_interaction"),
             "champion_flow": cand.get("champion_flow"),

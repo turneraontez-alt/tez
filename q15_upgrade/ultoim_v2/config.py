@@ -42,9 +42,16 @@ def _csv_set(name: str, default: str = "") -> frozenset[str]:
 
 
 # The entry-research intervals and their fire mark (seconds before settlement).
-# Matches the champion's three live checkpoints so the paper entry card lines up
-# 1:1 with the live 15M / 10M / 7M cards it visually resembles.
-INTERVAL_MARKS: dict[str, int] = {"15M": 900, "12M": 720, "11M": 660, "10M": 600, "7M": 420}
+# 13M/12M/11M are measure-first marks by default; only configured delivery
+# intervals may alert or route to an executor.
+INTERVAL_MARKS: dict[str, int] = {
+    "15M": 900,
+    "13M": 780,
+    "12M": 720,
+    "11M": 660,
+    "10M": 600,
+    "7M": 420,
+}
 
 
 @dataclass(frozen=True)
@@ -139,14 +146,17 @@ class UltoimV2Config:
     cap_7m_ask_max: int = field(
         default_factory=lambda: int(_float("Q15_ULTOIM_V2_CAP_7M_ASK_MAX", 72.0))
     )
+    # 13M / 11M / 12M marks — captured DEFAULT ON, but RECORD-ONLY (never deliver/trade). 13M
+    # was re-enabled for the V3 13M early-entry live-alert research path: V2 records the
+    # decision-time fields only, while V3 owns any operator-facing alert.
+    enable_13m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_13M", True))
     # 11M / 12M marks — captured DEFAULT ON, but both RECORD-ONLY (never deliver/trade). 12M
     # was briefly promoted to live delivery on ~1 in-sample day, but the larger ~42h capture
     # replay showed the DELIVERED 12M slice runs net-NEGATIVE (57.6% win at a ~60c break-even,
     # -2c/bet) while 10M/7M carry the book (+10c / +21c per bet) — so the owner reverted 12M to
     # record-only (delivery is "back to 10M and 7M"). Both marks stay ENABLED so they keep
     # accruing gradeable data without adding a near-duplicate alert/trade; to re-promote either,
-    # drop it from research_only_intervals (a deliberate, tested edit). 13M stays excluded
-    # (fragile, both-halves 82%->65%). 10M is the proven anchor.
+    # drop it from research_only_intervals (a deliberate, tested edit). 10M is the proven anchor.
     enable_11m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_11M", True))
     enable_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_ENABLE_12M", True))
     # Promote the 12M EXPENSIVE-NO slice to LIVE delivery (default OFF -> 12M stays research-only).
@@ -160,10 +170,10 @@ class UltoimV2Config:
     deliver_12m: bool = field(default_factory=lambda: _bool("Q15_ULTOIM_V2_DELIVER_12M", False))
     floor_12m_ask: float = field(default_factory=lambda: _float("Q15_ULTOIM_V2_FLOOR_12M_ASK", 65.0))
     # Marks that may RECORD but never DELIVER (and so never TRADE — the executor only fires on a
-    # delivered row), even when enabled. 11M and 12M are both here: the delivered marks are 10M
-    # and 7M only (15M is skipped via skip_15m). To promote a mark to live delivery, drop it.
+    # delivered row), even when enabled. 13M/11M/12M are here: the delivered marks are 10M and 7M
+    # only (15M is skipped via skip_15m). To promote a mark to live delivery, drop it.
     research_only_intervals: frozenset[str] = field(
-        default_factory=lambda: frozenset({"11M", "12M"})
+        default_factory=lambda: frozenset({"13M", "11M", "12M"})
     )
     # DELIVERY breadth + selection. DEFAULT 1 (owner-enabled, SELECTIVE): the single best
     # by reward:risk per (interval, window). The owner trades 1-2 picks per 15-min window

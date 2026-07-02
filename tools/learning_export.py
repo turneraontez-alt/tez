@@ -96,6 +96,11 @@ _LEDGER_ENV_DEFAULTS = {
     "polymarket": ("Q15_POLYMARKET_DB", "data/q15_polymarket_shadow_v1.sqlite3"),
     "spot_depth": ("Q15_SPOT_DEPTH_DB", "data/q15_spot_depth_v1.sqlite3"),
     "strategy_bots": ("Q15_STRATEGY_BOTS_DB", "data/q15_strategy_bots_v3.sqlite3"),
+    "settlement_index": ("Q15_FEED_SETTLE_INDEX_DB", "data/q15_settlement_index_v1.sqlite3"),
+    "ladder_probe": ("Q15_FEED_LADDER_DB", "data/q15_ladder_probe_v1.sqlite3"),
+    "market_activity": ("Q15_FEED_MARKET_ACTIVITY_DB", "data/q15_market_activity_v1.sqlite3"),
+    "path_recorder": ("Q15_FEED_PATH_RECORDER_DB", "data/q15_path_recorder_v1.sqlite3"),
+    "liq_feed": ("Q15_FEED_LIQ_DB", "data/q15_liq_feed_v1.sqlite3"),
 }
 
 

@@ -93,7 +93,7 @@ def _config(tmp_path, **over):
         # 12M delivery, the unified BTC-confirm + inverse-edge gates, YES harvest, 10M-only,
         # 10M exit-watch) are asserted in test_owner_default_config_is_aggressive. Overrides win.
         skip_15m=False, deliver_top_n=1, deliver_by_reward_risk=False, no_edge_waive=False,
-        cap_7m_ask=False, enable_11m=False, enable_12m=False,
+        cap_7m_ask=False, enable_13m=False, enable_11m=False, enable_12m=False,
         btc_confirm_enabled=False, require_inverse_edge=False, skip_7m=False,
         exit_watch_from_seconds=420.0, delivery_quality_guard_enabled=False,
     )
@@ -207,9 +207,10 @@ def test_owner_default_config_is_aggressive():
     assert cfg.cap_7m_ask_max == 72        # threshold retained for when the cap is re-enabled
     assert cfg.enable_11m is True          # captured...
     assert cfg.enable_12m is True
+    assert cfg.enable_13m is True
     # ...but BOTH record-only now: 12M reverted from delivery after the ~42h replay showed the
     # delivered 12M slice runs net-negative. Delivered marks are 10M + 7M only.
-    assert cfg.research_only_intervals == frozenset({"11M", "12M"})
+    assert cfg.research_only_intervals == frozenset({"13M", "11M", "12M"})
     # Owner-enabled CONVICTION rules (default ON; reversible via their Q15_* env vars):
     # skip 12M unless >=3 co-trigger, and 2x-size 10M on >=3 co-triggers.
     assert cfg.skip_12m_unless_min is True and cfg.min_triggers_12m == 3
@@ -914,14 +915,42 @@ def test_cap_7m_ask_on_vetoes_expensive_7m_no_interval_scoped():
     assert v3["fired"] is True and "ASK_CAP_7M" not in v3["reason_codes"]
 
 
-def test_11m_12m_inert_when_disabled(tmp_path):
-    """With the enable flags OFF, an 11M/12M-band candidate is dropped entirely -- no row,
+def test_13m_11m_12m_inert_when_disabled(tmp_path):
+    """With the enable flags OFF, a measure-first-band candidate is dropped entirely -- no row,
     byte-identical to before the marks were added to INTERVAL_MARKS."""
-    r = _runner(tmp_path, telegram=_StubTelegram(), enable_11m=False, enable_12m=False)
+    r = _runner(tmp_path, telegram=_StubTelegram(),
+                enable_13m=False, enable_11m=False, enable_12m=False)
     a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
     c = {"BTC": _canon("T-BTC", secs=601.0, close=9000.0)}   # 601s: 11M band only
     r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
     assert r.scoreboard()["all_observations"]["recorded"] == 0
+
+
+def test_13m_records_research_only_and_never_delivers(tmp_path):
+    tg = _StubTelegram()
+    r = _runner(tmp_path, telegram=tg, enable_13m=True,
+                deliver_top_n=3, deliver_by_reward_risk=True)
+    a = {"BTC": _analysis(side="NO", sel=0.65, ask=60.0, mkt_yes=0.35)}
+    c = {"BTC": _canon("T-BTC", secs=779.0, close=9000.0)}   # 779s: 13M band only
+    r._observe_sync(candidates=_extract(r, a, c, now=1000.0), now=1000.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "13M"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fired"] == 0
+    assert row["research_fired"] == 1
+    assert row["calibrated_yes_probability"] == pytest.approx(0.40)
+    assert row["flip_probability"] == pytest.approx(20.0)
+    assert row["entry_ask_cents"] == pytest.approx(60.0)
+    assert row["distance_sigma"] == pytest.approx(1.2)
+    assert "RESEARCH_ONLY_MARK" in (row["reason_codes"] or "")
+    assert tg.sent == []
+
+    # The report lock keeps repeat observations in the same window from duplicating 13M.
+    r._observe_sync(candidates=_extract(r, a, c, now=1001.0), now=1001.0)
+    rows = [row for row in r.ledger.recent_rows("ultoim-v2", limit=10)
+            if row["interval"] == "13M"]
+    assert len(rows) == 1
 
 
 def test_11m_records_research_only_and_never_delivers(tmp_path):

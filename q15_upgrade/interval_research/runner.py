@@ -72,9 +72,18 @@ class IntervalResearchRunner:
                                     model_version=mv, ticker=str(ticker), asset=str(asset),
                                     interval=interval, reason=reason, window_key=wk, captured_at=now)
                             continue
+                        capture_analysis = dict(analysis)
+                        try:
+                            from settlement_index import settlement_index_context
+
+                            capture_analysis["settlement_index"] = settlement_index_context(
+                                str(asset), spot_px=getattr(canonical, "spot", None), now=now)
+                        except Exception:  # noqa: BLE001 - record-only context must not break capture
+                            capture_analysis["settlement_index"] = {
+                                "index_px": None, "basis_cents": None, "index_age_s": None}
                         row = build_capture_row(
                             model_version=mv, interval=interval, mark_seconds=mark,
-                            asset=str(asset), analysis=analysis, canonical=canonical,
+                            asset=str(asset), analysis=capture_analysis, canonical=canonical,
                             window_key=wk, now=now)
                         self.ledger.record_capture(row)
         except Exception:  # never break the live loop

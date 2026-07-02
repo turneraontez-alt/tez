@@ -14,6 +14,8 @@ from .rules import (
     BOT_BNB_NO,
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
+    BOT_BASELINE,
+    BOT_THIRTEEN_M_SNIPER,
     BTC_REGIME_KEYS,
     COINBASE_L2_KEYS,
     KALSHI_DEPTH_KEYS,
@@ -558,6 +560,73 @@ class StrategyBotLedger:
         with self._lock:
             row = self._conn.execute(query, params).fetchone()
         return row is not None
+
+    @staticmethod
+    def _wilson_lower(correct: int, n: int, z: float = 1.96) -> float | None:
+        if n <= 0:
+            return None
+        p = correct / n
+        denom = 1.0 + z * z / n
+        centre = (p + z * z / (2 * n)) / denom
+        half = z * math.sqrt(p * (1.0 - p) / n + z * z / (4 * n * n)) / denom
+        return centre - half
+
+    def bot_accepted_resolved_stats(
+        self,
+        *,
+        bot_name: str = BOT_THIRTEEN_M_SNIPER,
+        strategy_version: str = STRATEGY_VERSION,
+    ) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(correct), 0) AS correct "
+                "FROM strategy_bot_decisions "
+                "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
+                "AND official_result IS NOT NULL",
+                (strategy_version, bot_name, ACCEPTED),
+            ).fetchone()
+        n = int(row["n"] or 0) if row is not None else 0
+        correct = int(row["correct"] or 0) if row is not None else 0
+        accuracy = None if n <= 0 else correct / n
+        return {
+            "n": n,
+            "correct": correct,
+            "accuracy": accuracy,
+            "wilson_lb": self._wilson_lower(correct, n),
+        }
+
+    def trailing_abs_flow_percentile(
+        self,
+        *,
+        asset: str | None,
+        created_before: float | None,
+        percentile: float = 0.70,
+        limit: int = 200,
+        strategy_version: str = STRATEGY_VERSION,
+    ) -> float | None:
+        params: list[Any] = [strategy_version, BOT_BASELINE]
+        query = (
+            "SELECT ABS(spot_depth_trade_net_notional_60s) AS value "
+            "FROM strategy_bot_decisions "
+            "WHERE strategy_version=? AND bot_name=? "
+            "AND spot_depth_trade_net_notional_60s IS NOT NULL"
+        )
+        if asset:
+            query += " AND asset=?"
+            params.append(str(asset).upper())
+        if created_before is not None:
+            query += " AND created_at<?"
+            params.append(float(created_before))
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        values = sorted(float(row["value"]) for row in rows if row["value"] is not None)
+        if not values:
+            return None
+        p = max(0.0, min(1.0, float(percentile)))
+        index = int(math.ceil((len(values) - 1) * p))
+        return values[index]
 
     def resolve(
         self,

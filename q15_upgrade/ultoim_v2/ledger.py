@@ -139,6 +139,17 @@ CREATE TABLE IF NOT EXISTS ultoim_v2_predictions (
     pin_break_drift REAL,
     threshold_interaction REAL,
     champion_flow REAL,
+    index_px REAL,
+    basis_cents REAL,
+    index_age_s REAL,
+    market_volume REAL,
+    open_interest REAL,
+    seconds_since_last_book_change REAL,
+    asleep_score REAL,
+    market_activity_age_s REAL,
+    liq_notional_60s REAL,
+    liq_side TEXT,
+    liq_age_s REAL,
     stake_multiplier INTEGER DEFAULT 1,
     UNIQUE(model_version, ticker, interval)
 );
@@ -297,6 +308,21 @@ class UltoimV2Ledger:
             # Record-only champion per-asset directional flow factor (feature_values
             # ["flow"]); the flow-against-NO abstain candidate. Nullable, never gates.
             ("champion_flow", "REAL"),
+            # Record-only exact Kalshi settlement-index context from CF Benchmarks RTI.
+            # Nullable when the authenticated feed is disabled/stale; never gates.
+            ("index_px", "REAL"),
+            ("basis_cents", "REAL"),
+            ("index_age_s", "REAL"),
+            # Record-only Kalshi market-activity context. Nullable when disabled/stale.
+            ("market_volume", "REAL"),
+            ("open_interest", "REAL"),
+            ("seconds_since_last_book_change", "REAL"),
+            ("asleep_score", "REAL"),
+            ("market_activity_age_s", "REAL"),
+            # Record-only Binance futures liquidation context. Nullable when disabled/stale.
+            ("liq_notional_60s", "REAL"),
+            ("liq_side", "TEXT"),
+            ("liq_age_s", "REAL"),
             # Record-only SETTLEMENT-STREAK signal: the asset's signed consecutive same-
             # outcome settled-window run as of prediction time (+N YES / -N NO). Nullable,
             # never gates; graded in streak_research_scoreboard.
@@ -508,6 +534,10 @@ class UltoimV2Ledger:
         "record_kind", "research_fired", "conf_gap", "blowup_risk", "screen_version",
         "s15_pass", "s15_codes", "s15_cal_drift", "s15_version",
         "pin_break_drift", "threshold_interaction", "champion_flow",
+        "index_px", "basis_cents", "index_age_s",
+        "market_volume", "open_interest", "seconds_since_last_book_change",
+        "asleep_score", "market_activity_age_s",
+        "liq_notional_60s", "liq_side", "liq_age_s",
         "settlement_streak", "stake_multiplier",
     )
 

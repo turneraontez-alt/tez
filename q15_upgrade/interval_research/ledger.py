@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS interval_captures (
     trade_decision TEXT,
     entry_recommended INTEGER DEFAULT 0,
     entry_reject_reason TEXT,
+    -- exact Kalshi settlement-index context (CF Benchmarks RTI), nullable when unavailable
+    index_px REAL,
+    basis_cents REAL,
+    index_age_s REAL,
     -- missing-capture accounting
     missing_reason TEXT,
     -- settlement
@@ -81,6 +85,7 @@ _CAPTURE_COLUMNS = (
     "yes_bid_cents", "yes_ask_cents", "spread_cents", "depth_contracts",
     "entry_ask_cents", "net_edge_cents", "fee_cents", "slippage_cents",
     "total_cost_cents", "trade_decision", "entry_recommended", "entry_reject_reason",
+    "index_px", "basis_cents", "index_age_s",
     "missing_reason",
 )
 
@@ -106,6 +111,7 @@ class IntervalResearchLedger:
                 os.makedirs(self.path.parent, exist_ok=True)
             with closing(self._connect()) as conn:
                 conn.executescript(_SCHEMA)
+                self._migrate(conn)
                 conn.commit()
             self._available = True
         except sqlite3.Error as exc:  # durable but never fatal to the live loop
@@ -115,6 +121,17 @@ class IntervalResearchLedger:
         conn = sqlite3.connect(self.path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(interval_captures)")}
+        for name, decl in (
+            ("index_px", "REAL"),
+            ("basis_cents", "REAL"),
+            ("index_age_s", "REAL"),
+        ):
+            if name not in existing:
+                conn.execute(f"ALTER TABLE interval_captures ADD COLUMN {name} {decl}")
 
     @property
     def available(self) -> bool:

@@ -550,7 +550,7 @@ class V95Tests(unittest.TestCase):
         self.assertFalse(result["automatic_production_learning"])
 
     def test_source_contains_no_order_submission_surface(self):
-        source = Path(__file__).parents[1].joinpath("q15_upgrade/checkpoint_v95.py").read_text().lower()
+        source = Path(__file__).parents[1].joinpath("q15_upgrade/checkpoint_v95.py").read_text(encoding="utf-8").lower()
         forbidden = ("place_order(", "create_order(", "submit_order(", "cancel_order(")
         self.assertFalse(any(token in source for token in forbidden))
 

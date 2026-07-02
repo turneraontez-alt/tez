@@ -1,5 +1,37 @@
 # Session handoff
 
+## Local THIS session - V3 13M early-entry sniper (activation blocked)
+Implemented the local code/test changes for the owner-requested V3 `thirteen_m_sniper` alert, but did **not**
+flip `.replit` live flags or merge because the required full-suite gate is not green in this Windows workspace.
+
+What changed locally:
+- Restored Ultoim V2 `13M` capture at 780s (`Q15_ULTOIM_V2_ENABLE_13M`, default true), record-only via
+  `research_only_intervals`; it records calibrated YES probability, flip probability, entry ask, distance, and
+  the existing depth/flow fields without alerting or executor routing.
+- Added V3 bot `thirteen_m_sniper` (strategy version suffix `-provisional`): default-off recording flag
+  `Q15_V3_13M_SNIPER`; separate default-off Telegram flag `Q15_V3_13M_SNIPER_NOTIFY`.
+- Gates: conviction, market-asleep/not-already-priced, flip-safe, 60s spot-flow fail-open contra veto, fee-adjusted
+  EV floor using the empirical accepted-slice Wilson lower bound once n>=30.
+- Added persistent accepted-slice stats, trailing 70th percentile flow context, V3 Telegram card
+  `V3 13M EARLY`, per-ticker/window dedup through the existing strategy-bot ledger uniqueness, and one-time
+  auto-mute notice when n>=80 and Wilson LB accuracy <0.55.
+
+Verification:
+- Focused suite: `python -m pytest tests/test_strategy_bots.py tests/test_ultoim_v2.py -q` -> `203 passed`.
+- Syntax/whitespace: `python -m compileall -q q15_upgrade/strategy_bots q15_upgrade/ultoim_v2` and
+  `git diff --check` passed.
+- Requested full suite: `python3 -m pytest tests/ -q` cannot collect here because `python3` points at Python 3.13;
+  the app exits with "Python 3.11 is required".
+- Full suite under Python 3.11: `python -m pytest tests/ -q` -> `1505 passed, 4 skipped, 164 failed, 2 errors`.
+  Failures/errors match the already-documented Windows SQLite temp-file lock issue (`PermissionError` deleting
+  temp `.sqlite3` files). WSL and Docker are unavailable in this workspace.
+
+Activation status:
+- `.replit` was intentionally **not** changed because the owner specified flipping
+  `Q15_V3_13M_SNIPER=true` and `Q15_V3_13M_SNIPER_NOTIFY=true` only after the full suite is green.
+- When a green Linux/Replit suite is available and those flags are set, the Repl must restart to pick up the
+  new env values.
+
 ## Shipped THIS session - item 6: rank-inversion scoreboard line
 Added a report-only `rank_quality_scoreboard(limit=300)` to the frozen V9.5 ledger. For each checkpoint it
 reads the latest resolved rows only, splits #1 vs #2-3 vs rest, computes Wilson CIs, and flags

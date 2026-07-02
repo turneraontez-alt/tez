@@ -9,7 +9,13 @@ this with ``monkeypatch.delenv`` to verify the real production default.
 """
 from __future__ import annotations
 
+import os
+import tempfile
+
 import pytest
+
+
+_TEMPORARY_DIRECTORY = tempfile.TemporaryDirectory
 
 
 @pytest.fixture(autouse=True)
@@ -26,3 +32,24 @@ def _ultoim_off_in_tests(monkeypatch):
         _cfg.reset_enabled_cache()
     except Exception:  # pragma: no cover
         pass
+
+
+@pytest.fixture(autouse=True)
+def _windows_tempdir_ignores_sqlite_cleanup_locks(monkeypatch):
+    """Keep Windows local pytest runs from failing on open SQLite temp files.
+
+    Several legacy v94/v95 ledgers intentionally reuse one SQLite connection for
+    process-life performance, and Linux can unlink those files during temp-dir
+    cleanup. Windows cannot. This affects only the test harness on Windows.
+    """
+    if os.name != "nt":
+        yield
+        return
+
+    class _WindowsTemporaryDirectory(_TEMPORARY_DIRECTORY):
+        def __init__(self, *args, **kwargs):
+            kwargs["ignore_cleanup_errors"] = True
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", _WindowsTemporaryDirectory)
+    yield

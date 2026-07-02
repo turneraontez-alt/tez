@@ -58,6 +58,11 @@ def build_capture_row(*, model_version: str, interval: str, mark_seconds: int,
     regime = analysis.get("regime") if isinstance(analysis.get("regime"), Mapping) else {}
     sigs = analysis.get("shadow_signals") if isinstance(analysis.get("shadow_signals"), Mapping) else {}
     costs = analysis.get("costs") if isinstance(analysis.get("costs"), Mapping) else {}
+    settlement_index = (
+        analysis.get("settlement_index")
+        if isinstance(analysis.get("settlement_index"), Mapping)
+        else {}
+    )
 
     dq = _num(analysis.get("data_quality"))
     decision = str(analysis.get("trade_decision") or "")
@@ -110,5 +115,8 @@ def build_capture_row(*, model_version: str, interval: str, mark_seconds: int,
         "entry_recommended": entry_recommended,
         "entry_reject_reason": (str(analysis.get("main_blocker")) if not entry_recommended
                                 and analysis.get("main_blocker") else None),
+        "index_px": _num(settlement_index.get("index_px")),
+        "basis_cents": _num(settlement_index.get("basis_cents")),
+        "index_age_s": _num(settlement_index.get("index_age_s")),
         "missing_reason": None,
     }

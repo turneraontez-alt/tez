@@ -58,6 +58,19 @@ def _point_ledgers_at(monkeypatch, data_dir: Path) -> None:
     )
     monkeypatch.setenv("Q15_SPOT_DEPTH_DB", str(data_dir / "q15_spot_depth_v1.sqlite3"))
     monkeypatch.setenv("Q15_STRATEGY_BOTS_DB", str(data_dir / "q15_strategy_bots_v3.sqlite3"))
+    monkeypatch.setenv(
+        "Q15_FEED_SETTLE_INDEX_DB", str(data_dir / "q15_settlement_index_v1.sqlite3")
+    )
+    monkeypatch.setenv(
+        "Q15_FEED_LADDER_DB", str(data_dir / "q15_ladder_probe_v1.sqlite3")
+    )
+    monkeypatch.setenv(
+        "Q15_FEED_MARKET_ACTIVITY_DB", str(data_dir / "q15_market_activity_v1.sqlite3")
+    )
+    monkeypatch.setenv(
+        "Q15_FEED_PATH_RECORDER_DB", str(data_dir / "q15_path_recorder_v1.sqlite3")
+    )
+    monkeypatch.setenv("Q15_FEED_LIQ_DB", str(data_dir / "q15_liq_feed_v1.sqlite3"))
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +106,41 @@ def test_build_snapshot_structure_and_gzip(tmp_path, monkeypatch):
     # gz artifact round-trips to a valid sqlite file
     raw = gzip.decompress(artifacts["dbs/q15_v95_ledger_v1.sqlite3.gz"])
     assert raw[:16] == b"SQLite format 3\x00"
+
+
+def test_build_snapshot_exports_new_collector_dbs(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _point_ledgers_at(monkeypatch, data_dir)
+
+    specs = {
+        "q15_settlement_index_v1.sqlite3": "settlement_index_ticks",
+        "q15_ladder_probe_v1.sqlite3": "ladder_captures",
+        "q15_market_activity_v1.sqlite3": "market_activity_samples",
+        "q15_path_recorder_v1.sqlite3": "window_paths",
+        "q15_liq_feed_v1.sqlite3": "liquidation_events",
+    }
+    for filename, table in specs.items():
+        conn = sqlite3.connect(data_dir / filename)
+        try:
+            conn.execute(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY, payload TEXT)')
+            conn.execute(f'INSERT INTO "{table}" (payload) VALUES (?)', ("ok",))
+            conn.commit()
+        finally:
+            conn.close()
+
+    snap, artifacts = lx.build_snapshot(
+        data_dir,
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
+        head_commit=None,
+        build_info=None,
+    )
+
+    for filename, table in specs.items():
+        meta = snap["databases"][filename]
+        assert meta["row_counts"][table] == 1
+        assert meta["artifact"] == f"dbs/{filename}.gz"
+        assert f"dbs/{filename}.gz" in artifacts
 
 
 def test_build_snapshot_skips_oversized_raw_db_artifact(tmp_path, monkeypatch):

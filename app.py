@@ -207,6 +207,92 @@ def _seconds_remaining(close_time_str):
         return None
 
 
+def _close_time_epoch(close_time_str):
+    if not close_time_str:
+        return None
+    try:
+        return datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        logger.warning("Could not parse close_time epoch %r", close_time_str)
+        return None
+
+
+def _observe_market_activity(asset, ticker, market, ob_delta, now):
+    try:
+        from market_activity import book_changed, get_market_activity_recorder
+
+        get_market_activity_recorder().observe(
+            asset=asset,
+            ticker=ticker,
+            market=market,
+            orderbook_changed=book_changed(ob_delta),
+            now=now,
+        )
+    except Exception:
+        logger.debug("market activity observe skipped", exc_info=True)
+
+
+def _observe_ladder_probe(asset, close_time_epoch, seconds_remaining, now):
+    try:
+        from ladder_probe import get_ladder_probe
+
+        get_ladder_probe().observe(
+            asset=asset,
+            series_ticker=SERIES_MAP[asset],
+            close_time=close_time_epoch,
+            seconds_remaining=seconds_remaining,
+            now=now,
+        )
+    except Exception:
+        logger.debug("ladder probe observe skipped", exc_info=True)
+
+
+def _observe_path_recorder(asset, snap, close_time_epoch, now):
+    try:
+        from path_recorder import get_path_recorder
+        from settlement_index import settlement_index_context
+
+        index_ctx = settlement_index_context(
+            asset,
+            spot_px=snap.get("underlying_current"),
+            now=now,
+        )
+        get_path_recorder().observe(
+            asset=asset,
+            close_time=close_time_epoch,
+            seconds_remaining=snap.get("seconds_remaining"),
+            index_px=index_ctx.get("index_px"),
+            spot_px=snap.get("underlying_current"),
+            yes_bid=snap.get("yes_bid"),
+            yes_ask=snap.get("yes_ask"),
+            now=now,
+        )
+    except Exception:
+        logger.debug("path recorder observe skipped", exc_info=True)
+
+
+def _flush_path_recorder(asset, close_time_str, now):
+    try:
+        from path_recorder import get_path_recorder
+
+        get_path_recorder().flush_window(
+            asset=asset,
+            close_time=_close_time_epoch(close_time_str),
+            now=now,
+        )
+    except Exception:
+        logger.debug("path recorder flush skipped", exc_info=True)
+
+
+def _flush_expired_path_records(now):
+    try:
+        from path_recorder import get_path_recorder
+
+        get_path_recorder().flush_expired(now=now)
+    except Exception:
+        logger.debug("expired path recorder flush skipped", exc_info=True)
+
+
 def discover_single(asset):
     """Return the soonest future market for an asset (live or upcoming).
 
@@ -553,9 +639,11 @@ def refresh_loop(max_cycles=None):
             for asset in ASSETS:
                 m = current_markets.get(asset)
                 if m and market_has_expired(m):
+                    _flush_path_recorder(asset, m.get("close_time", ""), now)
                     cycling.setdefault(asset, {"since": now, "last_try": 0})
                     current_markets.pop(asset, None)
                     logger.info(f"{asset} expired — cycling")
+            _flush_expired_path_records(now)
 
             # -- re-discover cycling assets --
             for asset in list(cycling.keys()):
@@ -672,7 +760,9 @@ def refresh_loop(max_cycles=None):
                 detail = _resolve_cached_detail(detail_cache, a, active[a].get("ticker"))
                 market = {**active[a], **(detail or {})}
                 market["_volume"] = _parse_volume(market)
+                close_epoch = _close_time_epoch(market.get("close_time", ""))
                 try:
+                    _observe_market_activity(a, market.get("ticker"), market, ob_delta, now)
                     snap = eng.build_snapshot(
                         a, market, ob_parsed, ob_delta, r["spot"],
                         broader, r.get("source") == "ws", now,
@@ -685,6 +775,8 @@ def refresh_loop(max_cycles=None):
                     snap = apply_snapshot_freshness(
                         snap, r, now, market_data.health(), config
                     )
+                    _observe_ladder_probe(a, close_epoch, snap.get("seconds_remaining"), now)
+                    _observe_path_recorder(a, snap, close_epoch, now)
                     eng.candles.evict(now)
                     with state_lock:
                         state[a] = snap
@@ -744,15 +836,35 @@ def refresh_loop(max_cycles=None):
             with state_lock:
                 snaps = dict(state)
             ws_health = market_data.health()
+            feed_ages = {}
             try:
                 from coinbase_adv_l2 import coinbase_adv_l2_health
                 _coinbase_l2_health = coinbase_adv_l2_health()
-                cycle_watchdog.observe_feed_ages(
-                    {"coinbase_adv_l2": _coinbase_l2_health.get("snapshot_age_seconds")},
-                    now=now,
-                )
+                feed_ages["coinbase_adv_l2"] = _coinbase_l2_health.get("snapshot_age_seconds")
             except Exception:
                 logger.debug("coinbase L2 feed freshness monitor skipped", exc_info=True)
+            for feed_name, age_key in (
+                ("settlement_index", "latest_age_seconds"),
+                ("ladder_probe", "last_capture_age_seconds"),
+                ("market_activity", "latest_age_seconds"),
+                ("path_recorder", "latest_point_age_seconds"),
+                ("liq_feed", "latest_age_seconds"),
+            ):
+                try:
+                    if feed_name == "settlement_index":
+                        from settlement_index import settlement_index_health as _health_fn
+                    elif feed_name == "ladder_probe":
+                        from ladder_probe import ladder_health as _health_fn
+                    elif feed_name == "market_activity":
+                        from market_activity import market_activity_health as _health_fn
+                    elif feed_name == "path_recorder":
+                        from path_recorder import path_recorder_health as _health_fn
+                    else:
+                        from liq_feed import liq_health as _health_fn
+                    feed_ages[feed_name] = _health_fn().get(age_key)
+                except Exception:
+                    logger.debug("%s feed freshness monitor skipped", feed_name, exc_info=True)
+            cycle_watchdog.observe_feed_ages(feed_ages, now=now)
             global _last_cycle_ok, _last_learn
             try:
                 snaps = ct.time("focus_pre_enrich", focus_manager.pre_enrich, snaps, now)
@@ -1014,41 +1126,6 @@ _COMPACT_FIELDS = (
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 _refresh_started = False
 _refresh_lock = threading.Lock()
 
@@ -1077,6 +1154,31 @@ def _start_refresh():
                 start_kraken_l3()
             except Exception as exc:
                 logger.warning("Kraken L3 collector did not start: %s", exc)
+            try:
+                from settlement_index import start_settlement_index
+                start_settlement_index()
+            except Exception as exc:
+                logger.warning("Settlement index collector did not start: %s", exc)
+            try:
+                from ladder_probe import start_ladder_probe
+                start_ladder_probe()
+            except Exception as exc:
+                logger.warning("Ladder probe did not start: %s", exc)
+            try:
+                from market_activity import start_market_activity
+                start_market_activity()
+            except Exception as exc:
+                logger.warning("Market activity recorder did not start: %s", exc)
+            try:
+                from path_recorder import start_path_recorder
+                start_path_recorder()
+            except Exception as exc:
+                logger.warning("Path recorder did not start: %s", exc)
+            try:
+                from liq_feed import start_liq_feed
+                start_liq_feed()
+            except Exception as exc:
+                logger.warning("Liquidation feed did not start: %s", exc)
             threading.Thread(target=refresh_loop, daemon=True).start()
             _refresh_started = True
             logger.info("Refresh loop started")

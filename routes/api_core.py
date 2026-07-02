@@ -191,6 +191,36 @@ def register(flask_app, host):
         except Exception:
             kraken_l3_status = {"enabled": False}
 
+        try:
+            from settlement_index import settlement_index_health
+            settlement_index_status = settlement_index_health()
+        except Exception:
+            settlement_index_status = {"enabled": False}
+
+        try:
+            from ladder_probe import ladder_health
+            ladder_probe_status = ladder_health()
+        except Exception:
+            ladder_probe_status = {"enabled": False}
+
+        try:
+            from market_activity import market_activity_health
+            market_activity_status = market_activity_health()
+        except Exception:
+            market_activity_status = {"enabled": False}
+
+        try:
+            from path_recorder import path_recorder_health
+            path_recorder_status = path_recorder_health()
+        except Exception:
+            path_recorder_status = {"enabled": False}
+
+        try:
+            from liq_feed import liq_health
+            liq_feed_status = liq_health()
+        except Exception:
+            liq_feed_status = {"enabled": False}
+
         deployment_type = "reserved-vm" if _app.os.environ.get("REPLIT_DEPLOYMENT") else "development"
 
         # Surface learning-ledger health at the top level so silent learning-layer
@@ -246,6 +276,11 @@ def register(flask_app, host):
             "spot_l3": spot_l3_status,
             "coinbase_adv_l2": coinbase_adv_l2_status,
             "kraken_l3": kraken_l3_status,
+            "settlement_index": settlement_index_status,
+            "ladder_probe": ladder_probe_status,
+            "market_activity": market_activity_status,
+            "path_recorder": path_recorder_status,
+            "liq_feed": liq_feed_status,
             "cycle_watchdog": _app.cycle_watchdog.health(),
             "feed_watchdog": _app.cycle_watchdog.feed_health(),
             "heartbeat_watchdog": _app.cycle_watchdog.heartbeat_status(now=now),
