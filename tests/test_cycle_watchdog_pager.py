@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -148,6 +149,23 @@ class TestWatchdogPager(unittest.TestCase):
             cw.reset()  # simulates an in-memory restart; cooldown file remains.
             self.assertIsNone(cw.heartbeat_supervisor_tick(now=1200.0, send_fn=sent.append))
             self.assertIsNotNone(cw.heartbeat_supervisor_tick(now=1722.0, send_fn=sent.append))
+            self.assertEqual(len(sent), 2)
+
+    def test_heartbeat_cooldown_write_failure_uses_memory(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["Q15_HEARTBEAT_PATH"] = os.path.join(td, "heartbeat.json")
+            os.environ["Q15_HEARTBEAT_COOLDOWN_PATH"] = os.path.join(td, "cooldown.json")
+            os.environ["Q15_HEARTBEAT_STALE_SECONDS"] = "120"
+            os.environ["Q15_HEARTBEAT_PAGER_COOLDOWN_SECONDS"] = "600"
+            sent = []
+
+            cw.write_heartbeat(now=1000.0, cycle=1)
+            with patch.object(cw, "_write_json_atomic", side_effect=OSError("readonly")):
+                msg = cw.heartbeat_supervisor_tick(now=1121.0, send_fn=sent.append)
+                self.assertIsNotNone(msg)
+                self.assertIsNone(cw.heartbeat_supervisor_tick(now=1122.0, send_fn=sent.append))
+                self.assertIsNotNone(cw.heartbeat_supervisor_tick(now=1722.0, send_fn=sent.append))
+
             self.assertEqual(len(sent), 2)
 
     def test_process_exit_alert_is_persistently_rate_limited(self):

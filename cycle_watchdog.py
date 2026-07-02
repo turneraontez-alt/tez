@@ -45,6 +45,7 @@ _lock = threading.Lock()
 _heartbeat_lock = threading.Lock()
 _supervisor_lock = threading.Lock()
 _supervisor_started = False
+_heartbeat_cooldown_memory: dict[str, float] = {}
 
 
 def _blank_state() -> dict:
@@ -199,7 +200,7 @@ def _claim_persistent_cooldown(kind: str, now: float, cooldown: float) -> bool:
     with _heartbeat_lock:
         data = _read_json(path)
         key = f"{kind}_alert_at"
-        last = _clean_age(data.get(key)) or 0.0
+        last = _clean_age(data.get(key)) or _heartbeat_cooldown_memory.get(key, 0.0) or 0.0
         if last and now - last < cooldown:
             return False
         data[key] = float(now)
@@ -207,7 +208,10 @@ def _claim_persistent_cooldown(kind: str, now: float, cooldown: float) -> bool:
         try:
             _write_json_atomic(path, data)
         except Exception:
+            _heartbeat_cooldown_memory[key] = float(now)
             logger.debug("heartbeat cooldown write failed", exc_info=True)
+        else:
+            _heartbeat_cooldown_memory[key] = float(now)
         return True
 
 
@@ -531,3 +535,5 @@ def reset() -> None:
         _pager_state["last_alert_at"] = 0.0
         _feed_state.clear()
         _feed_state.update(_blank_feed_state())
+    with _heartbeat_lock:
+        _heartbeat_cooldown_memory.clear()

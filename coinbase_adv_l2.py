@@ -18,9 +18,18 @@ import threading
 import time
 from typing import Any, Iterable
 
-from coinbase import jwt_generator
-
 logger = logging.getLogger(__name__)
+_last_stale_warning_at = 0.0
+
+try:
+    from coinbase import jwt_generator
+
+    _HAVE_COINBASE_SDK = True
+    _COINBASE_SDK_ERROR = None
+except Exception as exc:  # pragma: no cover - optional dependency guard
+    jwt_generator = None
+    _HAVE_COINBASE_SDK = False
+    _COINBASE_SDK_ERROR = f"{type(exc).__name__}: {exc}"
 
 try:
     import websockets
@@ -131,6 +140,14 @@ def _retention_days() -> float:
     return _env_float("Q15_COINBASE_ADV_L2_RETENTION_DAYS", 7.0, minimum=0.0)
 
 
+def _stale_warning_seconds() -> float:
+    return _env_float("Q15_COINBASE_ADV_L2_STALE_WARNING_SECONDS", 600.0, minimum=60.0)
+
+
+def _stale_warning_cooldown_seconds() -> float:
+    return _env_float("Q15_COINBASE_ADV_L2_STALE_WARNING_COOLDOWN_SECONDS", 600.0, minimum=60.0)
+
+
 def _configured_products() -> list[str]:
     raw = os.environ.get("Q15_COINBASE_ADV_L2_PRODUCTS", "").strip()
     if raw:
@@ -229,6 +246,31 @@ def _snapshot_age_health(db_path: str, products: Iterable[str], now: float) -> d
     }
 
 
+def _annotate_and_warn_stale(info: dict[str, Any], now: float) -> dict[str, Any]:
+    global _last_stale_warning_at
+    threshold = _stale_warning_seconds()
+    age = _f(info.get("snapshot_age_seconds"))
+    stale = bool(age is not None and age > threshold)
+    info["snapshot_stale"] = stale
+    info["snapshot_stale_seconds"] = threshold
+    if not (_enabled() and stale):
+        return info
+    cooldown = _stale_warning_cooldown_seconds()
+    if _last_stale_warning_at and now - _last_stale_warning_at < cooldown:
+        return info
+    _last_stale_warning_at = now
+    logger.warning(
+        "Coinbase Advanced L2 snapshots stale: age %.0fs exceeds %.0fs; "
+        "thread_alive=%s status=%s thread_error=%s",
+        age,
+        threshold,
+        info.get("thread_alive"),
+        info.get("status"),
+        info.get("thread_error"),
+    )
+    return info
+
+
 class CoinbaseAdvancedL2Collector:
     """Authenticated Advanced Trade L2 collector."""
 
@@ -270,6 +312,9 @@ class CoinbaseAdvancedL2Collector:
         if not _HAVE_WS:
             logger.warning("Coinbase Advanced L2 disabled: `pip install websockets`")
             return
+        if not _HAVE_COINBASE_SDK:
+            logger.warning("Coinbase Advanced L2 disabled: coinbase SDK missing: %s", _COINBASE_SDK_ERROR)
+            return
         if not self.products:
             logger.warning("Coinbase Advanced L2 not started: no products configured")
             return
@@ -297,6 +342,8 @@ class CoinbaseAdvancedL2Collector:
             info = {
                 "enabled": _enabled(),
                 "have_ws": _HAVE_WS,
+                "have_coinbase_sdk": _HAVE_COINBASE_SDK,
+                "coinbase_sdk_error": _COINBASE_SDK_ERROR,
                 "authenticated_key_loaded": _has_key_file(),
                 "key_file": self.key_file,
                 "products": list(self.products),
@@ -326,13 +373,15 @@ class CoinbaseAdvancedL2Collector:
                 "status": self._status_locked(),
             }
         info.update(_snapshot_age_health(self.db_path, self.products, now))
-        return info
+        return _annotate_and_warn_stale(info, now)
 
     def _status_locked(self) -> str:
         if not _enabled():
             return "disabled"
         if not _HAVE_WS:
             return "websockets_missing"
+        if not _HAVE_COINBASE_SDK:
+            return "coinbase_sdk_missing"
         if not _has_key_file():
             return "missing_or_bad_key_file"
         if self._connected:
@@ -606,6 +655,8 @@ class CoinbaseAdvancedL2Collector:
             backoff = min(30.0, backoff * 1.8)
 
     async def _subscribe(self, socket: Any, key_name: str, private_key: str) -> None:
+        if jwt_generator is None:
+            raise RuntimeError("coinbase SDK missing")
         heartbeat_jwt = jwt_generator.build_ws_jwt(key_name, private_key)
         await socket.send(json.dumps({
             "type": "subscribe",
@@ -645,11 +696,14 @@ def start_coinbase_adv_l2() -> None:
 
 
 def coinbase_adv_l2_health() -> dict[str, Any]:
+    now = time.time()
     products = _configured_products()
     db_path = _db_path()
     info = {
         "enabled": _enabled(),
         "have_ws": _HAVE_WS,
+        "have_coinbase_sdk": _HAVE_COINBASE_SDK,
+        "coinbase_sdk_error": _COINBASE_SDK_ERROR,
         "authenticated_key_loaded": _has_key_file(),
         "key_file": _key_file(),
         "products": products,
@@ -657,13 +711,16 @@ def coinbase_adv_l2_health() -> dict[str, Any]:
         "summary_levels": _summary_levels(),
         "retention_days": _retention_days(),
     }
-    info.update(_snapshot_age_health(db_path, products, time.time()))
+    info.update(_snapshot_age_health(db_path, products, now))
     if not _enabled() or _feed is None:
-        if _enabled() and not _has_key_file():
-            info["status"] = "missing_or_bad_key_file"
-        return info
+        if _enabled():
+            if not _HAVE_COINBASE_SDK:
+                info["status"] = "coinbase_sdk_missing"
+            elif not _has_key_file():
+                info["status"] = "missing_or_bad_key_file"
+        return _annotate_and_warn_stale(info, now)
     try:
         info.update(_feed.health())
     except Exception as exc:  # pragma: no cover - defensive
         info["error"] = str(exc)[:200]
-    return info
+    return _annotate_and_warn_stale(info, now)

@@ -1,5 +1,42 @@
 # Session handoff
 
+## Local THIS session - Q15 grading repair stages 1-5
+Run time: 2026-07-02T04:38:59Z.
+
+Shipped in staged commits:
+- Stage 1: unblocked V9.5/challenger grading with a persistent `reconcile_skip` park list, parked-ticker requeue path,
+  warning-level fetch/zero-progress logs, one-shot Telegram grading-stall alert, and `tools/backfill_resolutions.py`.
+- Stage 2: hourly report now prints `Grading: resolved 24h / backlog / oldest / parked`; `/api/health` exposes the same
+  grading block; stale scoreboard/rank-quality lines stamp `(data through MM-DD)` when resolved data is older than 24h.
+- Stage 3: Ultoim V2 exit-warning outbox path was already present and tested; `.env.example` now pins the owner posture
+  `Q15_ULTOIM_V2_EXIT_WARN_OUTBOX=true`.
+- Stage 4: repaired the V3 13M sniper path by feeding interval-research 13M captures into strategy-bot source rows behind
+  `Q15_V3_13M_SNIPER_FEED`, widening the ledger helper signatures, and warning once per process on swallowed 13M context
+  failures. `.env.example` documents `Q15_V3_13M_SNIPER=true`, `Q15_V3_13M_SNIPER_FEED=true`, and leaves
+  `Q15_V3_13M_SNIPER_NOTIFY` as owner choice.
+- Stage 5: V2 scoreboard headline/`overall` now counts settled fired NO rows only (`fired_resolved` keeps the total fired
+  YES+NO count visible), heartbeat pager falls back to in-memory cooldown if the cooldown file cannot be written, and
+  Coinbase Advanced L2 health now guards missing SDK/key failures, exposes snapshot age, and logs one rate-limited WARNING
+  when snapshots are stale for more than 10 minutes.
+
+Backfill runbook:
+1. On the live host, run `python tools/backfill_resolutions.py --db <live-v95-ledger.sqlite3>` once after deploy.
+2. Use `--dry-run` first if you need a no-write count of unresolved past-close tickers.
+3. If parked tickers should be retried, rerun with `--retry-parked`.
+4. Verify the next hourly report's `Grading:` line shows backlog near 0 and parked count understood.
+
+Verification:
+- Stage 5 focused affected suites: `261 passed`.
+- Full suite under Python 3.11: `python -m pytest tests/ -q` -> `1749 passed, 4 skipped`.
+- Local `python3 -m pytest tests/ -q` remains unsuitable on this Windows host because `python3` resolves to Python 3.13;
+  the repo guard requires Python 3.11. `python` is Python 3.11.9 here.
+
+Found during repair:
+- `outputs/` is an existing runtime artifact and was left untracked/unstaged.
+- The live Coinbase Advanced L2 root cause still needs confirmation from host logs/runtime health. The code now surfaces
+  `thread_error`, `thread_exit_age_seconds`, `status`, `have_coinbase_sdk`, key status, and stale snapshot age so a missing
+  SDK/key or exited thread is explicit rather than guessed.
+
 ## Local THIS session - Q15 collector feeds wired; activation blocked
 Run time: 2026-07-02T03:48:52Z.
 

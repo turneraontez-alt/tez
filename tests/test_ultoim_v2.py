@@ -1224,6 +1224,25 @@ def test_scoreboard_by_side_splits_no_and_yes_research(tmp_path):
     led.close()
 
 
+def test_scoreboard_overall_excludes_fired_yes_notify_rows(tmp_path):
+    led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
+    led.record_decision(_row(ticker="N1", predicted_side="NO", fired=1,
+                             research_fired=1, record_kind="DELIVERED_CANDIDATE"))
+    led.record_decision(_row(ticker="Y1", interval="7M", predicted_side="YES", fired=1,
+                             research_fired=1, record_kind="DELIVERED_CANDIDATE",
+                             delivery_status="SENT"))
+    led.resolve("ultoim-v2", "N1", "NO", 9500.0)
+    led.resolve("ultoim-v2", "Y1", "YES", 9500.0)
+
+    sb = led.scoreboard("ultoim-v2", min_n=1)
+
+    assert sb["fired_resolved"] == 2
+    assert sb["overall"]["n"] == 1
+    assert sb["resolved"] == 1
+    assert sb["by_side"]["YES"]["n"] == 1
+    led.close()
+
+
 def test_resolved_rows_oldest_first(tmp_path):
     led = UltoimV2Ledger(str(tmp_path / "u.sqlite3"))
     led.record_decision(_row(ticker="A", created_at=2000.0))

@@ -637,8 +637,14 @@ class UltoimV2Ledger:
             ).fetchall())
         # Headline 'entries' stats: delivered + fired rows only. all_observations
         # exposes every recorded row (fired + abstains).
-        entries = [r for r in all_rows
-                   if r["fired"] == 1 and r["official_result"] is not None]
+        fired_resolved = [
+            r for r in all_rows
+            if r["fired"] == 1 and r["official_result"] is not None
+        ]
+        entries = [
+            r for r in fired_resolved
+            if str(r["predicted_side"] or "").upper() == "NO"
+        ]
         all_resolved = [r for r in all_rows if r["official_result"] is not None]
         out: dict[str, Any] = {
             "available": True,
@@ -647,6 +653,7 @@ class UltoimV2Ledger:
             "session_id": self.session_id(),
             "min_n": min_n,
             "resolved": len(entries),
+            "fired_resolved": len(fired_resolved),
             "total_recorded": len(all_rows),
             "delivery_counts": {str(k): int(v) for k, v in counts.items()},
             "all_observations": {

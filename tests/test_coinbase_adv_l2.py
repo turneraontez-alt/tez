@@ -9,6 +9,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
+import coinbase_adv_l2 as adv_l2
 from coinbase_adv_l2 import CoinbaseAdvancedL2Collector, coinbase_adv_l2_health, load_cdp_key
 
 
@@ -154,3 +155,43 @@ def test_health_reports_db_snapshot_age_when_thread_absent(tmp_path, monkeypatch
     assert info["latest_snapshot_age_seconds"] < 120.0
     assert info["snapshot_age_by_product_seconds"]["BTC-USD"] >= 400.0
     assert info["snapshot_age_by_product_seconds"]["ETH-USD"] < 120.0
+
+
+def test_health_warns_once_when_snapshots_stale(tmp_path, monkeypatch, caplog):
+    db = str(tmp_path / "adv_l2.sqlite3")
+    now = time.time()
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE coinbase_adv_l2_snapshots (created_at REAL, product_id TEXT)")
+        conn.execute("INSERT INTO coinbase_adv_l2_snapshots VALUES (?, ?)", (now - 1200.0, "BTC-USD"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_ENABLED", "true")
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_DB", db)
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_PRODUCTS", "BTC-USD")
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_STALE_WARNING_SECONDS", "600")
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_STALE_WARNING_COOLDOWN_SECONDS", "600")
+    adv_l2._last_stale_warning_at = 0.0
+    caplog.set_level("WARNING", logger="coinbase_adv_l2")
+
+    first = adv_l2.coinbase_adv_l2_health()
+    second = adv_l2.coinbase_adv_l2_health()
+
+    assert first["snapshot_stale"] is True
+    assert first["snapshot_age_seconds"] >= 1000.0
+    assert second["snapshot_stale"] is True
+    assert caplog.text.count("Coinbase Advanced L2 snapshots stale") == 1
+
+
+def test_health_reports_missing_coinbase_sdk(monkeypatch):
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_ENABLED", "true")
+    monkeypatch.setattr(adv_l2, "_HAVE_COINBASE_SDK", False)
+    monkeypatch.setattr(adv_l2, "_COINBASE_SDK_ERROR", "ImportError: missing coinbase")
+
+    info = adv_l2.coinbase_adv_l2_health()
+
+    assert info["have_coinbase_sdk"] is False
+    assert info["coinbase_sdk_error"] == "ImportError: missing coinbase"
+    assert info["status"] == "coinbase_sdk_missing"

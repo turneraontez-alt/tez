@@ -76,6 +76,11 @@ class TestHealthLedgerSurface(unittest.TestCase):
         finally:
             appmod.checkpoint_v95.ledger.reconcile_backlog_status = orig
 
+    def test_health_includes_coinbase_adv_l2_snapshot_age_alias(self):
+        body = self.client.get("/api/health").get_json()
+        self.assertIn("coinbase_adv_l2", body)
+        self.assertIn("coinbase_adv_l2_snapshot_age_seconds", body)
+
 
 if __name__ == "__main__":
     unittest.main()

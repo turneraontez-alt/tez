@@ -281,6 +281,7 @@ def register(flask_app, host):
             "spot_depth": spot_depth_status,
             "spot_l3": spot_l3_status,
             "coinbase_adv_l2": coinbase_adv_l2_status,
+            "coinbase_adv_l2_snapshot_age_seconds": coinbase_adv_l2_status.get("snapshot_age_seconds"),
             "kraken_l3": kraken_l3_status,
             "settlement_index": settlement_index_status,
             "ladder_probe": ladder_probe_status,
