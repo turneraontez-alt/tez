@@ -621,6 +621,16 @@ class V95Ledger:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS reconcile_skip (
+                    ticker TEXT PRIMARY KEY,
+                    consecutive_undetermined INTEGER NOT NULL DEFAULT 0,
+                    first_undetermined_at REAL NOT NULL,
+                    last_undetermined_at REAL NOT NULL,
+                    parked_at REAL,
+                    last_status TEXT,
+                    last_sample_json TEXT,
+                    requeue_count INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             # Migrate older ledgers that predate the rank / P&L columns.
@@ -823,6 +833,10 @@ class V95Ledger:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_v95_predictions_resolved_mv "
                 "ON predictions(model_version, resolved_at) WHERE official_result IS NOT NULL"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v95_reconcile_skip_parked "
+                "ON reconcile_skip(parked_at)"
             )
             now = time.time()
             for checkpoint in LEARNING_CHECKPOINTS:
@@ -1839,6 +1853,304 @@ class V95Ledger:
             sample["all_keys"] = []
         return sample
 
+    def unresolved_past_close_tickers(
+        self,
+        *,
+        now: float | None = None,
+        include_parked: bool = True,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Distinct unresolved tickers whose close time has passed.
+
+        Used by the bounded live reconciler and by the unbounded backfill CLI.
+        The live reconciler passes ``include_parked=False`` so poison tickers
+        cannot hold the head of the queue forever; the CLI can still inspect all
+        past-close tickers when explicitly backfilling.
+        """
+        if not self._available:
+            return []
+        current = time.time() if now is None else float(now)
+        query = (
+            "SELECT p.ticker, MIN(p.close_time) AS close_time, COUNT(*) AS rows, "
+            "MAX(CASE WHEN rs.parked_at IS NOT NULL THEN 1 ELSE 0 END) AS parked "
+            "FROM predictions p "
+            "LEFT JOIN reconcile_skip rs ON rs.ticker=p.ticker "
+            "WHERE p.official_result IS NULL AND p.close_time IS NOT NULL AND p.close_time <= ? "
+        )
+        params: list[Any] = [current]
+        if not include_parked:
+            query += "AND NOT EXISTS (SELECT 1 FROM reconcile_skip s WHERE s.ticker=p.ticker AND s.parked_at IS NOT NULL) "
+        query += "GROUP BY p.ticker ORDER BY MIN(p.close_time) ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [
+            {
+                "ticker": str(row["ticker"]),
+                "close_time": _num(row["close_time"]),
+                "rows": int(row["rows"] or 0),
+                "parked": bool(row["parked"]),
+            }
+            for row in rows
+            if row["ticker"]
+        ]
+
+    def unresolved_prediction_count(self, ticker: str) -> int:
+        if not self._available:
+            return 0
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM predictions WHERE ticker=? AND official_result IS NULL",
+                (str(ticker),),
+            ).fetchone()
+        return int(row["n"] or 0) if row else 0
+
+    def reconcile_backlog_status(self, *, now: float | None = None) -> dict[str, Any]:
+        current = time.time() if now is None else float(now)
+        if not self._available:
+            return {"available": False, "path": str(self.path), "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            pending = connection.execute(
+                """SELECT COUNT(*) AS rows, COUNT(DISTINCT ticker) AS tickers,
+                          MIN(close_time) AS oldest_close_time
+                   FROM predictions
+                   WHERE official_result IS NULL AND close_time IS NOT NULL AND close_time <= ?""",
+                (current,),
+            ).fetchone()
+            resolved_24h = connection.execute(
+                "SELECT COUNT(*) AS n FROM predictions WHERE official_result IS NOT NULL AND resolved_at >= ?",
+                (current - 86400.0,),
+            ).fetchone()
+            newest = connection.execute(
+                "SELECT MAX(resolved_at) AS newest_resolved_at FROM predictions WHERE official_result IS NOT NULL"
+            ).fetchone()
+            parked = connection.execute(
+                "SELECT COUNT(*) AS n FROM reconcile_skip WHERE parked_at IS NOT NULL"
+            ).fetchone()
+        oldest = _num(pending["oldest_close_time"]) if pending else None
+        newest_resolved = _num(newest["newest_resolved_at"]) if newest else None
+        return {
+            "available": True,
+            "resolved_24h": int(resolved_24h["n"] or 0) if resolved_24h else 0,
+            "unresolved_pastclose": int(pending["rows"] or 0) if pending else 0,
+            "unresolved_pastclose_tickers": int(pending["tickers"] or 0) if pending else 0,
+            "oldest_unresolved_close_time": oldest,
+            "oldest_unresolved_age_seconds": None if oldest is None else round(max(0.0, current - oldest), 3),
+            "newest_resolved_at": newest_resolved,
+            "newest_resolved_age_seconds": None if newest_resolved is None else round(max(0.0, current - newest_resolved), 3),
+            "parked": int(parked["n"] or 0) if parked else 0,
+        }
+
+    def reconcile_skip_status(self, *, now: float | None = None, limit: int = 20) -> dict[str, Any]:
+        current = time.time() if now is None else float(now)
+        if not self._available:
+            return {"available": False, "path": str(self.path), "error": self._last_error}
+        with self._lock, closing(self._connect()) as connection:
+            counts = connection.execute(
+                """SELECT
+                      SUM(CASE WHEN parked_at IS NOT NULL THEN 1 ELSE 0 END) AS parked,
+                      SUM(CASE WHEN parked_at IS NULL THEN 1 ELSE 0 END) AS tracking
+                   FROM reconcile_skip"""
+            ).fetchone()
+            rows = connection.execute(
+                """SELECT ticker, consecutive_undetermined, first_undetermined_at,
+                          last_undetermined_at, parked_at, last_status,
+                          last_sample_json, requeue_count
+                   FROM reconcile_skip
+                   WHERE parked_at IS NOT NULL
+                   ORDER BY parked_at ASC LIMIT ?""",
+                (max(1, int(limit)),),
+            ).fetchall()
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            sample: dict[str, Any] = {}
+            try:
+                sample = json.loads(str(row["last_sample_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                sample = {}
+            parked_at = _num(row["parked_at"])
+            samples.append({
+                "ticker": str(row["ticker"]),
+                "consecutive_undetermined": int(row["consecutive_undetermined"] or 0),
+                "first_undetermined_at": _num(row["first_undetermined_at"]),
+                "last_undetermined_at": _num(row["last_undetermined_at"]),
+                "parked_at": parked_at,
+                "parked_age_seconds": None if parked_at is None else round(max(0.0, current - parked_at), 3),
+                "last_status": row["last_status"],
+                "requeue_count": int(row["requeue_count"] or 0),
+                "sample": sample,
+            })
+        return {
+            "available": True,
+            "skip_after": _env_int("Q15_V95_RECONCILE_SKIP_AFTER", 10, 1, 1000),
+            "parked": int(counts["parked"] or 0) if counts else 0,
+            "tracking": int(counts["tracking"] or 0) if counts else 0,
+            "samples": samples,
+        }
+
+    def requeue_parked_reconcile_tickers(self, tickers: Sequence[str] | None = None) -> int:
+        """Clear parked state so selected tickers can be retried by the live loop."""
+        if not self._available:
+            return 0
+        current = time.time()
+        with self._lock, closing(self._connect()) as connection:
+            if tickers is None:
+                cur = connection.execute(
+                    "UPDATE reconcile_skip SET parked_at=NULL, consecutive_undetermined=0, "
+                    "last_undetermined_at=?, requeue_count=requeue_count+1 WHERE parked_at IS NOT NULL",
+                    (current,),
+                )
+            else:
+                clean = [str(t).strip() for t in tickers if str(t).strip()]
+                if not clean:
+                    return 0
+                placeholders = ",".join("?" for _ in clean)
+                cur = connection.execute(
+                    "UPDATE reconcile_skip SET parked_at=NULL, consecutive_undetermined=0, "
+                    f"last_undetermined_at=?, requeue_count=requeue_count+1 WHERE ticker IN ({placeholders})",
+                    [current, *clean],
+                )
+            connection.commit()
+        self._status_cache = None
+        return int(cur.rowcount or 0)
+
+    def resolution_stall_alert_state(
+        self,
+        reconcile_result: Mapping[str, Any] | None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Persistent, rate-limited state machine for grading-stall ops alerts."""
+        current = time.time() if now is None else float(now)
+        stall_seconds = _env_float("Q15_V95_RESOLUTION_STALL_ALERT_SECONDS", 3600.0, 60.0, 86400.0)
+        cooldown = _env_float("Q15_V95_RESOLUTION_STALL_ALERT_COOLDOWN_SECONDS", stall_seconds, 60.0, 86400.0)
+        result = dict(reconcile_result or {})
+        resolved = int(result.get("new_predictions_resolved") or 0)
+        backlog = self.reconcile_backlog_status(now=current)
+        unresolved = int(backlog.get("unresolved_pastclose") or 0)
+        if not self._available:
+            return {"send": False, "reason": "ledger_unavailable", "stall_seconds": stall_seconds}
+        with self._lock, closing(self._connect()) as connection:
+            if resolved > 0 or unresolved <= 0:
+                connection.execute(
+                    "DELETE FROM metadata WHERE key IN ('resolution_stall_zero_since')"
+                )
+                connection.commit()
+                return {
+                    "send": False,
+                    "reason": "progress_or_no_backlog",
+                    "stall_seconds": stall_seconds,
+                    "unresolved_pastclose": unresolved,
+                    "new_predictions_resolved": resolved,
+                }
+            zero_row = connection.execute(
+                "SELECT value FROM metadata WHERE key='resolution_stall_zero_since'"
+            ).fetchone()
+            zero_since = _parse_ts(zero_row["value"]) if zero_row else None
+            if zero_since is None:
+                zero_since = current
+                connection.execute(
+                    "INSERT OR REPLACE INTO metadata(key,value) VALUES('resolution_stall_zero_since',?)",
+                    (str(zero_since),),
+                )
+                connection.commit()
+            stalled_for = max(0.0, current - zero_since)
+            if stalled_for < stall_seconds:
+                return {
+                    "send": False,
+                    "reason": "warming",
+                    "stall_seconds": stall_seconds,
+                    "stalled_for_seconds": round(stalled_for, 3),
+                    "unresolved_pastclose": unresolved,
+                    "new_predictions_resolved": resolved,
+                }
+            alert_row = connection.execute(
+                "SELECT value FROM metadata WHERE key='resolution_stall_alert_at'"
+            ).fetchone()
+            last_alert_at = _parse_ts(alert_row["value"]) if alert_row else None
+            if last_alert_at is not None and current - last_alert_at < cooldown:
+                return {
+                    "send": False,
+                    "reason": "cooldown",
+                    "stall_seconds": stall_seconds,
+                    "cooldown_seconds": cooldown,
+                    "stalled_for_seconds": round(stalled_for, 3),
+                    "last_alert_at": last_alert_at,
+                    "unresolved_pastclose": unresolved,
+                    "new_predictions_resolved": resolved,
+                }
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES('resolution_stall_alert_at',?)",
+                (str(current),),
+            )
+            connection.commit()
+        return {
+            "send": True,
+            "reason": "stalled",
+            "stall_seconds": stall_seconds,
+            "cooldown_seconds": cooldown,
+            "stalled_for_seconds": round(stalled_for, 3),
+            "unresolved_pastclose": unresolved,
+            "unresolved_pastclose_tickers": backlog.get("unresolved_pastclose_tickers"),
+            "oldest_unresolved_age_seconds": backlog.get("oldest_unresolved_age_seconds"),
+            "parked": backlog.get("parked"),
+            "new_predictions_resolved": resolved,
+        }
+
+    def _record_reconcile_undetermined_locked(
+        self,
+        connection: sqlite3.Connection,
+        ticker: str,
+        market: Mapping[str, Any],
+        now: float,
+        skip_after: int,
+    ) -> dict[str, Any]:
+        sample = self._undetermined_market_sample(ticker, market)
+        sample_json = _json(sample)[:4000]
+        status = str(market.get("status") or "")[:80]
+        row = connection.execute(
+            "SELECT * FROM reconcile_skip WHERE ticker=?",
+            (ticker,),
+        ).fetchone()
+        if row is None:
+            consecutive = 1
+            parked_at = now if consecutive >= skip_after else None
+            connection.execute(
+                """INSERT INTO reconcile_skip(
+                       ticker, consecutive_undetermined, first_undetermined_at,
+                       last_undetermined_at, parked_at, last_status, last_sample_json
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (ticker, consecutive, now, now, parked_at, status, sample_json),
+            )
+        else:
+            consecutive = int(row["consecutive_undetermined"] or 0) + 1
+            parked_at = _num(row["parked_at"])
+            if parked_at is None and consecutive >= skip_after:
+                parked_at = now
+            connection.execute(
+                """UPDATE reconcile_skip
+                   SET consecutive_undetermined=?, last_undetermined_at=?,
+                       parked_at=?, last_status=?, last_sample_json=?
+                   WHERE ticker=?""",
+                (consecutive, now, parked_at, status, sample_json, ticker),
+            )
+        parked = parked_at is not None
+        if parked and consecutive == skip_after:
+            logger.warning(
+                "v95 market reconcile parking undetermined ticker=%s after %d passes",
+                ticker,
+                consecutive,
+            )
+        return {
+            "ticker": ticker,
+            "consecutive_undetermined": consecutive,
+            "parked": parked,
+            "parked_at": parked_at,
+            "sample": sample,
+        }
+
     def reconcile_from_signal_store(self, signal_store: Any) -> dict[str, Any]:
         if not self._available:
             return {"available": False, "reason": self._last_error or "ledger_unavailable"}
@@ -1894,17 +2206,18 @@ class V95Ledger:
         loop. Any tickers left over are retried on the next invocation."""
         if not self._available or not callable(get_market):
             return {"available": False, "reason": "unavailable"}
-        now = now or time.time()
+        now = time.time() if now is None else float(now)
         budget = _env_float("Q15_V95_RECONCILE_BUDGET_SECONDS", 4.0, 0.5, 60.0)
-        with self._lock, closing(self._connect()) as connection:
-            rows = list(connection.execute(
-                "SELECT DISTINCT ticker FROM predictions "
-                "WHERE official_result IS NULL AND close_time IS NOT NULL AND close_time <= ? "
-                "ORDER BY close_time LIMIT ?",
-                (now, max(1, int(max_calls))),
-            ))
-        tickers = [str(row["ticker"]) for row in rows if row["ticker"]]
-        resolved = learned = calls = 0
+        skip_after = _env_int("Q15_V95_RECONCILE_SKIP_AFTER", 10, 1, 1000)
+        rows = self.unresolved_past_close_tickers(
+            now=now,
+            include_parked=False,
+            limit=max(1, int(max_calls)),
+        )
+        tickers = [str(row["ticker"]) for row in rows if row.get("ticker")]
+        backlog = self.reconcile_backlog_status(now=now)
+        skip_status = self.reconcile_skip_status(now=now, limit=8)
+        resolved = learned = calls = fetch_errors = parked_this_pass = 0
         events: list[dict[str, Any]] = []
         undetermined: list[dict[str, Any]] = []  # closed-but-no-result diagnostic samples
         undetermined_limit = _env_int("Q15_V95_UNDETERMINED_SAMPLE_LIMIT", 8, 0, 50)
@@ -1920,28 +2233,63 @@ class V95Ledger:
                 market = get_market(ticker)
             except Exception as exc:
                 self._last_error = f"market_reconcile:{type(exc).__name__}:{exc}"
+                fetch_errors += 1
+                logger.warning("v95 market reconcile fetch failed ticker=%s error=%s", ticker, self._last_error)
                 continue
             calls += 1
             if not isinstance(market, Mapping):
+                logger.warning("v95 market reconcile returned non-mapping ticker=%s type=%s", ticker, type(market).__name__)
                 continue
             result = str(market.get("result") or "").upper()
             if result not in {"YES", "NO"}:
                 # Closed but `result` not populated yet. Capture the raw fields once
                 # so we can identify which field carries Kalshi's INSTANT determined
                 # outcome (so settlement need not wait for the laggy `result`).
+                with self._lock, closing(self._connect()) as connection:
+                    skip = self._record_reconcile_undetermined_locked(
+                        connection,
+                        ticker,
+                        market,
+                        now,
+                        skip_after,
+                    )
+                    connection.commit()
+                if skip.get("parked"):
+                    parked_this_pass += 1
                 if len(undetermined) < undetermined_limit:
-                    undetermined.append(self._undetermined_market_sample(ticker, market))
+                    sample = dict(skip.get("sample") or self._undetermined_market_sample(ticker, market))
+                    sample["consecutive_undetermined"] = int(skip.get("consecutive_undetermined") or 0)
+                    sample["parked"] = bool(skip.get("parked"))
+                    undetermined.append(sample)
                 continue  # not officially resolved yet
             outcome_time = _parse_ts(market.get("close_time") or market.get("settled_at")) or now
             outcome = self.resolve_ticker(ticker, result, outcome_time)
             resolved += outcome["resolved"]
             learned += outcome["updates_applied"]
             events.extend(outcome.get("events", []))
+            with self._lock, closing(self._connect()) as connection:
+                connection.execute("DELETE FROM reconcile_skip WHERE ticker=?", (ticker,))
+                connection.commit()
+        if tickers and calls and resolved == 0:
+            logger.warning(
+                "v95 market reconcile made zero progress tickers=%d calls=%d undetermined=%d parked=%d fetch_errors=%d",
+                len(tickers),
+                calls,
+                len(undetermined),
+                parked_this_pass,
+                fetch_errors,
+            )
         return {
             "available": True, "tickers_checked": len(tickers), "market_calls": calls,
             "new_predictions_resolved": resolved, "shadow_updates_applied": learned,
             "budget_seconds": budget, "budget_exceeded": budget_exceeded,
             "elapsed_seconds": round(time.monotonic() - started, 3),
+            "fetch_errors": fetch_errors,
+            "skip_after": skip_after,
+            "parked_this_pass": parked_this_pass,
+            "parked": int(skip_status.get("parked") or 0) + parked_this_pass,
+            "unresolved_pastclose": backlog.get("unresolved_pastclose"),
+            "unresolved_pastclose_tickers": backlog.get("unresolved_pastclose_tickers"),
             "result_events": events[:20],
             # Closed contracts still missing `result` this pass, with their raw Kalshi
             # fields — so /api/q15-v9-5/learning shows what the instant outcome field is.
@@ -3583,6 +3931,12 @@ class V95Ledger:
                 "SELECT checkpoint, regime, MAX(CASE WHEN name='intercept' THEN updates ELSE 0 END) AS results "
                 "FROM regime_challenger_weights GROUP BY checkpoint, regime ORDER BY results DESC"
             ))
+            reconcile_skip = connection.execute(
+                """SELECT
+                      SUM(CASE WHEN parked_at IS NOT NULL THEN 1 ELSE 0 END) AS parked,
+                      SUM(CASE WHEN parked_at IS NULL THEN 1 ELSE 0 END) AS tracking
+                   FROM reconcile_skip"""
+            ).fetchone()
         regime_challengers = [
             {
                 "checkpoint": str(r["checkpoint"]), "regime": str(r["regime"]),
@@ -3619,6 +3973,11 @@ class V95Ledger:
             "calibration_unconverged_fallbacks": int(self._calibration_unconverged_fallbacks),
             "shadow_errors": int(self._shadow_errors),
             "last_shadow_error": self._last_shadow_error,
+            "reconcile_skip": {
+                "skip_after": _env_int("Q15_V95_RECONCILE_SKIP_AFTER", 10, 1, 1000),
+                "parked": int(reconcile_skip["parked"] or 0) if reconcile_skip else 0,
+                "tracking": int(reconcile_skip["tracking"] or 0) if reconcile_skip else 0,
+            },
             "notifications": {"total": int(notifications["total"] or 0), "sent": int(notifications["sent"] or 0), "failures": int(notifications["failures"] or 0)},
             "pushed_by_checkpoint": {
                 str(r["checkpoint"]): {

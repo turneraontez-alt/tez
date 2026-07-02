@@ -2863,6 +2863,32 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._last_reconcile_at = now
         self._reconcile_future = self._reconcile_executor.submit(self._reconcile_job, get_market, now)
 
+    def _maybe_send_resolution_stall_alert(self, notifier: Any, now: float) -> None:
+        if not _env_bool("Q15_V95_RESOLUTION_STALL_ALERTS_ENABLED", True):
+            return
+        state = self.ledger.resolution_stall_alert_state(self._last_market_reconcile, now=now)
+        if not state.get("send"):
+            return
+        message = (
+            "<b>Q15 OPS GRADING STALL</b>\n"
+            f"V9.5 grading has resolved 0 rows for {float(state.get('stalled_for_seconds') or 0.0):.0f}s.\n"
+            f"Backlog: {int(state.get('unresolved_pastclose') or 0)} past-close rows "
+            f"across {int(state.get('unresolved_pastclose_tickers') or 0)} tickers; "
+            f"parked {int(state.get('parked') or 0)}.\n"
+            "Run tools/backfill_resolutions.py on the live host and inspect parked tickers."
+        )
+        try:
+            if hasattr(notifier, "send_with_result"):
+                _send_with_optional_key(
+                    notifier,
+                    message,
+                    "q15-v95-resolution-stall-ops-alert",
+                )
+            elif hasattr(notifier, "send"):
+                notifier.send(message)
+        except Exception:
+            logger.warning("v95 resolution-stall ops alert send failed", exc_info=True)
+
     def run_cycle(self, snapshots: dict[str, dict], now: float, ws_health: Mapping[str, Any] | None,
                   focus_manager: Any, calibrated_edge: Any, notifier: Any) -> dict[str, dict]:
         _rc_start = time.monotonic()
@@ -2898,6 +2924,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             result_events: list[Mapping[str, Any]] = []
             _t0 = time.monotonic()
             result_events = self._harvest_reconcile_job()
+            self._maybe_send_resolution_stall_alert(notifier, now)
             if now - self._last_reconcile_at >= _env_float("Q15_V95_RECONCILE_INTERVAL_SECONDS", 30.0, 5.0, 300.0):
                 # Settle closed markets directly from Kalshi in the background, so
                 # grading/recaps keep up without blocking fresh predictions.
