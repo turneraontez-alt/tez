@@ -109,11 +109,37 @@ freshness + honest accuracy measurement matter more than new model features.
 `pip install pytest "websockets>=12.0" flask -q` first. A broken `cffi`/`cryptography`
 may need `pip install --force-reinstall --ignore-installed cffi cryptography -q`
 (else the two app-level test files error on collection instead of skipping).
-Tests: `python3 -m pytest tests/ -q` → **1507 passed / 4 skipped here** (8 app tests uncollectable
-in this container from a broken `cryptography`/pyo3 binding until `cffi` is force-reinstalled — env
-issue, not the diff; skip/error count varies with `flask`/`websockets`/cffi/crypto install state).
+Tests: `python3 -m pytest tests/ -q` → **1620 passed / 13 skipped here** (needs
+`pip install --user coinbase-advanced-py cffi cryptography` too in a fresh container, else 3 test
+files error on collection — env issue, not the diff; skip/error count varies with install state).
 
-## ✅ Shipped THIS session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
+## ✅ Shipped THIS session — bug fix: 13M sniper auto-mute notice could never send
+`strategy_bots/runtime.py:254` calls `ledger.claim_meta_once(key)` but `StrategyBotLedger`
+never had that method — the AttributeError was swallowed by the notice's catch-all, so the
+auto-mute Telegram notice silently never sent (its test failed on Linux; the Windows runner's
+pre-existing SQLite failures masked it). Added `strategy_bot_meta` table +
+`StrategyBotLedger.claim_meta_once()` (INSERT OR IGNORE on PRIMARY KEY: durable, atomic,
+once-per-key across restarts). `test_13m_sniper_auto_mute_records_and_sends_notice_once` now
+passes. **Suite 1643 passed / 13 skipped.**
+
+## ✅ Shipped THIS session — Stage 0 refactor precondition: dedicated guard tests + env docs
+**Suite 1620 passed / 13 skipped** (this container). Stage 0 of the owner-approved staged
+refactor was "green the suite" (16 gate tests failed while the delivery-quality guard defaulted
+ON). The default→OFF flip + test alignment **landed on `main` in parallel from the owner's local
+stack** (main also pins `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD="true"` in `.replit`, whose header
+now reflects the **local-Windows cutover — Replit runtime disabled, local stack is source of
+truth**). This branch merged main in (conflicts resolved taking main's side) and contributes the
+missing pieces:
+- **New `tests/test_ultoim_v2_delivery_quality_guard.py` (8 tests):** default-OFF, byte-identical
+  when off, HYPE/SOL block, ask<60 block + 60c boundary, spread>=3 block + 2.9 pass,
+  clean-candidate fires, yes_notify also suppressed, missing-spread fails open. The guard's
+  data case (ask<60 NOs 39.4%/-1,047c; HYPE -785c; SOL -387c settled) is real — the issue was
+  only the DEFAULT.
+- `.env.example`: documented the 4 guard vars (previously undocumented).
+- Next refactor stages (owner-approved, not yet started): config registry, app.py route/loop
+  split (golden-master first), telegram-client unification, rename/move pass.
+
+## ✅ Shipped a prior session — v2 audit tool + drop NO-7M + paper YES notifications (deploy-pending)
 **Suite 1507 / 4 skipped** (+28 tests). Two fleets confirmed the 15m taker market is efficient net of
 fees (−2 to −4c/contract); the only validated edge is **NO @ 10M** (+11.5c delivered-strict, CI lower
 bound > 0, survives LOAO + time-split), while **7M NO is break-even noise** (+0.75c, CI spans 0) that

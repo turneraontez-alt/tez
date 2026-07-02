@@ -168,6 +168,11 @@ CREATE INDEX IF NOT EXISTS idx_strategy_bot_resolve
     ON strategy_bot_decisions(source_system, source_model_version, ticker, official_result);
 CREATE INDEX IF NOT EXISTS idx_strategy_bot_score
     ON strategy_bot_decisions(strategy_version, bot_name, decision_status, asset, side);
+
+CREATE TABLE IF NOT EXISTS strategy_bot_meta (
+    meta_key TEXT PRIMARY KEY,
+    claimed_at REAL NOT NULL
+);
 """
 
 _COLS = (
@@ -437,6 +442,21 @@ class StrategyBotLedger:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def claim_meta_once(self, meta_key: str) -> bool:
+        """Durable once-only claim (e.g. the 13M sniper auto-mute notice).
+
+        Returns True exactly once per key across restarts; subsequent claims (or a
+        concurrent second caller) get False. INSERT OR IGNORE on the PRIMARY KEY is
+        the atomicity — no read-modify-write race.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO strategy_bot_meta (meta_key, claimed_at) VALUES (?, ?)",
+                (str(meta_key), time.time()),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def _ensure_columns_locked(self) -> None:
         existing = {
