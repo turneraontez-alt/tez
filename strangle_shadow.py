@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS strangle_windows (
     ttl_s REAL, hedge_delay_s REAL,
     spread_at_first_fill REAL,   -- market spread when the first leg filled
     postfill_mids_json TEXT,     -- [(dt_s, yes_mid)...] for 120s after first fill
-    UNIQUE(asset, close_time)
+    round_mark REAL NOT NULL DEFAULT 780,  -- seconds-remaining open mark of this round
+    UNIQUE(asset, close_time, round_mark)
 );
 """
 
@@ -98,6 +99,17 @@ class StrangleShadow:
         self.open_sr = _env_float("Q15_STRANGLE_SHADOW_OPEN_SR", 780.0)   # quote at ~13M
         self.open_sr_floor = _env_float("Q15_STRANGLE_SHADOW_OPEN_FLOOR", 690.0)
         self.cancel_sr = _env_float("Q15_STRANGLE_SHADOW_CANCEL_SR", 660.0)  # 120s TTL
+        # MULTI-ROUND harvest: the pin premium exists at 13M (impl/real ~1.62) AND
+        # decays but persists at 10M/7M (~1.25) — re-quoting after each round's
+        # terminal state multiplies the harvest surface per window. Marks are
+        # seconds-remaining opens; each mark runs the same open/TTL/hedge cycle
+        # with TTL = 120s and floor = mark-90. Default = single legacy round.
+        raw_marks = os.environ.get("Q15_STRANGLE_SHADOW_OPEN_MARKS", "")
+        try:
+            self.open_marks = tuple(sorted((float(x) for x in raw_marks.split(",") if x.strip()),
+                                           reverse=True)) or (self.open_sr,)
+        except ValueError:
+            self.open_marks = (self.open_sr,)
         self.max_spread = _env_float("Q15_STRANGLE_SHADOW_MAX_SPREAD", 6.0)
         self.hedge_slip = _env_float("Q15_STRANGLE_SHADOW_HEDGE_SLIP", 1.0)
         # After the FIRST fill, wait this long for the second maker fill (-> LOCKED)
@@ -129,6 +141,14 @@ class StrangleShadow:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(strangle_windows)")}
+            if "round_mark" not in cols:
+                # legacy table (pre multi-round): add the column; its UNIQUE(asset,
+                # close_time) constraint remains, so extra rounds are silently
+                # ignored until the DB file is rotated. Degrade gracefully.
+                self._conn.execute("ALTER TABLE strangle_windows ADD COLUMN round_mark REAL NOT NULL DEFAULT 780")
+                if len(self.open_marks) > 1:
+                    logger.warning("strangle shadow: legacy DB schema — multi-round limited to first round until DB rotated")
             self._conn.commit()
         except Exception:
             logger.warning("strangle shadow DB unavailable; disabling", exc_info=True)
@@ -148,19 +168,19 @@ class StrangleShadow:
         a_up = str(asset).upper()
         if self.assets and a_up not in self.assets:
             return
-        key = (a_up, float(close_time))
         with self._lock:
-            st = self._live.get(key)
-            if st is None:
-                if not (self.open_sr_floor <= sr <= self.open_sr):
-                    return
-                self._try_open(key, sr, yb, ya, ts)
-                return
-            if st["state"] == "QUOTED":
-                self._tick_quoted(key, st, sr, yb, ya, ts)
+            for mark in self.open_marks:
+                key = (a_up, float(close_time), mark)
+                st = self._live.get(key)
+                if st is None:
+                    if (mark - 90.0) <= sr <= mark:
+                        self._try_open(key, sr, yb, ya, ts, mark)
+                    continue
+                if st["state"] == "QUOTED":
+                    self._tick_quoted(key, st, sr, yb, ya, ts, mark)
 
-    def _try_open(self, key, sr, yb, ya, ts) -> None:
-        asset, close_time = key
+    def _try_open(self, key, sr, yb, ya, ts, mark) -> None:
+        asset, close_time = key[0], key[1]
         if yb is None or ya is None or not (0.0 < yb <= ya < 100.0):
             return
         spread = ya - yb
@@ -176,12 +196,12 @@ class StrangleShadow:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO strangle_windows "
                 "(created_at, asset, close_time, quote_sr, mid0, width, yes_bid, no_bid,"
-                " spread0, state, utc_hour, ttl_s, hedge_delay_s)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " spread0, state, utc_hour, ttl_s, hedge_delay_s, round_mark)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ts, asset, close_time, sr, mid, self.width,
                  our_yes_bid, our_no_bid, spread, state,
                  int(time.gmtime(ts).tm_hour),
-                 max(0.0, sr - self.cancel_sr), self.hedge_delay))
+                 120.0, self.hedge_delay, mark))
             self._conn.commit()
             if cur.rowcount == 0:       # restart mid-window: never re-quote
                 self._live[key] = {"state": "DONE"}
@@ -195,7 +215,7 @@ class StrangleShadow:
             "yes_fill": None, "no_fill": None, "last_mid": mid,
         }
 
-    def _tick_quoted(self, key, st, sr, yb, ya, ts) -> None:
+    def _tick_quoted(self, key, st, sr, yb, ya, ts, mark) -> None:
         if yb is None or ya is None or not (0.0 < yb <= ya < 100.0):
             return
         st["last_mid"] = (yb + ya) / 2.0
@@ -246,18 +266,18 @@ class StrangleShadow:
                         hedge_px=hedge_px, hedge_fee=fee, pnl_cents=pnl,
                         finalized_at=ts,
                         postfill_mids_json=json.dumps(st.get("postfill", [])))
-        elif sr < self.cancel_sr:                              # TTL: cancel both
+        elif sr < (mark - 120.0):                              # per-round 120s TTL
             st["state"] = "DONE"
             self._write(key, state="EXPIRED", pnl_cents=0.0, finalized_at=ts,
                         last_yes_mid=st["last_mid"])
 
     def _write(self, key, **cols) -> None:
-        asset, close_time = key
+        asset, close_time, mark = key
         try:
             sets = ", ".join(f"{c}=?" for c in cols)
             self._conn.execute(
-                f"UPDATE strangle_windows SET {sets} WHERE asset=? AND close_time=?",
-                (*cols.values(), asset, close_time))
+                f"UPDATE strangle_windows SET {sets} WHERE asset=? AND close_time=? AND round_mark=?",
+                (*cols.values(), asset, close_time, mark))
             self._conn.commit()
         except Exception:
             logger.debug("strangle write failed", exc_info=True)

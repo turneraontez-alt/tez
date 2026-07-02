@@ -1,5 +1,16 @@
 # Session handoff
 
+## ✅ Shipped THIS session — strangle quoter MULTI-ROUND mode (surface multiplication)
+Strategic reframe after 3 hunt rounds (~40 hypotheses, ~4 survivors): stop hunting new per-trade
+edges; multiply the surface of validated mechanisms. `Q15_STRANGLE_SHADOW_OPEN_MARKS="780,600,420"`
+re-quotes the strangle at each mark after the prior round resolves (pin premium measured 1.62x at
+13M decaying to 1.25x at 7M — three harvests per window instead of one). Per-round 120s TTL, same
+hedge logic, UNIQUE(asset,close,round). Legacy DBs migrate (ALTER) and degrade to single-round
+until rotated. +2 tests (suite 1761/4). Owner: set OPEN_MARKS="780,600,420" alongside
+Q15_STRANGLE_SHADOW=true. Remaining multiplications (briefs pending owner go): global late-flip
+watcher (10x surface on the +3-4c warn-time entry — the only surviving taker edge) and the
+new-listing monitor (the day-one asleep harvest as a calendar event).
+
 ## ✅ Shipped THIS session — hunt round 2 verdicts + quoter instrumentation
 Round-2 fleet (5 miners + synthesis) results, folded into the 13M book:
 - **KILLED:** taker latency bot (index/mid ~contemporaneous at 2.5s; ≤1.7c capturable < costs);
