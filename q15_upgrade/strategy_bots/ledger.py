@@ -573,7 +573,6 @@ class StrategyBotLedger:
 
     def bot_accepted_resolved_stats(
         self,
-        *,
         bot_name: str = BOT_THIRTEEN_M_SNIPER,
         strategy_version: str = STRATEGY_VERSION,
     ) -> dict[str, Any]:
@@ -597,13 +596,19 @@ class StrategyBotLedger:
 
     def trailing_abs_flow_percentile(
         self,
+        pctl: float | None = None,
+        window_n: int | None = None,
         *,
-        asset: str | None,
-        created_before: float | None,
-        percentile: float = 0.70,
-        limit: int = 200,
+        asset: str | None = None,
+        created_before: float | None = None,
+        percentile: float | None = None,
+        limit: int | None = None,
         strategy_version: str = STRATEGY_VERSION,
     ) -> float | None:
+        if percentile is None:
+            percentile = 0.70 if pctl is None else pctl
+        if limit is None:
+            limit = 200 if window_n is None else window_n
         params: list[Any] = [strategy_version, BOT_BASELINE]
         query = (
             "SELECT ABS(spot_depth_trade_net_notional_60s) AS value "

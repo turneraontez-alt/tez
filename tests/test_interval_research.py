@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -133,6 +134,41 @@ class CaptureResolveTest(unittest.TestCase):
         r = IntervalResearchRunner(_cfg(self.tmp, enabled=False, db_path=os.path.join(self.tmp, "off.sqlite3")))
         r.observe(analyses={"BTC": _analysis()}, canonicals={"BTC": _Canon("KXo", 600)}, now=1000.0)
         self.assertEqual(r.ledger.counts()["captured"], 0)
+
+    def test_13m_capture_feeds_strategy_bots_when_flag_on(self):
+        analysis = _analysis(side="YES", ask=55.0, edge=8.0)
+        analysis["selected_probability"] = 0.65
+        analysis["market_implied_yes_probability"] = 0.54
+        analysis["quote"]["spot_depth_trade_net_notional_60s"] = 125.0
+        analysis["quote"]["no_ask_cents"] = 45.0
+        with patch.dict(os.environ, {"Q15_V3_13M_SNIPER_FEED": "true"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_source_row") as record:
+                self.r.observe(
+                    analyses={"BTC": analysis},
+                    canonicals={"BTC": _Canon("KX13", 780, settlement_time=9000.0)},
+                    now=1000.0,
+                )
+
+        record.assert_called_once()
+        source_row = record.call_args.args[0]
+        self.assertEqual(record.call_args.kwargs["source_system"], "ultoim_v2")
+        self.assertEqual(source_row["ticker"], "KX13")
+        self.assertEqual(source_row["interval"], "13M")
+        self.assertEqual(source_row["window_key"], 10)
+        self.assertEqual(source_row["close_time"], 9000.0)
+        self.assertEqual(source_row["calibrated_yes_probability"], 0.40)
+        self.assertEqual(source_row["flip_probability"], 22.0)
+        self.assertEqual(source_row["entry_ask_cents"], 55.0)
+        self.assertEqual(source_row["spot_depth_trade_net_notional_60s"], 125.0)
+
+    def test_13m_capture_feed_default_off(self):
+        with patch("q15_upgrade.strategy_bots.runtime.record_source_row") as record:
+            self.r.observe(
+                analyses={"BTC": _analysis(side="YES", ask=55.0)},
+                canonicals={"BTC": _Canon("KX13-OFF", 780, settlement_time=9000.0)},
+                now=1000.0,
+            )
+        record.assert_not_called()
 
 
 class EconomicsTest(unittest.TestCase):

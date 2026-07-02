@@ -24,6 +24,7 @@ from q15_upgrade.strategy_bots.rules import (
     RESEARCH_ONLY,
     STRATEGY_VERSION,
     btc_regime_context_probe_decision,
+    baseline_decision,
     bnb_no_confirmation_decision,
     bnb_yes_reversal_decision,
     confidence_tier_decision,
@@ -1744,6 +1745,66 @@ def test_13m_sniper_ev_uses_fee_math_and_empirical_wilson_lb(monkeypatch):
     assert "EV_USES_EMPIRICAL_WILSON_LB" in empirical.reason_codes
     assert empirical.threshold_profile["ev_win_probability"] == pytest.approx(0.60)
     assert empirical.threshold_profile["ev_cents"] == pytest.approx(3.0)
+
+
+def test_13m_sniper_ledger_stats_and_flow_percentile_signatures(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_V3_13M_SNIPER", "true")
+    led = StrategyBotLedger(tmp_path / "v3.sqlite3")
+    try:
+        for i, (ticker, result) in enumerate((("KX13-WIN", "YES"), ("KX13-LOSS", "NO"))):
+            row = _thirteen_row(ticker=ticker, window_key=3000 + i, created_at=1000.0 + i)
+            decision = thirteen_m_sniper_decision(row, source_system="ultoim_v2")
+            assert decision is not None and decision.decision_status == ACCEPTED
+            assert led.record_decision(decision, row, source_system="ultoim_v2") is not None
+            led.resolve(
+                source_system="ultoim_v2",
+                source_model_version="ultoim-v2",
+                ticker=ticker,
+                official_result=result,
+                now=2000.0 + i,
+            )
+
+        stats = led.bot_accepted_resolved_stats(BOT_THIRTEEN_M_SNIPER, STRATEGY_VERSION)
+        assert stats["n"] == 2
+        assert stats["correct"] == 1
+        assert stats["accuracy"] == pytest.approx(0.5)
+        assert stats["wilson_lb"] is not None
+
+        for i, flow in enumerate((10.0, -20.0, 30.0, -40.0, 50.0)):
+            row = _row(
+                ticker=f"KXFLOW-{i}",
+                window_key=4000 + i,
+                created_at=500.0 + i,
+                spot_depth_trade_net_notional_60s=flow,
+            )
+            assert led.record_decision(
+                baseline_decision(row),
+                row,
+                source_system="ultoim_v2",
+            ) is not None
+
+        assert led.trailing_abs_flow_percentile(0.70, 5) == pytest.approx(40.0)
+    finally:
+        led.close()
+
+
+def test_13m_sniper_context_failures_warn_once(caplog):
+    class _BrokenLedger:
+        def bot_accepted_resolved_stats(self, *args, **kwargs):
+            raise AttributeError("stats missing")
+
+        def trailing_abs_flow_percentile(self, *args, **kwargs):
+            raise AttributeError("flow missing")
+
+    runtime._thirteen_m_stats_warning_logged = False
+    runtime._thirteen_m_flow_warning_logged = False
+    caplog.set_level("WARNING", logger="strategy_bots.runtime")
+
+    runtime._with_thirteen_m_sniper_context(_BrokenLedger(), _thirteen_row(created_at=123.0))
+    runtime._with_thirteen_m_sniper_context(_BrokenLedger(), _thirteen_row(created_at=124.0))
+
+    assert caplog.text.count("v3 13M sniper stats unavailable") == 1
+    assert caplog.text.count("v3 13M sniper flow percentile unavailable") == 1
 
 
 def test_13m_sniper_telegram_dedups_per_ticker_window(tmp_path, monkeypatch):

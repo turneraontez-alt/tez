@@ -35,6 +35,8 @@ logger = logging.getLogger("strategy_bots.runtime")
 
 _ledger: StrategyBotLedger | None = None
 _telegram: V3Telegram | None = None
+_thirteen_m_stats_warning_logged = False
+_thirteen_m_flow_warning_logged = False
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -136,6 +138,7 @@ def _with_thirteen_m_sniper_context(
     ledger: StrategyBotLedger,
     row: Mapping[str, Any],
 ) -> Mapping[str, Any]:
+    global _thirteen_m_stats_warning_logged, _thirteen_m_flow_warning_logged
     if str(row.get("interval") or "").upper() != "13M":
         return row
     out = dict(row)
@@ -146,7 +149,9 @@ def _with_thirteen_m_sniper_context(
         out.setdefault("thirteen_m_sniper_accuracy", stats.get("accuracy"))
         out.setdefault("thirteen_m_sniper_wilson_lb", stats.get("wilson_lb"))
     except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
-        logger.debug("v3 13M sniper stats unavailable", exc_info=True)
+        if not _thirteen_m_stats_warning_logged:
+            logger.warning("v3 13M sniper stats unavailable", exc_info=True)
+            _thirteen_m_stats_warning_logged = True
     try:
         flow_p70 = ledger.trailing_abs_flow_percentile(
             asset=str(row.get("asset") or "").upper() or None,
@@ -157,7 +162,9 @@ def _with_thirteen_m_sniper_context(
     except (TypeError, ValueError):
         logger.debug("v3 13M sniper flow percentile skipped for invalid created_at")
     except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
-        logger.debug("v3 13M sniper flow percentile unavailable", exc_info=True)
+        if not _thirteen_m_flow_warning_logged:
+            logger.warning("v3 13M sniper flow percentile unavailable", exc_info=True)
+            _thirteen_m_flow_warning_logged = True
     return out
 
 

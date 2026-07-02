@@ -9,6 +9,7 @@ events the champion already produces.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Mapping, Sequence
 
@@ -26,6 +27,23 @@ def _num(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _analysis_value(analysis: Mapping[str, Any], quote: Mapping[str, Any], key: str) -> Any:
+    if quote.get(key) is not None:
+        return quote.get(key)
+    return analysis.get(key)
 
 
 class IntervalResearchRunner:
@@ -85,9 +103,52 @@ class IntervalResearchRunner:
                             model_version=mv, interval=interval, mark_seconds=mark,
                             asset=str(asset), analysis=capture_analysis, canonical=canonical,
                             window_key=wk, now=now)
-                        self.ledger.record_capture(row)
+                        if self.ledger.record_capture(row):
+                            self._feed_thirteen_m_sniper(row, capture_analysis)
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
+
+    def _feed_thirteen_m_sniper(self, row: Mapping[str, Any],
+                                analysis: Mapping[str, Any]) -> None:
+        """Forward new 13M captures into the V3 source-row runtime when explicitly enabled."""
+        if not _env_bool("Q15_V3_13M_SNIPER_FEED", False):
+            return
+        if str(row.get("interval") or "").upper() != "13M":
+            return
+        quote = _mapping(analysis.get("quote"))
+        source_row = {
+            "created_at": row.get("captured_at"),
+            "model_version": row.get("model_version"),
+            "asset": row.get("asset"),
+            "ticker": row.get("ticker"),
+            "interval": "13M",
+            "window_key": row.get("window_key"),
+            "close_time": row.get("close_time"),
+            "record_kind": "INTERVAL_RESEARCH_13M",
+            "delivery_status": "RECORDED",
+            "predicted_side": row.get("predicted_side"),
+            "calibrated_yes_probability": row.get("calibrated_yes_probability"),
+            "raw_yes_probability": row.get("raw_yes_probability"),
+            "conservative_probability": row.get("conservative_probability"),
+            "selected_probability": _analysis_value(analysis, quote, "selected_probability"),
+            "market_implied_yes_probability": _analysis_value(
+                analysis, quote, "market_implied_yes_probability"),
+            "flip_probability": row.get("flip_probability"),
+            "entry_ask_cents": row.get("entry_ask_cents"),
+            "yes_bid_cents": row.get("yes_bid_cents"),
+            "yes_ask_cents": row.get("yes_ask_cents"),
+            "no_ask_cents": _analysis_value(analysis, quote, "no_ask_cents"),
+            "spread_cents": row.get("spread_cents"),
+            "depth_contracts": row.get("depth_contracts"),
+            "spot_depth_trade_net_notional_60s": _analysis_value(
+                analysis, quote, "spot_depth_trade_net_notional_60s"),
+        }
+        try:
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+            strategy_bots_runtime.record_source_row(source_row, source_system="ultoim_v2")
+        except Exception:  # noqa: BLE001 - optional research feed must never break capture
+            logger.warning("interval-research 13M sniper feed failed (ignored)", exc_info=True)
 
     def resolve_settled(self, result_events: Sequence[Mapping[str, Any]] | None,
                         now: float) -> int:
