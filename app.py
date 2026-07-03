@@ -59,6 +59,7 @@ from q15_upgrade.kalshi_rest import KalshiClient
 from market_cache import MarketResultCache
 from spot_client import get_spot
 import cycle_watchdog
+import startup_config_manifest
 import version as build_version
 from q15_upgrade.orderbook import parse_orderbook, OrderbookTracker
 from analysis import AssetEngine
@@ -101,6 +102,10 @@ logger.info("BUILD %s (%s) shipped=%s — %s · tests=%s",
 
 
 
+
+STARTUP_CONFIG_MANIFEST = startup_config_manifest.check_startup_config(
+    send_alert=os.environ.get("Q15_AUTOSTART_REFRESH", "1") != "0"
+)
 
 # Asset -> series ticker mapping for 15-min markets
 SERIES_MAP = {
@@ -285,6 +290,15 @@ def _observe_strangle_shadow(asset, snap, close_time_epoch, now):
         )
     except Exception:
         logger.debug("strangle shadow observe skipped", exc_info=True)
+
+
+def _feed_watchdog_age(status, age_key, now):
+    age = status.get(age_key)
+    if age is not None:
+        return age
+    if status.get("enabled") and status.get("status") != "disabled":
+        return max(0.0, now - SERVER_STARTED_AT)
+    return None
 
 
 def _flush_path_recorder(asset, close_time_str, now):
@@ -872,6 +886,7 @@ def refresh_loop(max_cycles=None):
                 ("market_activity", "latest_age_seconds"),
                 ("path_recorder", "latest_point_age_seconds"),
                 ("liq_feed", "latest_age_seconds"),
+                ("strangle_shadow", "latest_age_seconds"),
             ):
                 try:
                     if feed_name == "settlement_index":
@@ -882,9 +897,11 @@ def refresh_loop(max_cycles=None):
                         from market_activity import market_activity_health as _health_fn
                     elif feed_name == "path_recorder":
                         from path_recorder import path_recorder_health as _health_fn
-                    else:
+                    elif feed_name == "liq_feed":
                         from liq_feed import liq_health as _health_fn
-                    feed_ages[feed_name] = _health_fn().get(age_key)
+                    else:
+                        from strangle_shadow import strangle_shadow_health as _health_fn
+                    feed_ages[feed_name] = _feed_watchdog_age(_health_fn(), age_key, now)
                 except Exception:
                     logger.debug("%s feed freshness monitor skipped", feed_name, exc_info=True)
             cycle_watchdog.observe_feed_ages(feed_ages, now=now)
@@ -995,7 +1012,7 @@ def refresh_loop(max_cycles=None):
                 notifier.send(page)
             feed_page = cycle_watchdog.feed_alert_message(now)
             if feed_page:
-                notifier.send(feed_page)
+                cycle_watchdog.send_dependency_free_telegram(feed_page)
         except Exception:
             logger.exception("watchdog pager failed")
         cycles += 1

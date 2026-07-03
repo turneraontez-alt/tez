@@ -132,6 +132,26 @@ def test_scoreboard_shape(quoter):
     assert sb["by_state"]["LOCKED"]["n"] == 1
 
 
+def test_strangle_shadow_health_reports_latest_created_at(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW", "true")
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_DB", str(tmp_path / "health.sqlite3"))
+    q = ss.StrangleShadow()
+
+    missing = ss.strangle_shadow_health(now=CLOSE)
+    assert missing["enabled"] is True
+    assert missing["rows_written"] == 0
+    assert missing["latest_age_seconds"] is None
+    assert missing["status"] == "empty"
+
+    obs(q, 779, 48, 52)
+    health = ss.strangle_shadow_health(now=CLOSE - 700)
+    assert health["enabled"] is True
+    assert health["status"] == "ok"
+    assert health["rows_written"] == 1
+    assert health["latest_created_at"] == pytest.approx(CLOSE - 779)
+    assert health["latest_age_seconds"] == pytest.approx(79.0)
+
+
 def test_multi_round_harvests_each_mark(tmp_path, monkeypatch):
     monkeypatch.setenv("Q15_STRANGLE_SHADOW", "true")
     monkeypatch.setenv("Q15_STRANGLE_SHADOW_DB", str(tmp_path / "mr.sqlite3"))

@@ -71,6 +71,9 @@ def _point_ledgers_at(monkeypatch, data_dir: Path) -> None:
         "Q15_FEED_PATH_RECORDER_DB", str(data_dir / "q15_path_recorder_v1.sqlite3")
     )
     monkeypatch.setenv("Q15_FEED_LIQ_DB", str(data_dir / "q15_liq_feed_v1.sqlite3"))
+    monkeypatch.setenv(
+        "Q15_STRANGLE_SHADOW_DB", str(data_dir / "q15_strangle_shadow_v1.sqlite3")
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -119,6 +122,7 @@ def test_build_snapshot_exports_new_collector_dbs(tmp_path, monkeypatch):
         "q15_market_activity_v1.sqlite3": "market_activity_samples",
         "q15_path_recorder_v1.sqlite3": "window_paths",
         "q15_liq_feed_v1.sqlite3": "liquidation_events",
+        "q15_strangle_shadow_v1.sqlite3": "strangle_windows",
     }
     for filename, table in specs.items():
         conn = sqlite3.connect(data_dir / filename)

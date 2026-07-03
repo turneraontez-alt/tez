@@ -81,6 +81,27 @@ class TestHealthLedgerSurface(unittest.TestCase):
         self.assertIn("coinbase_adv_l2", body)
         self.assertIn("coinbase_adv_l2_snapshot_age_seconds", body)
 
+    def test_health_includes_runtime_manifest_and_strangle_shadow(self):
+        body = self.client.get("/api/health").get_json()
+        self.assertIn("startup_config_manifest", body)
+        self.assertIn("ok", body["startup_config_manifest"])
+        self.assertIn("strangle_shadow", body)
+        self.assertIn("latest_age_seconds", body["strangle_shadow"])
+
+    def test_enabled_empty_collector_gets_watchdog_age_from_startup(self):
+        orig_started = appmod.SERVER_STARTED_AT
+        appmod.SERVER_STARTED_AT = 100.0
+        try:
+            self.assertEqual(
+                appmod._feed_watchdog_age({"enabled": True, "status": "empty"}, "age", 1000.0),
+                900.0,
+            )
+            self.assertIsNone(
+                appmod._feed_watchdog_age({"enabled": False, "status": "disabled"}, "age", 1000.0)
+            )
+        finally:
+            appmod.SERVER_STARTED_AT = orig_started
+
 
 if __name__ == "__main__":
     unittest.main()

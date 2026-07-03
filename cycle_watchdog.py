@@ -215,6 +215,11 @@ def _claim_persistent_cooldown(kind: str, now: float, cooldown: float) -> bool:
         return True
 
 
+def claim_persistent_cooldown(kind: str, now: float, cooldown: float) -> bool:
+    """Public persisted-cooldown claim for ops pages sharing the heartbeat store."""
+    return _claim_persistent_cooldown(kind, now, cooldown)
+
+
 def _telegram_target() -> tuple[str | None, str | None]:
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or None
     chat = (

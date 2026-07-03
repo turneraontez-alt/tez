@@ -1,5 +1,59 @@
 # Session handoff
 
+## Local THIS session - runtime flag persistence + measurement watchdog
+Run time: 2026-07-03T05:23:00Z.
+
+Implemented:
+- Confirmed the local Windows startup path is `scripts/local/Start-Q15Local.ps1`, which imports `.env.local`
+  through `Import-Q15Env` before launching `python app.py`, `tools/github_relay.py`, and
+  `tools/learning_export.py`. The old `.replit` path is not used for this host.
+- Persisted the required local flags in `.env.local` and mirrored them in checked-in `.env.local.example`:
+  `Q15_STRANGLE_SHADOW=true`, `Q15_STRANGLE_SHADOW_OPEN_MARKS=780,600,420`,
+  `Q15_FEED_PATH_RECORDER=true`, `Q15_FEED_LADDER=true`, `Q15_FEED_MARKET_ACTIVITY=true`,
+  `Q15_FEED_SETTLE_INDEX=true`, `Q15_FEED_LIQ=true`, and
+  `Q15_ULTOIM_V2_DELIVERY_QUALITY_GUARD=true`.
+- Added `tools/expected_runtime_flags.json` plus `startup_config_manifest.py`. At boot it compares the
+  checked-in manifest to the live env, logs one summary line, exposes `startup_config_manifest` on
+  `/api/health`, and sends one persisted-cooldown direct Telegram ops page via the heartbeat pager path if
+  required flags are missing/off/wrong. It is diagnostic-only and never gates behavior.
+- Added `strangle_shadow_health()` and registered `strangle_shadow` in the feed watchdog using
+  `MAX(created_at)` from `strangle_windows`.
+- Tightened feed-watchdog coverage so enabled-but-empty collectors age from process start instead of being
+  silently ignored, and routed feed-watchdog pages through the dependency-free ops pager so
+  `Q15_ALERT_LEVEL=balanced` cannot mute stale-collector pages.
+
+Verification:
+- Baseline before edits: `python -m pytest tests/ -q` -> `1761 passed, 4 skipped`.
+- Focused after edits: `52 passed` across manifest, strangle, export, health, and watchdog tests.
+- Final full suite: `python -m pytest tests/ -q` -> `1772 passed, 4 skipped`.
+- `python tools/config_audit.py --check` -> OK, 947 env vars documented/baselined.
+- `python -m py_compile app.py routes/api_core.py cycle_watchdog.py strangle_shadow.py startup_config_manifest.py tools/learning_export.py` passed.
+
+Restart/export verification:
+- Restarted local with `scripts/local/Stop-Q15Local.ps1 -IncludeStale` then
+  `scripts/local/Start-Q15Local.ps1 -SkipInstall`; health returned `status=ok`.
+- Startup manifest health: `expected_count=8`, `mismatch_count=0`, `ok=true`.
+- Pre-restart DB counts: `strangle_windows` missing, `window_paths=52`, `ladder_captures=439`,
+  `market_activity_samples=7871`, `settlement_index_ticks=7376`, `liquidation_events=0`.
+- Published learning snapshot `2026-07-03T05:19:51.705846+00:00`: `strangle_windows=49`,
+  `window_paths=66`, `ladder_captures=544`, `market_activity_samples=9607`,
+  `settlement_index_ticks=9134`, `liquidation_events=0`.
+- Local live DB counts at `2026-07-03T05:22:59Z`: `strangle_windows=49`, `window_paths=66`,
+  `ladder_captures=558`, `market_activity_samples=9761`, `settlement_index_ticks=9275`,
+  `liquidation_events=0`.
+
+Remaining blockers:
+- The requested success sentence (`strangle_windows is accruing rows and every collector count is moving in
+  the hourly export.`) is NOT yet true because `liquidation_events` remains 0 after 30+ minutes.
+- Binance futures appears blocked/silent from this host: Binance futures REST returned HTTP 451 and configured/all-market
+  forceOrder plus a mark-price control WebSocket received 0 messages during probes. The app reports
+  `liq_feed.connected=true`, `last_error=null`, but `last_message_age_seconds=null` and feed watchdog marks
+  `liq_feed` stale. To make liquidation rows move on this host, use an allowed network/proxy/VPN for Binance
+  futures or implement an alternate liquidation provider.
+- Coinbase Advanced L2 is still stale for a separate credential reason: SDK is present (`coinbase-advanced-py 1.8.4`),
+  but startup logs `Coinbase Advanced L2 not started: bad/missing CDP key: [Errno 2] No such file or directory`
+  for the configured CDP key path, and `/api/health` reports `coinbase_adv_l2.status=missing_or_bad_key_file`.
+
 ## ✅ Shipped THIS session — microstructure research bridge (tools/micro_extract.py)
 The deep-microstructure sources exist on this host (spot_depth_snapshots 1.1M rows / 683MB,
 kraken_l3_summaries 1.09M rows / 926MB incl. full bid/ask level arrays; kraken_l3_events is 0 —

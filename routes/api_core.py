@@ -221,6 +221,12 @@ def register(flask_app, host):
         except Exception:
             liq_feed_status = {"enabled": False}
 
+        try:
+            from strangle_shadow import strangle_shadow_health
+            strangle_shadow_status = strangle_shadow_health(now=now)
+        except Exception:
+            strangle_shadow_status = {"enabled": False}
+
         deployment_type = "reserved-vm" if _app.os.environ.get("REPLIT_DEPLOYMENT") else "development"
 
         # Surface learning-ledger health at the top level so silent learning-layer
@@ -289,9 +295,11 @@ def register(flask_app, host):
             "market_activity": market_activity_status,
             "path_recorder": path_recorder_status,
             "liq_feed": liq_feed_status,
+            "strangle_shadow": strangle_shadow_status,
             "cycle_watchdog": _app.cycle_watchdog.health(),
             "feed_watchdog": _app.cycle_watchdog.feed_health(),
             "heartbeat_watchdog": _app.cycle_watchdog.heartbeat_status(now=now),
+            "startup_config_manifest": _app.startup_config_manifest.health(),
             "current_market_window": current_window,
             "assets_subscribed": [s.get("asset") for s in live],
             "assets_tracked": len(snaps),

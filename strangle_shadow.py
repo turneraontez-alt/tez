@@ -85,6 +85,10 @@ def _num(v: Any) -> float | None:
         return None
 
 
+def _db_path() -> str:
+    return os.environ.get("Q15_STRANGLE_SHADOW_DB", "data/q15_strangle_shadow_v1.sqlite3")
+
+
 def taker_fee_cents(price_cents: float) -> float:
     p = max(0.0, min(1.0, price_cents / 100.0))
     return float(math.ceil(7.0 * p * (1.0 - p)))
@@ -125,9 +129,7 @@ class StrangleShadow:
         # Post-fill mid path recording (seconds) — the instrumentation every
         # promotion test (fill-fade overlay, session TTL, vol skew) depends on.
         self.postfill_track_s = _env_float("Q15_STRANGLE_SHADOW_POSTFILL_TRACK_S", 120.0)
-        self.db_path = db_path or os.environ.get(
-            "Q15_STRANGLE_SHADOW_DB", "data/q15_strangle_shadow_v1.sqlite3"
-        )
+        self.db_path = db_path or _db_path()
         self._lock = threading.Lock()
         self._live: dict[tuple[str, float], dict[str, Any]] = {}
         self._conn: sqlite3.Connection | None = None
@@ -331,3 +333,46 @@ def reset_strangle_shadow() -> None:
     global _singleton
     with _singleton_lock:
         _singleton = None
+
+
+def strangle_shadow_health(now: float | None = None) -> dict[str, Any]:
+    """Report DB freshness using MAX(created_at) from strangle_windows."""
+    current = time.time() if now is None else float(now)
+    enabled = _env_bool("Q15_STRANGLE_SHADOW", False)
+    db_path = _db_path()
+    info: dict[str, Any] = {
+        "enabled": enabled,
+        "db_path": db_path,
+        "latest_created_at": None,
+        "latest_age_seconds": None,
+        "rows_written": 0,
+        "status": "disabled" if not enabled else "missing",
+        "missing_reason": None if not enabled else "strangle_db_missing",
+    }
+    path = Path(db_path)
+    if not path.is_file():
+        return info
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, MAX(created_at) AS max_created_at FROM strangle_windows"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        info["status"] = "error"
+        info["missing_reason"] = f"strangle_health_query_error:{type(exc).__name__}"
+        return info
+    count = int(row[0] or 0) if row else 0
+    latest = _num(row[1]) if row else None
+    info["rows_written"] = count
+    info["latest_created_at"] = latest
+    if latest is None:
+        info["status"] = "empty" if enabled else "disabled"
+        info["missing_reason"] = "strangle_windows_empty" if enabled else None
+        return info
+    info["latest_age_seconds"] = round(max(0.0, current - latest), 3)
+    info["status"] = "ok" if enabled else "disabled"
+    info["missing_reason"] = None
+    return info
