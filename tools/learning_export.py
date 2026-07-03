@@ -102,6 +102,7 @@ _LEDGER_ENV_DEFAULTS = {
     "path_recorder": ("Q15_FEED_PATH_RECORDER_DB", "data/q15_path_recorder_v1.sqlite3"),
     "liq_feed": ("Q15_FEED_LIQ_DB", "data/q15_liq_feed_v1.sqlite3"),
     "strangle_shadow": ("Q15_STRANGLE_SHADOW_DB", "data/q15_strangle_shadow_v1.sqlite3"),
+    "micro_paths": ("Q15_MICRO_PATHS_DB", "data/q15_micro_paths_v1.sqlite3"),
 }
 
 
@@ -784,6 +785,17 @@ def main() -> int:
     )
     while True:
         try:
+            if os.environ.get("Q15_MICRO_EXTRACT", "").strip().lower() in ("1", "true", "yes", "on"):
+                try:
+                    from tools import micro_extract as _me
+                    _me.run(
+                        os.environ.get("Q15_SPOT_DEPTH_DB", "data/q15_spot_depth_v1.sqlite3"),
+                        os.environ.get("Q15_KRAKEN_L3_DB", "data/q15_kraken_l3_v1.sqlite3"),
+                        os.environ.get("Q15_V95_LEDGER_DB", "data/q15_v95_ledger_v1.sqlite3"),
+                        os.environ.get("Q15_MICRO_PATHS_DB", "data/q15_micro_paths_v1.sqlite3"),
+                    )
+                except Exception as exc:  # extract must never block the export
+                    _log(f"micro_extract skipped: {type(exc).__name__}: {exc}")
             ok, detail, snapshot = run_once(
                 data_dir=DATA_DIR,
                 repo=REPO,

@@ -1,5 +1,24 @@
 # Session handoff
 
+## ✅ Shipped THIS session — microstructure research bridge (tools/micro_extract.py)
+The deep-microstructure sources exist on this host (spot_depth_snapshots 1.1M rows / 683MB,
+kraken_l3_summaries 1.09M rows / 926MB incl. full bid/ask level arrays; kraken_l3_events is 0 —
+raw events were never stored, summaries are max historical resolution) but are export-excluded,
+so research containers could never see them. New `tools/micro_extract.py`: per settled window,
+slices both sources over the final 900s, downsamples to ≤300 pts/source, computes compact
+feature vectors incl. a WALL metric (max/median level size + distance from the levels_json
+arrays), gzips one row per (asset, close_time) into `q15_micro_paths_v1.sqlite3` (registered in
+the export; ~3-5MB/day). Idempotent, read-only sources, 5 tests. **Owner: set
+`Q15_MICRO_EXTRACT=true`** (with the other flags) — the export loop then runs it each cycle.
+PRE-REGISTERED STUDY (run when ≥5 days of paths exist; oracle-graded, chrono OOS, both halves,
+vs the base flip-rate curve 35.7%@10m/17.8%@5m/9.6%@2m):
+ H1 refill half-life asymmetry after depletion → direction over remainder;
+ H2 cancel-to-add burst near strike → flip within 120s (exit-engine accelerator);
+ H3 avg order-size shift (avg_bid vs avg_ask order size divergence) → fill toxicity for the
+    strangle quoter (condition its TTL);
+ H4 wall appearance/pull (ratio & distance path) → pin vs break;
+ H5 5s-bucket signed-flow imbalance (VPIN-ish) → flip-risk forecast quality vs flip_probability.
+
 ## ✅ Shipped THIS session — strangle quoter MULTI-ROUND mode (surface multiplication)
 Strategic reframe after 3 hunt rounds (~40 hypotheses, ~4 survivors): stop hunting new per-trade
 edges; multiply the surface of validated mechanisms. `Q15_STRANGLE_SHADOW_OPEN_MARKS="780,600,420"`
