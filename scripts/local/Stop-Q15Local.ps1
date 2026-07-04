@@ -33,7 +33,7 @@ if (Test-Path -LiteralPath $PidDir) {
         if ($pidValue) {
             Stop-Q15ProcessById -ProcessId ([int]$pidValue) -Name $name
         }
-        Remove-Item -LiteralPath $_.FullName -Force
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
     }
 }
 
