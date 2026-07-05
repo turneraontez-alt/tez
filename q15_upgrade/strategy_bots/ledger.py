@@ -453,10 +453,23 @@ class StrategyBotLedger:
         the atomicity — no read-modify-write race.
         """
         with self._lock:
-            cur = self._conn.execute(
-                "INSERT OR IGNORE INTO strategy_bot_meta (meta_key, claimed_at) VALUES (?, ?)",
-                (str(meta_key), time.time()),
-            )
+            now = time.time()
+            cols = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(strategy_bot_meta)").fetchall()
+            }
+            if {"meta_key", "claimed_at"}.issubset(cols):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO strategy_bot_meta (meta_key, claimed_at) VALUES (?, ?)",
+                    (str(meta_key), now),
+                )
+            elif {"key", "value", "updated_at"}.issubset(cols):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO strategy_bot_meta (key, value, updated_at) VALUES (?, ?, ?)",
+                    (str(meta_key), "claimed", now),
+                )
+            else:
+                raise sqlite3.OperationalError("strategy_bot_meta has an unsupported schema")
             self._conn.commit()
             return cur.rowcount > 0
 

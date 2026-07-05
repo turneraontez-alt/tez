@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -566,6 +567,33 @@ def test_record_top_pick_notify_explicit_off(tmp_path, monkeypatch):
     led = runtime.get_ledger()
     rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_TOP_PICK_13M]
     assert len(rows) == 1 and tg.sent == []
+
+
+def test_record_top_pick_row_supports_legacy_meta_schema(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_TOP_PICK_13M
+
+    db_path = tmp_path / "v3.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE strategy_bot_meta (key TEXT PRIMARY KEY, value TEXT, updated_at REAL NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "true")
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M_NOTIFY", "true")
+
+    row_id = runtime.record_top_pick_row(_top_pick_row(window_key=57))
+    assert row_id is not None
+    assert runtime.record_top_pick_row(_top_pick_row(window_key=57, ticker="KXSOL-LEGACY-DUP")) is None
+
+    led = runtime.get_ledger()
+    rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_TOP_PICK_13M]
+    assert len(rows) == 1
+    assert rows[0]["notification_status"] == "SENT"
+    assert len(tg.sent) == 1
 
 
 class TopPick13mRunnerTest(unittest.TestCase):
