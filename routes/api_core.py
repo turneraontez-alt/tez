@@ -235,28 +235,36 @@ def register(flask_app, host):
         # (calibration_unconverged_fallbacks) or a shadow challenger that has stopped
         # learning (shadow_errors / last_shadow_error) must surface here, not just in
         # logs. Never let a ledger hiccup break the health route itself.
+        ledger_status = None
         try:
-            ls = _app.checkpoint_v95.ledger.status()
+            ledger_status = _app.checkpoint_v95.ledger.status()
             ledger_health = {
-                "available": bool(ls.get("available")),
-                "path": ls.get("path"),
-                "error": ls.get("error"),
-                "unique_predictions": ls.get("unique_predictions"),
-                "unique_resolved": ls.get("unique_resolved"),
-                "dropped_feature_rows": ls.get("dropped_feature_rows"),
-                "calibration_unconverged_fallbacks": ls.get("calibration_unconverged_fallbacks"),
-                "shadow_errors": ls.get("shadow_errors"),
-                "last_shadow_error": ls.get("last_shadow_error"),
+                "available": bool(ledger_status.get("available")),
+                "path": ledger_status.get("path"),
+                "error": ledger_status.get("error"),
+                "unique_predictions": ledger_status.get("unique_predictions"),
+                "unique_resolved": ledger_status.get("unique_resolved"),
+                "dropped_feature_rows": ledger_status.get("dropped_feature_rows"),
+                "calibration_unconverged_fallbacks": ledger_status.get("calibration_unconverged_fallbacks"),
+                "shadow_errors": ledger_status.get("shadow_errors"),
+                "last_shadow_error": ledger_status.get("last_shadow_error"),
             }
         except Exception as e:
             ledger_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
+            ledger_status = ledger_health
 
         try:
             grading_health = _app.checkpoint_v95.ledger.reconcile_backlog_status(now=now)
         except Exception as e:
             grading_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
 
-        q15_v95_health = _app.checkpoint_v95.health()
+        try:
+            q15_v95_health = _app.checkpoint_v95.health_compact(
+                ledger_status=ledger_status,
+                grading_status=grading_health,
+            )
+        except Exception as e:
+            q15_v95_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
         return _app.jsonify({
             "status": "ok",
             "ledger": ledger_health,

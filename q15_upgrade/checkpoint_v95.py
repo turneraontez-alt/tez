@@ -70,6 +70,7 @@ from .ledger_v95 import (
 from .market_data_v95 import PublicMarketDataHub
 
 VERSION = "q15-v9.5.2-runtime-activation-data-bridge-v1"
+_HEALTH_SUMMARY_CACHE_TTL_SECONDS = 15.0
 READ_ONLY = True
 
 # Coverage weights for evidence_quality: a feature-importance-ordered blend of
@@ -2746,6 +2747,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._bridge_status: dict[str, Any] = {}
         self._runtime_binding = "CheckpointPolicyV95"
         self._warn_throttle: dict[str, float] = {}
+        self._accuracy_summary_cache: dict[str, Any] | None = None
+        self._accuracy_summary_cache_at = 0.0
 
     def _throttled_warn(self, key: str, fmt: str, *args: Any, now: float | None = None,
                         interval: float = 60.0) -> None:
@@ -4233,7 +4236,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def accuracy_summary(self) -> dict[str, Any]:
         """Compact one-glance accuracy headline for /api/health."""
         from .accuracy_report import build_accuracy_report, compact_summary
-        return compact_summary(build_accuracy_report(self.ledger.metrics()))
+        cached = self._accuracy_summary_cache
+        if cached is not None and (time.monotonic() - self._accuracy_summary_cache_at) < _HEALTH_SUMMARY_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached)
+        summary = compact_summary(build_accuracy_report(self.ledger.metrics()))
+        self._accuracy_summary_cache = copy.deepcopy(summary)
+        self._accuracy_summary_cache_at = time.monotonic()
+        return summary
 
     def learning_status(self) -> dict[str, Any]:
         return {
@@ -4246,11 +4255,20 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "automatic_promotion": False, "automatic_threshold_changes": False,
         }
 
-    def health(self) -> dict[str, Any]:
-        try:
-            parent = super().health()
-        except Exception as exc:
-            parent = {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+    def health_compact(
+        self,
+        *,
+        ledger_status: Mapping[str, Any] | None = None,
+        grading_status: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Fast health block for the top-level HTTP health endpoint.
+
+        The full policy health walks every parent policy layer and re-reads the
+        ledger. That is useful for diagnostics, but too expensive for the liveness
+        endpoint while the live cycle is also holding ledger locks.
+        """
+        ledger = copy.deepcopy(ledger_status) if ledger_status is not None else self.ledger.status()
+        grading = copy.deepcopy(grading_status) if grading_status is not None else self.ledger.reconcile_backlog_status()
         return {
             "version": VERSION, "enabled": self.v95_enabled, "read_only": True,
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
@@ -4271,9 +4289,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "primary_learning_checkpoint": self.ledger.primary_learning_checkpoint,
             "learning_enabled_by_checkpoint": dict(self.ledger.learning_enabled_by_checkpoint),
             "automatic_promotion": False, "order_placement": False,
-            "ledger": self.ledger.status(),
-            "grading": self.ledger.reconcile_backlog_status(),
+            "ledger": ledger,
+            "grading": grading,
             "public_market_data": self.market_data.health(),
+        }
+
+    def health(self) -> dict[str, Any]:
+        try:
+            parent = super().health()
+        except Exception as exc:
+            parent = {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            **self.health_compact(),
             "parent_v94": parent,
         }
 

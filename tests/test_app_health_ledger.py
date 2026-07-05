@@ -76,6 +76,22 @@ class TestHealthLedgerSurface(unittest.TestCase):
         finally:
             appmod.checkpoint_v95.ledger.reconcile_backlog_status = orig
 
+    def test_health_uses_compact_v95_block(self):
+        orig = appmod.checkpoint_v95.health
+
+        def full_health_should_not_run():
+            raise AssertionError("full V9.5 diagnostic health should not run on /api/health")
+
+        appmod.checkpoint_v95.health = full_health_should_not_run
+        try:
+            resp = self.client.get("/api/health")
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json()
+            self.assertEqual(body["q15_v9_5"]["version"], appmod.checkpoint_v95.VERSION)
+            self.assertNotIn("parent_v94", body["q15_v9_5"])
+        finally:
+            appmod.checkpoint_v95.health = orig
+
     def test_health_includes_coinbase_adv_l2_snapshot_age_alias(self):
         body = self.client.get("/api/health").get_json()
         self.assertIn("coinbase_adv_l2", body)
