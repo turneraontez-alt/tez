@@ -104,16 +104,20 @@ class IntervalResearchRunner:
                             asset=str(asset), analysis=capture_analysis, canonical=canonical,
                             window_key=wk, now=now)
                         if self.ledger.record_capture(row):
-                            self._feed_thirteen_m_sniper(row, capture_analysis)
+                            self._feed_v3_marks(row, capture_analysis)
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
 
-    def _feed_thirteen_m_sniper(self, row: Mapping[str, Any],
-                                analysis: Mapping[str, Any]) -> None:
-        """Forward new 13M captures into the V3 source-row runtime when explicitly enabled."""
-        if not _env_bool("Q15_V3_13M_SNIPER_FEED", False):
-            return
-        if str(row.get("interval") or "").upper() != "13M":
+    # Per-interval V3 feed flags: 13M feeds the sniper, 10M feeds the fav_10m
+    # favorite-band book. Both default OFF.
+    _V3_FEED_FLAGS = {"13M": "Q15_V3_13M_SNIPER_FEED", "10M": "Q15_V3_FAV10M_FEED"}
+
+    def _feed_v3_marks(self, row: Mapping[str, Any],
+                       analysis: Mapping[str, Any]) -> None:
+        """Forward new mark captures into the V3 source-row runtime when explicitly enabled."""
+        interval = str(row.get("interval") or "").upper()
+        flag = self._V3_FEED_FLAGS.get(interval)
+        if flag is None or not _env_bool(flag, False):
             return
         quote = _mapping(analysis.get("quote"))
         source_row = {
@@ -121,10 +125,10 @@ class IntervalResearchRunner:
             "model_version": row.get("model_version"),
             "asset": row.get("asset"),
             "ticker": row.get("ticker"),
-            "interval": "13M",
+            "interval": interval,
             "window_key": row.get("window_key"),
             "close_time": row.get("close_time"),
-            "record_kind": "INTERVAL_RESEARCH_13M",
+            "record_kind": f"INTERVAL_RESEARCH_{interval}",
             "delivery_status": "RECORDED",
             "predicted_side": row.get("predicted_side"),
             "calibrated_yes_probability": row.get("calibrated_yes_probability"),
@@ -148,7 +152,7 @@ class IntervalResearchRunner:
 
             strategy_bots_runtime.record_source_row(source_row, source_system="ultoim_v2")
         except Exception:  # noqa: BLE001 - optional research feed must never break capture
-            logger.warning("interval-research 13M sniper feed failed (ignored)", exc_info=True)
+            logger.warning("interval-research %s v3 feed failed (ignored)", interval, exc_info=True)
 
     def resolve_settled(self, result_events: Sequence[Mapping[str, Any]] | None,
                         now: float) -> int:

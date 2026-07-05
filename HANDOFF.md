@@ -1,5 +1,38 @@
 # Session handoff
 
+## Shipped THIS session - V3 Books 1 & 2 (warn-flip band entry + 10M favorite band)
+Run time: 2026-07-05.
+
+Implemented (all default-OFF, paper-only, env-flagged):
+- **Book 1 `warn_flip_entry`** (`q15_upgrade/strategy_bots/rules.py`): follows a confirmed
+  ultoim_v2 exit-warning flip as a fresh entry on the flip side when its live ask is inside
+  the pre-registered 55-75c band (discovery n=58, +11.93c/tr, halves +5.30/+5.74). Dedicated
+  runtime path `record_exit_warning_row` (books stay clean); fed from
+  `UltoimV2Runner._fire_exit_warning` with the flip side's executable ask at warn time.
+  Tiers PRIME (<70c) / EDGE (70-75c), optional staleness floor, chase guidance (ask+1c),
+  empirical Wilson-LB EV once n>=30, auto-mute n>=80 / WLB<0.70.
+- **Book 2 `fav_10m`**: buys the predicted (favorite) side at the 10M mark inside 85-90c
+  (backtest n=656, +3.04c/tr, all four chronological quarters positive). Fed by the
+  generalized interval-research mark feed (`_feed_v3_marks`, flag `Q15_V3_FAV10M_FEED`).
+  Spread gate (<=6c, fail-open when missing), auto-mute n>=300 / WLB<0.87 (power-matched to
+  the ~89% breakeven), exempted from the empirical late-interval delivery guard like the sniper.
+- **New Telegram UI** (`strategy_bots/telegram.py`): action-first cards — the BUY line with
+  chase limit is the message; tier/freshness, confirmed-flip provenance, live book W-L +
+  Wilson LB, after-fee EV with prior labeling; auto-mute notices parameterized per book.
+- Env docs in `.env.example` (Q15_V3_WARN_FLIP_*, Q15_V3_FAV10M_*). To go live the owner sets:
+  `Q15_V3_WARN_FLIP=true`, `Q15_V3_WARN_FLIP_NOTIFY=true` (Book 1, validated — deliver now),
+  `Q15_V3_FAV10M=true`, `Q15_V3_FAV10M_FEED=true` (Book 2 recording; keep
+  `Q15_V3_FAV10M_NOTIFY=false` until its pre-registered forward bar passes: n>=600 forward,
+  Wilson-LB win > ask+fee breakeven, forward EV >= +1c).
+
+Verification:
+- `python -m pytest tests/ -q` -> 1793 passed, 4 skipped (includes 20 new tests in
+  `tests/test_v3_new_books.py`: gate matrices, staleness/auto-mute governors, notify gating,
+  message content + champion-marker safety, both feeds, end-to-end warn-flip recording).
+- `python tools/config_audit.py --check` -> OK, 962 env vars documented/baselined.
+- Deploy-pending: flags above are not yet set on the local Windows host; books are inert
+  until the owner enables them.
+
 ## Local THIS session - runtime flag persistence + measurement watchdog
 Run time: 2026-07-03T05:23:00Z.
 

@@ -23,6 +23,11 @@ BOT_HVF_DEPTH_FLOW = "hvf_depth_flow_wrapper"
 BOT_BTC_REGIME = "btc_regime_context_probe"
 BOT_DEPTH_FORMULA_15M = "v3_15m_depth_formula_research"
 BOT_THIRTEEN_M_SNIPER = "thirteen_m_sniper"
+BOT_WARN_FLIP = "warn_flip_entry"
+BOT_FAV_10M = "fav_10m"
+
+# Source-row record_kind stamped by the ultoim_v2 exit-warning feed (Book 1).
+WARN_FLIP_RECORD_KIND = "EXIT_WARNING_FLIP"
 
 TIER_A = "A"
 TIER_B = "B"
@@ -536,6 +541,78 @@ def _thirteen_m_auto_mute_min_n() -> int:
 
 def _thirteen_m_auto_mute_wilson_lb_min() -> float:
     return _env_float("Q15_V3_13M_AUTO_MUTE_WILSON_LB_MIN", 0.55, minimum=0.0)
+
+
+# -- Book 1: warn-flip band entry (pre-registered 55-75c, discovery n=58) -----
+
+def _warn_flip_enabled() -> bool:
+    return _env_bool("Q15_V3_WARN_FLIP", False)
+
+
+def _warn_flip_band_lo() -> float:
+    return _env_float("Q15_V3_WARN_FLIP_BAND_LO_CENTS", 55.0, minimum=0.0)
+
+
+def _warn_flip_band_hi() -> float:
+    return _env_float("Q15_V3_WARN_FLIP_BAND_HI_CENTS", 75.0, minimum=0.0)
+
+
+def _warn_flip_prime_max() -> float:
+    return _env_float("Q15_V3_WARN_FLIP_PRIME_MAX_CENTS", 70.0, minimum=0.0)
+
+
+def _warn_flip_min_seconds() -> float:
+    return _env_float("Q15_V3_WARN_FLIP_MIN_SECONDS", 0.0, minimum=0.0)
+
+
+def _warn_flip_chase_cents() -> float:
+    return _env_float("Q15_V3_WARN_FLIP_CHASE_CENTS", 1.0, minimum=0.0)
+
+
+def _warn_flip_auto_mute_min_n() -> int:
+    return int(_env_float("Q15_V3_WARN_FLIP_AUTO_MUTE_MIN_N", 80.0, minimum=1.0))
+
+
+def _warn_flip_auto_mute_wilson_lb_min() -> float:
+    return _env_float("Q15_V3_WARN_FLIP_AUTO_MUTE_WILSON_LB_MIN", 0.70, minimum=0.0)
+
+
+# Discovery prior (n=58 band trades, 2026-06-23..07-04): used for the message EV
+# estimate only until the live book reaches n>=30, then the empirical Wilson LB
+# takes over (same convention as the 13M sniper).
+WARN_FLIP_PRIOR_WIN_PROBABILITY = 0.828
+
+
+# -- Book 2: 10M favorite band (mined cell; forward bar before NOTIFY) --------
+
+def _fav_10m_enabled() -> bool:
+    return _env_bool("Q15_V3_FAV10M", False)
+
+
+def _fav_10m_band_lo() -> float:
+    return _env_float("Q15_V3_FAV10M_BAND_LO_CENTS", 85.0, minimum=0.0)
+
+
+def _fav_10m_band_hi() -> float:
+    return _env_float("Q15_V3_FAV10M_BAND_HI_CENTS", 90.0, minimum=0.0)
+
+
+def _fav_10m_spread_max() -> float:
+    return _env_float("Q15_V3_FAV10M_SPREAD_MAX_CENTS", 6.0, minimum=0.0)
+
+
+def _fav_10m_auto_mute_min_n() -> int:
+    # Auto-mute needs discriminating power near the ~89% breakeven: at n=300 a
+    # true 91% book keeps its Wilson LB above 0.87 while a breakeven 89% book
+    # falls below it. Smaller n would mute a genuinely good book on noise.
+    return int(_env_float("Q15_V3_FAV10M_AUTO_MUTE_MIN_N", 300.0, minimum=1.0))
+
+
+def _fav_10m_auto_mute_wilson_lb_min() -> float:
+    return _env_float("Q15_V3_FAV10M_AUTO_MUTE_WILSON_LB_MIN", 0.87, minimum=0.0)
+
+
+FAV_10M_PRIOR_WIN_PROBABILITY = 0.910  # backtest n=656, all four quarters positive
 
 
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
@@ -2139,6 +2216,255 @@ def thirteen_m_sniper_decision(
     )
 
 
+def warn_flip_entry_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision | None:
+    """Book 1: follow a confirmed exit-warning flip when the flip side is still
+    priced inside the pre-registered 55-75c band.
+
+    The band IS the rule (no conviction/EV gate): the validated edge is event
+    freshness x price, so the only hard gates are the band, an optional staleness
+    floor, and the auto-mute governor. Everything else is recorded telemetry.
+    """
+    if not _warn_flip_enabled() or source_system != "ultoim_v2":
+        return None
+    if str(row.get("record_kind") or "") != WARN_FLIP_RECORD_KIND:
+        return None
+
+    side = source_side(row)
+    ask = _entry_ask(row)
+    warn_sr = _num(row.get("warn_seconds_remaining"))
+    if warn_sr is None:
+        warn_sr = _num(row.get("seconds_remaining"))
+    band_lo = _warn_flip_band_lo()
+    band_hi = _warn_flip_band_hi()
+    prime_max = _warn_flip_prime_max()
+    min_seconds = _warn_flip_min_seconds()
+    chase = _warn_flip_chase_cents()
+    auto_mute_min_n = _warn_flip_auto_mute_min_n()
+    auto_mute_lb_min = _warn_flip_auto_mute_wilson_lb_min()
+    resolved_n = int(_num(row.get("warn_flip_resolved_n")) or 0)
+    resolved_accuracy = _num(row.get("warn_flip_accuracy"))
+    empirical_lb = _num(row.get("warn_flip_wilson_lb"))
+
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "provisional": True,
+        "source_system": source_system,
+        "record_kind": WARN_FLIP_RECORD_KIND,
+        "band_lo_cents": band_lo,
+        "band_hi_cents": band_hi,
+        "prime_max_cents": prime_max,
+        "min_seconds": min_seconds,
+        "chase_cents": chase,
+        "auto_mute_min_n": auto_mute_min_n,
+        "auto_mute_wilson_lb_min": auto_mute_lb_min,
+        "flip_side": side,
+        "flip_side_ask_cents": ask,
+        "warn_seconds_remaining": warn_sr,
+        "entry_side": row.get("entry_side"),
+        "entry_interval": row.get("entry_interval"),
+        "confirm_cycles": row.get("confirm_cycles"),
+        "confirm_span_seconds": row.get("confirm_span_seconds"),
+        "exit_value_cents": row.get("exit_value_cents"),
+        "resolved_n": resolved_n,
+        "resolved_correct": _num(row.get("warn_flip_correct")),
+        "resolved_accuracy": resolved_accuracy,
+        "resolved_wilson_lb": empirical_lb,
+    }
+    reasons: list[str] = ["V3_WARN_FLIP_EVAL"]
+    failures: list[str] = []
+
+    if side not in {"YES", "NO"}:
+        failures.append("FLIP_SIDE_MISSING")
+    if ask is None:
+        failures.append("FLIP_ASK_MISSING")
+    elif ask < band_lo:
+        # Never observed in discovery (no flip has repriced below 55c); recorded
+        # separately so the telemetry shows it if the market ever changes.
+        failures.append("BELOW_BAND")
+    elif ask >= band_hi:
+        failures.append("ABOVE_BAND")
+    else:
+        reasons.append("BAND_OK")
+        tier = "PRIME" if ask < prime_max else "EDGE"
+        profile["tier"] = tier
+        profile["chase_max_cents"] = ask + chase
+        reasons.append(f"TIER_{tier}")
+
+    if min_seconds > 0.0:
+        if warn_sr is None:
+            failures.append("WARN_SECONDS_MISSING")
+        elif warn_sr < min_seconds:
+            failures.append("STALE_WARNING")
+        else:
+            reasons.append("FRESH_WARNING")
+    if warn_sr is not None:
+        profile["early_warning_gt_260s"] = warn_sr > 260.0
+
+    win_probability: float | None = WARN_FLIP_PRIOR_WIN_PROBABILITY
+    prior_source = "discovery_n58"
+    if resolved_n >= 30 and empirical_lb is not None:
+        win_probability = min(win_probability, empirical_lb)
+        prior_source = "empirical_wilson_lb"
+        reasons.append("EV_USES_EMPIRICAL_WILSON_LB")
+    fee = _kalshi_fee_cents(ask)
+    ev_cents = None
+    if ask is not None and fee is not None and win_probability is not None:
+        ev_cents = win_probability * 100.0 - ask - float(fee)
+    profile.update({
+        "ev_win_probability": win_probability,
+        "ev_prior_source": prior_source,
+        "kalshi_fee_cents": fee,
+        "ev_cents": ev_cents,
+    })
+
+    auto_muted = bool(
+        resolved_n >= auto_mute_min_n
+        and empirical_lb is not None
+        and empirical_lb < auto_mute_lb_min
+    )
+    profile["auto_mute_active"] = auto_muted
+
+    if failures:
+        return BotDecision(
+            BOT_WARN_FLIP,
+            REJECTED,
+            tuple(reasons + failures),
+            threshold_profile={**profile, "passed": False},
+            side_override=side,
+            original_source_side=_side(row.get("entry_side")),
+        )
+    if auto_muted:
+        reasons.append("AUTO_MUTE_ACTIVE_WILSON_LB_LT_MIN")
+    return BotDecision(
+        BOT_WARN_FLIP,
+        ACCEPTED,
+        tuple(reasons),
+        threshold_profile={**profile, "passed": True},
+        side_override=side,
+        original_source_side=_side(row.get("entry_side")),
+        entry_ask_cents=ask,
+        use_entry_ask_override=ask is not None,
+    )
+
+
+def fav_10m_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision | None:
+    """Book 2: buy the predicted (favorite) side at the 10M mark when its ask is
+    inside the 85-90c band.
+
+    Mined cell (backtest n=656, +3.04c/trade, all four chronological quarters
+    positive) — NOTIFY stays behind its own flag until the pre-registered forward
+    bar passes. The market price is the signal; there is no conviction gate.
+    """
+    if not _fav_10m_enabled() or source_system != "ultoim_v2":
+        return None
+    if str(row.get("interval") or "").upper() != "10M":
+        return None
+
+    side = source_side(row)
+    ask = _entry_ask(row)
+    spread = _num(row.get("spread_cents"))
+    band_lo = _fav_10m_band_lo()
+    band_hi = _fav_10m_band_hi()
+    spread_max = _fav_10m_spread_max()
+    auto_mute_min_n = _fav_10m_auto_mute_min_n()
+    auto_mute_lb_min = _fav_10m_auto_mute_wilson_lb_min()
+    resolved_n = int(_num(row.get("fav_10m_resolved_n")) or 0)
+    resolved_accuracy = _num(row.get("fav_10m_accuracy"))
+    empirical_lb = _num(row.get("fav_10m_wilson_lb"))
+
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "provisional": True,
+        "source_system": source_system,
+        "interval_required": "10M",
+        "band_lo_cents": band_lo,
+        "band_hi_cents": band_hi,
+        "spread_max_cents": spread_max,
+        "auto_mute_min_n": auto_mute_min_n,
+        "auto_mute_wilson_lb_min": auto_mute_lb_min,
+        "favorite_side": side,
+        "favorite_side_ask_cents": ask,
+        "spread_cents": spread,
+        "manipulation_suspected": bool(row.get("manipulation_suspected")),
+        "resolved_n": resolved_n,
+        "resolved_correct": _num(row.get("fav_10m_correct")),
+        "resolved_accuracy": resolved_accuracy,
+        "resolved_wilson_lb": empirical_lb,
+    }
+    reasons: list[str] = ["V3_FAV10M_EVAL"]
+    failures: list[str] = []
+
+    if side not in {"YES", "NO"}:
+        failures.append("FAVORITE_SIDE_MISSING")
+    if ask is None:
+        failures.append("FAVORITE_ASK_MISSING")
+    elif not band_lo <= ask < band_hi:
+        failures.append("OUT_OF_BAND")
+    else:
+        reasons.append("BAND_OK")
+
+    if spread is None:
+        reasons.append("SPREAD_MISSING_FAIL_OPEN")
+    elif spread <= spread_max:
+        reasons.append("SPREAD_OK")
+    else:
+        failures.append("SPREAD_TOO_WIDE")
+    if row.get("manipulation_suspected"):
+        reasons.append("MANIPULATION_SUSPECTED_ALLOWED")
+
+    win_probability: float | None = FAV_10M_PRIOR_WIN_PROBABILITY
+    prior_source = "backtest_n656"
+    if resolved_n >= 30 and empirical_lb is not None:
+        win_probability = min(win_probability, empirical_lb)
+        prior_source = "empirical_wilson_lb"
+        reasons.append("EV_USES_EMPIRICAL_WILSON_LB")
+    fee = _kalshi_fee_cents(ask)
+    ev_cents = None
+    if ask is not None and fee is not None and win_probability is not None:
+        ev_cents = win_probability * 100.0 - ask - float(fee)
+    profile.update({
+        "ev_win_probability": win_probability,
+        "ev_prior_source": prior_source,
+        "kalshi_fee_cents": fee,
+        "ev_cents": ev_cents,
+    })
+
+    auto_muted = bool(
+        resolved_n >= auto_mute_min_n
+        and empirical_lb is not None
+        and empirical_lb < auto_mute_lb_min
+    )
+    profile["auto_mute_active"] = auto_muted
+
+    if failures:
+        return BotDecision(
+            BOT_FAV_10M,
+            REJECTED,
+            tuple(reasons + failures),
+            threshold_profile={**profile, "passed": False},
+            side_override=side,
+        )
+    if auto_muted:
+        reasons.append("AUTO_MUTE_ACTIVE_WILSON_LB_LT_MIN")
+    return BotDecision(
+        BOT_FAV_10M,
+        ACCEPTED,
+        tuple(reasons),
+        threshold_profile={**profile, "passed": True},
+        side_override=side,
+        entry_ask_cents=ask,
+        use_entry_ask_override=ask is not None,
+    )
+
+
 def decisions_for_row(
     row: Mapping[str, Any],
     *,
@@ -2156,6 +2482,9 @@ def decisions_for_row(
     thirteen_m = thirteen_m_sniper_decision(row, source_system=source_system)
     if thirteen_m is not None:
         decisions.append(thirteen_m)
+    fav_10m = fav_10m_decision(row, source_system=source_system)
+    if fav_10m is not None:
+        decisions.append(fav_10m)
     btc_probe = btc_regime_context_probe_decision(row, source_system=source_system)
     if btc_probe is not None:
         decisions.append(btc_probe)

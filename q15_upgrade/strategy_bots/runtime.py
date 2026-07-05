@@ -19,15 +19,18 @@ from .rules import (
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
     BOT_DEPTH_FORMULA_15M,
+    BOT_FAV_10M,
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     BOT_THIRTEEN_M_SNIPER,
+    BOT_WARN_FLIP,
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
     BotDecision,
     decisions_for_row,
     source_side,
+    warn_flip_entry_decision,
 )
 from .telegram import V3Telegram, build_v3_alert, build_v3_auto_mute_alert
 
@@ -68,6 +71,14 @@ def depth_formula_telegram_enabled() -> bool:
 
 def thirteen_m_sniper_notify_enabled() -> bool:
     return _bool("Q15_V3_13M_SNIPER_NOTIFY", False)
+
+
+def warn_flip_notify_enabled() -> bool:
+    return _bool("Q15_V3_WARN_FLIP_NOTIFY", False)
+
+
+def fav_10m_notify_enabled() -> bool:
+    return _bool("Q15_V3_FAV10M_NOTIFY", False)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -168,6 +179,41 @@ def _with_thirteen_m_sniper_context(
     return out
 
 
+_book_stats_warning_logged: set[str] = set()
+
+
+def _with_book_stats_context(
+    ledger: StrategyBotLedger,
+    row: Mapping[str, Any],
+    *,
+    bot_name: str,
+    prefix: str,
+) -> Mapping[str, Any]:
+    """Inject a bot's resolved ACCEPTED stats so its rules can self-govern
+    (empirical EV + auto-mute), mirroring the 13M sniper convention."""
+    out = dict(row)
+    try:
+        stats = ledger.bot_accepted_resolved_stats(bot_name=bot_name)
+        out.setdefault(f"{prefix}_resolved_n", stats.get("n"))
+        out.setdefault(f"{prefix}_correct", stats.get("correct"))
+        out.setdefault(f"{prefix}_accuracy", stats.get("accuracy"))
+        out.setdefault(f"{prefix}_wilson_lb", stats.get("wilson_lb"))
+    except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
+        if bot_name not in _book_stats_warning_logged:
+            logger.warning("v3 %s stats unavailable", bot_name, exc_info=True)
+            _book_stats_warning_logged.add(bot_name)
+    return out
+
+
+def _with_fav_10m_context(
+    ledger: StrategyBotLedger,
+    row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if str(row.get("interval") or "").upper() != "10M":
+        return row
+    return _with_book_stats_context(ledger, row, bot_name=BOT_FAV_10M, prefix="fav_10m")
+
+
 def _with_duplicate_window_guard(
     ledger: StrategyBotLedger,
     decision: BotDecision,
@@ -208,7 +254,7 @@ def _with_empirical_delivery_guard(decision: BotDecision, row: Mapping[str, Any]
     if (
         not empirical_delivery_guard_enabled()
         or decision.decision_status != ACCEPTED
-        or decision.bot_name in {BOT_BASELINE, BOT_THIRTEEN_M_SNIPER}
+        or decision.bot_name in {BOT_BASELINE, BOT_THIRTEEN_M_SNIPER, BOT_FAV_10M, BOT_WARN_FLIP}
     ):
         return decision
     side = source_side(row)
@@ -250,19 +296,37 @@ def _with_feed_degraded_stamp(row: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _maybe_send_auto_mute_notice(
+    ledger: StrategyBotLedger,
+    row: Mapping[str, Any],
+    *,
+    bot_name: str,
+    notify_enabled: bool,
+    header: str | None = None,
+) -> None:
+    if not notify_enabled:
+        return
+    key = f"{STRATEGY_VERSION}:{bot_name}:auto_mute_notice"
+    try:
+        if not ledger.claim_meta_once(key):
+            return
+        get_telegram().send(
+            build_v3_auto_mute_alert(_with_feed_degraded_stamp(row), header=header)
+        )
+    except Exception:  # noqa: BLE001 - notice must never block tracking
+        logger.warning("v3 %s auto-mute notice failed (ignored)", bot_name, exc_info=True)
+
+
 def _maybe_send_thirteen_m_auto_mute_notice(
     ledger: StrategyBotLedger,
     row: Mapping[str, Any],
 ) -> None:
-    if not thirteen_m_sniper_notify_enabled():
-        return
-    key = f"{STRATEGY_VERSION}:{BOT_THIRTEEN_M_SNIPER}:auto_mute_notice"
-    try:
-        if not ledger.claim_meta_once(key):
-            return
-        get_telegram().send(build_v3_auto_mute_alert(_with_feed_degraded_stamp(row)))
-    except Exception:  # noqa: BLE001 - notice must never block tracking
-        logger.warning("v3 13M sniper auto-mute notice failed (ignored)", exc_info=True)
+    _maybe_send_auto_mute_notice(
+        ledger,
+        row,
+        bot_name=BOT_THIRTEEN_M_SNIPER,
+        notify_enabled=thirteen_m_sniper_notify_enabled(),
+    )
 
 
 def record_source_row(
@@ -280,9 +344,12 @@ def record_source_row(
         ledger = get_ledger()
         if ledger is None:
             return 0
-        enriched_row = _with_thirteen_m_sniper_context(
+        enriched_row = _with_fav_10m_context(
             ledger,
-            _enrich_source_row(row, btc_context=btc_context),
+            _with_thirteen_m_sniper_context(
+                ledger,
+                _enrich_source_row(row, btc_context=btc_context),
+            ),
         )
         count = 0
         for decision in decisions_for_row(enriched_row, source_system=source_system, btc_context=btc_context):
@@ -296,6 +363,58 @@ def record_source_row(
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 strategy-bot record failed (ignored)", exc_info=True)
         return 0
+
+
+def record_exit_warning_row(row: Mapping[str, Any]) -> int | None:
+    """Record + (optionally) alert one confirmed exit-warning flip (Book 1).
+
+    Dedicated path: warn rows only run the warn_flip_entry bot, so the other
+    books' populations stay clean. All failures are swallowed by design — this
+    must never break the ultoim_v2 warning path that feeds it.
+    """
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return None
+        enriched = _with_book_stats_context(
+            ledger, row, bot_name=BOT_WARN_FLIP, prefix="warn_flip"
+        )
+        decision = warn_flip_entry_decision(enriched, source_system="ultoim_v2")
+        if decision is None:
+            return None
+        row_id = ledger.record_decision(decision, enriched, source_system="ultoim_v2")
+        if row_id is None:
+            return None
+        if decision.decision_status != ACCEPTED or not warn_flip_notify_enabled():
+            return row_id
+        if bool(decision.threshold_profile.get("auto_mute_active")):
+            _maybe_send_auto_mute_notice(
+                ledger,
+                ledger.row_by_id(row_id) or dict(enriched),
+                bot_name=BOT_WARN_FLIP,
+                notify_enabled=warn_flip_notify_enabled(),
+                header="V3 WARN-FLIP ENTRY AUTO-MUTED",
+            )
+            ledger.mark_notification(
+                row_id, status="AUTO_MUTED", message_id=None,
+                error="auto_mute_wilson_lb_lt_min",
+            )
+            return row_id
+        recorded = ledger.row_by_id(row_id)
+        if recorded is None:
+            return row_id
+        result = get_telegram().send(build_v3_alert(_with_feed_degraded_stamp(recorded)))
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        ledger.mark_notification(row_id, status=status, message_id=mid, error=result.get("error"))
+        return row_id
+    except Exception:  # noqa: BLE001 - non-critical side ledger
+        logger.warning("v3 warn-flip record failed (ignored)", exc_info=True)
+        return None
 
 
 def owns_source_notification(
@@ -380,9 +499,33 @@ def _maybe_notify(ledger: StrategyBotLedger, row_id: int, decision: BotDecision)
         except Exception:  # noqa: BLE001 - notification status is best-effort
             logger.debug("v3 13M sniper auto-mute mark failed", exc_info=True)
         return
+    fav_10m_alert = (
+        decision.bot_name == BOT_FAV_10M
+        and decision.decision_status == ACCEPTED
+    )
+    if fav_10m_alert and not fav_10m_notify_enabled():
+        return
+    if fav_10m_alert and bool(decision.threshold_profile.get("auto_mute_active")):
+        _maybe_send_auto_mute_notice(
+            ledger,
+            recorded,
+            bot_name=BOT_FAV_10M,
+            notify_enabled=fav_10m_notify_enabled(),
+            header="V3 FAVORITE 10M AUTO-MUTED",
+        )
+        try:
+            ledger.mark_notification(
+                row_id,
+                status="AUTO_MUTED",
+                message_id=None,
+                error="auto_mute_wilson_lb_lt_min",
+            )
+        except Exception:  # noqa: BLE001 - notification status is best-effort
+            logger.debug("v3 fav_10m auto-mute mark failed", exc_info=True)
+        return
     if (
         hvf_wrapper_only_notifications()
-        and decision.bot_name not in {BOT_HVF_DEPTH_FLOW, BOT_THIRTEEN_M_SNIPER}
+        and decision.bot_name not in {BOT_HVF_DEPTH_FLOW, BOT_THIRTEEN_M_SNIPER, BOT_FAV_10M}
         and not depth_formula_research
     ):
         return

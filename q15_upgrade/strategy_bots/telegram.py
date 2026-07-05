@@ -45,6 +45,8 @@ def _bot_label(name: str) -> str:
         "hvf_depth_flow_wrapper": "HVF Depth/Flow Wrapper",
         "v3_15m_depth_formula_research": "15M Depth Formula Research",
         "thirteen_m_sniper": "13M Early Sniper",
+        "warn_flip_entry": "Warn-Flip Entry",
+        "fav_10m": "Favorite 10M",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -225,13 +227,150 @@ def build_thirteen_m_sniper_alert(row: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def build_v3_auto_mute_alert(row: Mapping[str, Any]) -> str:
+def _whole(value: Any, suffix: str = "") -> str:
+    """Compact numeric: whole numbers render without a decimal (67 -> "67c")."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if abs(v - round(v)) < 0.05:
+        return html.escape(f"{int(round(v))}{suffix}")
+    return html.escape(f"{v:.1f}{suffix}")
+
+
+def _book_stats_line(thresholds: Mapping[str, Any]) -> str | None:
+    """`Book: 12W-2L · acc 85.7% · WLB 71.2%` from the resolved-stats profile."""
+    try:
+        n = int(float(thresholds.get("resolved_n") or 0))
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return "Book: no resolved trades yet (prior-based EV)"
+    try:
+        correct = int(float(thresholds.get("resolved_correct")))
+    except (TypeError, ValueError):
+        acc = thresholds.get("resolved_accuracy")
+        try:
+            correct = int(round(float(acc) * n)) if acc is not None else None
+        except (TypeError, ValueError):
+            correct = None
+    acc_text = _pct(thresholds.get("resolved_accuracy"))
+    lb_text = _pct(thresholds.get("resolved_wilson_lb"))
+    record = f"{correct}W-{n - correct}L" if correct is not None else f"n={n}"
+    return f"Book: {record} · acc {acc_text} · WLB {lb_text}"
+
+
+def build_warn_flip_alert(row: Mapping[str, Any]) -> str:
+    """Book 1 alert — action-first UI: the BUY line is the message."""
+    thresholds = _thresholds(row)
+    side = str(row.get("side") or thresholds.get("flip_side") or "").upper()
+    asset = str(row.get("asset") or "")
+    ask = row.get("entry_ask_cents")
+    if ask is None:
+        ask = thresholds.get("flip_side_ask_cents")
+    chase = thresholds.get("chase_max_cents")
+    tier = str(thresholds.get("tier") or "")
+    warn_sr = thresholds.get("warn_seconds_remaining")
+    cycles = thresholds.get("confirm_cycles")
+    span = thresholds.get("confirm_span_seconds")
+    ev = thresholds.get("ev_cents")
+    band_lo = thresholds.get("band_lo_cents")
+    band_hi = thresholds.get("band_hi_cents")
+    parts = [
+        f"\U0001f3af <b>V3 WARN-FLIP ENTRY</b> — {html.escape(asset)} {html.escape(side)}",
+        f"<b>BUY {html.escape(side)} @ {_whole(ask, 'c')}</b>"
+        + (f" · chase ≤ {_whole(chase, 'c')}" if chase is not None else ""),
+    ]
+    tier_bits = []
+    if tier:
+        band_text = (
+            f"{_whole(band_lo, '')}-{_whole(band_hi, 'c')}"
+            if band_lo is not None and band_hi is not None
+            else ""
+        )
+        tier_bits.append(f"Tier: {html.escape(tier)}" + (f" ({band_text} band)" if band_text else ""))
+    if warn_sr is not None:
+        tier_bits.append(f"⏱ {_whole(warn_sr, 's')} left")
+    if tier_bits:
+        parts.append(" · ".join(tier_bits))
+    if cycles is not None or span is not None:
+        parts.append(f"Confirmed flip: {_whole(cycles)} cycles / {_whole(span, 's')}")
+    book = _book_stats_line(thresholds)
+    if book:
+        parts.append(book)
+    if ev is not None:
+        prior = str(thresholds.get("ev_prior_source") or "")
+        suffix = " (prior)" if prior == "discovery_n58" else ""
+        parts.append(f"EV ≈ {_whole(ev, 'c')}/contract after fees{suffix}")
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
+    if row.get("original_source_side"):
+        parts.append(
+            f"Flipped from: {html.escape(str(row.get('original_source_side')))} entry"
+        )
+    parts.append(f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>")
+    parts.append("Mode: paper alert — enter manually, size to visible depth")
+    return "\n".join(parts)
+
+
+def build_fav_10m_alert(row: Mapping[str, Any]) -> str:
+    """Book 2 alert — same action-first UI, shadow-test banner until promoted."""
+    thresholds = _thresholds(row)
+    side = str(row.get("side") or thresholds.get("favorite_side") or "").upper()
+    asset = str(row.get("asset") or "")
+    ask = row.get("entry_ask_cents")
+    if ask is None:
+        ask = thresholds.get("favorite_side_ask_cents")
+    ev = thresholds.get("ev_cents")
+    band_lo = thresholds.get("band_lo_cents")
+    band_hi = thresholds.get("band_hi_cents")
+    parts = [
+        f"⭐ <b>V3 FAVORITE 10M</b> — {html.escape(asset)} {html.escape(side)}",
+        f"<b>BUY {html.escape(side)} @ {_whole(ask, 'c')}</b> · chase ≤ {_whole(_chase_max(ask), 'c')}",
+        (
+            f"Band: {_whole(band_lo, '')}-{_whole(band_hi, 'c')} favorite · 10M mark"
+            if band_lo is not None and band_hi is not None
+            else "Band: favorite · 10M mark"
+        ),
+    ]
+    book = _book_stats_line(thresholds)
+    if book:
+        parts.append(book)
+    if ev is not None:
+        prior = str(thresholds.get("ev_prior_source") or "")
+        suffix = " (backtest prior)" if prior == "backtest_n656" else ""
+        parts.append(f"EV ≈ {_whole(ev, 'c')}/contract after fees{suffix}")
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
+    parts.append(f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>")
+    parts.append("Mode: paper alert — forward test; half size vs warn-flip")
+    return "\n".join(parts)
+
+
+def _chase_max(ask: Any) -> float | None:
+    try:
+        return float(ask) + 1.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_warn_flip(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "warn_flip_entry"
+
+
+def _is_fav_10m(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "fav_10m"
+
+
+def build_v3_auto_mute_alert(row: Mapping[str, Any], *, header: str | None = None) -> str:
     thresholds = _thresholds(row)
     resolved_n = int(float(thresholds.get("resolved_n") or 0))
     acc = thresholds.get("resolved_accuracy")
     lb = thresholds.get("resolved_wilson_lb")
     parts = [
-        "<b>V3 13M EARLY AUTO-MUTED</b>",
+        f"<b>{html.escape(header)}</b>" if header else "<b>V3 13M EARLY AUTO-MUTED</b>",
         (
             "Notify guard tripped: "
             f"n={resolved_n}, acc={_pct(acc)}, Wilson LB={_pct(lb)}"
@@ -249,6 +388,10 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_bnb_combined_alert(row)
     if _is_thirteen_m_sniper(row):
         return build_thirteen_m_sniper_alert(row)
+    if _is_warn_flip(row):
+        return build_warn_flip_alert(row)
+    if _is_fav_10m(row):
+        return build_fav_10m_alert(row)
 
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"

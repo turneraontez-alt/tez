@@ -1260,6 +1260,42 @@ class UltoimV2Runner:
         sb = self.ledger.exit_warning_scoreboard(cfg.model_version, min_n=cfg.min_scoreboard_n)
         text = panel.build_exit_warning(row, sb, cfg)
         self._send_exit_warning(warning_id, row, text, now)
+        # V3 Book 1 (warn_flip_entry, default-OFF): grade following this confirmed
+        # flip as a fresh entry on the flip side at its live executable ask.
+        # cand's predicted side IS the flipped-to side here, so cand's
+        # entry_ask_cents is the flip side's ask at warn time.
+        try:
+            strategy_bots_runtime.record_exit_warning_row({
+                "created_at": now,
+                "model_version": cfg.model_version,
+                "asset": cand.get("asset"),
+                "ticker": cand.get("ticker"),
+                "interval": "WARN",
+                "window_key": window_key,
+                "close_time": cand.get("close_time"),
+                "record_kind": "EXIT_WARNING_FLIP",
+                "delivery_status": "RECORDED",
+                "predicted_side": str(cand.get("predicted_side") or "").upper(),
+                "entry_ask_cents": cand.get("entry_ask_cents"),
+                "spread_cents": cand.get("spread_cents"),
+                "depth_contracts": cand.get("depth_contracts"),
+                "yes_bid_depth_contracts": cand.get("yes_bid_depth_contracts"),
+                "yes_ask_depth_contracts": cand.get("yes_ask_depth_contracts"),
+                "no_bid_depth_contracts": cand.get("no_bid_depth_contracts"),
+                "no_ask_depth_contracts": cand.get("no_ask_depth_contracts"),
+                "calibrated_yes_probability": cand.get("calibrated_yes_probability"),
+                "market_implied_yes_probability": cand.get("market_implied_yes_probability"),
+                "flip_probability": cand.get("flip_probability"),
+                "manipulation_suspected": bool(cand.get("manipulation_suspected")),
+                "warn_seconds_remaining": _num(cand.get("seconds_remaining")),
+                "entry_side": entry_side,
+                "entry_interval": entry.get("interval"),
+                "confirm_cycles": cycles,
+                "confirm_span_seconds": span,
+                "exit_value_cents": exit_value,
+            })
+        except Exception:  # noqa: BLE001 - optional book must never break the warning path
+            logger.warning("ultoim_v2 warn-flip v3 feed failed (ignored)", exc_info=True)
         # OPT-IN EXECUTOR (default-OFF): on a confirmed flip warning, tell the live-order
         # layer to SELL the position (it no-ops if disabled / holds no position).
         try:
