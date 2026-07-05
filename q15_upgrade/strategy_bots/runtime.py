@@ -23,6 +23,7 @@ from .rules import (
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     BOT_THIRTEEN_M_SNIPER,
+    BOT_TOP_PICK_13M,
     BOT_WARN_FLIP,
     REJECTED,
     RESEARCH_ONLY,
@@ -30,6 +31,7 @@ from .rules import (
     BotDecision,
     decisions_for_row,
     source_side,
+    top_pick_13m_decision,
     warn_flip_entry_decision,
 )
 from .telegram import V3Telegram, build_v3_alert, build_v3_auto_mute_alert
@@ -79,6 +81,10 @@ def warn_flip_notify_enabled() -> bool:
 
 def fav_10m_notify_enabled() -> bool:
     return _bool("Q15_V3_FAV10M_NOTIFY", False)
+
+
+def top_pick_notify_enabled() -> bool:
+    return _bool("Q15_V3_TOP_PICK_13M_NOTIFY", False)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -414,6 +420,47 @@ def record_exit_warning_row(row: Mapping[str, Any]) -> int | None:
         return row_id
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 warn-flip record failed (ignored)", exc_info=True)
+        return None
+
+
+def record_top_pick_row(row: Mapping[str, Any]) -> int | None:
+    """Record + (optionally) alert the window's single top pick at 13M.
+
+    Display-only book: one row per 15m window (durable claim survives restarts),
+    ACCEPTED always, never a trade signal. Failures are swallowed by design.
+    """
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return None
+        wk = row.get("window_key")
+        if wk is None or not ledger.claim_meta_once(
+            f"{STRATEGY_VERSION}:{BOT_TOP_PICK_13M}:{int(wk)}"
+        ):
+            return None
+        enriched = _with_book_stats_context(
+            ledger, row, bot_name=BOT_TOP_PICK_13M, prefix="top_pick"
+        )
+        decision = top_pick_13m_decision(enriched)
+        if decision is None:
+            return None
+        row_id = ledger.record_decision(decision, enriched, source_system="ultoim_v2")
+        if row_id is None or not top_pick_notify_enabled():
+            return row_id
+        recorded = ledger.row_by_id(row_id)
+        if recorded is None:
+            return row_id
+        result = get_telegram().send(build_v3_alert(_with_feed_degraded_stamp(recorded)))
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        ledger.mark_notification(row_id, status=status, message_id=mid, error=result.get("error"))
+        return row_id
+    except Exception:  # noqa: BLE001 - non-critical side ledger
+        logger.warning("v3 top-pick record failed (ignored)", exc_info=True)
         return None
 
 

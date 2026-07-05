@@ -51,6 +51,8 @@ class IntervalResearchRunner:
         self.config = config or IntervalResearchConfig.from_env()
         self.ledger = IntervalResearchLedger(self.config.db_path)
         self._lock = threading.Lock()
+        # top-pick-13M one-shot state: window_key -> decided-at timestamp
+        self._top_pick_done: dict[int, float] = {}
 
     @property
     def model_version(self) -> str:
@@ -105,8 +107,73 @@ class IntervalResearchRunner:
                             window_key=wk, now=now)
                         if self.ledger.record_capture(row):
                             self._feed_v3_marks(row, capture_analysis)
+                self._maybe_top_pick_13m(canonicals, now)
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
+
+    # -- top pick 13M: one display alert per 15m window ----------------------
+    # Fires once per window shortly after the 13M captures land (sr 740-770):
+    # ranks the window's cross-asset slate by market extremity |candidate ask - 50|
+    # (measured 74.4% top-1 accuracy vs 72.1% for model-conviction ranking) and
+    # forwards the single winner to V3. Display-only: EV after fees is negative,
+    # so the alert explicitly says it is not a trade signal.
+    def _maybe_top_pick_13m(self, canonicals: Mapping[str, Any], now: float) -> None:
+        if not _env_bool("Q15_V3_TOP_PICK_13M", False):
+            return
+        min_assets = max(2, int(float(os.environ.get("Q15_V3_TOP_PICK_13M_MIN_ASSETS", "3") or 3)))
+        # prune old one-shot keys so the dict cannot leak
+        cutoff = now - 1800.0
+        for wk in [k for k, ts in self._top_pick_done.items() if ts < cutoff]:
+            self._top_pick_done.pop(wk, None)
+        for canonical in (canonicals or {}).values():
+            sr = _num(getattr(canonical, "seconds_remaining", None))
+            if sr is None or not (740.0 <= sr <= 770.0):
+                continue
+            wk = window_key(getattr(canonical, "settlement_time", None), now)
+            if wk is None or wk in self._top_pick_done:
+                continue
+            slate = self.ledger.captures_for_window(self.config.model_version, "13M", wk)
+            slate = [s for s in slate if s.get("yes_ask_cents") is not None
+                     and str(s.get("predicted_side") or "").upper() in {"YES", "NO"}]
+            if len(slate) < min_assets:
+                continue  # stragglers may still land; retry next cycle inside the band
+            ranked = sorted(
+                slate,
+                key=lambda s: (
+                    -abs(float(s["yes_ask_cents"]) - 50.0),
+                    -abs(float(s.get("calibrated_yes_probability") or 0.5) - 0.5),
+                ),
+            )
+            top, second = ranked[0], ranked[1]
+            self._top_pick_done[wk] = now
+            ask = top.get("entry_ask_cents")
+            if ask is None:
+                ask = top.get("yes_ask_cents")
+            source_row = {
+                "created_at": now,
+                "model_version": self.config.model_version,
+                "asset": top.get("asset"),
+                "ticker": top.get("ticker"),
+                "interval": "13M",
+                "window_key": wk,
+                "close_time": top.get("close_time"),
+                "record_kind": "TOP_PICK_13M",
+                "delivery_status": "RECORDED",
+                "predicted_side": str(top.get("predicted_side") or "").upper(),
+                "calibrated_yes_probability": top.get("calibrated_yes_probability"),
+                "entry_ask_cents": ask,
+                "spread_cents": top.get("spread_cents"),
+                "top_pick_slate_n": len(slate),
+                "top_pick_extremity": abs(float(top["yes_ask_cents"]) - 50.0),
+                "top_pick_runner_up_asset": second.get("asset"),
+                "top_pick_runner_up_extremity": abs(float(second["yes_ask_cents"]) - 50.0),
+            }
+            try:
+                from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+                strategy_bots_runtime.record_top_pick_row(source_row)
+            except Exception:  # noqa: BLE001 - optional display book must never break capture
+                logger.warning("interval-research top-pick feed failed (ignored)", exc_info=True)
 
     # Per-interval V3 feed flags: 13M feeds the sniper, 10M feeds the fav_10m
     # favorite-band book. Both default OFF.

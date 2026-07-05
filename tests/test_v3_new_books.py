@@ -473,3 +473,156 @@ def test_fire_exit_warning_feeds_book1(tmp_path, monkeypatch):
     assert source_row["warn_seconds_remaining"] == 390.0
     assert source_row["confirm_cycles"] == 2
     assert source_row["model_version"] == "ultoim-v2"
+
+
+# -- Top Pick 13M (display-only book) -----------------------------------------------
+
+def _top_pick_row(**over):
+    base = {
+        "created_at": 1000.0,
+        "model_version": "ultoim-v2",
+        "asset": "SOL",
+        "ticker": "KXSOL-13M",
+        "interval": "13M",
+        "window_key": 55,
+        "close_time": 1780.0,
+        "record_kind": "TOP_PICK_13M",
+        "delivery_status": "RECORDED",
+        "predicted_side": "NO",
+        "calibrated_yes_probability": 0.29,
+        "entry_ask_cents": 68.0,
+        "spread_cents": 2.0,
+        "top_pick_slate_n": 7,
+        "top_pick_extremity": 18.0,
+        "top_pick_runner_up_asset": "ETH",
+        "top_pick_runner_up_extremity": 12.0,
+    }
+    base.update(over)
+    return base
+
+
+def test_top_pick_decision_gates(monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_TOP_PICK_13M, top_pick_13m_decision
+
+    os.environ.pop("Q15_V3_TOP_PICK_13M", None)
+    assert top_pick_13m_decision(_top_pick_row()) is None
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "true")
+    assert top_pick_13m_decision(_top_pick_row(record_kind="DELIVERED_CANDIDATE")) is None
+    d = top_pick_13m_decision(_top_pick_row())
+    assert d is not None and d.bot_name == BOT_TOP_PICK_13M and d.decision_status == ACCEPTED
+    assert d.threshold_profile["not_a_trade_signal"] is True
+    assert d.threshold_profile["slate_n"] == 7
+
+
+def test_record_top_pick_row_once_per_window_and_notify(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_TOP_PICK_13M
+
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "true")
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M_NOTIFY", "true")
+
+    row_id = runtime.record_top_pick_row(_top_pick_row())
+    assert row_id is not None
+    # same window again (restart / concurrent) -> durable claim blocks a duplicate
+    assert runtime.record_top_pick_row(_top_pick_row(ticker="KXSOL-13M-DUP")) is None
+
+    led = runtime.get_ledger()
+    rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_TOP_PICK_13M]
+    assert len(rows) == 1 and rows[0]["decision_status"] == ACCEPTED
+    assert rows[0]["notification_status"] == "SENT"
+    assert len(tg.sent) == 1
+    text = tg.sent[0]
+    assert "V3 TOP PICK 13M" in text and "SOL NO" in text
+    assert "Call: SOL settles NO" in text
+    assert "market 68c" in text and "model 71%" in text
+    assert "Rank: 1 of 7" in text and "margin +6c over ETH" in text
+    assert "not a trade signal" in text
+    for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK", "Hourly Report"):
+        assert marker not in text
+
+
+def test_record_top_pick_notify_default_off(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_TOP_PICK_13M
+
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "true")
+    os.environ.pop("Q15_V3_TOP_PICK_13M_NOTIFY", None)
+
+    assert runtime.record_top_pick_row(_top_pick_row(window_key=56)) is not None
+    led = runtime.get_ledger()
+    rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_TOP_PICK_13M]
+    assert len(rows) == 1 and tg.sent == []
+
+
+class TopPick13mRunnerTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        from q15_upgrade.interval_research.runner import IntervalResearchRunner
+        from tests.test_interval_research import _cfg
+
+        self.tmp = tempfile.mkdtemp()
+        self.r = IntervalResearchRunner(_cfg(self.tmp))
+
+    def _capture_slate(self):
+        from tests.test_interval_research import _Canon, _analysis
+
+        # three assets captured at the 13M mark (sr 780, band [755, 780]).
+        # yes_ask_cents (the ranking input) comes from quote.ask_cents.
+        analyses = {
+            "BTC": _analysis(side="YES", ask=62.0),
+            "ETH": _analysis(side="NO", ask=71.0),
+            "SOL": _analysis(side="NO", ask=88.0),   # most extreme -> the pick
+        }
+        for name, quote_ask in (("BTC", 62.0), ("ETH", 71.0), ("SOL", 88.0)):
+            analyses[name]["quote"]["ask_cents"] = quote_ask
+        canonicals = {
+            a: _Canon(f"KX{a}", 780, settlement_time=9000.0) for a in analyses
+        }
+        self.r.observe(analyses=analyses, canonicals=canonicals, now=1000.0)
+        return analyses
+
+    def test_fires_once_with_most_extreme_pick(self):
+        analyses = self._capture_slate()
+        from tests.test_interval_research import _Canon
+
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "true"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+                # next cycle: sr has ticked into the firing band [740, 770]
+                canonicals = {a: _Canon(f"KX{a}", 760, settlement_time=9000.0) for a in analyses}
+                self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
+                # further cycles in-band must not fire again
+                canonicals = {a: _Canon(f"KX{a}", 750, settlement_time=9000.0) for a in analyses}
+                self.r.observe(analyses=analyses, canonicals=canonicals, now=1030.0)
+
+        record.assert_called_once()
+        source_row = record.call_args.args[0]
+        self.assertEqual(source_row["record_kind"], "TOP_PICK_13M")
+        self.assertEqual(source_row["asset"], "SOL")
+        self.assertEqual(source_row["predicted_side"], "NO")
+        self.assertEqual(source_row["top_pick_slate_n"], 3)
+        self.assertEqual(source_row["top_pick_runner_up_asset"], "ETH")
+
+    def test_flag_off_never_fires(self):
+        analyses = self._capture_slate()
+        from tests.test_interval_research import _Canon
+
+        os.environ.pop("Q15_V3_TOP_PICK_13M", None)
+        with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+            canonicals = {a: _Canon(f"KX{a}", 760, settlement_time=9000.0) for a in analyses}
+            self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
+        record.assert_not_called()
+
+    def test_min_assets_gate(self):
+        from tests.test_interval_research import _Canon, _analysis
+
+        analyses = {"BTC": _analysis(side="YES", ask=62.0)}
+        canonicals = {"BTC": _Canon("KXBTC", 780, settlement_time=9000.0)}
+        self.r.observe(analyses=analyses, canonicals=canonicals, now=1000.0)
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "true"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+                canonicals = {"BTC": _Canon("KXBTC", 760, settlement_time=9000.0)}
+                self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
+        record.assert_not_called()

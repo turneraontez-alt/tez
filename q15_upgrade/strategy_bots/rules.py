@@ -25,6 +25,7 @@ BOT_DEPTH_FORMULA_15M = "v3_15m_depth_formula_research"
 BOT_THIRTEEN_M_SNIPER = "thirteen_m_sniper"
 BOT_WARN_FLIP = "warn_flip_entry"
 BOT_FAV_10M = "fav_10m"
+BOT_TOP_PICK_13M = "top_pick_13m"
 
 # Source-row record_kind stamped by the ultoim_v2 exit-warning feed (Book 1).
 WARN_FLIP_RECORD_KIND = "EXIT_WARNING_FLIP"
@@ -613,6 +614,15 @@ def _fav_10m_auto_mute_wilson_lb_min() -> float:
 
 
 FAV_10M_PRIOR_WIN_PROBABILITY = 0.910  # backtest n=656, all four quarters positive
+
+
+# -- Top pick 13M: one display call per 15m window (NOT a trade signal) -------
+
+def _top_pick_13m_enabled() -> bool:
+    return _env_bool("Q15_V3_TOP_PICK_13M", False)
+
+
+TOP_PICK_13M_PRIOR_ACCURACY = 0.744  # backtest: top-1 by market extremity, n=970 windows
 
 
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:
@@ -2346,6 +2356,49 @@ def warn_flip_entry_decision(
         threshold_profile={**profile, "passed": True},
         side_override=side,
         original_source_side=_side(row.get("entry_side")),
+        entry_ask_cents=ask,
+        use_entry_ask_override=ask is not None,
+    )
+
+
+def top_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Display book: the single most-market-extreme call of the window at 13M.
+
+    Always ACCEPTED when the slate produced a valid winner — there is no gate to
+    fail because nothing is traded on it; accuracy accrues via the normal resolve
+    path so the panel's headline stays honest.
+    """
+    if not _top_pick_13m_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "TOP_PICK_13M":
+        return None
+    side = source_side(row)
+    ask = _entry_ask(row)
+    if side not in {"YES", "NO"}:
+        return None
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "display_only": True,
+        "not_a_trade_signal": True,
+        "prior_accuracy": TOP_PICK_13M_PRIOR_ACCURACY,
+        "pick_side": side,
+        "pick_ask_cents": ask,
+        "calibrated_yes_probability": _num(row.get("calibrated_yes_probability")),
+        "slate_n": row.get("top_pick_slate_n"),
+        "extremity_cents": row.get("top_pick_extremity"),
+        "runner_up_asset": row.get("top_pick_runner_up_asset"),
+        "runner_up_extremity_cents": row.get("top_pick_runner_up_extremity"),
+        "resolved_n": int(_num(row.get("top_pick_resolved_n")) or 0),
+        "resolved_correct": _num(row.get("top_pick_correct")),
+        "resolved_accuracy": _num(row.get("top_pick_accuracy")),
+        "resolved_wilson_lb": _num(row.get("top_pick_wilson_lb")),
+    }
+    return BotDecision(
+        BOT_TOP_PICK_13M,
+        ACCEPTED,
+        ("V3_TOP_PICK_13M", "RANKED_BY_MARKET_EXTREMITY"),
+        threshold_profile={**profile, "passed": True},
+        side_override=side,
         entry_ask_cents=ask,
         use_entry_ask_override=ask is not None,
     )

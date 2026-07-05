@@ -25,11 +25,22 @@ Implemented (all default-OFF, paper-only, env-flagged):
   `Q15_V3_FAV10M_NOTIFY=false` until its pre-registered forward bar passes: n>=600 forward,
   Wilson-LB win > ask+fee breakeven, forward EV >= +1c).
 
+Also shipped THIS session - Top Pick 13M display alert:
+- **`top_pick_13m`**: one card per 15m window — the single most market-extreme call across
+  the asset slate at the 13M mark (backtest top-1 accuracy ~74.4% ranking by |candidate
+  ask - 50|; model-conviction tiebreak). Fired from the interval-research runner
+  (`_maybe_top_pick_13m`, sr 740-770 firing band, min 3 scored assets), recorded via
+  `runtime.record_top_pick_row` with a durable once-per-window meta claim, resolved by the
+  normal ultoim_v2 reconcile so live accuracy accrues. The card is explicitly display-only
+  ("not a trade signal — EV after fees is negative"); no existing alert path touched.
+  Flags: `Q15_V3_TOP_PICK_13M`, `Q15_V3_TOP_PICK_13M_NOTIFY`, `Q15_V3_TOP_PICK_13M_MIN_ASSETS`
+  (all default OFF/3; documented in .env.example).
+
 Verification:
-- `python -m pytest tests/ -q` -> 1793 passed, 4 skipped (includes 20 new tests in
+- `python -m pytest tests/ -q` -> 1799 passed, 4 skipped (includes 26 new tests in
   `tests/test_v3_new_books.py`: gate matrices, staleness/auto-mute governors, notify gating,
   message content + champion-marker safety, both feeds, end-to-end warn-flip recording).
-- `python tools/config_audit.py --check` -> OK, 962 env vars documented/baselined.
+- `python tools/config_audit.py --check` -> OK, 965 env vars documented/baselined.
 - Deploy-pending: flags above are not yet set on the local Windows host; books are inert
   until the owner enables them.
 

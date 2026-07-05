@@ -160,6 +160,24 @@ class IntervalResearchLedger:
             ).fetchone()
         return row is not None
 
+    def captures_for_window(
+        self, model_version: str, interval: str, window_key: int
+    ) -> list[dict[str, Any]]:
+        """All scored captures for one (interval, window) — the cross-asset slate
+        the top-pick ranker compares. Read-only."""
+        if not self._available:
+            return []
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT ticker, asset, close_time, predicted_side, "
+                "calibrated_yes_probability, yes_ask_cents, entry_ask_cents, "
+                "spread_cents, captured_at, seconds_remaining "
+                "FROM interval_captures WHERE model_version=? AND interval=? "
+                "AND window_key=? AND predicted_side IS NOT NULL",
+                (model_version, interval, int(window_key)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def record_capture(self, row: Mapping[str, Any]) -> bool:
         """Insert one captured interval. Returns True only if a NEW row was created
         (INSERT OR IGNORE on the unique key — restart/loop safe)."""

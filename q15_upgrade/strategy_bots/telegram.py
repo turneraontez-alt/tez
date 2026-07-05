@@ -47,6 +47,7 @@ def _bot_label(name: str) -> str:
         "thirteen_m_sniper": "13M Early Sniper",
         "warn_flip_entry": "Warn-Flip Entry",
         "fav_10m": "Favorite 10M",
+        "top_pick_13m": "Top Pick 13M",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -356,6 +357,65 @@ def _chase_max(ask: Any) -> float | None:
         return None
 
 
+def _is_top_pick(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "top_pick_13m"
+
+
+def build_top_pick_alert(row: Mapping[str, Any]) -> str:
+    """Top-pick display card — one call per 15m window, explicitly not a signal."""
+    thresholds = _thresholds(row)
+    side = str(row.get("side") or thresholds.get("pick_side") or "").upper()
+    asset = str(row.get("asset") or "")
+    ask = row.get("entry_ask_cents")
+    if ask is None:
+        ask = thresholds.get("pick_ask_cents")
+    cal = thresholds.get("calibrated_yes_probability")
+    model_side_prob = None
+    try:
+        if cal is not None:
+            model_side_prob = float(cal) if side == "YES" else 1.0 - float(cal)
+    except (TypeError, ValueError):
+        model_side_prob = None
+    slate_n = thresholds.get("slate_n")
+    margin = None
+    try:
+        margin = float(thresholds.get("extremity_cents")) - float(
+            thresholds.get("runner_up_extremity_cents")
+        )
+    except (TypeError, ValueError):
+        margin = None
+    runner_up = thresholds.get("runner_up_asset")
+    parts = [
+        f"\U0001f3c6 <b>V3 TOP PICK 13M</b> — {html.escape(asset)} {html.escape(side)}",
+        f"<b>Call: {html.escape(asset)} settles {html.escape(side)}</b>"
+        + f" · market {_whole(ask, 'c')}"
+        + (
+            f" · model {_whole(model_side_prob * 100.0, '%')}"
+            if model_side_prob is not None
+            else ""
+        ),
+    ]
+    rank_bits = []
+    if slate_n is not None:
+        rank_bits.append(f"Rank: 1 of {_whole(slate_n)}")
+    if margin is not None and runner_up:
+        rank_bits.append(f"margin +{_whole(margin, 'c')} over {html.escape(str(runner_up))}")
+    if rank_bits:
+        parts.append(" · ".join(rank_bits))
+    book = _book_stats_line(thresholds)
+    if book:
+        parts.append(book)
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
+    parts.append(f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>")
+    parts.append(
+        "Mode: display-only prediction — accuracy panel, not a trade signal "
+        "(EV after fees is negative at market price)"
+    )
+    return "\n".join(parts)
+
+
 def _is_warn_flip(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "warn_flip_entry"
 
@@ -392,6 +452,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_warn_flip_alert(row)
     if _is_fav_10m(row):
         return build_fav_10m_alert(row)
+    if _is_top_pick(row):
+        return build_top_pick_alert(row)
 
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"
