@@ -111,14 +111,31 @@ class IntervalResearchRunner:
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
 
-    # -- top pick 13M: one display alert per 15m window ----------------------
-    # Fires once per window shortly after the 13M captures land (sr 740-770):
-    # ranks the window's cross-asset slate by market extremity |candidate ask - 50|
-    # (measured 74.4% top-1 accuracy vs 72.1% for model-conviction ranking) and
-    # forwards the single winner to V3. Display-only: EV after fees is negative,
-    # so the alert explicitly says it is not a trade signal.
+    # -- best trade 13M: one pick per 15m window (owner-requested, always fires) --
+    # Fires once per window shortly after the 13M captures land (sr 740-770).
+    # Ranking is PROFIT-first: measured per-price-bucket EV at the 13M mark
+    # (oracle-graded tape, Jun-23..Jul-05, n=969 cycles), then market extremity
+    # |candidate ask - 50| (74.5% top-1 accuracy), then model conviction. The
+    # 85-90c favorite band is the only ~breakeven-or-better cell at 13M; all
+    # other buckets are measured negative and the card says so per pick.
+    _BUCKET_EV_13M = (
+        (85.0, 90.0, 0.35),    # favorite band — best measured cell at 13M
+        (60.0, 70.0, -0.98),
+        (70.0, 80.0, -1.05),
+        (90.0, 101.0, -2.50),
+        (80.0, 85.0, -3.32),
+        (0.0, 60.0, -3.52),
+    )
+
+    @classmethod
+    def _bucket_ev(cls, ask: float) -> float:
+        for lo, hi, ev in cls._BUCKET_EV_13M:
+            if lo <= ask < hi:
+                return ev
+        return -3.52
+
     def _maybe_top_pick_13m(self, canonicals: Mapping[str, Any], now: float) -> None:
-        if not _env_bool("Q15_V3_TOP_PICK_13M", False):
+        if not _env_bool("Q15_V3_TOP_PICK_13M", True):
             return
         min_assets = max(2, int(float(os.environ.get("Q15_V3_TOP_PICK_13M_MIN_ASSETS", "3") or 3)))
         # prune old one-shot keys so the dict cannot leak
@@ -140,6 +157,7 @@ class IntervalResearchRunner:
             ranked = sorted(
                 slate,
                 key=lambda s: (
+                    -self._bucket_ev(float(s["yes_ask_cents"])),
                     -abs(float(s["yes_ask_cents"]) - 50.0),
                     -abs(float(s.get("calibrated_yes_probability") or 0.5) - 0.5),
                 ),
@@ -167,6 +185,8 @@ class IntervalResearchRunner:
                 "top_pick_extremity": abs(float(top["yes_ask_cents"]) - 50.0),
                 "top_pick_runner_up_asset": second.get("asset"),
                 "top_pick_runner_up_extremity": abs(float(second["yes_ask_cents"]) - 50.0),
+                "top_pick_bucket_ev_cents": self._bucket_ev(float(top["yes_ask_cents"])),
+                "top_pick_fav_band": 85.0 <= float(top["yes_ask_cents"]) < 90.0,
             }
             try:
                 from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
@@ -175,16 +195,18 @@ class IntervalResearchRunner:
             except Exception:  # noqa: BLE001 - optional display book must never break capture
                 logger.warning("interval-research top-pick feed failed (ignored)", exc_info=True)
 
-    # Per-interval V3 feed flags: 13M feeds the sniper, 10M feeds the fav_10m
-    # favorite-band book. Both default OFF.
-    _V3_FEED_FLAGS = {"13M": "Q15_V3_13M_SNIPER_FEED", "10M": "Q15_V3_FAV10M_FEED"}
+    # Per-interval V3 feed flags: 13M feeds the sniper (default OFF, owner-enabled
+    # in env), 10M feeds the fav_10m favorite-band book (default ON by owner
+    # directive 2026-07-05: "make everything on by default").
+    _V3_FEED_FLAGS = {"13M": ("Q15_V3_13M_SNIPER_FEED", False),
+                      "10M": ("Q15_V3_FAV10M_FEED", True)}
 
     def _feed_v3_marks(self, row: Mapping[str, Any],
                        analysis: Mapping[str, Any]) -> None:
-        """Forward new mark captures into the V3 source-row runtime when explicitly enabled."""
+        """Forward new mark captures into the V3 source-row runtime when enabled."""
         interval = str(row.get("interval") or "").upper()
         flag = self._V3_FEED_FLAGS.get(interval)
-        if flag is None or not _env_bool(flag, False):
+        if flag is None or not _env_bool(flag[0], flag[1]):
             return
         quote = _mapping(analysis.get("quote"))
         source_row = {

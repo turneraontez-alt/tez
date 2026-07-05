@@ -362,7 +362,12 @@ def _is_top_pick(row: Mapping[str, Any]) -> bool:
 
 
 def build_top_pick_alert(row: Mapping[str, Any]) -> str:
-    """Top-pick display card — one call per 15m window, explicitly not a signal."""
+    """Best-trade card — the one pick per 15m window, ranked by measured profit.
+
+    Fires every cycle by owner request; the cell line reports the pick's measured
+    per-bucket economics honestly (only the 85-90c favorite cell is ~breakeven+
+    at 13M — everything else is a fallback with a small expected cost).
+    """
     thresholds = _thresholds(row)
     side = str(row.get("side") or thresholds.get("pick_side") or "").upper()
     asset = str(row.get("asset") or "")
@@ -377,31 +382,27 @@ def build_top_pick_alert(row: Mapping[str, Any]) -> str:
     except (TypeError, ValueError):
         model_side_prob = None
     slate_n = thresholds.get("slate_n")
-    margin = None
-    try:
-        margin = float(thresholds.get("extremity_cents")) - float(
-            thresholds.get("runner_up_extremity_cents")
-        )
-    except (TypeError, ValueError):
-        margin = None
-    runner_up = thresholds.get("runner_up_asset")
     parts = [
-        f"\U0001f3c6 <b>V3 TOP PICK 13M</b> — {html.escape(asset)} {html.escape(side)}",
-        f"<b>Call: {html.escape(asset)} settles {html.escape(side)}</b>"
-        + f" · market {_whole(ask, 'c')}"
+        f"\U0001f3c6 <b>V3 BEST TRADE 13M</b> — {html.escape(asset)} {html.escape(side)}",
+        f"<b>BUY {html.escape(side)} @ {_whole(ask, 'c')}</b> · chase ≤ {_whole(_chase_max(ask), 'c')}"
         + (
             f" · model {_whole(model_side_prob * 100.0, '%')}"
             if model_side_prob is not None
             else ""
         ),
     ]
-    rank_bits = []
+    pick_bits = []
     if slate_n is not None:
-        rank_bits.append(f"Rank: 1 of {_whole(slate_n)}")
-    if margin is not None and runner_up:
-        rank_bits.append(f"margin +{_whole(margin, 'c')} over {html.escape(str(runner_up))}")
-    if rank_bits:
-        parts.append(" · ".join(rank_bits))
+        pick_bits.append(f"Best of {_whole(slate_n)} this cycle")
+    bucket_ev = thresholds.get("bucket_ev_cents")
+    if thresholds.get("fav_band"):
+        pick_bits.append("cell: FAV-BAND (best measured cell at 13M)")
+    elif bucket_ev is not None:
+        pick_bits.append(
+            f"cell: FALLBACK (best available; measured {_whole(bucket_ev, 'c')}/tr — expect small losses)"
+        )
+    if pick_bits:
+        parts.append(" · ".join(pick_bits))
     book = _book_stats_line(thresholds)
     if book:
         parts.append(book)
@@ -410,8 +411,8 @@ def build_top_pick_alert(row: Mapping[str, Any]) -> str:
         parts.insert(1, degraded)
     parts.append(f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>")
     parts.append(
-        "Mode: display-only prediction — accuracy panel, not a trade signal "
-        "(EV after fees is negative at market price)"
+        "Mode: one pick every cycle by request — size SMALL; "
+        "\U0001f3af warn-flip cards outrank this whenever they fire"
     )
     return "\n".join(parts)
 

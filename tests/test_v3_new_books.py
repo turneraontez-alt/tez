@@ -5,8 +5,10 @@ flip side's live ask is inside the pre-registered 55-75c band.
 Book 2 (fav_10m): buy the predicted (favorite) side at the 10M mark inside the
 85-90c band; shadow-first (NOTIFY behind its own flag).
 
-Both are default-OFF, paper-only, and self-governed (empirical Wilson-LB EV once
-n>=30, auto-mute governor).
+Both are paper-only and self-governed (empirical Wilson-LB EV once n>=30,
+auto-mute governor). Since 2026-07-05 the books and their NOTIFY flags default
+ON (owner directive); tests that exercise the disabled paths set the env flags
+to false explicitly.
 """
 from __future__ import annotations
 
@@ -92,8 +94,10 @@ class _Telegram:
 
 # -- Book 1: warn_flip_entry rules ------------------------------------------------
 
-def test_warn_flip_disabled_returns_none():
-    os.environ.pop("Q15_V3_WARN_FLIP", None)
+def test_warn_flip_default_on_and_explicit_off(monkeypatch):
+    os.environ.pop("Q15_V3_WARN_FLIP", None)  # default is ON per owner directive
+    assert warn_flip_entry_decision(_warn_row(), source_system="ultoim_v2") is not None
+    monkeypatch.setenv("Q15_V3_WARN_FLIP", "false")
     assert warn_flip_entry_decision(_warn_row(), source_system="ultoim_v2") is None
 
 
@@ -170,7 +174,7 @@ def test_warn_flip_empirical_ev_and_auto_mute(monkeypatch):
 # -- Book 2: fav_10m rules ---------------------------------------------------------
 
 def test_fav_10m_disabled_and_interval_gates(monkeypatch):
-    os.environ.pop("Q15_V3_FAV10M", None)
+    monkeypatch.setenv("Q15_V3_FAV10M", "false")
     assert fav_10m_decision(_fav_row(), source_system="ultoim_v2") is None
     monkeypatch.setenv("Q15_V3_FAV10M", "true")
     assert fav_10m_decision(_fav_row(interval="13M"), source_system="ultoim_v2") is None
@@ -213,14 +217,14 @@ def test_fav_10m_auto_mute_needs_power(monkeypatch):
     assert late.threshold_profile["auto_mute_active"] is True
 
 
-def test_decisions_for_row_includes_fav_10m_only_when_enabled(monkeypatch):
+def test_decisions_for_row_includes_fav_10m_by_default(monkeypatch):
     row = _fav_row()
-    os.environ.pop("Q15_V3_FAV10M", None)
-    bots = {d.bot_name for d in decisions_for_row(row, source_system="ultoim_v2")}
-    assert BOT_FAV_10M not in bots
-    monkeypatch.setenv("Q15_V3_FAV10M", "true")
+    os.environ.pop("Q15_V3_FAV10M", None)  # default ON
     bots = {d.bot_name for d in decisions_for_row(row, source_system="ultoim_v2")}
     assert BOT_FAV_10M in bots
+    monkeypatch.setenv("Q15_V3_FAV10M", "false")
+    bots = {d.bot_name for d in decisions_for_row(row, source_system="ultoim_v2")}
+    assert BOT_FAV_10M not in bots
 
 
 # -- runtime: recording + notification --------------------------------------------
@@ -237,7 +241,7 @@ def test_record_exit_warning_row_records_without_notify(tmp_path, monkeypatch):
     tg = _Telegram()
     _reset_runtime(tmp_path, monkeypatch, tg)
     monkeypatch.setenv("Q15_V3_WARN_FLIP", "true")
-    os.environ.pop("Q15_V3_WARN_FLIP_NOTIFY", None)
+    monkeypatch.setenv("Q15_V3_WARN_FLIP_NOTIFY", "false")
 
     row_id = runtime.record_exit_warning_row(_warn_row())
     assert row_id is not None
@@ -286,7 +290,7 @@ def test_record_exit_warning_rejected_rows_recorded_never_notified(tmp_path, mon
 def test_record_exit_warning_disabled_book_is_noop(tmp_path, monkeypatch):
     tg = _Telegram()
     _reset_runtime(tmp_path, monkeypatch, tg)
-    os.environ.pop("Q15_V3_WARN_FLIP", None)
+    monkeypatch.setenv("Q15_V3_WARN_FLIP", "false")
     assert runtime.record_exit_warning_row(_warn_row()) is None
     led = runtime.get_ledger()
     assert [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_WARN_FLIP] == []
@@ -296,7 +300,7 @@ def test_fav_10m_notify_gating_and_message(tmp_path, monkeypatch):
     tg = _Telegram()
     _reset_runtime(tmp_path, monkeypatch, tg)
     monkeypatch.setenv("Q15_V3_FAV10M", "true")
-    os.environ.pop("Q15_V3_FAV10M_NOTIFY", None)
+    monkeypatch.setenv("Q15_V3_FAV10M_NOTIFY", "false")
 
     assert runtime.record_source_row(_fav_row(), source_system="ultoim_v2") > 0
     assert tg.sent == []  # accepted but NOTIFY off -> silent shadow
@@ -432,17 +436,25 @@ class Fav10mFeedTest(unittest.TestCase):
         self.assertEqual(source_row["record_kind"], "INTERVAL_RESEARCH_10M")
         self.assertEqual(source_row["entry_ask_cents"], 87.0)
 
-    def test_10m_capture_feed_default_off(self):
+    def test_10m_capture_feed_default_on_explicit_off(self):
         from tests.test_interval_research import _Canon, _analysis
 
-        os.environ.pop("Q15_V3_FAV10M_FEED", None)
+        os.environ.pop("Q15_V3_FAV10M_FEED", None)  # default ON now
         with patch("q15_upgrade.strategy_bots.runtime.record_source_row") as record:
             self.r.observe(
                 analyses={"ETH": _analysis(side="YES", ask=87.0)},
-                canonicals={"ETH": _Canon("KX10-OFF", 600, settlement_time=9000.0)},
+                canonicals={"ETH": _Canon("KX10-DEF", 600, settlement_time=9000.0)},
                 now=1000.0,
             )
-        record.assert_not_called()
+        record.assert_called_once()
+        with patch.dict(os.environ, {"Q15_V3_FAV10M_FEED": "false"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_source_row") as record:
+                self.r.observe(
+                    analyses={"ETH": _analysis(side="YES", ask=87.0)},
+                    canonicals={"ETH": _Canon("KX10-OFF", 600, settlement_time=9000.0)},
+                    now=1000.0,
+                )
+            record.assert_not_called()
 
 
 def test_fire_exit_warning_feeds_book1(tmp_path, monkeypatch):
@@ -504,7 +516,7 @@ def _top_pick_row(**over):
 def test_top_pick_decision_gates(monkeypatch):
     from q15_upgrade.strategy_bots.rules import BOT_TOP_PICK_13M, top_pick_13m_decision
 
-    os.environ.pop("Q15_V3_TOP_PICK_13M", None)
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "false")
     assert top_pick_13m_decision(_top_pick_row()) is None
     monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "true")
     assert top_pick_13m_decision(_top_pick_row(record_kind="DELIVERED_CANDIDATE")) is None
@@ -533,22 +545,22 @@ def test_record_top_pick_row_once_per_window_and_notify(tmp_path, monkeypatch):
     assert rows[0]["notification_status"] == "SENT"
     assert len(tg.sent) == 1
     text = tg.sent[0]
-    assert "V3 TOP PICK 13M" in text and "SOL NO" in text
-    assert "Call: SOL settles NO" in text
-    assert "market 68c" in text and "model 71%" in text
-    assert "Rank: 1 of 7" in text and "margin +6c over ETH" in text
-    assert "not a trade signal" in text
+    assert "V3 BEST TRADE 13M" in text and "SOL NO" in text
+    assert "BUY NO @ 68c" in text and "chase ≤ 69c" in text
+    assert "model 71%" in text
+    assert "Best of 7 this cycle" in text
+    assert "size SMALL" in text
     for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK", "Hourly Report"):
         assert marker not in text
 
 
-def test_record_top_pick_notify_default_off(tmp_path, monkeypatch):
+def test_record_top_pick_notify_explicit_off(tmp_path, monkeypatch):
     from q15_upgrade.strategy_bots.rules import BOT_TOP_PICK_13M
 
     tg = _Telegram()
     _reset_runtime(tmp_path, monkeypatch, tg)
     monkeypatch.setenv("Q15_V3_TOP_PICK_13M", "true")
-    os.environ.pop("Q15_V3_TOP_PICK_13M_NOTIFY", None)
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M_NOTIFY", "false")
 
     assert runtime.record_top_pick_row(_top_pick_row(window_key=56)) is not None
     led = runtime.get_ledger()
@@ -600,19 +612,22 @@ class TopPick13mRunnerTest(unittest.TestCase):
         record.assert_called_once()
         source_row = record.call_args.args[0]
         self.assertEqual(source_row["record_kind"], "TOP_PICK_13M")
-        self.assertEqual(source_row["asset"], "SOL")
+        self.assertEqual(source_row["asset"], "SOL")          # fav band beats all
         self.assertEqual(source_row["predicted_side"], "NO")
         self.assertEqual(source_row["top_pick_slate_n"], 3)
-        self.assertEqual(source_row["top_pick_runner_up_asset"], "ETH")
+        # profit ranking: SOL (+0.35 fav band) > BTC (60-70: -0.98) > ETH (70-80: -1.05)
+        self.assertEqual(source_row["top_pick_runner_up_asset"], "BTC")
+        self.assertTrue(source_row["top_pick_fav_band"])
+        self.assertAlmostEqual(source_row["top_pick_bucket_ev_cents"], 0.35)
 
     def test_flag_off_never_fires(self):
         analyses = self._capture_slate()
         from tests.test_interval_research import _Canon
 
-        os.environ.pop("Q15_V3_TOP_PICK_13M", None)
-        with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
-            canonicals = {a: _Canon(f"KX{a}", 760, settlement_time=9000.0) for a in analyses}
-            self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "false"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+                canonicals = {a: _Canon(f"KX{a}", 760, settlement_time=9000.0) for a in analyses}
+                self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
         record.assert_not_called()
 
     def test_min_assets_gate(self):

@@ -1431,8 +1431,8 @@ def test_runtime_suppresses_duplicate_hype_window_and_marks_muted_notification(t
     )
     second = dict(first, ticker="KXHYPE-2")
 
-    assert runtime.record_source_row(first, source_system="ultoim_v2") == 4
-    assert runtime.record_source_row(second, source_system="ultoim_v2") == 4
+    assert runtime.record_source_row(first, source_system="ultoim_v2") == 5
+    assert runtime.record_source_row(second, source_system="ultoim_v2") == 5
 
     led = runtime.get_ledger()
     assert led is not None
@@ -2000,7 +2000,7 @@ def test_tier_c_research_notification_requires_flag(tmp_path, monkeypatch):
         reason_codes="EXPENSIVE_NO_ADMIT,RISK_LOW",
     )
 
-    assert runtime.record_source_row(row, source_system="ultoim_v2") == 3
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
     led = runtime.get_ledger()
     assert led is not None
     tier = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_CONFIDENCE_TIER)
@@ -2116,7 +2116,7 @@ def test_hvf_wrapper_only_mode_mutes_generic_v3_notifications(tmp_path, monkeypa
     )
 
     assert runtime.owns_source_notification(row, source_system="ultoim_v2") is False
-    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 5
     led = runtime.get_ledger()
     assert led is not None
     hype = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_HYPE_YES)
@@ -2237,7 +2237,7 @@ def test_empirical_delivery_guard_downgrades_yes_and_late_interval(tmp_path, mon
         kalshi_taker_net_yes_volume_15s=None,
     )
 
-    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 5
     led = runtime.get_ledger()
     assert led is not None
     hype = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_HYPE_YES)
@@ -2267,7 +2267,7 @@ def test_empirical_delivery_guard_preserves_measured_positive_bnb_no(tmp_path, m
         kalshi_taker_net_yes_volume_15s=-1.0,
     )
 
-    assert runtime.record_source_row(row, source_system="ultoim_v2") == 4
+    assert runtime.record_source_row(row, source_system="ultoim_v2") == 5
     led = runtime.get_ledger()
     assert led is not None
     bnb_no = next(r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_BNB_NO)

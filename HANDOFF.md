@@ -25,6 +25,21 @@ Implemented (all default-OFF, paper-only, env-flagged):
   `Q15_V3_FAV10M_NOTIFY=false` until its pre-registered forward bar passes: n>=600 forward,
   Wilson-LB win > ask+fee breakeven, forward EV >= +1c).
 
+Also shipped THIS session - BEST TRADE 13M upgrade + defaults ON (owner directive):
+- Owner directive 2026-07-05: "always give me one [pick per cycle] ... highest profit" and
+  "make everything on by default". Implemented:
+- **Profit-ranked selection**: the per-window pick now ranks the slate by measured
+  per-price-bucket EV at 13M (oracle-graded, n=969 cycles; 85-90c favorite band +0.35c is
+  the only ~breakeven+ cell) with market-extremity and conviction tiebreaks. Card renamed
+  **"V3 BEST TRADE 13M"** with a BUY/chase line, cell label (FAV-BAND vs FALLBACK with its
+  measured EV), and "size SMALL / warn-flip cards outrank this" mode line. Fires every
+  cycle (~96/day when notify on).
+- **Defaults flipped ON** for the three new books and their NOTIFY flags:
+  Q15_V3_WARN_FLIP(+_NOTIFY), Q15_V3_FAV10M(+_FEED, +_NOTIFY), Q15_V3_TOP_PICK_13M(+_NOTIFY).
+  Older books (13M sniper etc.) keep their existing defaults. Delivery still requires
+  Q15_V3_TELEGRAM_ENABLED + chat id. Affected tests updated (fav_10m adds one decision row
+  per ultoim_v2 10M source row; disabled-path tests now set flags false explicitly).
+
 Also shipped THIS session - Top Pick 13M display alert:
 - **`top_pick_13m`**: one card per 15m window — the single most market-extreme call across
   the asset slate at the 13M mark (backtest top-1 accuracy ~74.4% ranking by |candidate

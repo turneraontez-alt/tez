@@ -547,7 +547,8 @@ def _thirteen_m_auto_mute_wilson_lb_min() -> float:
 # -- Book 1: warn-flip band entry (pre-registered 55-75c, discovery n=58) -----
 
 def _warn_flip_enabled() -> bool:
-    return _env_bool("Q15_V3_WARN_FLIP", False)
+    # Default ON by owner directive 2026-07-05 ("make everything on by default").
+    return _env_bool("Q15_V3_WARN_FLIP", True)
 
 
 def _warn_flip_band_lo() -> float:
@@ -587,7 +588,8 @@ WARN_FLIP_PRIOR_WIN_PROBABILITY = 0.828
 # -- Book 2: 10M favorite band (mined cell; forward bar before NOTIFY) --------
 
 def _fav_10m_enabled() -> bool:
-    return _env_bool("Q15_V3_FAV10M", False)
+    # Default ON by owner directive 2026-07-05 ("make everything on by default").
+    return _env_bool("Q15_V3_FAV10M", True)
 
 
 def _fav_10m_band_lo() -> float:
@@ -619,7 +621,8 @@ FAV_10M_PRIOR_WIN_PROBABILITY = 0.910  # backtest n=656, all four quarters posit
 # -- Top pick 13M: one display call per 15m window (NOT a trade signal) -------
 
 def _top_pick_13m_enabled() -> bool:
-    return _env_bool("Q15_V3_TOP_PICK_13M", False)
+    # Default ON by owner directive 2026-07-05 ("make everything on by default").
+    return _env_bool("Q15_V3_TOP_PICK_13M", True)
 
 
 TOP_PICK_13M_PRIOR_ACCURACY = 0.744  # backtest: top-1 by market extremity, n=970 windows
@@ -2388,6 +2391,8 @@ def top_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
         "extremity_cents": row.get("top_pick_extremity"),
         "runner_up_asset": row.get("top_pick_runner_up_asset"),
         "runner_up_extremity_cents": row.get("top_pick_runner_up_extremity"),
+        "bucket_ev_cents": _num(row.get("top_pick_bucket_ev_cents")),
+        "fav_band": bool(row.get("top_pick_fav_band")),
         "resolved_n": int(_num(row.get("top_pick_resolved_n")) or 0),
         "resolved_correct": _num(row.get("top_pick_correct")),
         "resolved_accuracy": _num(row.get("top_pick_accuracy")),

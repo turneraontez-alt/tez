@@ -75,16 +75,18 @@ def thirteen_m_sniper_notify_enabled() -> bool:
     return _bool("Q15_V3_13M_SNIPER_NOTIFY", False)
 
 
+# The three 2026-07-05 books default ON (owner directive: "make everything on by
+# default"). Delivery still requires the V3 Telegram channel itself to be enabled.
 def warn_flip_notify_enabled() -> bool:
-    return _bool("Q15_V3_WARN_FLIP_NOTIFY", False)
+    return _bool("Q15_V3_WARN_FLIP_NOTIFY", True)
 
 
 def fav_10m_notify_enabled() -> bool:
-    return _bool("Q15_V3_FAV10M_NOTIFY", False)
+    return _bool("Q15_V3_FAV10M_NOTIFY", True)
 
 
 def top_pick_notify_enabled() -> bool:
-    return _bool("Q15_V3_TOP_PICK_13M_NOTIFY", False)
+    return _bool("Q15_V3_TOP_PICK_13M_NOTIFY", True)
 
 
 def suppress_owned_source_notifications() -> bool:
