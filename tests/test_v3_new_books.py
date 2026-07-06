@@ -736,3 +736,91 @@ def test_v31_card_shows_grades():
     assert "Grade: ⛔ SKIP" in stext and "do not trade" in stext
     for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK", "Hourly Report"):
         assert marker not in stext
+
+
+# -- hard requirement: exactly one pick per 15m window --------------------------------
+
+class OnePickPerWindowTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        from q15_upgrade.interval_research.runner import IntervalResearchRunner
+        from tests.test_interval_research import _cfg
+
+        self.tmp = tempfile.mkdtemp()
+        self.r = IntervalResearchRunner(_cfg(self.tmp))
+
+    def _one_asset(self, sr, now, ticker="KXSOL"):
+        from tests.test_interval_research import _Canon, _analysis
+
+        a = _analysis(side="NO", ask=88.0)
+        a["quote"]["ask_cents"] = 88.0
+        self.r.observe(analyses={"SOL": a},
+                       canonicals={"SOL": _Canon(ticker, sr, settlement_time=9000.0)}, now=now)
+
+    def test_fallback_fires_with_thin_slate(self):
+        # only ONE asset scored at 13M: primary window (min_assets=3) never fires...
+        self._one_asset(780, 1000.0)
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "true"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+                self._one_asset(760, 1020.0)   # primary band, slate too thin -> no fire
+                record.assert_not_called()
+                self._one_asset(700, 1080.0)   # fallback band -> fires with slate of 1
+        record.assert_called_once()
+        row = record.call_args.args[0]
+        self.assertEqual(row["asset"], "SOL")
+        self.assertEqual(row["top_pick_phase"], "FALLBACK")
+        self.assertEqual(row["top_pick_slate_n"], 1)
+        self.assertIsNone(row["top_pick_runner_up_asset"])
+
+    def test_fallback_never_double_fires_after_primary(self):
+        from tests.test_interval_research import _Canon, _analysis
+
+        analyses = {}
+        for name, ask in (("BTC", 62.0), ("ETH", 71.0), ("SOL", 88.0)):
+            a = _analysis(side="NO", ask=ask); a["quote"]["ask_cents"] = ask
+            analyses[name] = a
+        canonicals = {n: _Canon(f"KX{n}", 780, settlement_time=9000.0) for n in analyses}
+        self.r.observe(analyses=analyses, canonicals=canonicals, now=1000.0)
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "true"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+                canonicals = {n: _Canon(f"KX{n}", 760, settlement_time=9000.0) for n in analyses}
+                self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)  # primary
+                canonicals = {n: _Canon(f"KX{n}", 700, settlement_time=9000.0) for n in analyses}
+                self.r.observe(analyses=analyses, canonicals=canonicals, now=1080.0)  # fallback band
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0]["top_pick_phase"], "PRIMARY")
+
+    def test_gap_notice_when_nothing_scorable(self):
+        from tests.test_interval_research import _Canon, _analysis
+
+        # capture never lands (model can't score) -> zero slate all the way down
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "true"}):
+            with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+                with patch("q15_upgrade.strategy_bots.runtime.send_top_pick_gap_notice") as gap:
+                    self.r.observe(analyses={"SOL": _analysis(available=False)},
+                                   canonicals={"SOL": _Canon("KXGAP", 610, settlement_time=9000.0)},
+                                   now=1000.0)
+        record.assert_not_called()
+        gap.assert_called_once()
+        self.assertEqual(gap.call_args.kwargs["window_key"], 10)
+
+
+def test_gap_notice_runtime_sends_once(tmp_path, monkeypatch):
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_TOP_PICK_13M_NOTIFY", "true")
+    assert runtime.send_top_pick_gap_notice(window_key=99) is True
+    assert runtime.send_top_pick_gap_notice(window_key=99) is False  # durable claim
+    assert len(tg.sent) == 1
+    assert "NO PICK" in tg.sent[0] and "data gap" in tg.sent[0]
+
+
+def test_fallback_card_annotation():
+    row = {
+        "bot_name": "top_pick_13m",
+        "asset": "SOL", "side": "NO", "ticker": "KXSOL-13M", "entry_ask_cents": 66.0,
+        "threshold_json": json.dumps({"grade": "CAUTION", "slate_n": 1, "pick_phase": "FALLBACK"}),
+    }
+    text = build_v3_alert(row)
+    assert "late/thin slate (fallback fire)" in text

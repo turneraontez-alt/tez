@@ -2395,6 +2395,7 @@ def top_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
         "fav_band": bool(row.get("top_pick_fav_band")),
         "grade": str(row.get("top_pick_grade") or "") or None,
         "grade_reason": str(row.get("top_pick_grade_reason") or "") or None,
+        "pick_phase": str(row.get("top_pick_phase") or "") or None,
         "ranker_version": "v3.1-graded",
         "resolved_n": int(_num(row.get("top_pick_resolved_n")) or 0),
         "resolved_correct": _num(row.get("top_pick_correct")),

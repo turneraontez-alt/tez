@@ -167,16 +167,37 @@ class IntervalResearchRunner:
             self._top_pick_done.pop(wk, None)
         for canonical in (canonicals or {}).values():
             sr = _num(getattr(canonical, "seconds_remaining", None))
-            if sr is None or not (740.0 <= sr <= 770.0):
+            # HARD REQUIREMENT (owner, 2026-07-06): exactly one pick per 15m window.
+            # Two-phase fire: PRIMARY in [740, 770] once min_assets have scored;
+            # FALLBACK in [600, 740) with whatever slate exists (>=1) so a thin or
+            # late slate can never silently skip a window. Below 600 with zero
+            # scorable captures, a NO-PICK data-gap notice keeps the cadence
+            # visible instead of silent.
+            if sr is None or not (600.0 <= sr <= 770.0):
                 continue
+            phase = "PRIMARY" if sr >= 740.0 else "FALLBACK"
             wk = window_key(getattr(canonical, "settlement_time", None), now)
             if wk is None or wk in self._top_pick_done:
                 continue
             slate = self.ledger.captures_for_window(self.config.model_version, "13M", wk)
             slate = [s for s in slate if s.get("yes_ask_cents") is not None
                      and str(s.get("predicted_side") or "").upper() in {"YES", "NO"}]
-            if len(slate) < min_assets:
+            if phase == "PRIMARY" and len(slate) < min_assets:
                 continue  # stragglers may still land; retry next cycle inside the band
+            if phase == "FALLBACK" and not slate:
+                if sr < 620.0:
+                    # deadline: nothing scorable this window — emit the gap notice once
+                    self._top_pick_done[wk] = now
+                    try:
+                        from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+                        strategy_bots_runtime.send_top_pick_gap_notice(
+                            window_key=wk,
+                            close_time=_num(getattr(canonical, "settlement_time", None)),
+                        )
+                    except Exception:  # noqa: BLE001 - notice must never break capture
+                        logger.warning("top-pick gap notice failed (ignored)", exc_info=True)
+                continue
             ranked = sorted(
                 slate,
                 key=lambda s: (
@@ -185,7 +206,8 @@ class IntervalResearchRunner:
                     -abs(float(s.get("calibrated_yes_probability") or 0.5) - 0.5),
                 ),
             )
-            top, second = ranked[0], ranked[1]
+            top = ranked[0]
+            second = ranked[1] if len(ranked) > 1 else None
             self._top_pick_done[wk] = now
             ask = top.get("entry_ask_cents")
             if ask is None:
@@ -206,10 +228,13 @@ class IntervalResearchRunner:
                 "spread_cents": top.get("spread_cents"),
                 "top_pick_slate_n": len(slate),
                 "top_pick_extremity": abs(float(top["yes_ask_cents"]) - 50.0),
-                "top_pick_runner_up_asset": second.get("asset"),
-                "top_pick_runner_up_extremity": abs(float(second["yes_ask_cents"]) - 50.0),
+                "top_pick_runner_up_asset": second.get("asset") if second else None,
+                "top_pick_runner_up_extremity": (
+                    abs(float(second["yes_ask_cents"]) - 50.0) if second else None
+                ),
                 "top_pick_bucket_ev_cents": self._bucket_ev(float(top["yes_ask_cents"])),
                 "top_pick_fav_band": 85.0 <= float(top["yes_ask_cents"]) < 90.0,
+                "top_pick_phase": phase,
             }
             grade, grade_reason = self._pick_grade(str(top.get("asset")), float(top["yes_ask_cents"]))
             source_row["top_pick_grade"] = grade

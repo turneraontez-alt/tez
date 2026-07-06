@@ -466,6 +466,30 @@ def record_top_pick_row(row: Mapping[str, Any]) -> int | None:
         return None
 
 
+def send_top_pick_gap_notice(*, window_key: int, close_time: float | None = None) -> bool:
+    """One 'NO PICK — data gap' card when a window produced nothing scorable.
+
+    Keeps the owner's hard one-card-per-window cadence visible instead of
+    silently skipping. Durable once-per-window claim; failures swallowed.
+    """
+    try:
+        ledger = get_ledger()
+        if ledger is None or not top_pick_notify_enabled():
+            return False
+        if not ledger.claim_meta_once(f"{STRATEGY_VERSION}:{BOT_TOP_PICK_13M}:gap:{int(window_key)}"):
+            return False
+        parts = [
+            "\U0001f3c6 <b>V3 BEST TRADE 13M — NO PICK</b>",
+            "No scorable capture reached the 13M mark for this window (data gap).",
+            "Cadence guard: this card exists so a silent skip is impossible.",
+        ]
+        get_telegram().send("\n".join(parts))
+        return True
+    except Exception:  # noqa: BLE001 - notice must never block anything
+        logger.warning("v3 top-pick gap notice failed (ignored)", exc_info=True)
+        return False
+
+
 def owns_source_notification(
     row: Mapping[str, Any],
     *,

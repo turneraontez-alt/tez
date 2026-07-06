@@ -407,6 +407,8 @@ def build_top_pick_alert(row: Mapping[str, Any]) -> str:
     pick_bits = []
     if slate_n is not None:
         pick_bits.append(f"Best of {_whole(slate_n)} this cycle")
+    if str(thresholds.get("pick_phase") or "").upper() == "FALLBACK":
+        pick_bits.append("late/thin slate (fallback fire)")
     bucket_ev = thresholds.get("bucket_ev_cents")
     if thresholds.get("fav_band"):
         pick_bits.append("cell: FAV-BAND (best measured cell at 13M)")

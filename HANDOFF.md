@@ -25,6 +25,17 @@ Implemented (all default-OFF, paper-only, env-flagged):
   `Q15_V3_FAV10M_NOTIFY=false` until its pre-registered forward bar passes: n>=600 forward,
   Wilson-LB win > ask+fee breakeven, forward EV >= +1c).
 
+Also shipped THIS session - hard one-pick-per-window guarantee for BEST TRADE 13M:
+- Owner requirement: exactly one 13M pick per 15m window. Two-phase fire in the
+  interval-research runner: PRIMARY in sr [740,770] once >= min_assets scored (unchanged);
+  FALLBACK in sr [600,740) fires with whatever slate exists (>=1 asset; card annotated
+  "late/thin slate (fallback fire)", profile `pick_phase`); below sr 620 with zero
+  scorable captures a one-shot "NO PICK - data gap" card keeps the cadence visible
+  (durable per-window claim; `send_top_pick_gap_notice`). Single-asset slates handled
+  (no runner-up). At-most-one unchanged via the existing claim.
+- Limits stated honestly: the guarantee holds while the app process runs; a dead process
+  or fully dead feed cannot self-report (the export watchdog gap remains open).
+
 Also shipped THIS session - v3.1: graded BEST TRADE cards (research-first, max-depth probed):
 - Research findings (n=1,078 top-picks, oracle-graded, all halves/quarters-validated):
   BTC+ETH picks are a stable losing cell (-3.92c/tr; negative in all four quarters, both
