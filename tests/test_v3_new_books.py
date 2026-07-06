@@ -669,3 +669,70 @@ class TopPick13mRunnerTest(unittest.TestCase):
                 canonicals = {"BTC": _Canon("KXBTC", 760, settlement_time=9000.0)}
                 self.r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
         record.assert_not_called()
+
+
+# -- v3.1: pick grades (ranking untouched, card labeled by measured cell) -----------
+
+def test_v31_pick_grade_matrix():
+    from q15_upgrade.interval_research.runner import IntervalResearchRunner as R
+
+    assert R._pick_grade("BTC", 87.0) == ("SKIP", "MAJOR_EFFICIENT_BOOK")
+    assert R._pick_grade("ETH", 65.0) == ("SKIP", "MAJOR_EFFICIENT_BOOK")
+    assert R._pick_grade("SOL", 87.0) == ("TRADE", "ALT_FAVORITE_BAND")
+    assert R._pick_grade("DOGE", 65.0) == ("CAUTION", "ALT_FALLBACK_BAND")
+    assert R._pick_grade("XRP", 92.0) == ("SKIP", "OUT_OF_MEASURED_BANDS")
+    assert R._pick_grade("BNB", 55.0) == ("SKIP", "OUT_OF_MEASURED_BANDS")
+
+
+def test_v31_skip_assets_env_override(monkeypatch):
+    from q15_upgrade.interval_research.runner import IntervalResearchRunner as R
+
+    monkeypatch.setenv("Q15_V3_TOP_PICK_SKIP_ASSETS", "BTC")
+    assert R._pick_grade("ETH", 87.0) == ("TRADE", "ALT_FAVORITE_BAND")
+    assert R._pick_grade("BTC", 87.0) == ("SKIP", "MAJOR_EFFICIENT_BOOK")
+
+
+def test_v31_runner_stamps_grade_on_source_row():
+    import tempfile
+
+    from q15_upgrade.interval_research.runner import IntervalResearchRunner
+    from tests.test_interval_research import _Canon, _analysis, _cfg
+
+    tmp = tempfile.mkdtemp()
+    r = IntervalResearchRunner(_cfg(tmp))
+    analyses = {
+        "BTC": _analysis(side="YES", ask=62.0),
+        "ETH": _analysis(side="NO", ask=71.0),
+        "SOL": _analysis(side="NO", ask=88.0),
+    }
+    for name, quote_ask in (("BTC", 62.0), ("ETH", 71.0), ("SOL", 88.0)):
+        analyses[name]["quote"]["ask_cents"] = quote_ask
+    canonicals = {a: _Canon(f"KX{a}", 780, settlement_time=9000.0) for a in analyses}
+    r.observe(analyses=analyses, canonicals=canonicals, now=1000.0)
+    with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "true"}):
+        with patch("q15_upgrade.strategy_bots.runtime.record_top_pick_row") as record:
+            canonicals = {a: _Canon(f"KX{a}", 760, settlement_time=9000.0) for a in analyses}
+            r.observe(analyses=analyses, canonicals=canonicals, now=1020.0)
+    row = record.call_args.args[0]
+    assert row["asset"] == "SOL"
+    assert row["top_pick_grade"] == "TRADE"
+    assert row["top_pick_grade_reason"] == "ALT_FAVORITE_BAND"
+
+
+def test_v31_card_shows_grades():
+    base = {
+        "bot_name": "top_pick_13m",
+        "asset": "SOL", "side": "NO", "ticker": "KXSOL-13M", "entry_ask_cents": 87.0,
+    }
+    trade = dict(base, threshold_json=json.dumps({"grade": "TRADE", "slate_n": 7}))
+    text = build_v3_alert(trade)
+    assert "Grade: ✅ TRADE" in text
+    caution = dict(base, entry_ask_cents=66.0,
+                   threshold_json=json.dumps({"grade": "CAUTION", "slate_n": 7}))
+    assert "Grade: ⚠️ CAUTION" in build_v3_alert(caution)
+    skip = dict(base, asset="BTC",
+                threshold_json=json.dumps({"grade": "SKIP", "grade_reason": "MAJOR_EFFICIENT_BOOK"}))
+    stext = build_v3_alert(skip)
+    assert "Grade: ⛔ SKIP" in stext and "do not trade" in stext
+    for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK", "Hourly Report"):
+        assert marker not in stext

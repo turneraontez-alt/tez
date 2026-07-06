@@ -391,6 +391,19 @@ def build_top_pick_alert(row: Mapping[str, Any]) -> str:
             else ""
         ),
     ]
+    grade = str(thresholds.get("grade") or "").upper()
+    if grade == "TRADE":
+        parts.append("Grade: ✅ TRADE — alt favorite band (best measured cell)")
+    elif grade == "CAUTION":
+        parts.append("Grade: ⚠️ CAUTION — fallback cell, thin edge; smallest size")
+    elif grade == "SKIP":
+        reason = str(thresholds.get("grade_reason") or "")
+        why = (
+            "BTC/ETH books are efficiently priced (−3c/tr historical)"
+            if reason == "MAJOR_EFFICIENT_BOOK"
+            else "outside measured bands"
+        )
+        parts.append(f"Grade: ⛔ SKIP — {why}; shown for the record, do not trade")
     pick_bits = []
     if slate_n is not None:
         pick_bits.append(f"Best of {_whole(slate_n)} this cycle")

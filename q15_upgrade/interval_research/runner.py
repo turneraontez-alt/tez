@@ -134,6 +134,29 @@ class IntervalResearchRunner:
                 return ev
         return -3.52
 
+    # v3.1 grade (2026-07-06): the ranking is untouched; the card is labeled by
+    # its measured cell so the owner trades the good cells and skips the stable
+    # loser. Receipts (n=1078, chronological halves):
+    #   SKIP  (BTC/ETH pick, or ask outside fav/60-80): -2.90c/tr, h1 -2.96 / h2 -2.84
+    #   TRADE (alt in the 85-90c favorite band):        +1.21c/tr
+    #   CAUTION (alt at 60-80c fallback):               +1.55c/tr (decays h2)
+    # BTC/ETH are graded SKIP at any price: their books are efficiently priced
+    # (win rate below breakeven in every bucket; negative in all four quarters).
+    @staticmethod
+    def _skip_assets() -> set[str]:
+        raw = os.environ.get("Q15_V3_TOP_PICK_SKIP_ASSETS", "BTC,ETH")
+        return {part.strip().upper() for part in raw.split(",") if part.strip()}
+
+    @classmethod
+    def _pick_grade(cls, asset: str, ask: float) -> tuple[str, str]:
+        if str(asset).upper() in cls._skip_assets():
+            return ("SKIP", "MAJOR_EFFICIENT_BOOK")
+        if 85.0 <= ask < 90.0:
+            return ("TRADE", "ALT_FAVORITE_BAND")
+        if 60.0 <= ask < 80.0:
+            return ("CAUTION", "ALT_FALLBACK_BAND")
+        return ("SKIP", "OUT_OF_MEASURED_BANDS")
+
     def _maybe_top_pick_13m(self, canonicals: Mapping[str, Any], now: float) -> None:
         if not _env_bool("Q15_V3_TOP_PICK_13M", True):
             return
@@ -188,6 +211,9 @@ class IntervalResearchRunner:
                 "top_pick_bucket_ev_cents": self._bucket_ev(float(top["yes_ask_cents"])),
                 "top_pick_fav_band": 85.0 <= float(top["yes_ask_cents"]) < 90.0,
             }
+            grade, grade_reason = self._pick_grade(str(top.get("asset")), float(top["yes_ask_cents"]))
+            source_row["top_pick_grade"] = grade
+            source_row["top_pick_grade_reason"] = grade_reason
             try:
                 from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
 

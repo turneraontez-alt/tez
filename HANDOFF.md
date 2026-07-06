@@ -25,6 +25,25 @@ Implemented (all default-OFF, paper-only, env-flagged):
   `Q15_V3_FAV10M_NOTIFY=false` until its pre-registered forward bar passes: n>=600 forward,
   Wilson-LB win > ask+fee breakeven, forward EV >= +1c).
 
+Also shipped THIS session - v3.1: graded BEST TRADE cards (research-first, max-depth probed):
+- Research findings (n=1,078 top-picks, oracle-graded, all halves/quarters-validated):
+  BTC+ETH picks are a stable losing cell (-3.92c/tr; negative in all four quarters, both
+  assets independently, every hour block; bootstrap P(worse)=96.3%; NOT a depth proxy).
+  Mechanism confirmed in calibration curves: majors' win rate sits below ask+fee breakeven
+  in every price bucket (efficient books); alts sit at/above (the harvested inefficiency).
+  Hours effect (06-12 UTC) DOWNGRADED to hypothesis (h1 flips sign under boundary shifts).
+  Rank-demotion of majors tested and REJECTED (+0.29c vs +0.25c - replacement alts in
+  majors-led windows are junk); v3.1 therefore keeps the ranking untouched and GRADES the
+  card: TRADE (alt fav band, +1.21c), CAUTION (alt 60-80c, +1.55c pooled, decays),
+  SKIP (majors or out-of-band, -2.90c with h1 -2.96 / h2 -2.84 - the stablest cell found).
+  Traded set (non-SKIP): +1.49c/tr at ~58/day vs +0.25c baseline; card count unchanged (~81/day).
+- Implementation: `_pick_grade` in the interval-research runner (env
+  `Q15_V3_TOP_PICK_SKIP_ASSETS=BTC,ETH`), grade fields on the source row + threshold
+  profile (`ranker_version: v3.1-graded`), grade line on the card
+  (✅ TRADE / ⚠️ CAUTION / ⛔ SKIP with reason). Ranking, cadence, books untouched.
+- Pre-registered forward bars: SKIP cell must stay <= 0c at forward n>=150 (else grades
+  recalibrate); H2 (06-12 UTC) needs >= 3c forward gap at n>=150 before any use.
+
 Also shipped THIS session - BEST TRADE 13M upgrade + defaults ON (owner directive):
 - Owner directive 2026-07-05: "always give me one [pick per cycle] ... highest profit" and
   "make everything on by default". Implemented:
