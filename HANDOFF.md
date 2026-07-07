@@ -1,5 +1,38 @@
 # Session handoff
 
+## Shipped THIS session - drift-hypothesis shadow recorder (record-only forward test)
+Run time: 2026-07-06.
+
+Origin: a 34-agent parallel constrained-box strategy search (13M / ask 65-73 / alt / taker,
+one-pick-per-interval, shared walk-forward harness) tested 113 hypotheses. 23 claimed
+survivors, 2 passed the automated leak-audit, but MY adversarial re-verification overturned
+both: S1 (depth/mom/dq carve-out stack) collapses on ablation (overfit); the survivor list
+size (23/113) matches the false-discovery rate of pure noise. Decomposing the one plausible
+lead (S2 = near-strike+tight-spread+low-flip) revealed the real mechanism: a YES-side drift
+effect. Near-strike flips YES from -0.6pts to +6.5pts vs breakeven and does NOTHING for NO
+(-3.8 both ways); +low-flip sharpens YES to +8.9pts, diversified across DOGE/BNB/XRP. Economic
+story: at-the-money contracts are max-sensitive to the final 13min of price drift; crypto
+carries a small upward intraday drift; so near-strike YES is underpriced by the 65-73 market.
+Mechanism-first, not pattern-first -- the best candidate the box produced. STILL in-sample
+(the YES-narrowing was itself a post-hoc cut); only forward data can confirm.
+
+Implemented `q15_upgrade/drift_shadow.py` (record-only, own SQLite ledger, NEVER trades/notifies):
+- Frozen rule: 13M, alt, ask 65-73, distance_sigma<=3e-5 (~34th pctile), flip<=30, side YES;
+  one pick/interval ranked by model-market disagreement; else NO PICK. ~9 picks/day.
+- Pre-registered bars in scoreboard(): KILL at n>=40 if EV<=0 or WR<breakeven; PROMOTE at
+  n>=150 if EV>=+2c AND Wilson-LB>breakeven AND no day>40% of pnl AND >=3 assets.
+- Wired into interval_research runner: observe (740-770s band, dedup per window) + resolve
+  (grades on champion settlement events). Env-flagged (Q15_DRIFT_SHADOW*, default ON record-only).
+- Module replay on the full tape reproduces the analysis: n=123, win 78.9% vs breakeven 70.1%,
+  EV +8.73c, Wilson-LB 0.708>breakeven, 4 assets, status ACCRUING (n<150 promote gate).
+
+Verification:
+- `python -m pytest tests/ -q` -> 1818 passed, 4 skipped (9 new in tests/test_drift_shadow.py:
+  fee/pnl, rule-gate matrix, one-best-per-window idempotency, resolve grading, scoreboard bars).
+- `python tools/config_audit.py --check` -> OK, 973 env vars documented/baselined.
+- Deploy-pending: on host pull+restart to start the forward sample; read scoreboard() /
+  drift_picks table after ~1-2 weeks. KILL or PROMOTE is decided by the frozen bars, not by hand.
+
 ## Shipped THIS session - V3 Books 1 & 2 (warn-flip band entry + 10M favorite band)
 Run time: 2026-07-05.
 

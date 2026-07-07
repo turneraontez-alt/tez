@@ -108,8 +108,36 @@ class IntervalResearchRunner:
                         if self.ledger.record_capture(row):
                             self._feed_v3_marks(row, capture_analysis)
                 self._maybe_top_pick_13m(canonicals, now)
+                self._maybe_drift_shadow(canonicals, now)
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
+
+    def _maybe_drift_shadow(self, canonicals: Mapping[str, Any], now: float) -> None:
+        """Feed the record-only drift-hypothesis forward test (near-strike YES).
+
+        Fires once per window in the same [740, 770]s band as the top pick, using
+        the window's full 13M slate. Record-only; never trades or notifies."""
+        try:
+            from q15_upgrade.drift_shadow import get_recorder
+        except Exception:  # noqa: BLE001 - optional research recorder
+            return
+        rec = get_recorder()
+        if rec is None:
+            return
+        for canonical in (canonicals or {}).values():
+            sr = _num(getattr(canonical, "seconds_remaining", None))
+            if sr is None or not (740.0 <= sr <= 770.0):
+                continue
+            wk = window_key(getattr(canonical, "settlement_time", None), now)
+            if wk is None:
+                continue
+            slate = self.ledger.captures_for_window(self.config.model_version, "13M", wk)
+            if slate:
+                rec.observe_window(
+                    model_version=self.config.model_version, window_key=wk,
+                    close_time=_num(getattr(canonical, "settlement_time", None)),
+                    slate=slate, now=now)
+            break  # one window per cycle is enough; dedup is by (mv, window_key)
 
     # -- best trade 13M: one pick per 15m window (owner-requested, always fires) --
     # Fires once per window shortly after the 13M captures land (sr 740-770).
@@ -310,6 +338,13 @@ class IntervalResearchRunner:
                     n += self.ledger.resolve(self.config.model_version, str(ticker), str(result), now)
         except Exception:
             logger.debug("interval-research resolve failed (ignored)", exc_info=True)
+        try:
+            from q15_upgrade.drift_shadow import get_recorder
+            rec = get_recorder()
+            if rec is not None:
+                rec.resolve(result_events, now)
+        except Exception:  # noqa: BLE001 - drift recorder must never break resolve
+            logger.debug("drift-shadow resolve failed (ignored)", exc_info=True)
         return n
 
 
