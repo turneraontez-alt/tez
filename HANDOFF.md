@@ -1,5 +1,43 @@
 # Session handoff
 
+## Shipped THIS session - drift recorder v2 (audited volume expansion, 3 nested books)
+Run time: 2026-07-07.
+
+Origin: owner asked for definitive ways to get MORE picks or HIGHER win% on the drift book.
+Ran (a) an inline beta study, (b) an inline ablation study, (c) a 18-agent parallel
+improvement workflow (6 angles x 38 hypotheses + adversarial audits). Findings:
+
+CONFIRMED (audited, all-quarters-positive, ablation-tolerant, permutation p<0.01):
+- Ask-floor widening to 60 + taking ALL qualifying picks (not top-1): the volume book
+  60-73/all-quals = n=285 on tape, ~19.6/day (2.3x), EV +5.95c full, quarters all positive.
+- Dropping the one-per-interval cap alone: +13% volume at EQUAL-or-better EV (extras
+  standalone-positive in both halves).
+DEFINITIVE NEGATIVES (equally binding — protect the book):
+- No aggregate up-drift in the tape (50.1% YES): the mechanism is NOT unconditional drift.
+  Daily P&L corr +0.63 with day's %YES => the book is free optionality on alt-up days
+  (~breakeven on down days, prints on up days).
+- BTC regime gate REDUNDANT (baseline already implicitly selects BTC-up windows; anti-gate
+  cohort n=11/127); gates only remove picks.
+- NO-side mirror FAILS even in BTC-down regimes: the effect is YES-specific.
+- cheap-YES (buying YES against the model's NO near strike): all 8 variants train-negative.
+  The edge REQUIRES model-side agreement — it is model-skill x near-strike x YES.
+- dist<=3e-5 and fp<=30 are hard boundaries: each relaxation's marginal cohort loses in
+  both halves. 74-80 ask ceiling is a train-mirage (train +8.4 -> test -4.6).
+
+Implemented drift_shadow v2 (record-only, never trades/notifies):
+- Records the 60-80 SUPERSET envelope, every qualifying pick per interval with pick_rank;
+  UNIQUE(model_version, window_key, ticker); v1 schema auto-migrates aside (drift_picks_v1).
+- scoreboard() grades THREE nested books from one stream, each vs frozen bars:
+  primary 65-73 top-1 (2026-07-06 bars UNCHANGED: KILL n>=40 / PROMOTE n>=150 + guards),
+  volume 60-73 all (2026-07-07 bars: KILL n>=60 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 &
+  WLB>be), diag 74-80 (no bar; settles the mirage question forward).
+- Module replay reproduces research exactly: primary n=127/+8.57c, volume n=285/+5.95c,
+  diag n=47/+2.04c.
+
+Verification: `python -m pytest tests/ -q` -> 1820 passed, 4 skipped (11 drift tests incl.
+migration + nested-book slicing). config_audit --check OK (973 vars).
+Deploy-pending: host pull+restart; volume book accrues ~19.6 picks/day -> n=150 in ~8 days.
+
 ## Shipped THIS session - drift-hypothesis shadow recorder (record-only forward test)
 Run time: 2026-07-06.
 

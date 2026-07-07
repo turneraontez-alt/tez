@@ -1,27 +1,30 @@
-"""Drift-hypothesis shadow recorder (13M / ask 65-73 / alt / taker, record-only).
+"""Drift-hypothesis shadow recorder (13M near-strike YES, record-only).
 
-Forward-tests ONE pre-registered hypothesis discovered by the constrained
-strategy search (see HANDOFF): near-strike YES contracts benefit from crypto's
-small upward intraday drift, so at the 13M mark an at-the-money YES pick with
-low flip-risk is underpriced by the 65-73 market. This module records every
-qualifying pick (one per 15m interval) and grades it on settlement so the edge
-can be confirmed or killed on data the search never saw.
+Forward-tests the pre-registered near-strike-YES hypothesis (see HANDOFF): at
+the 13M mark, at-the-money alt YES contracts with low flip-risk are underpriced.
+It NEVER trades, notifies, or touches any live path. Pure observation: it writes
+its own SQLite ledger and exposes a scoreboard with frozen kill/promote bars.
 
-It NEVER trades, notifies, or touches any live path. Pure observation, exactly
-like interval_research: it writes to its own SQLite ledger and exposes a
-scoreboard with the frozen kill/promote bars.
+v2 (2026-07-07): the recorder captures a SUPERSET envelope (ask 60-80, every
+qualifying candidate per interval, with pick_rank) so that THREE nested books
+grade simultaneously from one stream, each against its own frozen bar:
 
-Pre-registered rule (frozen 2026-07-06; env-overridable for research only):
-  interval == 13M, asset not in {BTC, ETH}, ask in [65, 73],
-  distance_sigma <= 3e-5 (near-strike), flip_probability <= 30, side == YES.
-  If multiple candidates qualify in an interval, take the highest model-vs-market
-  disagreement (side_prob - ask/100); one pick per interval; else NO PICK.
+  Book P (primary; pre-registered 2026-07-06, bars UNCHANGED):
+    ask 65-73, top-1 per interval by disagreement (pick_rank==1 within 65-73).
+    KILL n>=40 if EV<=0 or WR<breakeven; PROMOTE n>=150 if EV>=+2c AND
+    Wilson-95 LB > breakeven AND no day >40% of P&L AND >=3 assets.
+  Book V (volume expansion; pre-registered 2026-07-07 after a 38-hypothesis
+    parallel search + adversarial audit — ask-floor widening to 60 confirmed,
+    multi-pick confirmed; the 74-80 ceiling was a train-mirage and is EXCLUDED):
+    ask 60-73, ALL qualifying picks. KILL n>=60 if EV<=0 or WR<breakeven;
+    PROMOTE n>=150 if EV>=+2c AND Wilson-95 LB > breakeven.
+  Book X (diagnostic only, no bar, never tradeable from this data alone):
+    ask 74-80 rows — recorded to settle the train-mirage question forward.
 
-Pre-registered decision bars (evaluated on FORWARD, post-2026-07-06 rows):
-  KILL    at n>=40  if EV/pick <= 0 or win rate < breakeven.
-  PROMOTE at n>=150 if EV/pick >= +2c AND Wilson-95 lower bound on win rate
-          > breakeven AND no single day > 40% of total P&L AND >= 3 distinct
-          assets contribute.
+Core rule (all books): asset not in {BTC, ETH}, side == YES,
+distance_sigma <= 3e-5 (near-strike), flip_probability <= 30 — every one of
+these conditions is load-bearing by ablation; dist/fp relaxations were tested
+and their marginal cohorts LOSE (see HANDOFF 2026-07-07).
 """
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ import sqlite3
 import time
 from typing import Any, Mapping, Sequence
 
-FEATURES_VERSION = "drift-shadow-v1"
+FEATURES_VERSION = "drift-shadow-v2"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS drift_picks (
@@ -50,12 +53,13 @@ CREATE TABLE IF NOT EXISTS drift_picks (
     side_prob REAL,
     disagreement REAL,
     slate_n INTEGER,
+    pick_rank INTEGER,
     features_version TEXT NOT NULL,
     official_result TEXT,
     resolved_at REAL,
     correct INTEGER,
     pnl_cents REAL,
-    UNIQUE(model_version, window_key)
+    UNIQUE(model_version, window_key, ticker)
 );
 """
 
@@ -122,20 +126,34 @@ class DriftShadow:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15.0)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._migrate_v1_locked()
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
         except sqlite3.Error:
             self._conn = None
             self.enabled = False
 
+    def _migrate_v1_locked(self) -> None:
+        """v1 -> v2: the v1 table had UNIQUE(model_version, window_key) (top-1 only)
+        and no pick_rank. Rename it aside so v2's superset schema applies; v1 rows
+        stay queryable in drift_picks_v1 (at most ~1 day of data existed)."""
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='drift_picks'"
+        ).fetchone()
+        if row and "UNIQUE(model_version, window_key)" in str(row["sql"]) \
+                and "ticker" not in str(row["sql"]).split("UNIQUE", 1)[1]:
+            self._conn.execute("ALTER TABLE drift_picks RENAME TO drift_picks_v1")
+
     # -- rule parameters (frozen defaults; env override for research only) -----
+    # v2 records the 60-80 SUPERSET envelope; books P (65-73 top-1) and
+    # V (60-73 all) are sliced from the recorded rows at scoreboard time.
     @property
     def ask_lo(self) -> float:
-        return _envf("Q15_DRIFT_SHADOW_ASK_LO", 65.0)
+        return _envf("Q15_DRIFT_SHADOW_ASK_LO", 60.0)
 
     @property
     def ask_hi(self) -> float:
-        return _envf("Q15_DRIFT_SHADOW_ASK_HI", 73.0)
+        return _envf("Q15_DRIFT_SHADOW_ASK_HI", 80.0)
 
     @property
     def dist_max(self) -> float:
@@ -180,31 +198,35 @@ class DriftShadow:
     def observe_window(self, *, model_version: str, window_key: int,
                        close_time: float | None, slate: Sequence[Mapping[str, Any]],
                        now: float) -> bool:
-        """Evaluate one 15m interval's 13M slate. Records the single best
-        qualifying pick (idempotent per window). Returns True if a pick was
-        recorded. Never raises."""
+        """Evaluate one 15m interval's 13M slate. Records EVERY qualifying
+        candidate in the recording envelope, ranked by disagreement (pick_rank
+        1 = best). Idempotent per (window, ticker). Returns True if any new row
+        was recorded. Never raises."""
         if not self.enabled or self._conn is None:
             return False
         try:
             quals = [c for c in slate if self._qualifies(c)]
             if not quals:
                 return False
-            top = max(quals, key=self._disagreement)
-            cal = _num(top.get("calibrated_yes_probability"))
-            ask = _num(top.get("yes_ask_cents"))
-            side = str(top.get("predicted_side") or "").upper()
-            side_prob = (cal if side == "YES" else 1.0 - cal) if cal is not None else None
-            cur = self._conn.execute(
-                "INSERT OR IGNORE INTO drift_picks (created_at, model_version, asset,"
-                " ticker, window_key, close_time, side, ask_cents, distance_sigma,"
-                " flip_probability, calibrated_yes_probability, side_prob, disagreement,"
-                " slate_n, features_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (now, model_version, str(top.get("asset")), str(top.get("ticker")),
-                 int(window_key), close_time, side, ask,
-                 _num(top.get("distance_from_strike")), _num(top.get("flip_probability")),
-                 cal, side_prob, self._disagreement(top), len(quals), FEATURES_VERSION))
+            quals.sort(key=self._disagreement, reverse=True)
+            wrote = False
+            for rank, cand in enumerate(quals, start=1):
+                cal = _num(cand.get("calibrated_yes_probability"))
+                ask = _num(cand.get("yes_ask_cents"))
+                side = str(cand.get("predicted_side") or "").upper()
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO drift_picks (created_at, model_version, asset,"
+                    " ticker, window_key, close_time, side, ask_cents, distance_sigma,"
+                    " flip_probability, calibrated_yes_probability, side_prob, disagreement,"
+                    " slate_n, pick_rank, features_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
+                     int(window_key), close_time, side, ask,
+                     _num(cand.get("distance_from_strike")), _num(cand.get("flip_probability")),
+                     cal, (cal if side == "YES" else 1.0 - cal) if cal is not None else None,
+                     self._disagreement(cand), len(quals), rank, FEATURES_VERSION))
+                wrote = wrote or cur.rowcount > 0
             self._conn.commit()
-            return cur.rowcount > 0
+            return wrote
         except sqlite3.Error:
             return False
 
@@ -236,29 +258,31 @@ class DriftShadow:
             pass
         return graded
 
-    def scoreboard(self) -> dict[str, Any]:
-        """Live standing vs the frozen pre-registered bars."""
-        if not self.enabled or self._conn is None:
-            return {"available": False, "enabled": self.enabled}
+    def _book_rows(self, lo: float, hi: float, top1: bool) -> list[sqlite3.Row]:
         rows = self._conn.execute(
-            "SELECT asset, ask_cents, correct, pnl_cents, created_at FROM drift_picks"
-            " WHERE official_result IS NOT NULL").fetchall()
+            "SELECT window_key, asset, ask_cents, disagreement, correct, pnl_cents,"
+            " created_at FROM drift_picks WHERE official_result IS NOT NULL"
+            " AND ask_cents >= ? AND ask_cents <= ?", (lo, hi)).fetchall()
+        if not top1:
+            return rows
+        best: dict[int, sqlite3.Row] = {}
+        for r in rows:
+            wk = int(r["window_key"])
+            cur = best.get(wk)
+            if cur is None or (r["disagreement"] or -9) > (cur["disagreement"] or -9):
+                best[wk] = r
+        return list(best.values())
+
+    def _grade_book(self, rows: list[sqlite3.Row], *, kill_n: int, promote_n: int,
+                    concentration_guards: bool) -> dict[str, Any]:
         n = len(rows)
-        pending = self._conn.execute(
-            "SELECT COUNT(*) FROM drift_picks WHERE official_result IS NULL").fetchone()[0]
-        base = {"available": True, "enabled": True, "features_version": FEATURES_VERSION,
-                "rule": {"ask": [self.ask_lo, self.ask_hi], "dist_max": self.dist_max,
-                         "flip_max": self.flip_max, "side": self.side},
-                "n_resolved": n, "n_pending": int(pending)}
         if n == 0:
-            base.update({"status": "empty"})
-            return base
+            return {"n_resolved": 0, "status": "empty"}
         correct = sum(1 for r in rows if r["correct"])
         total_pnl = sum(float(r["pnl_cents"]) for r in rows)
         wr = correct / n
         breakeven = sum(r["ask_cents"] + taker_fee_cents(r["ask_cents"]) for r in rows) / n / 100.0
         wlb = wilson_lower(correct, n)
-        # concentration guards
         by_day: dict[str, float] = {}
         for r in rows:
             day = time.strftime("%Y-%m-%d", time.gmtime(r["created_at"]))
@@ -267,20 +291,45 @@ class DriftShadow:
                         abs(total_pnl)) if total_pnl else None
         assets = {str(r["asset"]) for r in rows}
         ev = total_pnl / n
-        # frozen bars
-        kill = n >= 40 and (ev <= 0 or wr < breakeven)
-        promote = (n >= 150 and ev >= 2.0 and wlb is not None and wlb > breakeven
-                   and (max_day_frac is None or max_day_frac <= 0.40) and len(assets) >= 3)
+        kill = n >= kill_n and (ev <= 0 or wr < breakeven)
+        promote = (n >= promote_n and ev >= 2.0 and wlb is not None and wlb > breakeven)
+        if concentration_guards:
+            promote = promote and (max_day_frac is None or max_day_frac <= 0.40) and len(assets) >= 3
         status = "KILL" if kill else ("PROMOTE" if promote else "ACCRUING")
-        base.update({
-            "status": status, "win_rate": round(wr, 3), "breakeven_rate": round(breakeven, 3),
-            "wilson_lb": wlb and round(wlb, 3), "ev_cents": round(ev, 2),
-            "total_pnl_cents": round(total_pnl, 0), "n_assets": len(assets),
-            "max_day_pnl_frac": max_day_frac and round(max_day_frac, 2),
-            "bars": {"kill_at_n": 40, "promote_at_n": 150,
-                     "promote_needs": "ev>=2 & wilson_lb>breakeven & max_day<=40% & assets>=3"},
-        })
-        return base
+        return {"n_resolved": n, "status": status, "win_rate": round(wr, 3),
+                "breakeven_rate": round(breakeven, 3), "wilson_lb": wlb and round(wlb, 3),
+                "ev_cents": round(ev, 2), "total_pnl_cents": round(total_pnl, 0),
+                "n_assets": len(assets),
+                "max_day_pnl_frac": max_day_frac and round(max_day_frac, 2)}
+
+    def scoreboard(self) -> dict[str, Any]:
+        """Three nested books graded from the one recorded stream, each against
+        its own frozen bar (see module docstring)."""
+        if not self.enabled or self._conn is None:
+            return {"available": False, "enabled": self.enabled}
+        pending = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_picks WHERE official_result IS NULL").fetchone()[0]
+        return {
+            "available": True, "enabled": True, "features_version": FEATURES_VERSION,
+            "core_rule": {"envelope_ask": [self.ask_lo, self.ask_hi],
+                          "dist_max": self.dist_max, "flip_max": self.flip_max,
+                          "side": self.side},
+            "n_pending": int(pending),
+            "book_primary_65_73_top1": self._grade_book(
+                self._book_rows(65.0, 73.0, top1=True),
+                kill_n=40, promote_n=150, concentration_guards=True),
+            "book_volume_60_73_all": self._grade_book(
+                self._book_rows(60.0, 73.0, top1=False),
+                kill_n=60, promote_n=150, concentration_guards=False),
+            "book_diag_74_80": self._grade_book(
+                self._book_rows(74.0, 80.0, top1=False),
+                kill_n=10**9, promote_n=10**9, concentration_guards=False),
+            "bars": {
+                "primary": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be & day<=40% & assets>=3",
+                "volume": "KILL n>=60 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be",
+                "diag_74_80": "no bar; diagnostic only (train-mirage check)",
+            },
+        }
 
     def health(self, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
