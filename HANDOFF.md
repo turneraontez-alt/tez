@@ -1,5 +1,30 @@
 # Session handoff
 
+## Shipped THIS session - drift recorder: disagreement-weighted sizing (record-only)
+Run time: 2026-07-07 (same session as v2, follow-on).
+
+Origin: owner asked for accuracy-without-profit-loss levers on the drift book. 28 levers
+tested (16 exclusion/filter + 12 structural). The question CLOSED with a structural result:
+every slice of the volume book is net-profitable on the tape, so ANY exclusion filter lowers
+total profit — accuracy and profit are provably a trade-off inside this book (22/77 losers
+are settlement shocks; accuracy ceiling ~81%). Exactly ONE lever raised profit without
+touching accuracy or trade count: disagreement-tercile sizing — 1.5x the top tercile, 0.5x
+the bottom. Tape: +317c (+19%) at identical trades/accuracy; OOS check (train-fit terciles
+applied to the held-out half): +9.47 vs +9.26 c/unit. In-flight 7M exits, by contrast,
+DESTROY value here (TP90 -365c, CUT40 -1,127c) — do not add exit logic.
+
+Implemented in `q15_upgrade/drift_shadow.py` (still record-only, bars UNTOUCHED):
+- Each row now records `size_weight` (1.5/1.0/0.5) from FROZEN train-fit tercile thresholds
+  lo=-0.1157 / hi=-0.0917 (`Q15_DRIFT_SHADOW_W_LO_T`/`_W_HI_T`, research-only overrides).
+- scoreboard() reports `weighted_pnl_cents` + `weighted_ev_per_unit_cents` per book
+  ALONGSIDE flat; kill/promote bars still grade FLAT numbers only (sizing is observational).
+- Column migration: existing v2 DBs (host runs 519fb29) gain `size_weight` via ALTER TABLE;
+  pre-existing NULL rows read as weight 1.0.
+
+Verification: `python -m pytest tests/ -q` -> 1824 passed, 4 skipped (15 drift tests incl.
+tercile boundaries, weighted-scoreboard math, v2-pre-sizing column migration).
+config_audit --check OK (975 vars). Deploy-pending: host pull+restart.
+
 ## Shipped THIS session - drift recorder v2 (audited volume expansion, 3 nested books)
 Run time: 2026-07-07.
 

@@ -25,6 +25,13 @@ Core rule (all books): asset not in {BTC, ETH}, side == YES,
 distance_sigma <= 3e-5 (near-strike), flip_probability <= 30 — every one of
 these conditions is load-bearing by ablation; dist/fp relaxations were tested
 and their marginal cohorts LOSE (see HANDOFF 2026-07-07).
+
+Sizing (2026-07-07, the one lever of 28 tested that raised profit without
+touching accuracy): each row records size_weight — 1.5x when disagreement is
+above the frozen train-fit high tercile (-0.0917), 0.5x below the low tercile
+(-0.1157), else 1.0x. On the tape: +19% total P&L at identical trades; OOS
+check (train-fit thresholds on the test half) +9.47 vs +9.26 c/unit. The
+scoreboard reports each book's weighted P&L alongside flat.
 """
 from __future__ import annotations
 
@@ -54,6 +61,7 @@ CREATE TABLE IF NOT EXISTS drift_picks (
     disagreement REAL,
     slate_n INTEGER,
     pick_rank INTEGER,
+    size_weight REAL,
     features_version TEXT NOT NULL,
     official_result TEXT,
     resolved_at REAL,
@@ -128,6 +136,7 @@ class DriftShadow:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._migrate_v1_locked()
             self._conn.executescript(_SCHEMA)
+            self._migrate_columns_locked()
             self._conn.commit()
         except sqlite3.Error:
             self._conn = None
@@ -143,6 +152,13 @@ class DriftShadow:
         if row and "UNIQUE(model_version, window_key)" in str(row["sql"]) \
                 and "ticker" not in str(row["sql"]).split("UNIQUE", 1)[1]:
             self._conn.execute("ALTER TABLE drift_picks RENAME TO drift_picks_v1")
+
+    def _migrate_columns_locked(self) -> None:
+        """v2 tables created before the sizing lever lack size_weight; add it in
+        place (pre-existing rows keep NULL, read as weight 1.0 at scoreboard time)."""
+        cols = {str(r["name"]) for r in self._conn.execute("PRAGMA table_info(drift_picks)")}
+        if "size_weight" not in cols:
+            self._conn.execute("ALTER TABLE drift_picks ADD COLUMN size_weight REAL")
 
     # -- rule parameters (frozen defaults; env override for research only) -----
     # v2 records the 60-80 SUPERSET envelope; books P (65-73 top-1) and
@@ -166,6 +182,24 @@ class DriftShadow:
     @property
     def side(self) -> str:
         return (os.environ.get("Q15_DRIFT_SHADOW_SIDE", "YES") or "YES").upper()
+
+    # sizing terciles: FROZEN from the train half (2026-07-07); env for research only
+    @property
+    def w_lo_threshold(self) -> float:
+        return _envf("Q15_DRIFT_SHADOW_W_LO_T", -0.1157)
+
+    @property
+    def w_hi_threshold(self) -> float:
+        return _envf("Q15_DRIFT_SHADOW_W_HI_T", -0.0917)
+
+    def size_weight(self, disagreement: float | None) -> float:
+        if disagreement is None:
+            return 1.0
+        if disagreement >= self.w_hi_threshold:
+            return 1.5
+        if disagreement < self.w_lo_threshold:
+            return 0.5
+        return 1.0
 
     def _qualifies(self, cap: Mapping[str, Any]) -> bool:
         asset = str(cap.get("asset") or "").upper()
@@ -214,16 +248,18 @@ class DriftShadow:
                 cal = _num(cand.get("calibrated_yes_probability"))
                 ask = _num(cand.get("yes_ask_cents"))
                 side = str(cand.get("predicted_side") or "").upper()
+                dis = self._disagreement(cand)
                 cur = self._conn.execute(
                     "INSERT OR IGNORE INTO drift_picks (created_at, model_version, asset,"
                     " ticker, window_key, close_time, side, ask_cents, distance_sigma,"
                     " flip_probability, calibrated_yes_probability, side_prob, disagreement,"
-                    " slate_n, pick_rank, features_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " slate_n, pick_rank, size_weight, features_version)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
                      int(window_key), close_time, side, ask,
                      _num(cand.get("distance_from_strike")), _num(cand.get("flip_probability")),
                      cal, (cal if side == "YES" else 1.0 - cal) if cal is not None else None,
-                     self._disagreement(cand), len(quals), rank, FEATURES_VERSION))
+                     dis, len(quals), rank, self.size_weight(dis), FEATURES_VERSION))
                 wrote = wrote or cur.rowcount > 0
             self._conn.commit()
             return wrote
@@ -261,7 +297,7 @@ class DriftShadow:
     def _book_rows(self, lo: float, hi: float, top1: bool) -> list[sqlite3.Row]:
         rows = self._conn.execute(
             "SELECT window_key, asset, ask_cents, disagreement, correct, pnl_cents,"
-            " created_at FROM drift_picks WHERE official_result IS NOT NULL"
+            " size_weight, created_at FROM drift_picks WHERE official_result IS NOT NULL"
             " AND ask_cents >= ? AND ask_cents <= ?", (lo, hi)).fetchall()
         if not top1:
             return rows
@@ -281,6 +317,12 @@ class DriftShadow:
         correct = sum(1 for r in rows if r["correct"])
         total_pnl = sum(float(r["pnl_cents"]) for r in rows)
         wr = correct / n
+        # disagreement-tercile sizing, reported ALONGSIDE flat — kill/promote
+        # bars grade the FLAT numbers only (sizing is observational, not a gate)
+        weights = [float(r["size_weight"]) if r["size_weight"] is not None else 1.0
+                   for r in rows]
+        weighted_pnl = sum(w * float(r["pnl_cents"]) for w, r in zip(weights, rows))
+        total_weight = sum(weights)
         breakeven = sum(r["ask_cents"] + taker_fee_cents(r["ask_cents"]) for r in rows) / n / 100.0
         wlb = wilson_lower(correct, n)
         by_day: dict[str, float] = {}
@@ -299,6 +341,9 @@ class DriftShadow:
         return {"n_resolved": n, "status": status, "win_rate": round(wr, 3),
                 "breakeven_rate": round(breakeven, 3), "wilson_lb": wlb and round(wlb, 3),
                 "ev_cents": round(ev, 2), "total_pnl_cents": round(total_pnl, 0),
+                "weighted_pnl_cents": round(weighted_pnl, 1),
+                "weighted_ev_per_unit_cents": (round(weighted_pnl / total_weight, 2)
+                                               if total_weight else None),
                 "n_assets": len(assets),
                 "max_day_pnl_frac": max_day_frac and round(max_day_frac, 2)}
 
@@ -314,6 +359,9 @@ class DriftShadow:
             "core_rule": {"envelope_ask": [self.ask_lo, self.ask_hi],
                           "dist_max": self.dist_max, "flip_max": self.flip_max,
                           "side": self.side},
+            "sizing": {"w_lo_threshold": self.w_lo_threshold,
+                       "w_hi_threshold": self.w_hi_threshold,
+                       "weights": [0.5, 1.0, 1.5]},
             "n_pending": int(pending),
             "book_primary_65_73_top1": self._grade_book(
                 self._book_rows(65.0, 73.0, top1=True),

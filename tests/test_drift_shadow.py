@@ -169,6 +169,76 @@ def test_v1_schema_migrates_aside(tmp_path, monkeypatch):
     assert r._conn.execute("SELECT pick_rank FROM drift_picks").fetchone()[0] == 1
 
 
+def test_size_weight_tercile_thresholds(rec):
+    # frozen train-fit terciles (2026-07-07): lo=-0.1157, hi=-0.0917
+    assert rec.w_lo_threshold == pytest.approx(-0.1157)
+    assert rec.w_hi_threshold == pytest.approx(-0.0917)
+    assert rec.size_weight(None) == 1.0        # missing disagreement -> flat
+    assert rec.size_weight(0.03) == 1.5        # strong model edge -> upsize
+    assert rec.size_weight(-0.0917) == 1.5     # boundary is inclusive at hi
+    assert rec.size_weight(-0.10) == 1.0       # mid tercile
+    assert rec.size_weight(-0.1157) == 1.0     # boundary stays mid at lo
+    assert rec.size_weight(-0.20) == 0.5       # weak edge -> downsize
+
+
+def test_size_weight_recorded_on_insert(rec):
+    # default _cap: cal .70 @ 67c -> disagreement +.03 >= hi tercile -> 1.5x
+    rec.observe_window(model_version="m", window_key=600, close_time=9000.0,
+                       slate=[_cap()], now=1000.0)
+    w = rec._conn.execute("SELECT size_weight FROM drift_picks").fetchone()[0]
+    assert w == pytest.approx(1.5)
+
+
+def test_scoreboard_weighted_pnl_alongside_flat(rec):
+    # 1.5x winner (disagree +.03) + 0.5x loser (disagree -.17); 67c: win +31 / loss -69
+    rec.observe_window(model_version="m", window_key=700, close_time=9000.0,
+                       slate=[_cap(ticker="WHI", calibrated_yes_probability=0.70)], now=1000.0)
+    rec.observe_window(model_version="m", window_key=701, close_time=9000.0,
+                       slate=[_cap(ticker="WLO", calibrated_yes_probability=0.50)], now=1000.0)
+    rec.resolve([{"ticker": "WHI", "result": "YES"},
+                 {"ticker": "WLO", "result": "NO"}], now=2000.0)
+    book = rec.scoreboard()["book_volume_60_73_all"]
+    assert book["total_pnl_cents"] == pytest.approx(-38.0)        # flat: 31 - 69
+    assert book["weighted_pnl_cents"] == pytest.approx(12.0)      # 1.5*31 - 0.5*69
+    assert book["ev_cents"] == pytest.approx(-19.0)
+    assert book["weighted_ev_per_unit_cents"] == pytest.approx(6.0)  # 12 / (1.5+0.5)
+    # sizing never gates the bars: status still graded on flat numbers
+    assert book["status"] == "ACCRUING"
+
+
+def test_v2_pre_sizing_schema_gains_size_weight(tmp_path, monkeypatch):
+    # a live v2 DB written before the sizing lever has no size_weight column;
+    # init must ALTER it in and read old NULL rows as weight 1.0
+    import sqlite3 as s3
+    db = str(tmp_path / "v2old.sqlite3")
+    c = s3.connect(db)
+    c.execute("""CREATE TABLE drift_picks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,
+        model_version TEXT, asset TEXT NOT NULL, ticker TEXT NOT NULL,
+        window_key INTEGER NOT NULL, close_time REAL, side TEXT NOT NULL,
+        ask_cents REAL NOT NULL, distance_sigma REAL, flip_probability REAL,
+        calibrated_yes_probability REAL, side_prob REAL, disagreement REAL,
+        slate_n INTEGER, pick_rank INTEGER, features_version TEXT NOT NULL,
+        official_result TEXT, resolved_at REAL, correct INTEGER, pnl_cents REAL,
+        UNIQUE(model_version, window_key, ticker))""")
+    c.execute("INSERT INTO drift_picks (created_at, asset, ticker, window_key, side,"
+              " ask_cents, pick_rank, features_version, official_result, correct, pnl_cents)"
+              " VALUES (1,'DOGE','OLD',1,'YES',67,1,'drift-shadow-v2','YES',1,31.0)")
+    c.commit(); c.close()
+    monkeypatch.setenv("Q15_DRIFT_SHADOW", "true")
+    monkeypatch.setenv("Q15_DRIFT_SHADOW_DB", db)
+    ds.reset_recorder()
+    r = ds.DriftShadow()
+    assert r.enabled
+    cols = {row["name"] for row in r._conn.execute("PRAGMA table_info(drift_picks)")}
+    assert "size_weight" in cols
+    # the v1 rename guard must NOT fire on a v2 table
+    assert r._conn.execute("SELECT COUNT(*) FROM drift_picks").fetchone()[0] == 1
+    book = r.scoreboard()["book_volume_60_73_all"]
+    assert book["n_resolved"] == 1
+    assert book["weighted_pnl_cents"] == pytest.approx(31.0)   # NULL weight -> 1.0
+
+
 def test_scoreboard_accruing_below_kill_n(rec):
     for i in range(20):
         rec.observe_window(model_version="m", window_key=200 + i, close_time=9000.0,
