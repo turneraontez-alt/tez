@@ -1,5 +1,13 @@
 # Session handoff
 
+> **OPERATIONAL NOTE (owner, 2026-07-08): the Repl is disconnected — the app now
+> runs on the owner's LOCAL machine.** The local checkout pulls `main` and
+> `tools/learning_export.py` still force-pushes `learning-snapshots` hourly, so
+> the review workflow is unchanged. But "Stop ▸ Run on the Repl" advice is
+> obsolete: deploys = local `git pull` + restart the local app process. Older
+> references to "the Repl" in this file and CLAUDE.md should be read as "the
+> local host".
+
 ## Shipped THIS session - Drift Shadow v3: verified improvement tracks (record-only)
 Run time: 2026-07-08.
 
