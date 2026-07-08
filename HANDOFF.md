@@ -8,6 +8,34 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - Picklo HD (realistic Piccolo) Blender asset (non-runtime)
+Run time: 2026-07-08.
+
+Owner asked for a "highly detailed, realistic 3D model" follow-up to the blocky
+R15 Picklo. Built a subdivided, organically-modeled Piccolo as a new asset
+(the blocky picklo_r15.blend is untouched). Non-runtime art asset:
+- `assets/picklo/picklo_hd.blend` — realistic model (Blender 5.0, ~284K). Same
+  15 R15 parts + joint-pivot origins + LowerTorso-rooted hierarchy, but each
+  part is a lofted/subdivided organic mesh: detailed head (scowling brow ridge,
+  deep-set stern eyes, sharp nose, mouth crease, long pointed ears, forward-
+  arcing segmented antennae, eyeball children), muscular pink ribbed arms with
+  red-orange wrist bands, green hands (four curled fingers + thumb + black
+  nails), purple gi with modeled folds/armholes/collar, blue obi sash (stacked
+  wraps + knot + draping tails child), baggy cinched pants, orange pointed
+  shoes with soles. Realistic Cycles materials (green SSS skin, woven gi, silk
+  sash, leather shoes, lacquer nails) + a studio (cove backdrop, 3-point
+  lighting, Camera_Full / Camera_Head, AgX tone-mapping).
+- `assets/picklo/hd/` — component modules (spec, materials, head, torso, arms,
+  hands, legs, scene) each exposing build()/register()/setup().
+  `assets/picklo/build_picklo_hd.py` assembles + wires + saves + `--verify`s +
+  `--render`s. `tests/test_picklo_asset.py` gained an HD contract test
+  (auto-skips without bpy).
+
+Verification: pytest -> 1799 passed, 14 skipped. build_picklo_hd --verify ->
+15 HD parts (10.7k cage verts), hierarchy + materials + studio present.
+Renders (Camera_Full / Camera_Head) checked visually against the reference.
+No runtime code touched.
+
 ## Shipped THIS session - Picklo R15 Blender asset (owner request, non-runtime)
 Run time: 2026-07-08.
 
