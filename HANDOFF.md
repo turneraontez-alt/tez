@@ -8,6 +8,29 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - Picklo R15 Blender asset (owner request, non-runtime)
+Run time: 2026-07-08.
+
+Owner asked for an R15-style "Picklo" character model with every part separated
+and individually colored, delivered as a Blender file. Not runtime code — a
+standalone art asset:
+- `assets/picklo/picklo_r15.blend` — the model (Blender 5.0, compressed, 108K).
+  15 mesh parts with R15 names (Head, Upper/LowerTorso, L/R Upper/LowerArm,
+  Hand, Upper/LowerLeg, Foot), each with its own uniquely colored material
+  (`Picklo_<Part>`): pickle-green core, warm left limbs, cool right limbs.
+  Origins sit at the joints and parts are parented LowerTorso -> UpperTorso ->
+  Head/arms, LowerTorso -> legs, so parts rotate naturally for posing. A
+  separate `Environment` collection holds ground/sun/camera for instant renders.
+- `assets/picklo/build_picklo_r15.py` — deterministic generator + `--verify`
+  (regenerate with `pip install bpy`, then run the script; also works inside
+  Blender's own Python).
+- `tests/test_picklo_asset.py` — asset contract test; auto-skips wherever
+  `bpy` isn't installed (it is NOT a dependency of the monitor).
+
+Verification: pytest (web sandbox) -> 1798 passed, 14 skipped (env-dependent
+skips; asset test runs and passes where bpy exists). No runtime code touched.
+Deploy: nothing to restart — pure repo asset.
+
 ## Shipped THIS session - Drift Shadow pick cards into the V3 Telegram chat
 Run time: 2026-07-08 (follow-on to v3).
 
