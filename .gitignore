@@ -50,3 +50,7 @@ build/
 .replit-artifact
 .backups/
 .claude/worktrees/
+
+# Blender backup files
+*.blend1
+*.blend2
