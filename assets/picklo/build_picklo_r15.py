@@ -6,9 +6,12 @@ is its own mesh object with its own uniquely colored material, so each piece
 can be selected, re-colored, or animated independently.
 
 Design choices:
-- Core (Head / UpperTorso / LowerTorso) uses three pickle greens — Picklo.
-- Left-side limbs use warm colors, right-side limbs cool colors, so left/right
-  is unambiguous in the viewport (standard rigging-reference convention).
+- Palette matches Piccolo (Dragon Ball): green skin, purple gi, blue sash,
+  pink ribbed arm sections, orange shoes. Symmetric parts get slightly
+  different shades so all 15 materials stay numerically unique and every part
+  reads as its own piece.
+- The Head mesh carries Piccolo's two forward-tilted antennae and pointed
+  side ears (same object/material, so the model stays exactly 15 parts).
 - Each object's origin sits at its joint (hip, knee, elbow, ...) and parts are
   parented LowerTorso -> UpperTorso -> Head/arms, LowerTorso -> legs, so
   rotating any part pivots naturally at the joint.
@@ -34,49 +37,102 @@ import sys
 GAP = 0.02  # shrink per axis so touching parts never z-fight
 
 R15_PARTS = [
-    # name              size                 center               pivot (joint)       parent          color
-    ("LowerTorso",      (2.00, 1.00, 0.45), (0.0, 0.0, 2.225),  (0.0, 0.0, 2.00),  None,           (0.52, 0.60, 0.12)),
-    ("UpperTorso",      (2.00, 1.00, 1.55), (0.0, 0.0, 3.225),  (0.0, 0.0, 2.45),  "LowerTorso",   (0.13, 0.42, 0.18)),
-    ("Head",            (1.20, 1.20, 1.20), (0.0, 0.0, 4.600),  (0.0, 0.0, 4.00),  "UpperTorso",   (0.28, 0.62, 0.16)),
-    # Left arm (character's left = +X) — warm colors
-    ("LeftUpperArm",    (1.00, 1.00, 0.85), (1.5, 0.0, 3.575),  (1.5, 0.0, 4.00),  "UpperTorso",   (0.90, 0.49, 0.13)),
-    ("LeftLowerArm",    (1.00, 1.00, 0.80), (1.5, 0.0, 2.750),  (1.5, 0.0, 3.15),  "LeftUpperArm", (0.86, 0.20, 0.18)),
-    ("LeftHand",        (0.90, 0.90, 0.35), (1.5, 0.0, 2.175),  (1.5, 0.0, 2.35),  "LeftLowerArm", (0.96, 0.76, 0.05)),
-    # Right arm — cool colors
-    ("RightUpperArm",   (1.00, 1.00, 0.85), (-1.5, 0.0, 3.575), (-1.5, 0.0, 4.00), "UpperTorso",   (0.15, 0.39, 0.92)),
-    ("RightLowerArm",   (1.00, 1.00, 0.80), (-1.5, 0.0, 2.750), (-1.5, 0.0, 3.15), "RightUpperArm", (0.05, 0.65, 0.91)),
-    ("RightHand",       (0.90, 0.90, 0.35), (-1.5, 0.0, 2.175), (-1.5, 0.0, 2.35), "RightLowerArm", (0.55, 0.36, 0.96)),
-    # Left leg — warm colors
-    ("LeftUpperLeg",    (1.00, 1.00, 0.85), (0.5, 0.0, 1.575),  (0.5, 0.0, 2.00),  "LowerTorso",   (0.72, 0.11, 0.11)),
-    ("LeftLowerLeg",    (1.00, 1.00, 0.80), (0.5, 0.0, 0.750),  (0.5, 0.0, 1.15),  "LeftUpperLeg", (0.93, 0.35, 0.14)),
-    ("LeftFoot",        (1.00, 1.30, 0.35), (0.5, -0.15, 0.175), (0.5, 0.0, 0.35), "LeftLowerLeg", (0.55, 0.27, 0.07)),
-    # Right leg — cool colors
-    ("RightUpperLeg",   (1.00, 1.00, 0.85), (-0.5, 0.0, 1.575), (-0.5, 0.0, 2.00), "LowerTorso",   (0.10, 0.22, 0.66)),
-    ("RightLowerLeg",   (1.00, 1.00, 0.80), (-0.5, 0.0, 0.750), (-0.5, 0.0, 1.15), "RightUpperLeg", (0.13, 0.59, 0.95)),
-    ("RightFoot",       (1.00, 1.30, 0.35), (-0.5, -0.15, 0.175), (-0.5, 0.0, 0.35), "RightLowerLeg", (0.29, 0.08, 0.55)),
+    # name              size                 center               pivot (joint)       parent          color (sRGB)
+    ("LowerTorso",      (2.00, 1.00, 0.45), (0.0, 0.0, 2.225),  (0.0, 0.0, 2.00),  None,           (0.16, 0.38, 0.78)),  # blue sash
+    ("UpperTorso",      (2.00, 1.00, 1.55), (0.0, 0.0, 3.225),  (0.0, 0.0, 2.45),  "LowerTorso",   (0.44, 0.26, 0.64)),  # purple gi
+    ("Head",            (1.20, 1.20, 1.20), (0.0, 0.0, 4.600),  (0.0, 0.0, 4.00),  "UpperTorso",   (0.45, 0.78, 0.25)),  # green skin
+    # Arms: pink ribbed sections, green hands (character's left = +X)
+    ("LeftUpperArm",    (1.00, 1.00, 0.85), (1.5, 0.0, 3.575),  (1.5, 0.0, 4.00),  "UpperTorso",   (0.94, 0.60, 0.66)),
+    ("LeftLowerArm",    (1.00, 1.00, 0.80), (1.5, 0.0, 2.750),  (1.5, 0.0, 3.15),  "LeftUpperArm", (0.98, 0.72, 0.76)),
+    ("LeftHand",        (0.90, 0.90, 0.35), (1.5, 0.0, 2.175),  (1.5, 0.0, 2.35),  "LeftLowerArm", (0.36, 0.68, 0.20)),
+    ("RightUpperArm",   (1.00, 1.00, 0.85), (-1.5, 0.0, 3.575), (-1.5, 0.0, 4.00), "UpperTorso",   (0.90, 0.56, 0.62)),
+    ("RightLowerArm",   (1.00, 1.00, 0.80), (-1.5, 0.0, 2.750), (-1.5, 0.0, 3.15), "RightUpperArm", (0.94, 0.68, 0.72)),
+    ("RightHand",       (0.90, 0.90, 0.35), (-1.5, 0.0, 2.175), (-1.5, 0.0, 2.35), "RightLowerArm", (0.32, 0.62, 0.18)),
+    # Legs: purple gi pants, orange shoes
+    ("LeftUpperLeg",    (1.00, 1.00, 0.85), (0.5, 0.0, 1.575),  (0.5, 0.0, 2.00),  "LowerTorso",   (0.38, 0.21, 0.56)),
+    ("LeftLowerLeg",    (1.00, 1.00, 0.80), (0.5, 0.0, 0.750),  (0.5, 0.0, 1.15),  "LeftUpperLeg", (0.31, 0.17, 0.47)),
+    ("LeftFoot",        (1.00, 1.30, 0.35), (0.5, -0.15, 0.175), (0.5, 0.0, 0.35), "LeftLowerLeg", (0.92, 0.48, 0.10)),
+    ("RightUpperLeg",   (1.00, 1.00, 0.85), (-0.5, 0.0, 1.575), (-0.5, 0.0, 2.00), "LowerTorso",   (0.35, 0.19, 0.52)),
+    ("RightLowerLeg",   (1.00, 1.00, 0.80), (-0.5, 0.0, 0.750), (-0.5, 0.0, 1.15), "RightUpperLeg", (0.28, 0.15, 0.43)),
+    ("RightFoot",       (1.00, 1.30, 0.35), (-0.5, -0.15, 0.175), (-0.5, 0.0, 0.35), "RightLowerLeg", (0.87, 0.44, 0.09)),
 ]
 
 MODEL_COLLECTION = "Picklo_R15"
 ENV_COLLECTION = "Environment"
 
 
-def _box_mesh(bpy, name, size, center, pivot):
+def _add_cube(bm, scale, offset, rot=None, shape=None):
+    """Add a unit cube to `bm`, optionally reshape it in unit space, then
+    scale / rotate (Euler radians) / translate only the new geometry."""
+    import bmesh
+    from mathutils import Euler, Matrix, Vector
+
+    verts = bmesh.ops.create_cube(bm, size=1.0)["verts"]
+    if shape:
+        for v in verts:
+            shape(v.co)
+    mat = Matrix.Translation(Vector(offset))
+    if rot:
+        mat = mat @ Euler(rot, "XYZ").to_matrix().to_4x4()
+    mat = mat @ Matrix.Diagonal((*scale, 1.0))
+    bmesh.ops.transform(bm, matrix=mat, verts=verts)
+    return verts
+
+
+def _finish_mesh(bpy, bm, name):
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+    return mesh
+
+
+def _box_mesh(bpy, name, size, center, pivot, shape=None):
     """Cuboid mesh (outward normals) with vertices relative to the pivot."""
     import bmesh
 
     scale = [max(s - GAP, 0.01) for s in size]
     offset = [c - p for c, p in zip(center, pivot)]
     bm = bmesh.new()
-    bmesh.ops.create_cube(bm, size=1.0)
-    for v in bm.verts:
-        v.co.x = v.co.x * scale[0] + offset[0]
-        v.co.y = v.co.y * scale[1] + offset[1]
-        v.co.z = v.co.z * scale[2] + offset[2]
-    mesh = bpy.data.meshes.new(name)
-    bm.to_mesh(mesh)
-    bm.free()
-    mesh.update()
-    return mesh
+    _add_cube(bm, scale, offset, shape=shape)
+    return _finish_mesh(bpy, bm, name)
+
+
+def _head_mesh(bpy, name, size, center, pivot):
+    """Piccolo head: cube + two forward-tilted antennae + pointed side ears.
+
+    All in one mesh so the model stays exactly 15 objects. Coordinates are
+    head-local (relative to the neck pivot); the head cube spans z 0..1.2.
+    """
+    import bmesh
+    import math
+
+    bm = bmesh.new()
+    scale = [max(s - GAP, 0.01) for s in size]
+    offset = [c - p for c, p in zip(center, pivot)]
+    _add_cube(bm, scale, offset)
+
+    def spike(co):  # collapse the top face toward a point
+        if co.z > 0:
+            co.x *= 0.15
+            co.y *= 0.15
+
+    tilt = math.radians(40)  # antennae lean forward (character faces -Y)
+    for sx in (1.0, -1.0):
+        _add_cube(bm, (0.11, 0.11, 0.55), (sx * 0.17, -0.30, 1.32),
+                  rot=(tilt, 0.0, 0.0), shape=spike)
+        # ears: tapered wedges on the head sides, tips up and slightly out
+        _add_cube(bm, (0.30, 0.36, 0.72), (sx * 0.74, 0.0, 0.74),
+                  rot=(0.0, sx * math.radians(18), 0.0), shape=spike)
+
+    return _finish_mesh(bpy, bm, name)
+
+
+def _toe_taper(co):
+    """Slope the front-top of the shoe so it reads as Piccolo's pointed toe."""
+    if co.y < 0 and co.z > 0:
+        co.z = 0.0
+        co.x *= 0.8
 
 
 def _srgb_to_linear(c):
@@ -110,7 +166,11 @@ def build(out_path, render_path=None):
 
     objects = {}
     for name, size, center, pivot, parent, color in R15_PARTS:
-        mesh = _box_mesh(bpy, name, size, center, pivot)
+        if name == "Head":
+            mesh = _head_mesh(bpy, name, size, center, pivot)
+        else:
+            shape = _toe_taper if name.endswith("Foot") else None
+            mesh = _box_mesh(bpy, name, size, center, pivot, shape=shape)
         obj = bpy.data.objects.new(name, mesh)
         obj.location = pivot
         obj.data.materials.append(_material(bpy, f"Picklo_{name}", color))
@@ -152,7 +212,7 @@ def build(out_path, render_path=None):
     cam_data = bpy.data.cameras.new("Camera")
     cam_data.lens = 50.0
     cam = bpy.data.objects.new("Camera", cam_data)
-    cam.location = (8.0, -9.0, 4.5)
+    cam.location = (5.0, -12.0, 4.6)
     from mathutils import Vector
 
     look = Vector((0.0, 0.0, 2.6)) - cam.location
@@ -203,6 +263,8 @@ def verify(blend_path):
     assert len(colors) == 15, f"expected 15 unique colors, got {len(colors)}"
     roots = [o for o in col.objects if o.parent is None]
     assert [o.name for o in roots] == ["LowerTorso"], f"bad root: {roots}"
+    head = col.objects["Head"]
+    assert len(head.data.polygons) >= 18, "head missing antennae/ears"
     print(f"verify OK: 15 uniquely colored parts, root=LowerTorso, in {blend_path}")
 
 
