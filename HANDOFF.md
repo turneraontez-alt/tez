@@ -12,12 +12,16 @@
 Run time: 2026-07-08.
 
 Owner asked for an R15-style "Picklo" character model with every part separated
-and individually colored, delivered as a Blender file. Not runtime code — a
+and individually colored, delivered as a Blender file — then clarified with a
+reference image that Picklo = Piccolo (Dragon Ball). Not runtime code — a
 standalone art asset:
-- `assets/picklo/picklo_r15.blend` — the model (Blender 5.0, compressed, 108K).
+- `assets/picklo/picklo_r15.blend` — the model (Blender 5.0, compressed).
   15 mesh parts with R15 names (Head, Upper/LowerTorso, L/R Upper/LowerArm,
   Hand, Upper/LowerLeg, Foot), each with its own uniquely colored material
-  (`Picklo_<Part>`): pickle-green core, warm left limbs, cool right limbs.
+  (`Picklo_<Part>`), Piccolo palette: green head/hands, purple gi torso+legs,
+  blue sash (LowerTorso), pink ribbed arm segments, orange pointed shoes
+  (toe-tapered). The Head mesh carries Piccolo's forward-tilted antennae and
+  pointed side ears (same object, so the model stays exactly 15 parts).
   Origins sit at the joints and parts are parented LowerTorso -> UpperTorso ->
   Head/arms, LowerTorso -> legs, so parts rotate naturally for posing. A
   separate `Environment` collection holds ground/sun/camera for instant renders.
