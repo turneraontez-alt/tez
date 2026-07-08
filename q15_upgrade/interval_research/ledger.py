@@ -170,8 +170,9 @@ class IntervalResearchLedger:
         with self._lock, closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT ticker, asset, close_time, predicted_side, "
-                "calibrated_yes_probability, yes_ask_cents, entry_ask_cents, "
-                "spread_cents, captured_at, seconds_remaining, "
+                "calibrated_yes_probability, yes_ask_cents, yes_bid_cents, "
+                "entry_ask_cents, spread_cents, depth_contracts, "
+                "captured_at, seconds_remaining, "
                 "flip_probability, distance_from_strike "
                 "FROM interval_captures WHERE model_version=? AND interval=? "
                 "AND window_key=? AND predicted_side IS NOT NULL",

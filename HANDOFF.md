@@ -1,5 +1,54 @@
 # Session handoff
 
+## Shipped THIS session - Drift Shadow v3: verified improvement tracks (record-only)
+Run time: 2026-07-08.
+
+Origin: owner asked for a deep improvement search on the drift book ("top 5, review
+first"), then approved adding the survivors to the shadow AS SEPARATE PARTS, with a
+standing directive: if the shadow is ever enabled as a live book, it takes ALL
+components whose bars passed ("full_enable_blueprint" in the scoreboard). An 8-family
+parallel search (~40 hypotheses: checkpoint sweep, late qualifiers, sizing 2.0,
+ranking 2.0, band edges, cross-signals, execution, mechanism measurement) was run on a
+fresh oracle-graded multi-checkpoint dataset (66,302 rows, all 8 marks); every survivor
+was then re-verified by hand (ablation, walk-forward, holiday/day-concentration
+controls, null baselines). Survivors -> v3 tracks in q15_upgrade/drift_shadow.py:
+
+- ADD-ON track (drift_addons): 13M volume-book pick re-passes the FULL rule at
+  12M..7M -> record ONE add-on at that checkpoint's ask (first re-qual only).
+  Tape: n=123, +12.14c/add, WR 81.3%, both halves + all quarters positive,
+  ablation-tolerant (11M-7M-only +18.7c), null-controlled (unconditional adds
+  +6.94). Bars: KILL n>=40 if EV<=0|WR<be; PROMOTE n>=120 if EV>=4 & WLB>be.
+- LATE-QUAL track (drift_lq_watch -> drift_latequal): clean-but-cheap 13M signal
+  (alt YES, dist/fp clean, ask<60) that reprices INTO 60-73 by 12M/11M/10M.
+  Tape: n=38, +9.34c/pick but n_train=8 and 44% one-day concentration -> full
+  bar before anything (KILL n>=40; PROMOTE n>=150 if EV>=2 & WLB>be).
+- SIZING TILTS (columns on drift_picks): spread_weight (3-4c -> 1.5x, >=5c ->
+  0.5x; the 3-4c cohort held ~+14c/pick in EVERY sub-period), session_weight
+  (UTC 16-24 -> 1.33x / 8-16 -> 0.75x / 0-8 -> 0.84x; survives weekday+holiday
+  controls), stack_weight = clip(product). Reported in scoreboard
+  tilts_volume_book alongside flat + size_weight; never gate any bar.
+- Execution context: spread_cents + depth_contracts now stored per pick; doctrine
+  for manual trading: chase +1c ONLY when displayed depth<50; 25-50 contracts/pick
+  comfort zone, ~100 conservative ceiling.
+- Wiring: runner _maybe_drift_checkpoints feeds 12M..7M slates (bands mark-40..
+  mark-10s); ledger captures_for_window now also returns yes_bid_cents +
+  depth_contracts. v2 books/bars UNTOUCHED; older DBs migrate in place (ALTER
+  columns + new tables).
+
+Killed with receipts (do not revisit without new tape): every other checkpoint as a
+standalone book (only 13M works; 11M's value lives entirely in the add-on overlap),
+undifferentiated late entries, sub-60 floors (55-59 train-negative; 50-54 one-day/
+post-hoc), re-ranking (no-op in 88% of windows; train-best ranker degrades test),
+BTC-state/slate-size/day-of-week tilts, sizing-2.0 refinements over terciles.
+Honest note: on the rebuilt split the shipped tercile edge is only +0.09 c/unit
+(8.98 vs 8.89) - much smaller than the original split suggested; the spread/session
+tilts are 20-30x larger effects on the same basis. Mechanism receipt: near-strike alt
+YES-favorites settle +4.8pp above their price (both halves, all quarters); NO-favorites
+are fairly priced; the mispricing peaks exactly at 13M.
+
+Verification: python -m pytest tests/ -q -> 1831 passed, 4 skipped (22 drift tests).
+config_audit --check OK (975 vars; v3 adds none). Deploy-pending: host pull+restart.
+
 ## Shipped THIS session - drift recorder: disagreement-weighted sizing (record-only)
 Run time: 2026-07-07 (same session as v2, follow-on).
 

@@ -109,6 +109,7 @@ class IntervalResearchRunner:
                             self._feed_v3_marks(row, capture_analysis)
                 self._maybe_top_pick_13m(canonicals, now)
                 self._maybe_drift_shadow(canonicals, now)
+                self._maybe_drift_checkpoints(canonicals, now)
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
 
@@ -138,6 +139,45 @@ class IntervalResearchRunner:
                     close_time=_num(getattr(canonical, "settlement_time", None)),
                     slate=slate, now=now)
             break  # one window per cycle is enough; dedup is by (mv, window_key)
+
+    # drift-shadow v3 later-checkpoint bands: fire once captures for that mark
+    # have landed (mark-40..mark-10s), mirroring the 13M band above.
+    _DRIFT_CKPT_MARKS = (("12M", 720), ("11M", 660), ("10M", 600),
+                         ("9M", 540), ("8M", 480), ("7M", 420))
+
+    def _maybe_drift_checkpoints(self, canonicals: Mapping[str, Any], now: float) -> None:
+        """Feed the drift shadow's v3 record-only tracks (re-qualification
+        add-ons and late-qualifier entries) at the 12M..7M marks. Never trades
+        or notifies; idempotent per (window, ticker) inside the recorder."""
+        try:
+            from q15_upgrade.drift_shadow import get_recorder
+        except Exception:  # noqa: BLE001 - optional research recorder
+            return
+        rec = get_recorder()
+        if rec is None or not hasattr(rec, "observe_checkpoint"):
+            return
+        for canonical in (canonicals or {}).values():
+            sr = _num(getattr(canonical, "seconds_remaining", None))
+            if sr is None:
+                continue
+            for interval, mark in self._DRIFT_CKPT_MARKS:
+                if not (mark - 40.0) <= sr <= (mark - 10.0):
+                    continue
+                wk = window_key(getattr(canonical, "settlement_time", None), now)
+                if wk is None:
+                    break
+                slate = self.ledger.captures_for_window(
+                    self.config.model_version, interval, wk)
+                if slate:
+                    rec.observe_checkpoint(
+                        model_version=self.config.model_version, window_key=wk,
+                        interval=interval,
+                        close_time=_num(getattr(canonical, "settlement_time", None)),
+                        slate=slate, now=now)
+                break
+            else:
+                continue
+            break  # one (window, interval) per cycle; recorder is idempotent
 
     # -- best trade 13M: one pick per 15m window (owner-requested, always fires) --
     # Fires once per window shortly after the 13M captures land (sr 740-770).

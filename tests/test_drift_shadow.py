@@ -249,6 +249,172 @@ def test_scoreboard_accruing_below_kill_n(rec):
     assert sb["book_primary_65_73_top1"]["status"] == "ACCRUING"  # below the n=40 kill gate
 
 
+def test_v3_tilt_weight_functions(rec):
+    # spread: 3-4c lazy-market cohort upweighted; >=5c downweighted; <=2c flat
+    assert ds.DriftShadow.spread_weight(None) == 1.0
+    assert ds.DriftShadow.spread_weight(2.0) == 1.0
+    assert ds.DriftShadow.spread_weight(3.0) == 1.5
+    assert ds.DriftShadow.spread_weight(4.0) == 1.5
+    assert ds.DriftShadow.spread_weight(5.0) == 0.5
+    # session: US evening rich / EU poor / overnight near-flat
+    assert ds.DriftShadow.session_weight(None) == 1.0
+    assert ds.DriftShadow.session_weight(20) == 1.33
+    assert ds.DriftShadow.session_weight(8) == 0.75
+    assert ds.DriftShadow.session_weight(15) == 0.75
+    assert ds.DriftShadow.session_weight(3) == 0.84
+    # stack is the clipped product
+    assert ds.DriftShadow.stack_weight(3.0, 20) == 1.5      # 1.5*1.33 clipped
+    assert ds.DriftShadow.stack_weight(5.0, 8) == 0.5       # 0.5*0.75 clipped
+    assert ds.DriftShadow.stack_weight(None, None) == 1.0
+
+
+def test_v3_tilts_recorded_on_pick(rec):
+    # captured_at 2026-07-07 20:00 UTC -> hour 20 -> session 1.33; spread 3 -> 1.5
+    ts = 1783454400.0  # 2026-07-07T20:00:00Z
+    rec.observe_window(model_version="m", window_key=800, close_time=9000.0,
+                       slate=[_cap(spread_cents=3.0, depth_contracts=120.0, captured_at=ts)],
+                       now=ts + 10)
+    row = rec._conn.execute(
+        "SELECT spread_cents, depth_contracts, spread_weight, session_weight, stack_weight"
+        " FROM drift_picks").fetchone()
+    assert row["spread_cents"] == 3.0 and row["depth_contracts"] == 120.0
+    assert row["spread_weight"] == 1.5
+    assert row["session_weight"] == pytest.approx(1.33)
+    assert row["stack_weight"] == 1.5
+
+
+def test_v3_addon_first_requal_only(rec):
+    rec.observe_window(model_version="m", window_key=900, close_time=9000.0,
+                       slate=[_cap(ticker="RQ", yes_ask_cents=67.0)], now=1000.0)
+    # 12M: re-passes the full rule -> one add-on at the 12M ask
+    n = rec.observe_checkpoint(model_version="m", window_key=900, interval="12M",
+                               close_time=9000.0,
+                               slate=[_cap(ticker="RQ", yes_ask_cents=69.0)], now=1060.0)
+    assert n == 1
+    # repeat + later checkpoint: still exactly one add-on (first re-qual wins)
+    assert rec.observe_checkpoint(model_version="m", window_key=900, interval="12M",
+                                  close_time=9000.0,
+                                  slate=[_cap(ticker="RQ", yes_ask_cents=69.0)], now=1070.0) == 0
+    assert rec.observe_checkpoint(model_version="m", window_key=900, interval="11M",
+                                  close_time=9000.0,
+                                  slate=[_cap(ticker="RQ", yes_ask_cents=70.0)], now=1120.0) == 0
+    rows = rec._conn.execute(
+        "SELECT add_interval, ask_cents, base_ask_cents FROM drift_addons").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["add_interval"] == "12M" and rows[0]["ask_cents"] == 69.0
+    assert rows[0]["base_ask_cents"] == 67.0
+    # resolve grades the add-on too: base pick + add-on both settle YES
+    rec.resolve([{"ticker": "RQ", "result": "YES"}], now=2000.0)
+    sb = rec.scoreboard()
+    assert sb["book_addon_requal"]["n_resolved"] == 1
+    assert sb["book_addon_requal"]["ev_cents"] == pytest.approx(29.0)  # 100-69-2
+
+
+def test_v3_addon_needs_base_pick_and_band(rec):
+    # qualifying cap at 12M with NO base pick and no watch -> nothing recorded
+    assert rec.observe_checkpoint(model_version="m", window_key=901, interval="12M",
+                                  close_time=9000.0,
+                                  slate=[_cap(ticker="NOBASE", yes_ask_cents=69.0)],
+                                  now=1000.0) == 0
+    assert rec._conn.execute("SELECT COUNT(*) FROM drift_addons").fetchone()[0] == 0
+    assert rec._conn.execute("SELECT COUNT(*) FROM drift_latequal").fetchone()[0] == 0
+    # base pick exists but the later ask is in the 74-80 diagnostic band -> no add
+    rec.observe_window(model_version="m", window_key=902, close_time=9000.0,
+                       slate=[_cap(ticker="RQ2", yes_ask_cents=67.0)], now=1000.0)
+    assert rec.observe_checkpoint(model_version="m", window_key=902, interval="12M",
+                                  close_time=9000.0,
+                                  slate=[_cap(ticker="RQ2", yes_ask_cents=76.0)],
+                                  now=1060.0) == 0
+
+
+def test_v3_latequal_watch_then_entry(rec):
+    # 13M: clean signal but ask below the 60c floor -> watch, NOT a pick
+    rec.observe_window(model_version="m", window_key=903, close_time=9000.0,
+                       slate=[_cap(ticker="LQ1", yes_ask_cents=55.0),
+                              _cap(ticker="DIRTY", yes_ask_cents=55.0, flip_probability=40.0)],
+                       now=1000.0)
+    assert rec._conn.execute("SELECT COUNT(*) FROM drift_picks").fetchone()[0] == 0
+    watch = rec._conn.execute("SELECT ticker FROM drift_lq_watch").fetchall()
+    assert [w["ticker"] for w in watch] == ["LQ1"]      # dirty 13M is never watched
+    # 12M: market repriced INTO the band with gates clean -> entry recorded
+    assert rec.observe_checkpoint(model_version="m", window_key=903, interval="12M",
+                                  close_time=9000.0,
+                                  slate=[_cap(ticker="LQ1", yes_ask_cents=64.0),
+                                         _cap(ticker="DIRTY", yes_ask_cents=64.0)],
+                                  now=1060.0) == 1
+    row = rec._conn.execute(
+        "SELECT entry_interval, ask_cents, ask13_cents FROM drift_latequal").fetchone()
+    assert row["entry_interval"] == "12M" and row["ask_cents"] == 64.0
+    assert row["ask13_cents"] == 55.0
+    # 9M is NOT a late-qual entry checkpoint (12M/11M/10M only)
+    rec.observe_window(model_version="m", window_key=904, close_time=9000.0,
+                       slate=[_cap(ticker="LQ2", yes_ask_cents=55.0)], now=2000.0)
+    assert rec.observe_checkpoint(model_version="m", window_key=904, interval="9M",
+                                  close_time=9000.0,
+                                  slate=[_cap(ticker="LQ2", yes_ask_cents=64.0)],
+                                  now=2300.0) == 0
+    # grading: LQ1 settles NO -> book_latequal shows the loss at the entry ask
+    rec.resolve([{"ticker": "LQ1", "result": "NO"}], now=3000.0)
+    sb = rec.scoreboard()
+    assert sb["book_latequal"]["n_resolved"] == 1
+    assert sb["book_latequal"]["ev_cents"] == pytest.approx(-66.0)  # -(64+2)
+
+
+def test_v3_scoreboard_blueprint_and_tilts(rec):
+    ts = 1783454400.0  # 20:00Z -> session 1.33
+    rec.observe_window(model_version="m", window_key=905, close_time=9000.0,
+                       slate=[_cap(ticker="T", yes_ask_cents=67.0, spread_cents=3.0,
+                                   captured_at=ts)], now=ts)
+    rec.resolve([{"ticker": "T", "result": "YES"}], now=ts + 900)
+    sb = rec.scoreboard()
+    bp = sb["full_enable_blueprint"]
+    assert set(bp) >= {"base_book_60_73", "addon_requal_12m_7m",
+                       "latequal_repriced_into_band", "sizing_tilts_recorded",
+                       "execution_doctrine"}
+    tv = sb["tilts_volume_book"]
+    assert tv["n_resolved"] == 1 and tv["flat_pnl_cents"] == pytest.approx(31.0)
+    assert tv["spread_weight"]["weighted_pnl_cents"] == pytest.approx(46.5)   # 1.5x
+    assert tv["stack_weight"]["weighted_pnl_cents"] == pytest.approx(46.5)    # clipped 1.5
+    assert sb["bars"]["addon_requal"].startswith("KILL n>=40")
+
+
+def test_v3_migrates_v21_schema_in_place(tmp_path, monkeypatch):
+    # a live DB from the v2.1 build (size_weight present, no v3 columns/tables)
+    import sqlite3 as s3
+    db = str(tmp_path / "v21.sqlite3")
+    c = s3.connect(db)
+    c.execute("""CREATE TABLE drift_picks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,
+        model_version TEXT, asset TEXT NOT NULL, ticker TEXT NOT NULL,
+        window_key INTEGER NOT NULL, close_time REAL, side TEXT NOT NULL,
+        ask_cents REAL NOT NULL, distance_sigma REAL, flip_probability REAL,
+        calibrated_yes_probability REAL, side_prob REAL, disagreement REAL,
+        slate_n INTEGER, pick_rank INTEGER, size_weight REAL,
+        features_version TEXT NOT NULL, official_result TEXT, resolved_at REAL,
+        correct INTEGER, pnl_cents REAL,
+        UNIQUE(model_version, window_key, ticker))""")
+    c.execute("INSERT INTO drift_picks (created_at, asset, ticker, window_key, side,"
+              " ask_cents, pick_rank, size_weight, features_version, official_result,"
+              " correct, pnl_cents)"
+              " VALUES (1,'DOGE','OLD',1,'YES',67,1,1.5,'drift-shadow-v2','YES',1,31.0)")
+    c.commit(); c.close()
+    monkeypatch.setenv("Q15_DRIFT_SHADOW", "true")
+    monkeypatch.setenv("Q15_DRIFT_SHADOW_DB", db)
+    ds.reset_recorder()
+    r = ds.DriftShadow()
+    assert r.enabled
+    cols = {row["name"] for row in r._conn.execute("PRAGMA table_info(drift_picks)")}
+    assert {"spread_weight", "session_weight", "stack_weight",
+            "spread_cents", "depth_contracts"} <= cols
+    tables = {t[0] for t in r._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert {"drift_addons", "drift_lq_watch", "drift_latequal"} <= tables
+    # old row: NULL tilt weights read as 1.0; existing size_weight preserved
+    tv = r.scoreboard()["tilts_volume_book"]
+    assert tv["spread_weight"]["weighted_pnl_cents"] == pytest.approx(31.0)
+    assert tv["size_weight"]["weighted_pnl_cents"] == pytest.approx(46.5)
+
+
 def test_health_reports_rows(rec):
     missing = rec.health(now=1000.0)
     assert missing["status"] == "empty" and missing["rows_written"] == 0
