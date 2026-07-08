@@ -8,6 +8,31 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - Drift Shadow pick cards into the V3 Telegram chat
+Run time: 2026-07-08 (follow-on to v3).
+
+Owner approved the DRIFT PICK card design and asked for delivery into the V3
+channel, styled like the ultoim_v2 channel's UI (bold header outside <pre>,
+body inside one <pre> panel). Implementation:
+- `strategy_bots`: new bot `drift_13m` (BOT_DRIFT_13M) — `drift_pick_13m_decision`
+  (rules), `record_drift_pick_row` (runtime; durable claim per (window, ticker) —
+  multi-pick book), `build_drift_pick_alert` (telegram; v2 panel grammar). Card
+  carries: size banner from the stack tilt (⭐ FULL ≥1.25x / ✅ NORMAL / 🔉 HALF
+  <0.75x), BUY line + breakeven, sizing reasons (spread/session), fill doctrine
+  (depth>=50 -> rest at ask; thin -> pay +1c now), 25-50/100 size guide, live
+  book record + verdict-n footer. No live formatter/suppression markers (tested).
+- Wiring: interval-research runner `_alert_drift_picks` fires after
+  `observe_window` writes; recorder gains read-only `picks_recorded_at` (the
+  recorder itself still never notifies).
+- Flags (default ON per owner directive): `Q15_V3_DRIFT_13M`,
+  `Q15_V3_DRIFT_13M_NOTIFY`; delivery also requires `Q15_V3_TELEGRAM_ENABLED`.
+- ADD-ON / LATE-QUAL cards deliberately NOT built yet: those tracks have n=0
+  live; wire their cards once the v3 tracks actually record (next session).
+
+Verification: pytest -> 1836 passed, 4 skipped. config_audit OK (977 vars).
+Deploy-pending: owner's local host needs git pull + app restart (also still
+pending for the v3 recorder tracks themselves — see operational note above).
+
 ## Shipped THIS session - Drift Shadow v3: verified improvement tracks (record-only)
 Run time: 2026-07-08.
 

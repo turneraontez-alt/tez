@@ -824,3 +824,103 @@ def test_fallback_card_annotation():
     }
     text = build_v3_alert(row)
     assert "late/thin slate (fallback fire)" in text
+
+
+# -- drift pick 13M (Drift Shadow base-book card; owner-approved 2026-07-08) --
+
+def _drift_row(**over):
+    base = {
+        "created_at": 5000.0,
+        "model_version": "v95",
+        "record_kind": "DRIFT_PICK_13M",
+        "asset": "XRP",
+        "ticker": "KXXRP15M-DP",
+        "interval": "13M",
+        "window_key": 777,
+        "close_time": 5800.0,
+        "predicted_side": "YES",
+        "entry_ask_cents": 60.0,
+        "spread_cents": 3.0,
+        "depth_contracts": 250.0,
+        "drift_spread_weight": 1.5,
+        "drift_session_weight": 1.33,
+        "drift_stack_weight": 1.5,
+        "drift_disagreement": -0.05,
+        "drift_pick_rank": 1,
+        "drift_slate_n": 2,
+        "drift_book_n_resolved": 11,
+        "drift_book_wins": 8,
+        "drift_book_total_pnl_cents": 72.0,
+        "drift_book_status": "ACCRUING",
+        "drift_book_verdict_n": 60,
+    }
+    base.update(over)
+    return base
+
+
+def test_drift_decision_gates(monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_DRIFT_13M, drift_pick_13m_decision
+
+    monkeypatch.setenv("Q15_V3_DRIFT_13M", "false")
+    assert drift_pick_13m_decision(_drift_row()) is None
+    monkeypatch.setenv("Q15_V3_DRIFT_13M", "true")
+    assert drift_pick_13m_decision(_drift_row(record_kind="TOP_PICK_13M")) is None
+    assert drift_pick_13m_decision(_drift_row(predicted_side="NO")) is None
+    d = drift_pick_13m_decision(_drift_row())
+    assert d is not None and d.bot_name == BOT_DRIFT_13M and d.decision_status == ACCEPTED
+    assert d.threshold_profile["stack_weight"] == 1.5
+    assert d.threshold_profile["book_n_resolved"] == 11
+
+
+def test_record_drift_pick_dedup_per_window_ticker_and_card(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_DRIFT_13M
+
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_DRIFT_13M", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_13M_NOTIFY", "true")
+
+    assert runtime.record_drift_pick_row(_drift_row()) is not None
+    # same (window, ticker) -> durable claim blocks; same window, NEW ticker -> allowed
+    assert runtime.record_drift_pick_row(_drift_row()) is None
+    assert runtime.record_drift_pick_row(_drift_row(ticker="KXDOGE15M-DP")) is not None
+
+    led = runtime.get_ledger()
+    rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == "drift_13m"]
+    assert len(rows) == 2 and all(r["decision_status"] == ACCEPTED for r in rows)
+    assert len(tg.sent) == 2
+    text = tg.sent[0]
+    assert "DRIFT PICK 13M" in text and "FULL SIZE" in text
+    assert "BUY YES — XRP @ 60¢" in text and "breakeven 62%" in text
+    assert "rest at 60¢" in text
+    assert "8W-3L" in text and "verdict at n=60" in text
+    assert "<pre>" in text  # v2-channel panel grammar: header outside, body inside
+    for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK",
+                   "Hourly Report", "TOP 3 PICKS"):
+        assert marker not in text
+
+
+def test_drift_card_thin_depth_half_size_and_empty_book():
+    from q15_upgrade.strategy_bots.telegram import build_drift_pick_alert
+
+    row = {
+        "bot_name": "drift_13m", "asset": "DOGE", "ticker": "T",
+        "entry_ask_cents": 67.0,
+        "threshold_json": json.dumps({
+            "stack_weight": 0.5, "spread_cents": 5.0, "session_weight": 0.75,
+            "depth_contracts": 12.0, "book_n_resolved": 0, "book_verdict_n": 60}),
+    }
+    text = build_drift_pick_alert(row)
+    assert "HALF SIZE" in text
+    assert "downsize" in text
+    assert "pay 68¢ now" in text           # thin book -> immediate +1c chase
+    assert "no resolved picks yet" in text
+    assert "breakeven 69%" in text         # 67c + 2c fee
+
+
+def test_drift_notify_explicit_off(tmp_path, monkeypatch):
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_DRIFT_13M_NOTIFY", "false")
+    assert runtime.record_drift_pick_row(_drift_row(window_key=778)) is not None
+    assert tg.sent == []

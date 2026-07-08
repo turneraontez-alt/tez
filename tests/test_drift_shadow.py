@@ -415,6 +415,19 @@ def test_v3_migrates_v21_schema_in_place(tmp_path, monkeypatch):
     assert tv["size_weight"]["weighted_pnl_cents"] == pytest.approx(46.5)
 
 
+def test_picks_recorded_at_returns_only_new_rows(rec):
+    slate = [_cap(ticker="N1"), _cap(ticker="N2", calibrated_yes_probability=0.75)]
+    rec.observe_window(model_version="m", window_key=950, close_time=9000.0,
+                       slate=slate, now=1000.0)
+    new = rec.picks_recorded_at("m", 950, 1000.0)
+    assert {p["ticker"] for p in new} == {"N1", "N2"}
+    assert all("spread_weight" in p and "ask_cents" in p for p in new)
+    # re-observation at a later time inserts nothing -> helper returns nothing
+    rec.observe_window(model_version="m", window_key=950, close_time=9000.0,
+                       slate=slate, now=1010.0)
+    assert rec.picks_recorded_at("m", 950, 1010.0) == []
+
+
 def test_health_reports_rows(rec):
     missing = rec.health(now=1000.0)
     assert missing["status"] == "empty" and missing["rows_written"] == 0

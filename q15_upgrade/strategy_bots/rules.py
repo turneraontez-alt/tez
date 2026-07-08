@@ -26,6 +26,7 @@ BOT_THIRTEEN_M_SNIPER = "thirteen_m_sniper"
 BOT_WARN_FLIP = "warn_flip_entry"
 BOT_FAV_10M = "fav_10m"
 BOT_TOP_PICK_13M = "top_pick_13m"
+BOT_DRIFT_13M = "drift_13m"
 
 # Source-row record_kind stamped by the ultoim_v2 exit-warning feed (Book 1).
 WARN_FLIP_RECORD_KIND = "EXIT_WARNING_FLIP"
@@ -626,6 +627,56 @@ def _top_pick_13m_enabled() -> bool:
 
 
 TOP_PICK_13M_PRIOR_ACCURACY = 0.744  # backtest: top-1 by market extremity, n=970 windows
+
+
+# -- Drift pick 13M: the Drift Shadow base-book pick as a paper card ----------
+# The recorder (q15_upgrade/drift_shadow.py) stays record-only; this bot only
+# formats + delivers what the recorder already wrote. Card UI mirrors the
+# ultoim_v2 panel grammar (header outside <pre>, body inside one <pre>).
+
+def _drift_13m_enabled() -> bool:
+    # Default ON by owner directive 2026-07-08 (drift cards into the V3 channel).
+    return _env_bool("Q15_V3_DRIFT_13M", True)
+
+
+def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Paper card for one recorded drift-book pick (alt YES, 60-73c,
+    near-strike, low flip). ACCEPTED always — the book records every qualifying
+    pick; sizing conviction is carried by the tilt weights, never by skipping."""
+    if not _drift_13m_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
+        return None
+    ask = _entry_ask(row)
+    if ask is None or str(source_side(row)) != "YES":
+        return None
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "not_a_trade_signal": False,  # this book IS the owner's tradeable card
+        "pick_ask_cents": ask,
+        "spread_cents": _num(row.get("spread_cents")),
+        "depth_contracts": _num(row.get("depth_contracts")),
+        "spread_weight": _num(row.get("drift_spread_weight")),
+        "session_weight": _num(row.get("drift_session_weight")),
+        "stack_weight": _num(row.get("drift_stack_weight")),
+        "disagreement": _num(row.get("drift_disagreement")),
+        "pick_rank": row.get("drift_pick_rank"),
+        "slate_n": row.get("drift_slate_n"),
+        "book_n_resolved": int(_num(row.get("drift_book_n_resolved")) or 0),
+        "book_wins": _num(row.get("drift_book_wins")),
+        "book_total_pnl_cents": _num(row.get("drift_book_total_pnl_cents")),
+        "book_status": str(row.get("drift_book_status") or "") or None,
+        "book_verdict_n": int(_num(row.get("drift_book_verdict_n")) or 60),
+    }
+    return BotDecision(
+        BOT_DRIFT_13M,
+        ACCEPTED,
+        ("V3_DRIFT_PICK_13M", "NEAR_STRIKE_YES_BOOK"),
+        threshold_profile={**profile, "passed": True},
+        side_override="YES",
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
 
 
 def _depth_signal(row: Mapping[str, Any], key: str, deadband: float) -> tuple[str | None, float | None]:

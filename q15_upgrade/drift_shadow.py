@@ -681,6 +681,23 @@ class DriftShadow:
             },
         }
 
+    def picks_recorded_at(self, model_version: str, window_key: int,
+                          recorded_at: float) -> list[dict[str, Any]]:
+        """Rows INSERTED by the observe_window call that ran at ``recorded_at``
+        (idempotent re-observations keep their original created_at, so exactly
+        the new rows match). Read-only — used by the alert adapter; the
+        recorder itself still never notifies."""
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM drift_picks WHERE model_version=? AND window_key=?"
+                " AND created_at=?",
+                (model_version, int(window_key), recorded_at)).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.Error:
+            return []
+
     def health(self, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
         if not self.enabled or self._conn is None:

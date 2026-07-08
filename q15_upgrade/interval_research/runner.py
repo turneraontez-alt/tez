@@ -134,11 +134,58 @@ class IntervalResearchRunner:
                 continue
             slate = self.ledger.captures_for_window(self.config.model_version, "13M", wk)
             if slate:
-                rec.observe_window(
+                wrote = rec.observe_window(
                     model_version=self.config.model_version, window_key=wk,
                     close_time=_num(getattr(canonical, "settlement_time", None)),
                     slate=slate, now=now)
+                if wrote:
+                    self._alert_drift_picks(rec, wk, now)
             break  # one window per cycle is enough; dedup is by (mv, window_key)
+
+    def _alert_drift_picks(self, rec: Any, wk: int, now: float) -> None:
+        """Deliver a V3-channel card for each pick the recorder just wrote.
+
+        The recorder stays record-only; this adapter reads its new rows and
+        hands them to the strategy-bots delivery rail (durable per-(window,
+        ticker) claim there, so restarts/re-observations never double-send).
+        Never raises into the live loop."""
+        try:
+            picks = rec.picks_recorded_at(self.config.model_version, wk, now)
+            if not picks:
+                return
+            book = (rec.scoreboard() or {}).get("book_volume_60_73_all", {})
+            wins = None
+            if book.get("n_resolved") and book.get("win_rate") is not None:
+                wins = round(float(book["win_rate"]) * int(book["n_resolved"]))
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+            for p in picks:
+                strategy_bots_runtime.record_drift_pick_row({
+                    "created_at": now,
+                    "model_version": self.config.model_version,
+                    "record_kind": "DRIFT_PICK_13M",
+                    "asset": p.get("asset"),
+                    "ticker": p.get("ticker"),
+                    "interval": "13M",
+                    "window_key": wk,
+                    "close_time": p.get("close_time"),
+                    "predicted_side": "YES",
+                    "entry_ask_cents": p.get("ask_cents"),
+                    "spread_cents": p.get("spread_cents"),
+                    "depth_contracts": p.get("depth_contracts"),
+                    "drift_spread_weight": p.get("spread_weight"),
+                    "drift_session_weight": p.get("session_weight"),
+                    "drift_stack_weight": p.get("stack_weight"),
+                    "drift_disagreement": p.get("disagreement"),
+                    "drift_pick_rank": p.get("pick_rank"),
+                    "drift_slate_n": p.get("slate_n"),
+                    "drift_book_n_resolved": book.get("n_resolved"),
+                    "drift_book_wins": wins,
+                    "drift_book_total_pnl_cents": book.get("total_pnl_cents"),
+                    "drift_book_status": book.get("status"),
+                    "drift_book_verdict_n": 60,
+                })
+        except Exception:  # noqa: BLE001 - alerting must never break the loop
+            logger.debug("drift pick alert failed (ignored)", exc_info=True)
 
     # drift-shadow v3 later-checkpoint bands: fire once captures for that mark
     # have landed (mark-40..mark-10s), mirroring the 13M band above.

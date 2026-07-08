@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 from typing import Any, Mapping
 
@@ -48,6 +49,7 @@ def _bot_label(name: str) -> str:
         "warn_flip_entry": "Warn-Flip Entry",
         "fav_10m": "Favorite 10M",
         "top_pick_13m": "Top Pick 13M",
+        "drift_13m": "Drift Pick 13M",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -432,6 +434,119 @@ def build_top_pick_alert(row: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _is_drift_pick(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "drift_13m"
+
+
+def _drift_size_banner(stack: Any) -> str:
+    """One-glance size grade from the stacked tilt weight."""
+    try:
+        w = float(stack)
+    except (TypeError, ValueError):
+        return "✅ NORMAL SIZE"
+    if w >= 1.25:
+        return f"⭐ FULL SIZE ({w:.2g}×)"
+    if w < 0.75:
+        return f"🔉 HALF SIZE ({w:.2g}×)"
+    return f"✅ NORMAL SIZE ({w:.2g}×)"
+
+
+def _drift_sizing_reason(sp: Any, sess_w: Any) -> str:
+    bits: list[str] = []
+    try:
+        s = float(sp)
+        if s <= 2:
+            bits.append(f"spread {s:.0f}¢ → tight (MM-priced)")
+        elif s <= 4:
+            bits.append(f"spread {s:.0f}¢ → upsize")
+        else:
+            bits.append(f"spread {s:.0f}¢ → downsize")
+    except (TypeError, ValueError):
+        pass
+    try:
+        w = float(sess_w)
+        if w > 1.0:
+            bits.append("US hours → upsize")
+        elif w < 0.8:
+            bits.append("EU hours → downsize")
+        else:
+            bits.append("overnight → neutral")
+    except (TypeError, ValueError):
+        pass
+    return " · ".join(bits)
+
+
+def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
+    """Drift Shadow base-book pick — ultoim_v2 panel grammar (bold header
+    outside a <pre> block, body inside one <pre>), owner-approved card layout.
+    MUST NOT carry live formatter/suppression markers ("V9.5 CHECK",
+    "ENTRY RECOMMENDED", "NO ENTRY YET", "Hourly Report —", "TOP 3 PICKS")."""
+    thresholds = _thresholds(row)
+    asset = str(row.get("asset") or "")
+    ask = row.get("entry_ask_cents")
+    if ask is None:
+        ask = thresholds.get("pick_ask_cents")
+    fee = None
+    try:
+        p = float(ask) / 100.0
+        fee = math.ceil(7.0 * p * (1.0 - p))
+    except (TypeError, ValueError):
+        pass
+    breakeven = (
+        f"{(float(ask) + fee):.0f}%" if fee is not None else "n/a"
+    )
+    banner = _drift_size_banner(thresholds.get("stack_weight"))
+    n = int(float(thresholds.get("book_n_resolved") or 0))
+    wins = thresholds.get("book_wins")
+    pnl = thresholds.get("book_total_pnl_cents")
+    verdict_n = int(float(thresholds.get("book_verdict_n") or 60))
+    if n > 0 and wins is not None:
+        w = int(float(wins))
+        book_line = (
+            f"Book: {w}W-{n - w}L · {float(pnl):+.0f}¢ · verdict at n={verdict_n}"
+            if pnl is not None else f"Book: {w}W-{n - w}L · verdict at n={verdict_n}"
+        )
+    else:
+        book_line = f"Book: no resolved picks yet · verdict at n={verdict_n}"
+    header = f"🌊 <b>DRIFT PICK 13M · {html.escape(banner)}</b>"
+    body = [
+        "PAPER SIGNAL — record-only book; you trade it manually or not at all.",
+        "",
+        f"BUY YES — {asset} @ {_plain_whole(ask)}¢ · breakeven {breakeven}",
+        f"Sizing: {_drift_sizing_reason(thresholds.get('spread_cents'), thresholds.get('session_weight'))}",
+        _drift_fill_line_plain(thresholds.get("depth_contracts"), ask),
+        "Size guide: 25–50 contracts comfort · ~100 max",
+        book_line,
+        f"Ticker: {str(row.get('ticker') or '')}",
+        "Drift Shadow · paper/research · no orders placed",
+    ]
+    return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
+
+
+def _plain_whole(value: Any) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"{int(round(v))}" if abs(v - round(v)) < 0.05 else f"{v:.1f}"
+
+
+def _drift_fill_line_plain(depth: Any, ask: Any) -> str:
+    """Unescaped variant for inside the <pre> body (escaping happens at join)."""
+    ask_txt = f"{_plain_whole(ask)}¢"
+    try:
+        d = float(depth)
+    except (TypeError, ValueError):
+        return f"Fill: depth unknown → rest at {ask_txt}, chase +1¢ only if unfilled"
+    if d >= 50:
+        return f"Fill: depth {d:.0f} @ ask → rest at {ask_txt}, don't pay up"
+    try:
+        chase = f"{_plain_whole(float(ask) + 1.0)}¢"
+    except (TypeError, ValueError):
+        chase = "+1¢"
+    return f"Fill: thin book ({d:.0f} @ ask) → pay {chase} now to get filled"
+
+
 def _is_warn_flip(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "warn_flip_entry"
 
@@ -470,6 +585,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_fav_10m_alert(row)
     if _is_top_pick(row):
         return build_top_pick_alert(row)
+    if _is_drift_pick(row):
+        return build_drift_pick_alert(row)
 
     reasons = str(row.get("reason_codes") or "").replace(",", ", ")
     is_reversal = str(row.get("bot_name") or "") == "bnb_yes_reversal"
