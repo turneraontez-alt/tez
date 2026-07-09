@@ -109,7 +109,11 @@ def _window_id(close: Any) -> int | None:
 class ShadowLedger:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+        # The challenger runner uses this ledger from multiple worker threads.
+        # SQLite's default thread affinity would raise on those cross-thread
+        # reads/writes, so allow shared access here and rely on the runner's
+        # existing serialization around ledger operations.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._migrate()
