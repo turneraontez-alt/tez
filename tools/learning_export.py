@@ -2,7 +2,7 @@
 """Learning-snapshot export: publish the live learning records to GitHub.
 
 Runs as a long-lived background workflow on the Repl (sibling to the GitHub
-relay). Once an hour it:
+relay). Periodically it:
 
   1. Takes a *consistent* read-only snapshot of every SQLite learning ledger
      under ``data/`` (via the SQLite online-backup API — never a torn file copy
@@ -809,7 +809,7 @@ def main() -> int:
         return 2
 
     _log(
-        f"Hourly learning export -> github.com/{REPO} branch '{BRANCH}' "
+        f"Periodic learning export -> github.com/{REPO} branch '{BRANCH}' "
         f"every {INTERVAL}s (data dir: {DATA_DIR})"
     )
     while True:
