@@ -272,6 +272,11 @@ def test_publish_pushes_orphan_and_leaves_worktree_untouched(tmp_path):
     work, remote = _init_work_and_remote(tmp_path)
     head_before = _git(work, "rev-parse", "HEAD")
     branch_before = _git(work, "rev-parse", "--abbrev-ref", "HEAD")
+    object_files_before = {
+        path.relative_to(work / ".git" / "objects")
+        for path in (work / ".git" / "objects").rglob("*")
+        if path.is_file()
+    }
 
     gz = gzip.compress(b"SQLite format 3\x00 fake", mtime=0)
     snap = {"generated_at": "2026-06-22T12:00:00+00:00", "git_commit": "abc",
@@ -289,6 +294,14 @@ def test_publish_pushes_orphan_and_leaves_worktree_untouched(tmp_path):
     # no local snapshot branch ref was created
     local_branches = _git(work, "branch", "--list", "learning-snapshots")
     assert local_branches == ""
+    object_files_after = {
+        path.relative_to(work / ".git" / "objects")
+        for path in (work / ".git" / "objects").rglob("*")
+        if path.is_file()
+    }
+    assert object_files_after == object_files_before, (
+        "snapshot publishing must not add blobs to the live Git object database"
+    )
 
     # remote received exactly the expected tree
     names = _git(remote, "ls-tree", "-r", "--name-only", "learning-snapshots").split()

@@ -131,3 +131,30 @@ def test_spot_depth_can_be_explicitly_disabled(monkeypatch):
     monkeypatch.setenv("Q15_SPOT_DEPTH_ENABLED", "false")
     health = spot_depth_health()
     assert health["enabled"] is False
+
+
+def test_spot_depth_prunes_rows_outside_retention(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_SPOT_DEPTH_RETENTION_DAYS", "1")
+    db = str(tmp_path / "depth.sqlite3")
+    feed = SpotDepthRecorder(assets=["BTC"], db_path=db)
+    conn = feed._connect()
+    conn.execute(
+        "INSERT INTO spot_depth_snapshots "
+        "(created_at, asset, provider, symbol, source) VALUES (?,?,?,?,?)",
+        (time.time() - 172800.0, "BTC", "coinbase", "BTC-USD", "old"),
+    )
+    conn.commit()
+    feed._handle_coinbase(json.dumps({
+        "type": "snapshot",
+        "product_id": "BTC-USD",
+        "bids": [["100.0", "2.0"]],
+        "asks": [["100.5", "1.5"]],
+    }))
+
+    assert feed.record_once() == 1
+    rows = conn.execute(
+        "SELECT source FROM spot_depth_snapshots ORDER BY created_at"
+    ).fetchall()
+    assert [row[0] for row in rows] == ["coinbase BTC-USD"]
+    assert feed.health()["records_pruned"] == 1
+    feed.close()

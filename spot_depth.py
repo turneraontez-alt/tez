@@ -133,6 +133,10 @@ def _record_seconds() -> float:
     return _env_float("Q15_SPOT_DEPTH_RECORD_SECONDS", 5.0, minimum=1.0)
 
 
+def _retention_days() -> float:
+    return _env_float("Q15_SPOT_DEPTH_RETENTION_DAYS", 7.0, minimum=0.0)
+
+
 def _levels() -> int:
     return _env_int("Q15_SPOT_DEPTH_LEVELS", 5, minimum=1)
 
@@ -192,6 +196,7 @@ class SpotDepthRecorder:
         self.db_path = db_path or _db_path()
         self.level_count = _levels()
         self._record_seconds = _record_seconds()
+        self._retention_days = _retention_days()
         self._max_book_age = _max_book_age()
         self._lock = threading.Lock()
         self._books: dict[str, dict[str, Any]] = {}
@@ -202,6 +207,8 @@ class SpotDepthRecorder:
         self._last_message_at: dict[str, float] = {}
         self._last_record_at: float | None = None
         self._records_written = 0
+        self._records_pruned = 0
+        self._last_prune_at = 0.0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._conn: sqlite3.Connection | None = None
@@ -259,6 +266,7 @@ class SpotDepthRecorder:
                 "assets": list(self.assets),
                 "db_path": self.db_path,
                 "record_seconds": self._record_seconds,
+                "retention_days": self._retention_days,
                 "levels": self.level_count,
                 "connected": dict(self._connected),
                 "book_age_seconds": books,
@@ -267,6 +275,7 @@ class SpotDepthRecorder:
                     round(now - self._last_record_at, 3) if self._last_record_at else None
                 ),
                 "records_written": self._records_written,
+                "records_pruned": self._records_pruned,
                 "last_error": dict(self._last_error),
             }
 
@@ -471,6 +480,14 @@ class SpotDepthRecorder:
         with self._lock:
             for row in rows:
                 self._insert_row_locked(conn, row)
+            if self._retention_days > 0 and now - self._last_prune_at >= 600.0:
+                cutoff = now - (self._retention_days * 86400.0)
+                cur = conn.execute(
+                    "DELETE FROM spot_depth_snapshots WHERE created_at < ?",
+                    (cutoff,),
+                )
+                self._records_pruned += max(0, int(cur.rowcount or 0))
+                self._last_prune_at = now
             conn.commit()
             self._last_record_at = now
             self._records_written += len(rows)

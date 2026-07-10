@@ -568,19 +568,34 @@ def publish(
 ) -> tuple[bool, str]:
     """Force-push the snapshot as a single orphan commit on ``branch``.
 
-    Built entirely with plumbing against a TEMP index, so HEAD / the working
-    tree / the real index are never touched. Returns ``(ok, masked_detail)``.
+    Built entirely inside a disposable bare repository. This also protects the
+    live object database: force-pushed orphan snapshots contain large SQLite
+    blobs that would otherwise remain as unreachable objects after every cycle.
+    Returns ``(ok, masked_detail)``.
     """
     if branch in PROTECTED_BRANCHES:
         raise ValueError(f"refusing to publish snapshots to protected branch {branch!r}")
 
     files = _snapshot_files(artifacts, snapshot)
 
-    with tempfile.TemporaryDirectory(prefix="lexport_idx_") as tmpdir:
-        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmpdir, "index")}
+    with tempfile.TemporaryDirectory(prefix="lexport_git_") as tmpdir:
+        git_dir = os.path.join(tmpdir, "snapshot.git")
+        res = git(["init", "--bare", "-q", git_dir], workdir=tmpdir)
+        if res.returncode != 0:
+            return False, _mask("temporary git init failed: " + res.stderr.strip(), token)
+        env = {
+            **os.environ,
+            "GIT_DIR": git_dir,
+            "GIT_INDEX_FILE": os.path.join(tmpdir, "index"),
+        }
 
         for relpath, data in sorted(files.items()):
-            res = git(["hash-object", "-w", "--stdin"], input_bytes=data, workdir=workdir)
+            res = git(
+                ["hash-object", "-w", "--stdin"],
+                input_bytes=data,
+                env=env,
+                workdir=tmpdir,
+            )
             if res.returncode != 0:
                 return False, _mask(
                     f"hash-object failed for {relpath}: {res.stderr.strip()}", token
@@ -589,14 +604,14 @@ def publish(
             res = git(
                 ["update-index", "--add", "--cacheinfo", f"100644,{blob},{relpath}"],
                 env=env,
-                workdir=workdir,
+                workdir=tmpdir,
             )
             if res.returncode != 0:
                 return False, _mask(
                     f"update-index failed for {relpath}: {res.stderr.strip()}", token
                 )
 
-        res = git(["write-tree"], env=env, workdir=workdir)
+        res = git(["write-tree"], env=env, workdir=tmpdir)
         if res.returncode != 0:
             return False, _mask("write-tree failed: " + res.stderr.strip(), token)
         tree = res.stdout.strip()
@@ -609,7 +624,7 @@ def publish(
                 "commit-tree", tree, "-m", message,
             ],
             env=env,
-            workdir=workdir,
+            workdir=tmpdir,
         )
         if res.returncode != 0:
             return False, _mask("commit-tree failed: " + res.stderr.strip(), token)
@@ -620,7 +635,8 @@ def publish(
                 "-c", "credential.helper=",
                 "push", "--force", remote_url, f"{commit}:refs/heads/{branch}",
             ],
-            workdir=workdir,
+            env=env,
+            workdir=tmpdir,
         )
         ok = res.returncode == 0
         return ok, _mask((res.stdout + res.stderr).strip(), token)

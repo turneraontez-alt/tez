@@ -28,6 +28,10 @@ $stopScript = Join-Path $PSScriptRoot "Stop-Q15Local.ps1"
 if (Test-Path -LiteralPath $stopScript) {
     & $stopScript -PidDir $pidDir -IncludeStale
 }
+$storageScript = Join-Path $PSScriptRoot "Optimize-Q15Storage.ps1"
+if (Test-Path -LiteralPath $storageScript) {
+    & $storageScript
+}
 $services = @(
     @{ Name = "app"; Args = @((Join-Path $root "app.py")) }
 )
