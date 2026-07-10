@@ -1,9 +1,9 @@
-"""Authenticated Coinbase Advanced Trade full Level2 book collector.
+"""Coinbase Advanced Trade full Level2 book collector.
 
 Advanced Trade does not expose a public ``level3`` channel in the documented
 channel list. Its ``level2`` channel sends the full price-level book snapshot
-and every subsequent price-level update. This collector captures that feed using
-the CDP JSON key/JWT flow.
+and every subsequent price-level update. Market-data subscriptions are public;
+when a valid CDP JSON key is available the collector still uses the JWT flow.
 """
 from __future__ import annotations
 
@@ -203,6 +203,10 @@ def _has_key_file() -> bool:
         return False
 
 
+def _preferred_connection_mode() -> str:
+    return "authenticated" if _HAVE_COINBASE_SDK and _has_key_file() else "public"
+
+
 def _snapshot_age_health(db_path: str, products: Iterable[str], now: float) -> dict[str, Any]:
     path = Path(db_path)
     if not path.exists():
@@ -272,7 +276,7 @@ def _annotate_and_warn_stale(info: dict[str, Any], now: float) -> dict[str, Any]
 
 
 class CoinbaseAdvancedL2Collector:
-    """Authenticated Advanced Trade L2 collector."""
+    """Advanced Trade L2 collector with optional CDP authentication."""
 
     def __init__(
         self,
@@ -298,6 +302,7 @@ class CoinbaseAdvancedL2Collector:
         self._last_record_at: float | None = None
         self._last_error: dict[str, str] = {}
         self._connected = False
+        self._connection_mode = _preferred_connection_mode()
         self._records_written = 0
         self._updates_seen = 0
         self._last_prune_at = 0.0
@@ -312,16 +317,8 @@ class CoinbaseAdvancedL2Collector:
         if not _HAVE_WS:
             logger.warning("Coinbase Advanced L2 disabled: `pip install websockets`")
             return
-        if not _HAVE_COINBASE_SDK:
-            logger.warning("Coinbase Advanced L2 disabled: coinbase SDK missing: %s", _COINBASE_SDK_ERROR)
-            return
         if not self.products:
             logger.warning("Coinbase Advanced L2 not started: no products configured")
-            return
-        try:
-            load_cdp_key(self.key_file)
-        except Exception as exc:
-            logger.warning("Coinbase Advanced L2 not started: bad/missing CDP key: %s", exc)
             return
         if self._thread and self._thread.is_alive():
             return
@@ -345,6 +342,7 @@ class CoinbaseAdvancedL2Collector:
                 "have_coinbase_sdk": _HAVE_COINBASE_SDK,
                 "coinbase_sdk_error": _COINBASE_SDK_ERROR,
                 "authenticated_key_loaded": _has_key_file(),
+                "connection_mode": self._connection_mode,
                 "key_file": self.key_file,
                 "products": list(self.products),
                 "db_path": self.db_path,
@@ -380,10 +378,6 @@ class CoinbaseAdvancedL2Collector:
             return "disabled"
         if not _HAVE_WS:
             return "websockets_missing"
-        if not _HAVE_COINBASE_SDK:
-            return "coinbase_sdk_missing"
-        if not _has_key_file():
-            return "missing_or_bad_key_file"
         if self._connected:
             return "connected"
         if self._thread_exited_at and not self._stop.is_set():
@@ -621,7 +615,14 @@ class CoinbaseAdvancedL2Collector:
         backoff = 1.0
         while not self._stop.is_set():
             try:
-                key_name, private_key = load_cdp_key(self.key_file)
+                key_name: str | None = None
+                private_key: str | None = None
+                if _HAVE_COINBASE_SDK:
+                    try:
+                        key_name, private_key = load_cdp_key(self.key_file)
+                    except Exception:
+                        pass
+                connection_mode = "authenticated" if key_name and private_key else "public"
                 async with websockets.connect(
                     ADVANCED_TRADE_WS,
                     ping_interval=20,
@@ -632,10 +633,15 @@ class CoinbaseAdvancedL2Collector:
                 ) as socket:
                     with self._lock:
                         self._connected = True
+                        self._connection_mode = connection_mode
                         self._last_error.pop("coinbase", None)
                     await self._subscribe(socket, key_name, private_key)
                     backoff = 1.0
-                    reconnect_at = time.monotonic() + self.jwt_refresh_seconds
+                    reconnect_at = (
+                        time.monotonic() + self.jwt_refresh_seconds
+                        if connection_mode == "authenticated"
+                        else float("inf")
+                    )
                     while not self._stop.is_set() and time.monotonic() < reconnect_at:
                         try:
                             message = await asyncio.wait_for(socket.recv(), timeout=20.0)
@@ -654,23 +660,29 @@ class CoinbaseAdvancedL2Collector:
             await asyncio.sleep(backoff)
             backoff = min(30.0, backoff * 1.8)
 
-    async def _subscribe(self, socket: Any, key_name: str, private_key: str) -> None:
-        if jwt_generator is None:
-            raise RuntimeError("coinbase SDK missing")
-        heartbeat_jwt = jwt_generator.build_ws_jwt(key_name, private_key)
-        await socket.send(json.dumps({
+    async def _subscribe(
+        self,
+        socket: Any,
+        key_name: str | None = None,
+        private_key: str | None = None,
+    ) -> None:
+        authenticated = bool(key_name and private_key and jwt_generator is not None)
+        heartbeat = {
             "type": "subscribe",
             "channel": "heartbeats",
-            "jwt": heartbeat_jwt,
-        }))
+        }
+        if authenticated:
+            heartbeat["jwt"] = jwt_generator.build_ws_jwt(key_name, private_key)
+        await socket.send(json.dumps(heartbeat))
         for product_id in self.products:
-            token = jwt_generator.build_ws_jwt(key_name, private_key)
-            await socket.send(json.dumps({
+            subscription = {
                 "type": "subscribe",
                 "product_ids": [product_id],
                 "channel": "level2",
-                "jwt": token,
-            }))
+            }
+            if authenticated:
+                subscription["jwt"] = jwt_generator.build_ws_jwt(key_name, private_key)
+            await socket.send(json.dumps(subscription))
 
 
 _feed: CoinbaseAdvancedL2Collector | None = None
@@ -705,6 +717,7 @@ def coinbase_adv_l2_health() -> dict[str, Any]:
         "have_coinbase_sdk": _HAVE_COINBASE_SDK,
         "coinbase_sdk_error": _COINBASE_SDK_ERROR,
         "authenticated_key_loaded": _has_key_file(),
+        "connection_mode": _preferred_connection_mode(),
         "key_file": _key_file(),
         "products": products,
         "db_path": db_path,
@@ -714,10 +727,7 @@ def coinbase_adv_l2_health() -> dict[str, Any]:
     info.update(_snapshot_age_health(db_path, products, now))
     if not _enabled() or _feed is None:
         if _enabled():
-            if not _HAVE_COINBASE_SDK:
-                info["status"] = "coinbase_sdk_missing"
-            elif not _has_key_file():
-                info["status"] = "missing_or_bad_key_file"
+            info["status"] = "websockets_missing" if not _HAVE_WS else f"ready_{info['connection_mode']}"
         return _annotate_and_warn_stale(info, now)
     try:
         info.update(_feed.health())

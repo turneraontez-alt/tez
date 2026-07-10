@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -185,13 +186,39 @@ def test_health_warns_once_when_snapshots_stale(tmp_path, monkeypatch, caplog):
     assert caplog.text.count("Coinbase Advanced L2 snapshots stale") == 1
 
 
-def test_health_reports_missing_coinbase_sdk(monkeypatch):
+def test_public_subscribe_does_not_require_cdp_key(tmp_path):
+    class FakeSocket:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, raw):
+            self.messages.append(json.loads(raw))
+
+    feed = CoinbaseAdvancedL2Collector(
+        products=["BTC-USD", "ETH-USD"],
+        db_path=str(tmp_path / "adv_l2.sqlite3"),
+        key_file=str(tmp_path / "missing.json"),
+    )
+    socket = FakeSocket()
+
+    asyncio.run(feed._subscribe(socket))
+
+    assert [message["channel"] for message in socket.messages] == ["heartbeats", "level2", "level2"]
+    assert all("jwt" not in message for message in socket.messages)
+    assert socket.messages[1]["product_ids"] == ["BTC-USD"]
+    assert socket.messages[2]["product_ids"] == ["ETH-USD"]
+
+
+def test_health_uses_public_mode_without_coinbase_sdk(monkeypatch, tmp_path):
     monkeypatch.setenv("Q15_COINBASE_ADV_L2_ENABLED", "true")
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_KEY_FILE", str(tmp_path / "missing.json"))
     monkeypatch.setattr(adv_l2, "_HAVE_COINBASE_SDK", False)
     monkeypatch.setattr(adv_l2, "_COINBASE_SDK_ERROR", "ImportError: missing coinbase")
+    monkeypatch.setattr(adv_l2, "_feed", None)
 
     info = adv_l2.coinbase_adv_l2_health()
 
     assert info["have_coinbase_sdk"] is False
     assert info["coinbase_sdk_error"] == "ImportError: missing coinbase"
-    assert info["status"] == "coinbase_sdk_missing"
+    assert info["connection_mode"] == "public"
+    assert info["status"] == "ready_public"
