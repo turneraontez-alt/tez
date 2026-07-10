@@ -303,6 +303,9 @@ def test_v3_addon_first_requal_only(rec):
     assert len(rows) == 1
     assert rows[0]["add_interval"] == "12M" and rows[0]["ask_cents"] == 69.0
     assert rows[0]["base_ask_cents"] == 67.0
+    inserted = rec.checkpoint_rows_recorded_at("m", 900, "12M", 1060.0)
+    assert len(inserted) == 1
+    assert inserted[0]["record_kind"] == "DRIFT_ADDON_REQUAL"
     # resolve grades the add-on too: base pick + add-on both settle YES
     rec.resolve([{"ticker": "RQ", "result": "YES"}], now=2000.0)
     sb = rec.scoreboard()
@@ -346,10 +349,10 @@ def test_v3_latequal_watch_then_entry(rec):
         "SELECT entry_interval, ask_cents, ask13_cents FROM drift_latequal").fetchone()
     assert row["entry_interval"] == "12M" and row["ask_cents"] == 64.0
     assert row["ask13_cents"] == 55.0
-    # 9M is NOT a late-qual entry checkpoint (12M/11M/10M only)
+    # The losing 10M extension is intentionally disabled; only 12M/11M enter.
     rec.observe_window(model_version="m", window_key=904, close_time=9000.0,
                        slate=[_cap(ticker="LQ2", yes_ask_cents=55.0)], now=2000.0)
-    assert rec.observe_checkpoint(model_version="m", window_key=904, interval="9M",
+    assert rec.observe_checkpoint(model_version="m", window_key=904, interval="10M",
                                   close_time=9000.0,
                                   slate=[_cap(ticker="LQ2", yes_ask_cents=64.0)],
                                   now=2300.0) == 0
@@ -358,6 +361,13 @@ def test_v3_latequal_watch_then_entry(rec):
     sb = rec.scoreboard()
     assert sb["book_latequal"]["n_resolved"] == 1
     assert sb["book_latequal"]["ev_cents"] == pytest.approx(-66.0)  # -(64+2)
+    events = rec.resolved_events()
+    assert events == [{
+        "model_version": "m",
+        "ticker": "LQ1",
+        "official_result": "NO",
+        "resolved_at": 3000.0,
+    }]
 
 
 def test_v3_scoreboard_blueprint_and_tilts(rec):

@@ -23,6 +23,8 @@ from .rules import (
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     BOT_DRIFT_13M,
+    BOT_DRIFT_ADDON,
+    BOT_DRIFT_LATEQUAL,
     BOT_THIRTEEN_M_SNIPER,
     BOT_TOP_PICK_13M,
     BOT_WARN_FLIP,
@@ -31,6 +33,8 @@ from .rules import (
     STRATEGY_VERSION,
     BotDecision,
     decisions_for_row,
+    drift_addon_requal_decision,
+    drift_latequal_decision,
     drift_pick_13m_decision,
     source_side,
     top_pick_13m_decision,
@@ -94,6 +98,14 @@ def top_pick_notify_enabled() -> bool:
 def drift_notify_enabled() -> bool:
     # Default ON by owner directive 2026-07-08 (drift cards into the V3 channel).
     return _bool("Q15_V3_DRIFT_13M_NOTIFY", True)
+
+
+def drift_addon_notify_enabled() -> bool:
+    return _bool("Q15_V3_DRIFT_ADDON_NOTIFY", True)
+
+
+def drift_latequal_notify_enabled() -> bool:
+    return _bool("Q15_V3_DRIFT_LATEQUAL_NOTIFY", True)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -490,10 +502,11 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             f"{STRATEGY_VERSION}:{BOT_DRIFT_13M}:{int(wk)}:{ticker}"
         ):
             return None
-        decision = drift_pick_13m_decision(row)
+        enriched = _enrich_source_row(row)
+        decision = drift_pick_13m_decision(enriched)
         if decision is None:
             return None
-        row_id = ledger.record_decision(decision, row, source_system="drift_shadow")
+        row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
         if row_id is None or not drift_notify_enabled():
             return row_id
         recorded = ledger.row_by_id(row_id)
@@ -510,6 +523,53 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         return row_id
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 drift-pick record failed (ignored)", exc_info=True)
+        return None
+
+
+def record_drift_checkpoint_row(row: Mapping[str, Any]) -> int | None:
+    """Record and optionally notify one Drift add-on or late-qualifier row."""
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return None
+        kind = str(row.get("record_kind") or "")
+        if kind == "DRIFT_ADDON_REQUAL":
+            bot_name = BOT_DRIFT_ADDON
+            decision_fn = drift_addon_requal_decision
+            notify = drift_addon_notify_enabled()
+        elif kind == "DRIFT_LATEQUAL":
+            bot_name = BOT_DRIFT_LATEQUAL
+            decision_fn = drift_latequal_decision
+            notify = drift_latequal_notify_enabled()
+        else:
+            return None
+        wk = row.get("window_key")
+        ticker = str(row.get("ticker") or "")
+        if wk is None or not ticker or not ledger.claim_meta_once(
+            f"{STRATEGY_VERSION}:{bot_name}:{int(wk)}:{ticker}"
+        ):
+            return None
+        enriched = _enrich_source_row(row)
+        decision = decision_fn(enriched)
+        if decision is None:
+            return None
+        row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
+        if row_id is None or not notify:
+            return row_id
+        recorded = ledger.row_by_id(row_id)
+        if recorded is None:
+            return row_id
+        result = get_telegram().send(build_v3_alert(_with_feed_degraded_stamp(recorded)))
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        ledger.mark_notification(row_id, status=status, message_id=mid, error=result.get("error"))
+        return row_id
+    except Exception:  # noqa: BLE001 - checkpoint tracking must never break capture
+        logger.warning("v3 drift checkpoint record failed (ignored)", exc_info=True)
         return None
 
 
@@ -699,6 +759,29 @@ def resolve(
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 strategy-bot resolve failed (ignored)", exc_info=True)
         return 0
+
+
+def reconcile_drift_settlements(events: Any) -> int:
+    """Backfill or grade Drift strategy rows from the authoritative Drift ledger."""
+    total = 0
+    if not events:
+        return total
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        model_version = str(event.get("model_version") or "")
+        ticker = str(event.get("ticker") or "")
+        result = str(event.get("official_result") or "").upper()
+        if not model_version or not ticker or result not in {"YES", "NO"}:
+            continue
+        total += resolve(
+            source_system="drift_shadow",
+            source_model_version=model_version,
+            ticker=ticker,
+            official_result=result,
+            now=event.get("resolved_at"),
+        )
+    return total
 
 
 def scoreboard() -> dict[str, Any]:

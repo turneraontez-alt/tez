@@ -50,6 +50,8 @@ def _bot_label(name: str) -> str:
         "fav_10m": "Favorite 10M",
         "top_pick_13m": "Top Pick 13M",
         "drift_13m": "Drift Pick 13M",
+        "drift_addon_requal": "Drift Requalification Add-On",
+        "drift_latequal_12m_11m": "Drift Late Qualifier",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -438,6 +440,14 @@ def _is_drift_pick(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "drift_13m"
 
 
+def _is_drift_addon(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "drift_addon_requal"
+
+
+def _is_drift_latequal(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "drift_latequal_12m_11m"
+
+
 def _drift_size_banner(stack: Any) -> str:
     """One-glance size grade from the stacked tilt weight."""
     try:
@@ -523,6 +533,63 @@ def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
     return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
 
 
+def _drift_track_book_line(thresholds: Mapping[str, Any]) -> str:
+    n = int(float(thresholds.get("track_n_resolved") or 0))
+    wins = thresholds.get("track_wins")
+    pnl = thresholds.get("track_total_pnl_cents")
+    verdict_n = int(float(thresholds.get("track_verdict_n") or 40))
+    if n <= 0 or wins is None:
+        return f"Track: no resolved entries yet | first verdict at n={verdict_n}"
+    w = int(float(wins))
+    pnl_text = f" | {float(pnl):+.0f}c" if pnl is not None else ""
+    return f"Track: {w}W-{n - w}L{pnl_text} | first verdict at n={verdict_n}"
+
+
+def build_drift_addon_alert(row: Mapping[str, Any]) -> str:
+    """Paper add-on card; explicitly excluded from independent-pick accuracy."""
+    thresholds = _thresholds(row)
+    asset = str(row.get("asset") or "")
+    interval = str(row.get("interval") or "")
+    ask = row.get("entry_ask_cents")
+    base_ask = thresholds.get("base_ask_cents")
+    header = f"<b>DRIFT ADD-ON {html.escape(interval)} | PAPER</b>"
+    body = [
+        "CORRELATED ADD-ON - the original YES pick re-passed every frozen gate.",
+        "",
+        f"ADD YES - {asset} @ {_plain_whole(ask)}c",
+        f"Base entry: {_plain_whole(base_ask)}c | requalified: {interval}",
+        "Risk: add at most 0.5x; total window exposure cap is 1.5x.",
+        "Split that cap across assets when several picks share the same window.",
+        "Accounting: correlated exposure, NOT an independent accuracy sample.",
+        _drift_track_book_line(thresholds),
+        f"Ticker: {str(row.get('ticker') or '')}",
+        "Paper/research only | no order placed",
+    ]
+    return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
+
+
+def build_drift_latequal_alert(row: Mapping[str, Any]) -> str:
+    """Research-only card for a clean sub-60c 13M row repriced by 12M/11M."""
+    thresholds = _thresholds(row)
+    asset = str(row.get("asset") or "")
+    interval = str(row.get("interval") or "")
+    ask = row.get("entry_ask_cents")
+    ask13 = thresholds.get("ask13_cents")
+    header = f"<b>DRIFT LATE QUAL {interval} | RESEARCH ONLY</b>"
+    body = [
+        "NEW INDEPENDENT PAPER PICK - clean at 13M, then repriced into 60-73c.",
+        "",
+        f"BUY YES - {asset} @ {_plain_whole(ask)}c",
+        f"13M watch price: {_plain_whole(ask13)}c | qualified: {interval}",
+        "Only 12M and 11M qualify; the losing 10M extension is disabled.",
+        "Keep research-only until the frozen forward sample reaches its bar.",
+        _drift_track_book_line(thresholds),
+        f"Ticker: {str(row.get('ticker') or '')}",
+        "Research only | no order placed",
+    ]
+    return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
+
+
 def _plain_whole(value: Any) -> str:
     try:
         v = float(value)
@@ -585,6 +652,10 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_fav_10m_alert(row)
     if _is_top_pick(row):
         return build_top_pick_alert(row)
+    if _is_drift_addon(row):
+        return build_drift_addon_alert(row)
+    if _is_drift_latequal(row):
+        return build_drift_latequal_alert(row)
     if _is_drift_pick(row):
         return build_drift_pick_alert(row)
 

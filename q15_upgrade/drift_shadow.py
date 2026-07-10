@@ -47,11 +47,11 @@ UNTOUCHED; every v3 track records and grades independently:
     EV>=+4c AND Wilson-95 LB > breakeven.
   LATE-QUAL track (drift_lq_watch -> drift_latequal): a 13M capture that was
     clean (alt YES, dist<=3e-5, fp<=30) but priced BELOW the 60c floor goes on
-    watch; if the market reprices INTO 60-73 by 12M/11M/10M (gates re-checked
-    at entry), record an entry at that ask. Tape: n=38, +9.34c/pick — but
-    n_train=8 and 44% of profit from one day, so this track is record-only
-    with a full bar: KILL n>=40 if EV<=0 or WR<breakeven; PROMOTE n>=150 if
-    EV>=+2c AND Wilson-95 LB > breakeven.
+    watch; if the market reprices INTO 60-73 by 12M/11M (gates re-checked at
+    entry), record an entry at that ask. The original 10M extension is excluded:
+    it lost both on the historical tape and again in the fresh forward sample.
+    This track remains record-only with a full bar: KILL n>=40 if EV<=0 or
+    WR<breakeven; PROMOTE n>=150 if EV>=+2c AND Wilson-95 LB > breakeven.
   SIZING TILTS (columns on drift_picks): spread_weight (sp 3-4c -> 1.5x,
     sp>=5 -> 0.5x, else 1.0x; the 3-4c cohort held ~+14c/pick in every
     sub-period tested) and session_weight (UTC 16-24 -> 1.33x, 8-16 -> 0.75x,
@@ -81,7 +81,7 @@ FEATURES_VERSION = "drift-shadow-v3"
 _BOOK_HI = 73.0
 # add-on / late-qual entry checkpoints, in firing order
 _ADDON_INTERVALS = ("12M", "11M", "10M", "9M", "8M", "7M")
-_LATEQUAL_INTERVALS = ("12M", "11M", "10M")
+_LATEQUAL_INTERVALS = ("12M", "11M")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS drift_picks (
@@ -452,7 +452,7 @@ class DriftShadow:
         already has a base volume-book pick (13M, ask<=73) gets ONE add-on row
         at this checkpoint's ask (first re-qualification wins via the unique
         key — checkpoints fire chronologically).
-        LATE-QUAL (12M/11M/10M only): a watched clean-but-cheap ticker whose
+        LATE-QUAL (12M/11M only): a watched clean-but-cheap ticker whose
         price repriced INTO 60-73 (gates re-checked here) gets an entry row.
         Idempotent; returns number of new rows; never raises."""
         if not self.enabled or self._conn is None or interval not in _ADDON_INTERVALS:
@@ -697,6 +697,60 @@ class DriftShadow:
             return [dict(r) for r in rows]
         except sqlite3.Error:
             return []
+
+    def checkpoint_rows_recorded_at(
+        self,
+        model_version: str,
+        window_key: int,
+        interval: str,
+        recorded_at: float,
+    ) -> list[dict[str, Any]]:
+        """Return add-on/late-qual rows inserted by one checkpoint observation."""
+        if not self.enabled or self._conn is None:
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            for table, interval_col, record_kind in (
+                ("drift_addons", "add_interval", "DRIFT_ADDON_REQUAL"),
+                ("drift_latequal", "entry_interval", "DRIFT_LATEQUAL"),
+            ):
+                rows = self._conn.execute(
+                    f"SELECT * FROM {table} WHERE model_version=? AND window_key=?"
+                    f" AND {interval_col}=? AND created_at=?",
+                    (model_version, int(window_key), str(interval), recorded_at),
+                ).fetchall()
+                for row in rows:
+                    item = dict(row)
+                    item["record_kind"] = record_kind
+                    out.append(item)
+        except sqlite3.Error:
+            return []
+        return out
+
+    def resolved_events(self) -> list[dict[str, Any]]:
+        """Unique settled Drift events used to reconcile the V3 side ledger."""
+        if not self.enabled or self._conn is None:
+            return []
+        events: dict[tuple[str, str], dict[str, Any]] = {}
+        try:
+            for table in ("drift_picks", "drift_addons", "drift_latequal"):
+                rows = self._conn.execute(
+                    f"SELECT model_version, ticker, official_result, resolved_at FROM {table}"
+                    " WHERE official_result IN ('YES','NO')"
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["model_version"] or ""), str(row["ticker"] or ""))
+                    if not key[1]:
+                        continue
+                    events[key] = {
+                        "model_version": key[0],
+                        "ticker": key[1],
+                        "official_result": str(row["official_result"]),
+                        "resolved_at": _num(row["resolved_at"]),
+                    }
+        except sqlite3.Error:
+            return []
+        return list(events.values())
 
     def health(self, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()

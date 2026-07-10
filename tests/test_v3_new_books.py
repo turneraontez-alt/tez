@@ -858,6 +858,35 @@ def _drift_row(**over):
     return base
 
 
+def _drift_checkpoint_row(**over):
+    base = {
+        "created_at": 1100.0,
+        "model_version": "interval-research-v1",
+        "record_kind": "DRIFT_ADDON_REQUAL",
+        "delivery_status": "PAPER_ADDON",
+        "asset": "XRP",
+        "ticker": "KXXRP15M-ADD",
+        "interval": "12M",
+        "window_key": 778,
+        "close_time": 1800.0,
+        "predicted_side": "YES",
+        "entry_ask_cents": 66.0,
+        "spread_cents": 2.0,
+        "depth_contracts": 80.0,
+        "drift_base_ask_cents": 64.0,
+        "drift_ask13_cents": None,
+        "drift_disagreement": -0.08,
+        "drift_rule_version": "drift-addon-requal-12m-7m-v1",
+        "drift_track_n_resolved": 13,
+        "drift_track_wins": 10,
+        "drift_track_total_pnl_cents": 113.0,
+        "drift_track_status": "ACCRUING",
+        "drift_track_verdict_n": 40,
+    }
+    base.update(over)
+    return base
+
+
 def test_drift_decision_gates(monkeypatch):
     from q15_upgrade.strategy_bots.rules import BOT_DRIFT_13M, drift_pick_13m_decision
 
@@ -866,6 +895,7 @@ def test_drift_decision_gates(monkeypatch):
     monkeypatch.setenv("Q15_V3_DRIFT_13M", "true")
     assert drift_pick_13m_decision(_drift_row(record_kind="TOP_PICK_13M")) is None
     assert drift_pick_13m_decision(_drift_row(predicted_side="NO")) is None
+    assert drift_pick_13m_decision(_drift_row(entry_ask_cents=74.0)) is None
     d = drift_pick_13m_decision(_drift_row())
     assert d is not None and d.bot_name == BOT_DRIFT_13M and d.decision_status == ACCEPTED
     assert d.threshold_profile["stack_weight"] == 1.5
@@ -879,6 +909,7 @@ def test_record_drift_pick_dedup_per_window_ticker_and_card(tmp_path, monkeypatc
     _reset_runtime(tmp_path, monkeypatch, tg)
     monkeypatch.setenv("Q15_V3_DRIFT_13M", "true")
     monkeypatch.setenv("Q15_V3_DRIFT_13M_NOTIFY", "true")
+    monkeypatch.setattr(runtime, "_enrich_source_row", lambda row, **_: dict(row))
 
     assert runtime.record_drift_pick_row(_drift_row()) is not None
     # same (window, ticker) -> durable claim blocks; same window, NEW ticker -> allowed
@@ -924,3 +955,122 @@ def test_drift_notify_explicit_off(tmp_path, monkeypatch):
     monkeypatch.setenv("Q15_V3_DRIFT_13M_NOTIFY", "false")
     assert runtime.record_drift_pick_row(_drift_row(window_key=778)) is not None
     assert tg.sent == []
+
+
+def test_drift_checkpoint_decisions_and_10m_latequal_exclusion(monkeypatch):
+    from q15_upgrade.strategy_bots.rules import (
+        BOT_DRIFT_ADDON,
+        BOT_DRIFT_LATEQUAL,
+        RESEARCH_ONLY,
+        drift_addon_requal_decision,
+        drift_latequal_decision,
+    )
+
+    monkeypatch.setenv("Q15_V3_DRIFT_ADDON", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_LATEQUAL", "true")
+    addon = drift_addon_requal_decision(_drift_checkpoint_row())
+    assert addon is not None and addon.bot_name == BOT_DRIFT_ADDON
+    assert addon.decision_status == ACCEPTED
+    assert addon.threshold_profile["counts_as_independent_pick"] is False
+    assert addon.threshold_profile["max_addon_weight"] == 0.5
+
+    late_row = _drift_checkpoint_row(
+        record_kind="DRIFT_LATEQUAL",
+        delivery_status="RESEARCH",
+        ticker="KXXRP15M-LATE",
+        drift_base_ask_cents=None,
+        drift_ask13_cents=55.0,
+        drift_rule_version="drift-latequal-12m-11m-v1",
+    )
+    late = drift_latequal_decision(late_row)
+    assert late is not None and late.bot_name == BOT_DRIFT_LATEQUAL
+    assert late.decision_status == RESEARCH_ONLY
+    assert late.threshold_profile["counts_as_independent_pick"] is True
+    assert drift_latequal_decision(dict(late_row, interval="10M")) is None
+
+
+def test_drift_checkpoint_cards_accounting_and_settlement(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_DRIFT_ADDON, BOT_DRIFT_LATEQUAL
+
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_DRIFT_ADDON", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_ADDON_NOTIFY", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_LATEQUAL", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_LATEQUAL_NOTIFY", "true")
+    monkeypatch.setattr(runtime, "_enrich_source_row", lambda row, **_: dict(row))
+
+    addon_row = _drift_checkpoint_row()
+    late_row = _drift_checkpoint_row(
+        record_kind="DRIFT_LATEQUAL",
+        delivery_status="RESEARCH",
+        ticker="KXXRP15M-LATE",
+        drift_base_ask_cents=None,
+        drift_ask13_cents=55.0,
+        drift_rule_version="drift-latequal-12m-11m-v1",
+    )
+    assert runtime.record_drift_checkpoint_row(addon_row) is not None
+    assert runtime.record_drift_checkpoint_row(addon_row) is None
+    assert runtime.record_drift_checkpoint_row(late_row) is not None
+    assert len(tg.sent) == 2
+    assert "DRIFT ADD-ON 12M" in tg.sent[0]
+    assert "NOT an independent accuracy sample" in tg.sent[0]
+    assert "DRIFT LATE QUAL 12M" in tg.sent[1]
+    assert "RESEARCH ONLY" in tg.sent[1]
+
+    assert runtime.reconcile_drift_settlements([
+        {"model_version": "interval-research-v1", "ticker": addon_row["ticker"],
+         "official_result": "YES", "resolved_at": 1900.0},
+        {"model_version": "interval-research-v1", "ticker": late_row["ticker"],
+         "official_result": "NO", "resolved_at": 1900.0},
+    ]) == 2
+    ledger = runtime.get_ledger()
+    scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
+    assert scoreboard["all"]["rows"] == 1
+    assert scoreboard["all_exposure"]["rows"] == 2
+    assert scoreboard["drift_system"]["independent_picks"]["rows"] == 1
+    assert scoreboard["drift_system"]["correlated_addon_exposure"]["rows"] == 1
+    assert scoreboard["by_bot"][BOT_DRIFT_ADDON]["resolved"] == 1
+    assert scoreboard["by_bot"][BOT_DRIFT_LATEQUAL]["resolved"] == 1
+
+
+def test_drift_checkpoint_runner_adapter_forwards_new_rows():
+    from types import SimpleNamespace
+    from q15_upgrade.interval_research.runner import IntervalResearchRunner
+
+    runner = object.__new__(IntervalResearchRunner)
+    runner.config = SimpleNamespace(model_version="interval-research-v1")
+
+    class Recorder:
+        def checkpoint_rows_recorded_at(self, model_version, window_key, interval, now):
+            assert (model_version, window_key, interval, now) == (
+                "interval-research-v1", 44, "11M", 1200.0)
+            return [{
+                "record_kind": "DRIFT_LATEQUAL",
+                "created_at": 1200.0,
+                "asset": "SOL",
+                "ticker": "KXSOL-LATE",
+                "close_time": 1800.0,
+                "ask_cents": 64.0,
+                "ask13_cents": 56.0,
+                "spread_cents": 2.0,
+                "depth_contracts": 90.0,
+                "disagreement": -0.08,
+            }]
+
+        def scoreboard(self):
+            return {"book_latequal": {
+                "n_resolved": 8,
+                "win_rate": 0.75,
+                "total_pnl_cents": 62.0,
+                "status": "ACCRUING",
+            }}
+
+    with patch("q15_upgrade.strategy_bots.runtime.record_drift_checkpoint_row") as record:
+        runner._alert_drift_checkpoint_rows(Recorder(), 44, "11M", 1200.0)
+    record.assert_called_once()
+    row = record.call_args.args[0]
+    assert row["record_kind"] == "DRIFT_LATEQUAL"
+    assert row["drift_rule_version"] == "drift-latequal-12m-11m-v1"
+    assert row["drift_independent_pick"] is True
+    assert row["drift_track_wins"] == 6

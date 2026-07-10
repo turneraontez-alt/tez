@@ -53,6 +53,7 @@ class IntervalResearchRunner:
         self._lock = threading.Lock()
         # top-pick-13M one-shot state: window_key -> decided-at timestamp
         self._top_pick_done: dict[int, float] = {}
+        self._drift_strategy_reconciled = False
 
     @property
     def model_version(self) -> str:
@@ -216,15 +217,82 @@ class IntervalResearchRunner:
                 slate = self.ledger.captures_for_window(
                     self.config.model_version, interval, wk)
                 if slate:
-                    rec.observe_checkpoint(
+                    wrote = rec.observe_checkpoint(
                         model_version=self.config.model_version, window_key=wk,
                         interval=interval,
                         close_time=_num(getattr(canonical, "settlement_time", None)),
                         slate=slate, now=now)
+                    if wrote:
+                        self._alert_drift_checkpoint_rows(rec, wk, interval, now)
                 break
             else:
                 continue
             break  # one (window, interval) per cycle; recorder is idempotent
+
+    def _alert_drift_checkpoint_rows(
+        self,
+        rec: Any,
+        window_key_value: int,
+        interval: str,
+        now: float,
+    ) -> None:
+        """Send newly recorded checkpoint tracks through the paper V3 rail."""
+        try:
+            rows = rec.checkpoint_rows_recorded_at(
+                self.config.model_version, window_key_value, interval, now)
+            if not rows:
+                return
+            scoreboard = rec.scoreboard() or {}
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+            for row in rows:
+                kind = str(row.get("record_kind") or "")
+                if kind == "DRIFT_ADDON_REQUAL":
+                    book = scoreboard.get("book_addon_requal", {})
+                    delivery_status = "PAPER_ADDON"
+                    rule_version = "drift-addon-requal-12m-7m-v1"
+                    independent = False
+                elif kind == "DRIFT_LATEQUAL":
+                    book = scoreboard.get("book_latequal", {})
+                    delivery_status = "RESEARCH"
+                    rule_version = "drift-latequal-12m-11m-v1"
+                    independent = True
+                else:
+                    continue
+                wins = None
+                if book.get("n_resolved") and book.get("win_rate") is not None:
+                    wins = round(float(book["win_rate"]) * int(book["n_resolved"]))
+                strategy_bots_runtime.record_drift_checkpoint_row({
+                    "created_at": row.get("created_at", now),
+                    "model_version": self.config.model_version,
+                    "record_kind": kind,
+                    "delivery_status": delivery_status,
+                    "asset": row.get("asset"),
+                    "ticker": row.get("ticker"),
+                    "interval": interval,
+                    "window_key": window_key_value,
+                    "close_time": row.get("close_time"),
+                    "seconds_remaining": (
+                        float(row["close_time"]) - now
+                        if row.get("close_time") is not None else None
+                    ),
+                    "predicted_side": "YES",
+                    "entry_ask_cents": row.get("ask_cents"),
+                    "spread_cents": row.get("spread_cents"),
+                    "depth_contracts": row.get("depth_contracts"),
+                    "drift_base_ask_cents": row.get("base_ask_cents"),
+                    "drift_ask13_cents": row.get("ask13_cents"),
+                    "drift_disagreement": row.get("disagreement"),
+                    "drift_rule_version": rule_version,
+                    "drift_independent_pick": independent,
+                    "drift_track_n_resolved": book.get("n_resolved"),
+                    "drift_track_wins": wins,
+                    "drift_track_total_pnl_cents": book.get("total_pnl_cents"),
+                    "drift_track_status": book.get("status"),
+                    "drift_track_verdict_n": 40,
+                })
+        except Exception:  # noqa: BLE001 - alerting must never break capture
+            logger.debug("drift checkpoint alert failed (ignored)", exc_info=True)
 
     # -- best trade 13M: one pick per 15m window (owner-requested, always fires) --
     # Fires once per window shortly after the 13M captures land (sr 740-770).
@@ -425,6 +493,7 @@ class IntervalResearchRunner:
                     n += self.ledger.resolve(self.config.model_version, str(ticker), str(result), now)
         except Exception:
             logger.debug("interval-research resolve failed (ignored)", exc_info=True)
+        rec = None
         try:
             from q15_upgrade.drift_shadow import get_recorder
             rec = get_recorder()
@@ -432,6 +501,31 @@ class IntervalResearchRunner:
                 rec.resolve(result_events, now)
         except Exception:  # noqa: BLE001 - drift recorder must never break resolve
             logger.debug("drift-shadow resolve failed (ignored)", exc_info=True)
+        try:
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+            current_events = []
+            for event in result_events:
+                if not isinstance(event, Mapping):
+                    continue
+                ticker = event.get("ticker") or event.get("contract")
+                result = event.get("result") or event.get("official_result")
+                if ticker and result:
+                    current_events.append({
+                        "model_version": self.config.model_version,
+                        "ticker": str(ticker),
+                        "official_result": str(result),
+                        "resolved_at": now,
+                    })
+            strategy_bots_runtime.reconcile_drift_settlements(current_events)
+            if (
+                not self._drift_strategy_reconciled
+                and rec is not None
+                and strategy_bots_runtime.enabled()
+            ):
+                strategy_bots_runtime.reconcile_drift_settlements(rec.resolved_events())
+                self._drift_strategy_reconciled = True
+        except Exception:  # noqa: BLE001 - side-ledger repair must never block resolve
+            logger.debug("drift strategy settlement reconcile failed (ignored)", exc_info=True)
         return n
 
 

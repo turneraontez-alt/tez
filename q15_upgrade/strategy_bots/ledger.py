@@ -15,6 +15,9 @@ from .rules import (
     BOT_BNB_YES_REVERSAL,
     BOT_CONFIDENCE_TIER,
     BOT_BASELINE,
+    BOT_DRIFT_13M,
+    BOT_DRIFT_ADDON,
+    BOT_DRIFT_LATEQUAL,
     BOT_THIRTEEN_M_SNIPER,
     BTC_REGIME_KEYS,
     COINBASE_L2_KEYS,
@@ -698,18 +701,26 @@ class StrategyBotLedger:
         min_n: int = 30,
     ) -> dict[str, Any]:
         rows = self.rows(strategy_version)
+        independent_rows = [r for r in rows if r.get("bot_name") != BOT_DRIFT_ADDON]
         return {
             "available": True,
             "strategy_version": strategy_version,
             "paper_only": True,
             "min_n": int(min_n),
             "total_rows": len(rows),
-            "resolved": sum(1 for r in rows if r.get("official_result") is not None),
-            "accepted": self._agg([r for r in rows if r.get("decision_status") == ACCEPTED], min_n),
-            "research_only": self._agg(
-                [r for r in rows if r.get("decision_status") == RESEARCH_ONLY], min_n
+            "independent_rows": len(independent_rows),
+            "correlated_exposure_rows": len(rows) - len(independent_rows),
+            "resolved": sum(
+                1 for r in independent_rows if r.get("official_result") is not None
             ),
-            "all": self._agg(rows, min_n),
+            "accepted": self._agg(
+                [r for r in independent_rows if r.get("decision_status") == ACCEPTED], min_n
+            ),
+            "research_only": self._agg(
+                [r for r in independent_rows if r.get("decision_status") == RESEARCH_ONLY], min_n
+            ),
+            "all": self._agg(independent_rows, min_n),
+            "all_exposure": self._agg(rows, min_n),
             "by_bot": self._group(rows, ("bot_name",), min_n),
             "by_tier": self._group(
                 [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER],
@@ -736,12 +747,13 @@ class StrategyBotLedger:
                 rows, ("bot_name", "source_rule", "interval", "delivery_status"), min_n
             ),
             "accepted_by_bot_asset_side_rule_interval_delivery": self._group(
-                [r for r in rows if r.get("decision_status") == ACCEPTED],
+                [r for r in independent_rows if r.get("decision_status") == ACCEPTED],
                 ("bot_name", "asset", "side", "source_rule", "interval", "delivery_status"),
                 min_n,
             ),
             "positive_ev_gate": self._positive_ev_gate(rows, min_n),
             "bnb_system": self._bnb_system(rows, min_n),
+            "drift_system": self._drift_system(rows, min_n),
             "tier_confirmation_system": self._tier_confirmation_system(rows, min_n),
             "data_coverage": self._data_coverage(rows),
         }
@@ -827,6 +839,28 @@ class StrategyBotLedger:
             "by_source_asset_tier": cls._coverage_group(
                 tier_rows,
                 ("source_system", "asset", "tier"),
+            ),
+        }
+
+    @classmethod
+    def _drift_system(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        min_n: int,
+    ) -> dict[str, Any]:
+        core = [r for r in rows if r.get("bot_name") == BOT_DRIFT_13M]
+        addons = [r for r in rows if r.get("bot_name") == BOT_DRIFT_ADDON]
+        latequal = [r for r in rows if r.get("bot_name") == BOT_DRIFT_LATEQUAL]
+        independent = core + latequal
+        return {
+            "independent_picks": cls._agg(independent, min_n),
+            "base_13m": cls._agg(core, min_n),
+            "latequal_12m_11m": cls._agg(latequal, min_n),
+            "correlated_addon_exposure": cls._agg(addons, min_n),
+            "total_exposure": cls._agg(independent + addons, min_n),
+            "accounting": (
+                "drift_addon_requal is correlated exposure and is excluded from "
+                "top-level independent accuracy/PnL"
             ),
         }
 

@@ -27,6 +27,8 @@ BOT_WARN_FLIP = "warn_flip_entry"
 BOT_FAV_10M = "fav_10m"
 BOT_TOP_PICK_13M = "top_pick_13m"
 BOT_DRIFT_13M = "drift_13m"
+BOT_DRIFT_ADDON = "drift_addon_requal"
+BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
 
 # Source-row record_kind stamped by the ultoim_v2 exit-warning feed (Book 1).
 WARN_FLIP_RECORD_KIND = "EXIT_WARNING_FLIP"
@@ -639,6 +641,14 @@ def _drift_13m_enabled() -> bool:
     return _env_bool("Q15_V3_DRIFT_13M", True)
 
 
+def _drift_addon_enabled() -> bool:
+    return _env_bool("Q15_V3_DRIFT_ADDON", True)
+
+
+def _drift_latequal_enabled() -> bool:
+    return _env_bool("Q15_V3_DRIFT_LATEQUAL", True)
+
+
 def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
     """Paper card for one recorded drift-book pick (alt YES, 60-73c,
     near-strike, low flip). ACCEPTED always — the book records every qualifying
@@ -648,7 +658,7 @@ def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
     if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
         return None
     ask = _entry_ask(row)
-    if ask is None or str(source_side(row)) != "YES":
+    if ask is None or not 60.0 <= ask <= 73.0 or str(source_side(row)) != "YES":
         return None
     profile: dict[str, Any] = {
         "paper_only": True,
@@ -667,12 +677,111 @@ def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
         "book_total_pnl_cents": _num(row.get("drift_book_total_pnl_cents")),
         "book_status": str(row.get("drift_book_status") or "") or None,
         "book_verdict_n": int(_num(row.get("drift_book_verdict_n")) or 60),
+        "counts_as_independent_pick": True,
+        "exposure_class": "INDEPENDENT_BASE_PICK",
     }
     return BotDecision(
         BOT_DRIFT_13M,
         ACCEPTED,
         ("V3_DRIFT_PICK_13M", "NEAR_STRIKE_YES_BOOK"),
         threshold_profile={**profile, "passed": True},
+        side_override="YES",
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def _drift_track_profile(
+    row: Mapping[str, Any],
+    *,
+    independent: bool,
+    exposure_class: str,
+) -> dict[str, Any]:
+    return {
+        "paper_only": True,
+        "not_a_live_order": True,
+        "rule_version": str(row.get("drift_rule_version") or "drift-checkpoint-v1"),
+        "counts_as_independent_pick": independent,
+        "exposure_class": exposure_class,
+        "entry_ask_cents": _entry_ask(row),
+        "base_ask_cents": _num(row.get("drift_base_ask_cents")),
+        "ask13_cents": _num(row.get("drift_ask13_cents")),
+        "disagreement": _num(row.get("drift_disagreement")),
+        "spread_cents": _num(row.get("spread_cents")),
+        "depth_contracts": _num(row.get("depth_contracts")),
+        "track_n_resolved": int(_num(row.get("drift_track_n_resolved")) or 0),
+        "track_wins": _num(row.get("drift_track_wins")),
+        "track_total_pnl_cents": _num(row.get("drift_track_total_pnl_cents")),
+        "track_status": str(row.get("drift_track_status") or "") or None,
+        "track_verdict_n": int(_num(row.get("drift_track_verdict_n")) or 40),
+    }
+
+
+def drift_addon_requal_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Correlated paper add-on after the base pick re-passes the full rule."""
+    if not _drift_addon_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "DRIFT_ADDON_REQUAL":
+        return None
+    interval = str(row.get("interval") or "").upper()
+    ask = _entry_ask(row)
+    if (
+        interval not in {"12M", "11M", "10M", "9M", "8M", "7M"}
+        or ask is None
+        or not 60.0 <= ask <= 73.0
+        or str(source_side(row)) != "YES"
+    ):
+        return None
+    profile = _drift_track_profile(
+        row,
+        independent=False,
+        exposure_class="CORRELATED_REQUAL_ADDON",
+    )
+    profile.update({
+        "max_addon_weight": 0.5,
+        "window_risk_cap_units": 1.5,
+        "passed": True,
+    })
+    return BotDecision(
+        BOT_DRIFT_ADDON,
+        ACCEPTED,
+        ("V3_DRIFT_ADDON_REQUAL", "CORRELATED_EXPOSURE_NOT_INDEPENDENT"),
+        threshold_profile=profile,
+        side_override="YES",
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def drift_latequal_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Independent research pick that reprices into-band at 12M or 11M."""
+    if not _drift_latequal_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "DRIFT_LATEQUAL":
+        return None
+    interval = str(row.get("interval") or "").upper()
+    ask = _entry_ask(row)
+    if (
+        interval not in {"12M", "11M"}
+        or ask is None
+        or not 60.0 <= ask <= 73.0
+        or str(source_side(row)) != "YES"
+    ):
+        return None
+    profile = _drift_track_profile(
+        row,
+        independent=True,
+        exposure_class="INDEPENDENT_LATEQUAL_PICK",
+    )
+    profile.update({
+        "historical_10m_excluded": True,
+        "passed": True,
+    })
+    return BotDecision(
+        BOT_DRIFT_LATEQUAL,
+        RESEARCH_ONLY,
+        ("V3_DRIFT_LATEQUAL_12M_11M", "RESEARCH_ONLY_PROVISIONAL"),
+        threshold_profile=profile,
         side_override="YES",
         entry_ask_cents=ask,
         use_entry_ask_override=True,
