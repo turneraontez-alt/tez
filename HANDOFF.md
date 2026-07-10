@@ -8,6 +8,29 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - Drift validated add-ons and settlement repair
+Run time: 2026-07-10.
+
+Owner approved the add-ons only after a pre-launch replay reproduced the frozen
+tape exactly. Implemented the evidence-backed paper configuration:
+- `drift_addon_requal`: first full-rule requalification at 12M..7M, sent to the
+  V3 channel as a correlated PAPER add-on. Cards cap the add at 0.5x and the
+  total window at 1.5x; these rows are excluded from independent-pick accuracy.
+- `drift_latequal_12m_11m`: clean sub-60c 13M rows that reprice into 60-73c at
+  12M/11M, sent as RESEARCH ONLY. The repeatedly losing 10M extension is off.
+- Base Drift cards now enforce the tradeable 60-73c band, so diagnostic 74-80c
+  rows remain recorded but cannot be sent as accepted picks.
+- Checkpoint rows now flow through durable V3 records/cards with Coinbase L2,
+  Kraken L3, and BTC-regime enrichment where available. The V3 scoreboard has
+  separate independent, correlated-add-on, and total-exposure views.
+- Interval settlement now grades Drift strategy rows and runs a one-time source-
+  ledger reconciliation. On restart it repaired all 34 historical Drift cards:
+  28-6, +444c, zero overdue Drift rows.
+
+Safety: all new paths are PAPER_RESEARCH and place no orders. Local startup kept
+executor dry-run and kill switches on. Verification: focused 148 passed; full
+suite 1841 passed, 4 skipped; config audit 981 vars OK.
+
 ## Shipped THIS session - Picklo HD (realistic Piccolo) Blender asset (non-runtime)
 Run time: 2026-07-08.
 
