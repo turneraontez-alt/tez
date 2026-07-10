@@ -18,3 +18,7 @@ newest 7 archives. Rolling Coinbase L2, Kraken L3, and spot-depth databases are
 excluded by default because they are large and reproducible. Add
 -IncludeHighVolume for a full collector archive. Secrets are excluded by
 default; add -IncludeSecrets only when storing the ZIP in a protected location.
+
+Install daily maintenance (02:45) and critical backup (03:00) tasks with:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\local\Install-Q15StorageTasks.ps1
