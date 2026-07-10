@@ -15,6 +15,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -180,7 +181,7 @@ def test_build_snapshot_skips_oversized_raw_db_artifact(tmp_path, monkeypatch):
     assert "dbs/q15_coinbase_adv_l2_v1.sqlite3.gz" not in artifacts
 
 
-def test_build_snapshot_excludes_high_volume_raw_db_without_gzip(tmp_path, monkeypatch):
+def test_build_snapshot_excludes_high_volume_raw_db_without_backup_or_gzip(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     _point_ledgers_at(monkeypatch, data_dir)
@@ -194,12 +195,13 @@ def test_build_snapshot_excludes_high_volume_raw_db_without_gzip(tmp_path, monke
     finally:
         conn.close()
 
-    snap, artifacts = lx.build_snapshot(
-        data_dir,
-        now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
-        head_commit=None,
-        build_info=None,
-    )
+    with patch.object(lx, "_backup_db", side_effect=AssertionError("must not copy excluded DB")):
+        snap, artifacts = lx.build_snapshot(
+            data_dir,
+            now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
+            head_commit=None,
+            build_info=None,
+        )
 
     meta = snap["databases"]["q15_coinbase_adv_l2_v1.sqlite3"]
     assert meta["artifact"] is None

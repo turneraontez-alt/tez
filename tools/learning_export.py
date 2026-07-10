@@ -85,6 +85,7 @@ DEFAULT_MAX_ARTIFACT_BYTES = 95 * 1024 * 1024
 DEFAULT_RAW_ARTIFACT_EXCLUDE_NAMES = {
     "q15_coinbase_adv_l2_v1.sqlite3",
     "q15_kraken_l3_v1.sqlite3",
+    "q15_spot_depth_v1.sqlite3",
     "q15_spot_l3_v1.sqlite3",
 }
 
@@ -451,6 +452,23 @@ def build_snapshot(
     strategy_bots_name = _ledger_basename("strategy_bots")
 
     for src in _db_files(data_dir):
+        excluded = src.name in raw_artifact_exclude_names
+        if excluded:
+            _log(f"skipping raw DB artifact {src.name}: configured high-volume collector")
+            databases[src.name] = {
+                "artifact": None,
+                "artifact_skipped": True,
+                "artifact_skipped_reason": "raw_artifact_excluded",
+                "artifact_max_bytes": max_artifact_bytes,
+                "db_bytes": src.stat().st_size,
+                "gz_bytes": None,
+                "gz_sha256": None,
+                "row_counts": _guard(
+                    f"{src.name}.row_counts",
+                    lambda path=src: _db_row_counts(path),
+                ),
+            }
+            continue
         backup = _backup_db(src)
         if backup is None:
             databases[src.name] = {"error": "backup_failed"}
@@ -458,12 +476,9 @@ def build_snapshot(
         try:
             raw = backup.read_bytes()
             rel = f"dbs/{src.name}.gz"
-            excluded = src.name in raw_artifact_exclude_names
-            gz = None if excluded else gzip.compress(raw, mtime=0)
-            artifact_skipped = excluded or (gz is not None and len(gz) > max_artifact_bytes)
-            if excluded:
-                _log(f"skipping raw DB artifact {src.name}: configured high-volume collector")
-            elif gz is not None and not artifact_skipped:
+            gz = gzip.compress(raw, mtime=0)
+            artifact_skipped = len(gz) > max_artifact_bytes
+            if not artifact_skipped:
                 artifacts[rel] = gz
             else:
                 _log(
@@ -474,14 +489,12 @@ def build_snapshot(
                 "artifact": None if artifact_skipped else rel,
                 "artifact_skipped": artifact_skipped,
                 "artifact_skipped_reason": (
-                    "raw_artifact_excluded"
-                    if excluded
-                    else ("gz_bytes_exceed_limit" if artifact_skipped else None)
+                    "gz_bytes_exceed_limit" if artifact_skipped else None
                 ),
                 "artifact_max_bytes": max_artifact_bytes,
                 "db_bytes": len(raw),
-                "gz_bytes": None if gz is None else len(gz),
-                "gz_sha256": None if gz is None else hashlib.sha256(gz).hexdigest(),
+                "gz_bytes": len(gz),
+                "gz_sha256": hashlib.sha256(gz).hexdigest(),
                 "row_counts": _db_row_counts(backup),
             }
             # Guard the whole scoreboard build (incl. import/constructor) so a
