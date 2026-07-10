@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import os
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from notifications.telegram_client import TelegramSendClient
 
@@ -52,6 +52,7 @@ def _bot_label(name: str) -> str:
         "drift_13m": "Drift Pick 13M",
         "drift_addon_requal": "Drift Requalification Add-On",
         "drift_latequal_12m_11m": "Drift Late Qualifier",
+        "drift_no_mirror": "Drift NO Mirror",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -448,6 +449,10 @@ def _is_drift_latequal(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "drift_latequal_12m_11m"
 
 
+def _is_drift_no_mirror(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "drift_no_mirror"
+
+
 def _drift_size_banner(stack: Any) -> str:
     """One-glance size grade from the stacked tilt weight."""
     try:
@@ -590,6 +595,50 @@ def build_drift_latequal_alert(row: Mapping[str, Any]) -> str:
     return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
 
 
+def build_drift_no_mirror_group_alert(rows: Sequence[Mapping[str, Any]]) -> str:
+    """One compact research card for every positive NO candidate in a window."""
+    candidates = [row for row in rows if _is_drift_no_mirror(row)]
+    if not candidates:
+        return "<b>DRIFT NO WATCH \u2014 RESEARCH ONLY</b>\nNo qualifying candidates."
+    first = candidates[0]
+    thresholds = _thresholds(first)
+    window_key = first.get("window_key")
+    body = [
+        "VISUAL WATCH ONLY - no order is placed.",
+        f"Window: {window_key if window_key is not None else 'n/a'} | "
+        f"Candidates: {len(candidates)}",
+        "",
+    ]
+    highlight_codes = {"MID_PRICE_65_69", "TIGHT_SPREAD", "BTC_AGREES_NO"}
+    for row in candidates:
+        tags = [
+            code.strip()
+            for code in str(row.get("reason_codes") or "").split(",")
+            if code.strip() in highlight_codes
+        ]
+        tag_text = ", ".join(tags) if tags else "POSITIVE_FILTER"
+        body.extend([
+            (
+                f"{str(row.get('asset') or '')} NO @ "
+                f"{_plain_whole(row.get('entry_ask_cents'))}c | "
+                f"spread {_plain_whole(row.get('spread_cents'))}c"
+            ),
+            f"Tags: {tag_text}",
+            f"Ticker: {str(row.get('ticker') or '')}",
+        ])
+    body.extend([
+        "",
+        _drift_track_book_line(thresholds),
+        "Excluded entirely: BNB, DOGE, and untagged NO candidates.",
+        "Separate from Drift YES | prospective research only",
+    ])
+    header = "<b>DRIFT NO WATCH \u2014 RESEARCH ONLY</b>"
+    degraded = _degraded_line(first)
+    if degraded:
+        header += "\n" + degraded
+    return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
+
+
 def _plain_whole(value: Any) -> str:
     try:
         v = float(value)
@@ -656,6 +705,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_drift_addon_alert(row)
     if _is_drift_latequal(row):
         return build_drift_latequal_alert(row)
+    if _is_drift_no_mirror(row):
+        return build_drift_no_mirror_group_alert([row])
     if _is_drift_pick(row):
         return build_drift_pick_alert(row)
 

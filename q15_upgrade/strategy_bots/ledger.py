@@ -18,6 +18,7 @@ from .rules import (
     BOT_DRIFT_13M,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
+    BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
     BTC_REGIME_KEYS,
     COINBASE_L2_KEYS,
@@ -851,6 +852,7 @@ class StrategyBotLedger:
         core = [r for r in rows if r.get("bot_name") == BOT_DRIFT_13M]
         addons = [r for r in rows if r.get("bot_name") == BOT_DRIFT_ADDON]
         latequal = [r for r in rows if r.get("bot_name") == BOT_DRIFT_LATEQUAL]
+        no_mirror = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_MIRROR]
         independent = core + latequal
         return {
             "independent_picks": cls._agg(independent, min_n),
@@ -858,9 +860,13 @@ class StrategyBotLedger:
             "latequal_12m_11m": cls._agg(latequal, min_n),
             "correlated_addon_exposure": cls._agg(addons, min_n),
             "total_exposure": cls._agg(independent + addons, min_n),
+            "no_mirror_research": cls._agg(no_mirror, min_n),
+            "no_mirror_by_asset": cls._group(no_mirror, ("asset",), min_n),
+            "all_drift_research_exposure": cls._agg(independent + addons + no_mirror, min_n),
             "accounting": (
                 "drift_addon_requal is correlated exposure and is excluded from "
-                "top-level independent accuracy/PnL"
+                "independent YES accuracy/PnL; drift_no_mirror is a separate "
+                "research-only NO book and never mixes with Drift YES"
             ),
         }
 

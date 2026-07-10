@@ -29,6 +29,7 @@ BOT_TOP_PICK_13M = "top_pick_13m"
 BOT_DRIFT_13M = "drift_13m"
 BOT_DRIFT_ADDON = "drift_addon_requal"
 BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
+BOT_DRIFT_NO_MIRROR = "drift_no_mirror"
 
 # Source-row record_kind stamped by the ultoim_v2 exit-warning feed (Book 1).
 WARN_FLIP_RECORD_KIND = "EXIT_WARNING_FLIP"
@@ -649,6 +650,10 @@ def _drift_latequal_enabled() -> bool:
     return _env_bool("Q15_V3_DRIFT_LATEQUAL", True)
 
 
+def _drift_no_mirror_enabled() -> bool:
+    return _env_bool("Q15_V3_DRIFT_NO_MIRROR", True)
+
+
 def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
     """Paper card for one recorded drift-book pick (alt YES, 60-73c,
     near-strike, low flip). ACCEPTED always — the book records every qualifying
@@ -783,6 +788,75 @@ def drift_latequal_decision(row: Mapping[str, Any]) -> BotDecision | None:
         ("V3_DRIFT_LATEQUAL_12M_11M", "RESEARCH_ONLY_PROVISIONAL"),
         threshold_profile=profile,
         side_override="YES",
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def drift_no_mirror_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Prospective NO mirror restricted to the historically positive cohorts.
+
+    The source recorder applies the same filter, but these checks are repeated
+    here so a malformed adapter row cannot reintroduce the negative BNB, DOGE,
+    or untagged cohorts into the strategy ledger or Telegram path.
+    """
+    if not _drift_no_mirror_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "DRIFT_NO_MIRROR":
+        return None
+    asset = _asset(row)
+    ask = _entry_ask(row)
+    if (
+        asset not in {"XRP", "HYPE", "SOL"}
+        or source_side(row) != "NO"
+        or ask is None
+        or not 60.0 <= ask <= 73.0
+    ):
+        return None
+
+    raw_tags = row.get("drift_no_tags") or row.get("source_reason_codes") or row.get("reason_codes")
+    if isinstance(raw_tags, (list, tuple, set, frozenset)):
+        tags = {str(tag).strip().upper() for tag in raw_tags if str(tag).strip()}
+    else:
+        tags = {part.strip().upper() for part in str(raw_tags or "").split(",") if part.strip()}
+    mid_price = "MID_PRICE_65_69" in tags
+    tight_btc = "TIGHT_SPREAD" in tags and "BTC_AGREES_NO" in tags
+    if not (mid_price or tight_btc):
+        return None
+
+    reasons = [
+        "V3_DRIFT_NO_MIRROR",
+        "RESEARCH_ONLY_PROSPECTIVE",
+        *sorted(tag for tag in tags if tag != "DRIFT_NO_MIRROR_RESEARCH"),
+    ]
+    profile = {
+        "paper_only": True,
+        "not_a_live_order": True,
+        "counts_as_independent_pick": True,
+        "exposure_class": "INDEPENDENT_NO_MIRROR_RESEARCH",
+        "positive_assets_only": ["XRP", "HYPE", "SOL"],
+        "excluded_negative_assets": ["BNB", "DOGE"],
+        "entry_band_cents": [60.0, 73.0],
+        "mid_price_band_cents": [65.0, 70.0],
+        "tight_spread_max_cents": 2.0,
+        "requires": "MID_PRICE_65_69 OR (TIGHT_SPREAD AND BTC_AGREES_NO)",
+        "highlight_tags": sorted(tag for tag in tags if tag in {
+            "MID_PRICE_65_69", "TIGHT_SPREAD", "BTC_AGREES_NO"
+        }),
+        "btc_side_at_capture": str(row.get("drift_btc_side_at_capture") or "") or None,
+        "track_n_resolved": int(_num(row.get("drift_track_n_resolved")) or 0),
+        "track_wins": _num(row.get("drift_track_wins")),
+        "track_total_pnl_cents": _num(row.get("drift_track_total_pnl_cents")),
+        "track_status": str(row.get("drift_track_status") or "") or None,
+        "track_verdict_n": int(_num(row.get("drift_track_verdict_n")) or 60),
+        "passed": True,
+    }
+    return BotDecision(
+        BOT_DRIFT_NO_MIRROR,
+        RESEARCH_ONLY,
+        tuple(reasons),
+        threshold_profile=profile,
+        side_override="NO",
         entry_ask_cents=ask,
         use_entry_ask_override=True,
     )

@@ -59,8 +59,14 @@ UNTOUCHED; every v3 track records and grades independently:
     stack_weight = clip(spread*session, 0.5, 1.5). Reported alongside flat
     and size_weight; NEVER gate any bar.
   Execution context: spread_cents + depth_contracts are stored per pick so the
-    conditional-chase doctrine (pay +1c only when displayed depth < 50) can be
-    graded forward.
+  conditional-chase doctrine (pay +1c only when displayed depth < 50) can be
+  graded forward.
+
+v4 (2026-07-10): adds a completely separate, prospective NO-mirror research
+track. It uses the actual predicted-side NO ask and records only the positive
+cohorts from the expanded audit: XRP/HYPE/SOL plus either a 65-69c entry or a
+tight (<=2c) spread with BTC also predicting NO. BNB, DOGE, and untagged rows
+are intentionally absent. This track never changes the YES books or their bars.
 
 scoreboard()["full_enable_blueprint"] lists every component with its live
 status — the assembly list for an eventual promotion: if the shadow is ever
@@ -75,13 +81,19 @@ import sqlite3
 import time
 from typing import Any, Mapping, Sequence
 
-FEATURES_VERSION = "drift-shadow-v3"
+FEATURES_VERSION = "drift-shadow-v4-no-mirror"
 
 # volume-book band ceiling: the tradeable band is 60-73; 74-80 is diagnostic only
 _BOOK_HI = 73.0
 # add-on / late-qual entry checkpoints, in firing order
 _ADDON_INTERVALS = ("12M", "11M", "10M", "9M", "8M", "7M")
 _LATEQUAL_INTERVALS = ("12M", "11M")
+_NO_MIRROR_ASSETS = frozenset({"XRP", "HYPE", "SOL"})
+_NO_MIRROR_ASK_LO = 60.0
+_NO_MIRROR_ASK_HI = 73.0
+_NO_MIRROR_MID_LO = 65.0
+_NO_MIRROR_MID_HI = 70.0
+_NO_MIRROR_TIGHT_SPREAD = 2.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS drift_picks (
@@ -164,6 +176,32 @@ CREATE TABLE IF NOT EXISTS drift_latequal (
     disagreement REAL,
     spread_cents REAL,
     depth_contracts REAL,
+    features_version TEXT NOT NULL,
+    official_result TEXT,
+    resolved_at REAL,
+    correct INTEGER,
+    pnl_cents REAL,
+    UNIQUE(model_version, window_key, ticker)
+);
+CREATE TABLE IF NOT EXISTS drift_no_mirror (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    model_version TEXT,
+    asset TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    window_key INTEGER NOT NULL,
+    close_time REAL,
+    side TEXT NOT NULL DEFAULT 'NO',
+    ask_cents REAL NOT NULL,
+    distance_sigma REAL,
+    flip_probability REAL,
+    calibrated_yes_probability REAL,
+    side_prob REAL,
+    disagreement REAL,
+    spread_cents REAL,
+    depth_contracts REAL,
+    btc_side TEXT,
+    reason_codes TEXT NOT NULL,
     features_version TEXT NOT NULL,
     official_result TEXT,
     resolved_at REAL,
@@ -390,12 +428,56 @@ class DriftShadow:
             return False
         return True
 
+    def _no_mirror_tags(
+        self,
+        cap: Mapping[str, Any],
+        *,
+        btc_side: str | None,
+    ) -> tuple[str, ...]:
+        """Return the profitable prospective NO cohort tags, or no tags.
+
+        This deliberately has no generic fallback. The historical BNB, DOGE,
+        and untagged cohorts were negative after conservative execution costs,
+        so they are excluded before a source or strategy decision can exist.
+        """
+        asset = str(cap.get("asset") or "").upper()
+        if asset not in _NO_MIRROR_ASSETS:
+            return ()
+        if str(cap.get("predicted_side") or "").upper() != "NO":
+            return ()
+        ask = _num(cap.get("entry_ask_cents"))
+        if ask is None or not (_NO_MIRROR_ASK_LO <= ask <= _NO_MIRROR_ASK_HI):
+            return ()
+        dist = _num(cap.get("distance_from_strike"))
+        if dist is None or dist > self.dist_max:
+            return ()
+        flip = _num(cap.get("flip_probability"))
+        if flip is None or flip > self.flip_max:
+            return ()
+
+        spread = _num(cap.get("spread_cents"))
+        mid_price = _NO_MIRROR_MID_LO <= ask < _NO_MIRROR_MID_HI
+        tight_spread = spread is not None and spread <= _NO_MIRROR_TIGHT_SPREAD
+        btc_agrees_no = btc_side == "NO"
+        if not (mid_price or (tight_spread and btc_agrees_no)):
+            return ()
+
+        tags = ["DRIFT_NO_MIRROR_RESEARCH"]
+        if mid_price:
+            tags.append("MID_PRICE_65_69")
+        if tight_spread:
+            tags.append("TIGHT_SPREAD")
+        if btc_agrees_no:
+            tags.append("BTC_AGREES_NO")
+        return tuple(tags)
+
     def observe_window(self, *, model_version: str, window_key: int,
                        close_time: float | None, slate: Sequence[Mapping[str, Any]],
                        now: float) -> bool:
         """Evaluate one 15m interval's 13M slate. Records EVERY qualifying
         candidate in the recording envelope, ranked by disagreement (pick_rank
-        1 = best), plus the late-qualifier watch list (clean-but-cheap, v3).
+        1 = best), plus the late-qualifier watch list (clean-but-cheap, v3) and
+        the separately filtered NO-mirror research book (v4).
         Idempotent per (window, ticker). Returns True if any new pick row was
         recorded. Never raises."""
         if not self.enabled or self._conn is None:
@@ -438,6 +520,36 @@ class DriftShadow:
                     " VALUES (?,?,?,?,?,?,?)",
                     (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
                      int(window_key), close_time, _num(cand.get("yes_ask_cents"))))
+
+            # v4: a separate NO mirror. The selected-side entry ask is the real
+            # NO ask captured by interval research; do not infer it as 100-YES.
+            btc_side = next((
+                str(cand.get("predicted_side") or "").upper()
+                for cand in slate
+                if str(cand.get("asset") or "").upper() == "BTC"
+                and str(cand.get("predicted_side") or "").upper() in {"YES", "NO"}
+            ), None)
+            for cand in slate:
+                tags = self._no_mirror_tags(cand, btc_side=btc_side)
+                if not tags:
+                    continue
+                ask = _num(cand.get("entry_ask_cents"))
+                cal = _num(cand.get("calibrated_yes_probability"))
+                side_prob = (1.0 - cal) if cal is not None else None
+                disagreement = side_prob - ask / 100.0 if side_prob is not None else None
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO drift_no_mirror (created_at, model_version,"
+                    " asset, ticker, window_key, close_time, side, ask_cents,"
+                    " distance_sigma, flip_probability, calibrated_yes_probability,"
+                    " side_prob, disagreement, spread_cents, depth_contracts, btc_side,"
+                    " reason_codes, features_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
+                     int(window_key), close_time, "NO", ask,
+                     _num(cand.get("distance_from_strike")),
+                     _num(cand.get("flip_probability")), cal, side_prob, disagreement,
+                     _num(cand.get("spread_cents")), _num(cand.get("depth_contracts")),
+                     btc_side, ",".join(tags), FEATURES_VERSION))
+                wrote = wrote or cur.rowcount > 0
             self._conn.commit()
             return wrote
         except sqlite3.Error:
@@ -518,16 +630,17 @@ class DriftShadow:
                 result = str(ev.get("result") or ev.get("official_result") or "").upper()
                 if not ticker or result not in {"YES", "NO"}:
                     continue
-                for row in self._conn.execute(
-                        "SELECT id, side, ask_cents FROM drift_picks WHERE ticker=?"
-                        " AND official_result IS NULL", (str(ticker),)).fetchall():
-                    correct = str(row["side"]).upper() == result
-                    self._conn.execute(
-                        "UPDATE drift_picks SET official_result=?, resolved_at=?, correct=?,"
-                        " pnl_cents=? WHERE id=?",
-                        (result, now, 1 if correct else 0,
-                         net_pnl_cents(float(row["ask_cents"]), correct), row["id"]))
-                    graded += 1
+                for table in ("drift_picks", "drift_no_mirror"):
+                    for row in self._conn.execute(
+                            f"SELECT id, side, ask_cents FROM {table} WHERE ticker=?"
+                            " AND official_result IS NULL", (str(ticker),)).fetchall():
+                        correct = str(row["side"]).upper() == result
+                        self._conn.execute(
+                            f"UPDATE {table} SET official_result=?, resolved_at=?, correct=?,"
+                            " pnl_cents=? WHERE id=?",
+                            (result, now, 1 if correct else 0,
+                             net_pnl_cents(float(row["ask_cents"]), correct), row["id"]))
+                        graded += 1
                 # v3 tracks are YES-side by construction: correct iff result YES
                 for table in ("drift_addons", "drift_latequal"):
                     for row in self._conn.execute(
@@ -642,6 +755,12 @@ class DriftShadow:
         book_latequal = self._grade_book(
             self._track_rows("drift_latequal"),
             kill_n=40, promote_n=150, concentration_guards=False)
+        book_no_mirror = self._grade_book(
+            self._track_rows("drift_no_mirror"),
+            kill_n=60, promote_n=150, concentration_guards=False)
+        no_mirror_pending = self._conn.execute(
+            "SELECT COUNT(*) FROM drift_no_mirror WHERE official_result IS NULL"
+        ).fetchone()[0]
         tilts = self._tilt_views()
         return {
             "available": True, "enabled": True, "features_version": FEATURES_VERSION,
@@ -652,6 +771,7 @@ class DriftShadow:
                        "w_hi_threshold": self.w_hi_threshold,
                        "weights": [0.5, 1.0, 1.5]},
             "n_pending": int(pending),
+            "n_pending_no_mirror": int(no_mirror_pending),
             "book_primary_65_73_top1": book_primary,
             "book_volume_60_73_all": book_volume,
             "book_diag_74_80": self._grade_book(
@@ -659,6 +779,7 @@ class DriftShadow:
                 kill_n=10**9, promote_n=10**9, concentration_guards=False),
             "book_addon_requal": book_addon,
             "book_latequal": book_latequal,
+            "book_no_mirror_research": book_no_mirror,
             "tilts_volume_book": tilts,
             "bars": {
                 "primary": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be & day<=40% & assets>=3",
@@ -666,6 +787,7 @@ class DriftShadow:
                 "diag_74_80": "no bar; diagnostic only (train-mirage check)",
                 "addon_requal": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=120 if EV>=4 & WLB>be",
                 "latequal": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be",
+                "no_mirror_research": "KILL n>=60 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be; manual review required",
             },
             # the assembly list for an eventual full enable (owner directive
             # 2026-07-08): a promoted live book takes every component whose bar
@@ -678,6 +800,7 @@ class DriftShadow:
                 "sizing_tilts_recorded": ["size_weight", "spread_weight",
                                           "session_weight", "stack_weight"],
                 "execution_doctrine": "chase +1c only when depth<50; 25-50 contracts/pick comfort, ~100 ceiling",
+                "no_mirror_research": "separate prospective book; never auto-promoted or mixed with YES",
             },
         }
 
@@ -695,6 +818,25 @@ class DriftShadow:
                 " AND created_at=?",
                 (model_version, int(window_key), recorded_at)).fetchall()
             return [dict(r) for r in rows]
+        except sqlite3.Error:
+            return []
+
+    def no_mirror_rows_recorded_at(
+        self,
+        model_version: str,
+        window_key: int,
+        recorded_at: float,
+    ) -> list[dict[str, Any]]:
+        """Filtered NO rows inserted by one 13M observation."""
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM drift_no_mirror WHERE model_version=? AND window_key=?"
+                " AND created_at=? ORDER BY asset, ticker",
+                (model_version, int(window_key), recorded_at),
+            ).fetchall()
+            return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
 
@@ -733,7 +875,7 @@ class DriftShadow:
             return []
         events: dict[tuple[str, str], dict[str, Any]] = {}
         try:
-            for table in ("drift_picks", "drift_addons", "drift_latequal"):
+            for table in ("drift_picks", "drift_addons", "drift_latequal", "drift_no_mirror"):
                 rows = self._conn.execute(
                     f"SELECT model_version, ticker, official_result, resolved_at FROM {table}"
                     " WHERE official_result IN ('YES','NO')"
@@ -761,7 +903,8 @@ class DriftShadow:
         latest = _num(row["latest"])
         tracks = {table: int(self._conn.execute(
             f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("drift_addons", "drift_lq_watch", "drift_latequal")}
+            for table in ("drift_addons", "drift_lq_watch", "drift_latequal",
+                          "drift_no_mirror")}
         return {"enabled": True, "rows_written": int(row["n"] or 0),
                 "latest_created_at": latest,
                 "latest_age_seconds": (now - latest) if latest is not None else None,

@@ -446,3 +446,77 @@ def test_health_reports_rows(rec):
     h = rec.health(now=1000.0)
     assert h["status"] == "ok" and h["rows_written"] == 1
     assert h["latest_age_seconds"] == pytest.approx(100.0)
+
+
+def _no_cap(**over):
+    base = dict(
+        asset="XRP",
+        ticker="KXXRP-NO",
+        predicted_side="NO",
+        yes_ask_cents=35.0,
+        entry_ask_cents=67.0,
+        spread_cents=2.0,
+        distance_from_strike=1e-5,
+        flip_probability=20.0,
+        calibrated_yes_probability=0.31,
+        depth_contracts=120.0,
+    )
+    base.update(over)
+    return base
+
+
+def test_v4_no_mirror_records_only_positive_filtered_cohorts(rec):
+    slate = [
+        _no_cap(asset="BTC", ticker="KXBTC-NO", entry_ask_cents=70.0),
+        _no_cap(asset="XRP", ticker="XRP-TIGHT", entry_ask_cents=64.0, spread_cents=2.0),
+        _no_cap(asset="HYPE", ticker="HYPE-MID", entry_ask_cents=67.0, spread_cents=5.0),
+        _no_cap(asset="SOL", ticker="SOL-UNTAGGED", entry_ask_cents=64.0, spread_cents=3.0),
+        _no_cap(asset="BNB", ticker="BNB-NEG", entry_ask_cents=67.0),
+        _no_cap(asset="DOGE", ticker="DOGE-NEG", entry_ask_cents=67.0),
+    ]
+    assert rec.observe_window(
+        model_version="m", window_key=1001, close_time=1900.0, slate=slate, now=1000.0
+    ) is True
+    rows = rec._conn.execute(
+        "SELECT ticker, ask_cents, btc_side, reason_codes FROM drift_no_mirror ORDER BY ticker"
+    ).fetchall()
+    assert [row["ticker"] for row in rows] == ["HYPE-MID", "XRP-TIGHT"]
+    assert rows[0]["ask_cents"] == 67.0
+    assert rows[1]["ask_cents"] == 64.0  # actual selected-side NO ask, not 100-YES ask
+    assert rows[1]["btc_side"] == "NO"
+    assert "MID_PRICE_65_69" in rows[0]["reason_codes"]
+    assert {"TIGHT_SPREAD", "BTC_AGREES_NO"} <= set(rows[1]["reason_codes"].split(","))
+    fresh = rec.no_mirror_rows_recorded_at("m", 1001, 1000.0)
+    assert {row["ticker"] for row in fresh} == {"HYPE-MID", "XRP-TIGHT"}
+
+
+def test_v4_no_mirror_tight_path_requires_btc_no(rec):
+    slate = [
+        _no_cap(asset="BTC", ticker="KXBTC-YES", predicted_side="YES"),
+        _no_cap(ticker="XRP-TIGHT", entry_ask_cents=64.0, spread_cents=2.0),
+    ]
+    assert rec.observe_window(
+        model_version="m", window_key=1002, close_time=1900.0, slate=slate, now=1000.0
+    ) is False
+    assert rec._conn.execute("SELECT COUNT(*) FROM drift_no_mirror").fetchone()[0] == 0
+
+
+def test_v4_no_mirror_resolves_no_and_stays_separate(rec):
+    rec.observe_window(
+        model_version="m",
+        window_key=1003,
+        close_time=1900.0,
+        slate=[_no_cap(ticker="XRP-WIN", entry_ask_cents=67.0, spread_cents=5.0)],
+        now=1000.0,
+    )
+    assert rec.resolve([{"ticker": "XRP-WIN", "result": "NO"}], now=2000.0) == 1
+    row = rec._conn.execute(
+        "SELECT correct, pnl_cents FROM drift_no_mirror WHERE ticker='XRP-WIN'"
+    ).fetchone()
+    assert row["correct"] == 1
+    assert row["pnl_cents"] == pytest.approx(31.0)
+    scoreboard = rec.scoreboard()
+    assert scoreboard["book_no_mirror_research"]["n_resolved"] == 1
+    assert scoreboard["book_volume_60_73_all"]["status"] == "empty"
+    assert scoreboard["n_pending_no_mirror"] == 0
+    assert rec.health(now=2000.0)["v3_tracks"]["drift_no_mirror"] == 1

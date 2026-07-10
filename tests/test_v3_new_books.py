@@ -1074,3 +1074,155 @@ def test_drift_checkpoint_runner_adapter_forwards_new_rows():
     assert row["drift_rule_version"] == "drift-latequal-12m-11m-v1"
     assert row["drift_independent_pick"] is True
     assert row["drift_track_wins"] == 6
+
+
+# -- Drift NO mirror: filtered positive cohorts, one grouped research card ----
+
+def _drift_no_row(**over):
+    base = {
+        "created_at": 2000.0,
+        "model_version": "interval-research-v1",
+        "record_kind": "DRIFT_NO_MIRROR",
+        "rule_code": "DRIFT_NO_MIRROR_POSITIVE_FILTER_V1",
+        "reason_codes": "DRIFT_NO_MIRROR_RESEARCH,MID_PRICE_65_69,TIGHT_SPREAD,BTC_AGREES_NO",
+        "drift_no_tags": "DRIFT_NO_MIRROR_RESEARCH,MID_PRICE_65_69,TIGHT_SPREAD,BTC_AGREES_NO",
+        "delivery_status": "RESEARCH",
+        "asset": "XRP",
+        "ticker": "KXXRP15M-NO",
+        "interval": "13M",
+        "window_key": 1200,
+        "close_time": 2780.0,
+        "predicted_side": "NO",
+        "entry_ask_cents": 67.0,
+        "spread_cents": 2.0,
+        "depth_contracts": 100.0,
+        "drift_btc_side_at_capture": "NO",
+        "drift_track_n_resolved": 0,
+        "drift_track_verdict_n": 60,
+    }
+    base.update(over)
+    return base
+
+
+def test_drift_no_mirror_decision_excludes_negative_and_untagged(monkeypatch):
+    from q15_upgrade.strategy_bots.rules import (
+        BOT_DRIFT_NO_MIRROR,
+        RESEARCH_ONLY,
+        drift_no_mirror_decision,
+    )
+
+    monkeypatch.setenv("Q15_V3_DRIFT_NO_MIRROR", "true")
+    decision = drift_no_mirror_decision(_drift_no_row())
+    assert decision is not None and decision.bot_name == BOT_DRIFT_NO_MIRROR
+    assert decision.decision_status == RESEARCH_ONLY and decision.side_override == "NO"
+    assert decision.entry_ask_cents == 67.0
+    assert decision.threshold_profile["excluded_negative_assets"] == ["BNB", "DOGE"]
+
+    assert drift_no_mirror_decision(_drift_no_row(asset="BNB")) is None
+    assert drift_no_mirror_decision(_drift_no_row(asset="DOGE")) is None
+    assert drift_no_mirror_decision(_drift_no_row(asset="ETH")) is None
+    assert drift_no_mirror_decision(_drift_no_row(predicted_side="YES")) is None
+    assert drift_no_mirror_decision(_drift_no_row(entry_ask_cents=74.0)) is None
+    assert drift_no_mirror_decision(_drift_no_row(
+        reason_codes="DRIFT_NO_MIRROR_RESEARCH,TIGHT_SPREAD",
+        drift_no_tags="DRIFT_NO_MIRROR_RESEARCH,TIGHT_SPREAD",
+    )) is None
+
+
+def test_drift_no_mirror_runtime_groups_and_separates_scoreboard(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.rules import BOT_DRIFT_NO_MIRROR
+
+    tg = _Telegram()
+    _reset_runtime(tmp_path, monkeypatch, tg)
+    monkeypatch.setenv("Q15_V3_DRIFT_NO_MIRROR", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_NO_MIRROR_NOTIFY", "true")
+    monkeypatch.setattr(runtime, "_enrich_source_row", lambda row, **_: dict(row))
+
+    rows = [
+        _drift_no_row(),
+        _drift_no_row(
+            asset="HYPE",
+            ticker="KXHYPE15M-NO",
+            entry_ask_cents=66.0,
+            spread_cents=5.0,
+            reason_codes="DRIFT_NO_MIRROR_RESEARCH,MID_PRICE_65_69",
+            drift_no_tags="DRIFT_NO_MIRROR_RESEARCH,MID_PRICE_65_69",
+            drift_btc_side_at_capture="YES",
+        ),
+        _drift_no_row(asset="BNB", ticker="KXBNB-EXCLUDED"),
+    ]
+    row_ids = runtime.record_drift_no_mirror_window(rows)
+    assert len(row_ids) == 2
+    assert runtime.record_drift_no_mirror_window(rows) == []
+    assert len(tg.sent) == 1
+    text = tg.sent[0]
+    assert "DRIFT NO WATCH \u2014 RESEARCH ONLY" in text
+    assert "XRP NO @ 67c" in text and "HYPE NO @ 66c" in text
+    assert "BNB" in text  # exclusion disclosure only
+    assert "KXBNB-EXCLUDED" not in text
+    assert "no order is placed" in text
+
+    ledger = runtime.get_ledger()
+    recorded = [
+        row for row in ledger.rows(STRATEGY_VERSION)
+        if row["bot_name"] == BOT_DRIFT_NO_MIRROR
+    ]
+    assert len(recorded) == 2
+    assert all(row["decision_status"] == "RESEARCH_ONLY" for row in recorded)
+    assert all(row["side"] == "NO" for row in recorded)
+    assert {row["notification_status"] for row in recorded} == {"SENT"}
+    assert len({row["notification_message_id"] for row in recorded}) == 1
+
+    assert runtime.reconcile_drift_settlements([
+        {"model_version": "interval-research-v1", "ticker": "KXXRP15M-NO",
+         "official_result": "NO", "resolved_at": 2800.0},
+        {"model_version": "interval-research-v1", "ticker": "KXHYPE15M-NO",
+         "official_result": "YES", "resolved_at": 2800.0},
+    ]) == 2
+    scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
+    drift = scoreboard["drift_system"]
+    assert drift["independent_picks"]["rows"] == 0  # YES book remains untouched
+    assert drift["no_mirror_research"]["rows"] == 2
+    assert drift["no_mirror_research"]["resolved"] == 2
+    assert drift["no_mirror_by_asset"]["XRP"]["correct"] == 1
+    assert drift["no_mirror_by_asset"]["HYPE"]["correct"] == 0
+
+
+def test_drift_no_mirror_runner_adapter_groups_window():
+    from types import SimpleNamespace
+    from q15_upgrade.interval_research.runner import IntervalResearchRunner
+
+    runner = object.__new__(IntervalResearchRunner)
+    runner.config = SimpleNamespace(model_version="interval-research-v1")
+
+    class Recorder:
+        def no_mirror_rows_recorded_at(self, model_version, window_key, now):
+            assert (model_version, window_key, now) == ("interval-research-v1", 55, 1000.0)
+            return [{
+                "created_at": 1000.0,
+                "asset": "SOL",
+                "ticker": "KXSOL-NO",
+                "close_time": 1780.0,
+                "ask_cents": 68.0,
+                "spread_cents": 3.0,
+                "depth_contracts": 70.0,
+                "btc_side": "YES",
+                "reason_codes": "DRIFT_NO_MIRROR_RESEARCH,MID_PRICE_65_69",
+            }]
+
+        def scoreboard(self):
+            return {"book_no_mirror_research": {
+                "n_resolved": 10,
+                "win_rate": 0.8,
+                "total_pnl_cents": 210.0,
+                "status": "ACCRUING",
+            }}
+
+    with patch("q15_upgrade.strategy_bots.runtime.record_drift_no_mirror_window") as record:
+        runner._alert_drift_no_mirror(Recorder(), 55, 1000.0)
+    record.assert_called_once()
+    payload = record.call_args.args[0]
+    assert len(payload) == 1
+    assert payload[0]["predicted_side"] == "NO"
+    assert payload[0]["entry_ask_cents"] == 68.0
+    assert payload[0]["drift_track_wins"] == 8

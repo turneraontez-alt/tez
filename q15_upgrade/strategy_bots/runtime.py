@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 import logging
 import os
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import cycle_watchdog
 
@@ -25,6 +25,7 @@ from .rules import (
     BOT_DRIFT_13M,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
+    BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
     BOT_TOP_PICK_13M,
     BOT_WARN_FLIP,
@@ -35,12 +36,18 @@ from .rules import (
     decisions_for_row,
     drift_addon_requal_decision,
     drift_latequal_decision,
+    drift_no_mirror_decision,
     drift_pick_13m_decision,
     source_side,
     top_pick_13m_decision,
     warn_flip_entry_decision,
 )
-from .telegram import V3Telegram, build_v3_alert, build_v3_auto_mute_alert
+from .telegram import (
+    V3Telegram,
+    build_drift_no_mirror_group_alert,
+    build_v3_alert,
+    build_v3_auto_mute_alert,
+)
 
 logger = logging.getLogger("strategy_bots.runtime")
 
@@ -106,6 +113,10 @@ def drift_addon_notify_enabled() -> bool:
 
 def drift_latequal_notify_enabled() -> bool:
     return _bool("Q15_V3_DRIFT_LATEQUAL_NOTIFY", True)
+
+
+def drift_no_mirror_notify_enabled() -> bool:
+    return _bool("Q15_V3_DRIFT_NO_MIRROR_NOTIFY", True)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -571,6 +582,74 @@ def record_drift_checkpoint_row(row: Mapping[str, Any]) -> int | None:
     except Exception:  # noqa: BLE001 - checkpoint tracking must never break capture
         logger.warning("v3 drift checkpoint record failed (ignored)", exc_info=True)
         return None
+
+
+def record_drift_no_mirror_window(rows: Sequence[Mapping[str, Any]]) -> list[int]:
+    """Record filtered NO candidates and send one grouped research card.
+
+    Every candidate remains an independent ledger row for settlement/PnL, but
+    Telegram receives at most one compact card per 15-minute window.
+    """
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return []
+        row_ids: list[int] = []
+        recorded_rows: list[dict[str, Any]] = []
+        window_key: int | None = None
+        for row in rows:
+            wk = row.get("window_key")
+            ticker = str(row.get("ticker") or "")
+            if wk is None or not ticker:
+                continue
+            wk_int = int(wk)
+            if window_key is None:
+                window_key = wk_int
+            if wk_int != window_key:
+                logger.warning("drift NO group contained multiple windows; skipping %s", ticker)
+                continue
+            if not ledger.claim_meta_once(
+                f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_MIRROR}:{wk_int}:{ticker}"
+            ):
+                continue
+            enriched = _enrich_source_row(row)
+            decision = drift_no_mirror_decision(enriched)
+            if decision is None:
+                continue
+            row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
+            if row_id is None:
+                continue
+            recorded = ledger.row_by_id(row_id)
+            if recorded is None:
+                continue
+            row_ids.append(row_id)
+            recorded_rows.append(recorded)
+
+        if not row_ids or window_key is None or not drift_no_mirror_notify_enabled():
+            return row_ids
+        if not ledger.claim_meta_once(
+            f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_MIRROR}:group-notify:{window_key}"
+        ):
+            return row_ids
+        stamped = [_with_feed_degraded_stamp(row) for row in recorded_rows]
+        result = get_telegram().send(build_drift_no_mirror_group_alert(stamped))
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        for row_id in row_ids:
+            ledger.mark_notification(
+                row_id,
+                status=status,
+                message_id=mid,
+                error=result.get("error"),
+            )
+        return row_ids
+    except Exception:  # noqa: BLE001 - research mirror must never break capture
+        logger.warning("v3 drift NO mirror record failed (ignored)", exc_info=True)
+        return []
 
 
 def send_top_pick_gap_notice(*, window_key: int, close_time: float | None = None) -> bool:
