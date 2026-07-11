@@ -50,6 +50,7 @@ def _bot_label(name: str) -> str:
         "fav_10m": "Favorite 10M",
         "top_pick_13m": "Top Pick 13M",
         "drift_13m": "Drift Pick 13M",
+        "drift_flow_spread_13m": "Drift Flow/Spread 13M",
         "drift_addon_requal": "Drift Requalification Add-On",
         "drift_latequal_12m_11m": "Drift Late Qualifier",
         "drift_no_mirror": "Drift NO Mirror",
@@ -438,7 +439,10 @@ def build_top_pick_alert(row: Mapping[str, Any]) -> str:
 
 
 def _is_drift_pick(row: Mapping[str, Any]) -> bool:
-    return str(row.get("bot_name") or "") == "drift_13m"
+    return str(row.get("bot_name") or "") in {
+        "drift_13m",
+        "drift_flow_spread_13m",
+    }
 
 
 def _is_drift_addon(row: Mapping[str, Any]) -> bool:
@@ -491,6 +495,27 @@ def _drift_sizing_reason(sp: Any, sess_w: Any) -> str:
     return " · ".join(bits)
 
 
+def _drift_confirmation_line(thresholds: Mapping[str, Any]) -> str | None:
+    path = str(thresholds.get("gate_path") or "")
+    flow = thresholds.get("spot_depth_trade_net_notional_60s")
+    spread = thresholds.get("spread_cents")
+    try:
+        flow_text = f"${float(flow):+,.0f}"
+    except (TypeError, ValueError):
+        flow_text = "n/a"
+    try:
+        spread_text = f"{float(spread):.0f}c"
+    except (TypeError, ValueError):
+        spread_text = "n/a"
+    if path == "FLOW_AND_SPREAD":
+        return f"Confirmed: 60s spot flow {flow_text} + tight spread {spread_text}"
+    if path == "FLOW_60S_POSITIVE":
+        return f"Confirmed: 60s spot flow {flow_text} (positive)"
+    if path == "SPREAD_LTE_2":
+        return f"Confirmed: Kalshi spread {spread_text} (<=2c fallback)"
+    return None
+
+
 def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
     """Drift Shadow base-book pick — ultoim_v2 panel grammar (bold header
     outside a <pre> block, body inside one <pre>), owner-approved card layout.
@@ -535,6 +560,11 @@ def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
         f"Ticker: {str(row.get('ticker') or '')}",
         "Drift Shadow · paper/research · no orders placed",
     ]
+    confirmation = _drift_confirmation_line(thresholds)
+    if confirmation:
+        if str(row.get("bot_name") or "") == "drift_flow_spread_13m":
+            header = header.replace("DRIFT PICK 13M", "DRIFT FLOW CONFIRMED 13M")
+        body.insert(2, confirmation)
     return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
 
 

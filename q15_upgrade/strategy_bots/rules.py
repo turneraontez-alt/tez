@@ -28,6 +28,7 @@ BOT_WARN_FLIP = "warn_flip_entry"
 BOT_FAV_10M = "fav_10m"
 BOT_TOP_PICK_13M = "top_pick_13m"
 BOT_DRIFT_13M = "drift_13m"
+BOT_DRIFT_FLOW_SPREAD = "drift_flow_spread_13m"
 BOT_DRIFT_ADDON = "drift_addon_requal"
 BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
 BOT_DRIFT_NO_MIRROR = "drift_no_mirror"
@@ -643,6 +644,10 @@ def _drift_13m_enabled() -> bool:
     return _env_bool("Q15_V3_DRIFT_13M", True)
 
 
+def _drift_flow_spread_enabled() -> bool:
+    return _env_bool("Q15_V3_DRIFT_FLOW_SPREAD", True)
+
+
 def _drift_addon_enabled() -> bool:
     return _env_bool("Q15_V3_DRIFT_ADDON", True)
 
@@ -691,6 +696,107 @@ def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
         ACCEPTED,
         ("V3_DRIFT_PICK_13M", "NEAR_STRIKE_YES_BOOK"),
         threshold_profile={**profile, "passed": True},
+        side_override="YES",
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def drift_flow_spread_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Confirmed Drift delivery gate; the raw Drift recorder remains shadow-only.
+
+    The matched rule is deliberately simple: accept when fresh corrected 60s
+    spot flow is positive OR the executable Kalshi spread is at most 2 cents.
+    Missing flow is inconclusive unless the tight-spread fallback passes.
+    """
+    if not _drift_flow_spread_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
+        return None
+    ask = _entry_ask(row)
+    if ask is None or not 60.0 <= ask <= 73.0 or str(source_side(row)) != "YES":
+        return None
+
+    spread_max = _env_float("Q15_V3_DRIFT_FLOW_SPREAD_MAX_CENTS", 2.0, 0.0)
+    spread = _num(row.get("spread_cents"))
+    spot_status = str(row.get("spot_depth_status") or "").lower()
+    flow60 = _num(row.get("spot_depth_trade_net_notional_60s"))
+    flow_is_fresh = spot_status == "ok" and flow60 is not None
+    flow_pass = flow_is_fresh and flow60 > 0.0
+    spread_pass = spread is not None and spread <= spread_max
+
+    reasons = ["V3_DRIFT_FLOW_SPREAD_13M", "NEAR_STRIKE_YES_BOOK"]
+    if flow_pass:
+        reasons.append("DRIFT_SPOT_FLOW_60S_POSITIVE")
+    if spread_pass:
+        reasons.append("DRIFT_KALSHI_SPREAD_LTE_2")
+
+    if flow_pass or spread_pass:
+        status = ACCEPTED
+        gate_path = "FLOW_AND_SPREAD" if flow_pass and spread_pass else (
+            "FLOW_60S_POSITIVE" if flow_pass else "SPREAD_LTE_2"
+        )
+        reasons.append("DRIFT_FLOW_SPREAD_CONFIRMED")
+    elif not flow_is_fresh:
+        status = RESEARCH_ONLY
+        gate_path = "FLOW_MISSING_OR_STALE"
+        reasons.extend((
+            "DRIFT_FLOW_SPREAD_INCONCLUSIVE",
+            "DRIFT_SPOT_FLOW_MISSING_OR_STALE",
+        ))
+    else:
+        status = REJECTED
+        gate_path = "FLOW_NONPOSITIVE_AND_SPREAD_GT_2"
+        reasons.extend((
+            "DRIFT_FLOW_SPREAD_REJECTED",
+            "DRIFT_SPOT_FLOW_60S_NONPOSITIVE",
+            "DRIFT_KALSHI_SPREAD_GT_2",
+        ))
+
+    n_resolved = int(_num(row.get("drift_flow_spread_resolved_n")) or 0)
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "not_a_live_order": True,
+        "rule_version": "drift-flow-spread-13m-v1",
+        "passed": status == ACCEPTED,
+        "gate_path": gate_path,
+        "spot_flow_60s_min_exclusive": 0.0,
+        "spread_max_cents": spread_max,
+        "spot_depth_status": spot_status or None,
+        "spot_depth_missing_reason": row.get("spot_depth_missing_reason"),
+        "spot_depth_snapshot_age_seconds": _num(
+            row.get("spot_depth_snapshot_age_seconds")
+        ),
+        "spot_depth_raw_book_age_seconds": _num(
+            row.get("spot_depth_raw_book_age_seconds")
+        ),
+        "spot_depth_raw_trade_age_seconds": _num(
+            row.get("spot_depth_raw_trade_age_seconds")
+        ),
+        "spot_depth_trade_net_notional_60s": flow60,
+        "pick_ask_cents": ask,
+        "spread_cents": spread,
+        "depth_contracts": _num(row.get("depth_contracts")),
+        "spread_weight": _num(row.get("drift_spread_weight")),
+        "session_weight": _num(row.get("drift_session_weight")),
+        "stack_weight": _num(row.get("drift_stack_weight")),
+        "disagreement": _num(row.get("drift_disagreement")),
+        "pick_rank": row.get("drift_pick_rank"),
+        "slate_n": row.get("drift_slate_n"),
+        "book_n_resolved": n_resolved,
+        "book_wins": _num(row.get("drift_flow_spread_correct")),
+        "book_total_pnl_cents": _num(row.get("drift_flow_spread_net_pnl_cents")),
+        "book_status": "PROVISIONAL" if n_resolved < 60 else "EVALUATE",
+        "book_verdict_n": 60,
+        "counts_as_independent_pick": True,
+        "exposure_class": "INDEPENDENT_FLOW_SPREAD_PICK",
+        "raw_drift_remains_shadow": True,
+    }
+    return BotDecision(
+        BOT_DRIFT_FLOW_SPREAD,
+        status,
+        tuple(reasons),
+        threshold_profile=profile,
         side_override="YES",
         entry_ask_cents=ask,
         use_entry_ask_override=True,

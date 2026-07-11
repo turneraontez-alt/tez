@@ -16,6 +16,7 @@ from .rules import (
     BOT_CONFIDENCE_TIER,
     BOT_BASELINE,
     BOT_DRIFT_13M,
+    BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
     BOT_DRIFT_NO_MIRROR,
@@ -595,7 +596,8 @@ class StrategyBotLedger:
     ) -> dict[str, Any]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(correct), 0) AS correct "
+                "SELECT COUNT(*) AS n, COALESCE(SUM(correct), 0) AS correct, "
+                "COALESCE(SUM(hypothetical_pnl_cents), 0) AS net_pnl_cents "
                 "FROM strategy_bot_decisions "
                 "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
                 "AND official_result IS NOT NULL",
@@ -603,12 +605,14 @@ class StrategyBotLedger:
             ).fetchone()
         n = int(row["n"] or 0) if row is not None else 0
         correct = int(row["correct"] or 0) if row is not None else 0
+        net_pnl = float(row["net_pnl_cents"] or 0.0) if row is not None else 0.0
         accuracy = None if n <= 0 else correct / n
         return {
             "n": n,
             "correct": correct,
             "accuracy": accuracy,
             "wilson_lb": self._wilson_lower(correct, n),
+            "net_pnl_cents": net_pnl,
         }
 
     def trailing_abs_flow_percentile(
@@ -849,7 +853,8 @@ class StrategyBotLedger:
         rows: Sequence[Mapping[str, Any]],
         min_n: int,
     ) -> dict[str, Any]:
-        core = [r for r in rows if r.get("bot_name") == BOT_DRIFT_13M]
+        raw_shadow = [r for r in rows if r.get("bot_name") == BOT_DRIFT_13M]
+        core = [r for r in rows if r.get("bot_name") == BOT_DRIFT_FLOW_SPREAD]
         addons = [r for r in rows if r.get("bot_name") == BOT_DRIFT_ADDON]
         latequal = [r for r in rows if r.get("bot_name") == BOT_DRIFT_LATEQUAL]
         no_mirror = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_MIRROR]
@@ -857,6 +862,8 @@ class StrategyBotLedger:
         return {
             "independent_picks": cls._agg(independent, min_n),
             "base_13m": cls._agg(core, min_n),
+            "flow_spread_13m": cls._agg(core, min_n),
+            "raw_13m_legacy_shadow": cls._agg(raw_shadow, min_n),
             "latequal_12m_11m": cls._agg(latequal, min_n),
             "correlated_addon_exposure": cls._agg(addons, min_n),
             "total_exposure": cls._agg(independent + addons, min_n),
@@ -864,9 +871,10 @@ class StrategyBotLedger:
             "no_mirror_by_asset": cls._group(no_mirror, ("asset",), min_n),
             "all_drift_research_exposure": cls._agg(independent + addons + no_mirror, min_n),
             "accounting": (
-                "drift_addon_requal is correlated exposure and is excluded from "
-                "independent YES accuracy/PnL; drift_no_mirror is a separate "
-                "research-only NO book and never mixes with Drift YES"
+                "raw drift_13m is the legacy shadow/control and is excluded from "
+                "current independent performance; drift_flow_spread_13m owns base "
+                "Telegram delivery. drift_addon_requal is correlated exposure; "
+                "drift_no_mirror is a separate research-only NO book"
             ),
         }
 

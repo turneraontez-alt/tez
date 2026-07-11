@@ -11,6 +11,7 @@ import cycle_watchdog
 from .btc_regime import enrich_btc_regime
 from .kraken_l3_depth import enrich_kraken_l3
 from .l2_depth import enrich_coinbase_l2
+from .spot_depth import enrich_spot_depth
 from .ledger import StrategyBotLedger
 from .rules import (
     ACCEPTED,
@@ -22,7 +23,7 @@ from .rules import (
     BOT_FAV_10M,
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
-    BOT_DRIFT_13M,
+    BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
     BOT_DRIFT_NO_MIRROR,
@@ -35,9 +36,9 @@ from .rules import (
     BotDecision,
     decisions_for_row,
     drift_addon_requal_decision,
+    drift_flow_spread_13m_decision,
     drift_latequal_decision,
     drift_no_mirror_decision,
-    drift_pick_13m_decision,
     source_side,
     top_pick_13m_decision,
     warn_flip_entry_decision,
@@ -103,16 +104,21 @@ def top_pick_notify_enabled() -> bool:
 
 
 def drift_notify_enabled() -> bool:
-    # Default ON by owner directive 2026-07-08 (drift cards into the V3 channel).
-    return _bool("Q15_V3_DRIFT_13M_NOTIFY", True)
+    # Legacy compatibility flag. Raw Drift is shadow-only and this route is no
+    # longer called by record_drift_pick_row.
+    return _bool("Q15_V3_DRIFT_13M_NOTIFY", False)
+
+
+def drift_flow_spread_notify_enabled() -> bool:
+    return _bool("Q15_V3_DRIFT_FLOW_SPREAD_NOTIFY", True)
 
 
 def drift_addon_notify_enabled() -> bool:
-    return _bool("Q15_V3_DRIFT_ADDON_NOTIFY", True)
+    return _bool("Q15_V3_DRIFT_ADDON_NOTIFY", False)
 
 
 def drift_latequal_notify_enabled() -> bool:
-    return _bool("Q15_V3_DRIFT_LATEQUAL_NOTIFY", True)
+    return _bool("Q15_V3_DRIFT_LATEQUAL_NOTIFY", False)
 
 
 def drift_no_mirror_notify_enabled() -> bool:
@@ -236,6 +242,7 @@ def _with_book_stats_context(
         out.setdefault(f"{prefix}_correct", stats.get("correct"))
         out.setdefault(f"{prefix}_accuracy", stats.get("accuracy"))
         out.setdefault(f"{prefix}_wilson_lb", stats.get("wilson_lb"))
+        out.setdefault(f"{prefix}_net_pnl_cents", stats.get("net_pnl_cents"))
     except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
         if bot_name not in _book_stats_warning_logged:
             logger.warning("v3 %s stats unavailable", bot_name, exc_info=True)
@@ -497,11 +504,11 @@ def record_top_pick_row(row: Mapping[str, Any]) -> int | None:
 
 
 def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
-    """Record + (optionally) alert one Drift Shadow base-book pick at 13M.
+    """Record one flow/spread decision and alert only confirmed Drift picks.
 
     Multi-pick book: dedup is per (window, ticker) — a window can carry several
-    qualifying alts and each gets its own card. The recorder itself stays
-    record-only; this is the delivery adapter. Failures swallowed by design.
+    qualifying alts and each gets its own decision. The recorder itself stays
+    the raw shadow/control. Rejected and inconclusive rows still settle here.
     """
     try:
         ledger = get_ledger()
@@ -510,15 +517,28 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         wk = row.get("window_key")
         ticker = str(row.get("ticker") or "")
         if wk is None or not ticker or not ledger.claim_meta_once(
-            f"{STRATEGY_VERSION}:{BOT_DRIFT_13M}:{int(wk)}:{ticker}"
+            f"{STRATEGY_VERSION}:{BOT_DRIFT_FLOW_SPREAD}:{int(wk)}:{ticker}"
         ):
             return None
-        enriched = _enrich_source_row(row)
-        decision = drift_pick_13m_decision(enriched)
+        source = dict(row)
+        source.setdefault("delivery_status", "PAPER_DRIFT_FLOW_SPREAD")
+        enriched = enrich_spot_depth(source)
+        enriched = _enrich_source_row(enriched)
+        enriched = _with_book_stats_context(
+            ledger,
+            enriched,
+            bot_name=BOT_DRIFT_FLOW_SPREAD,
+            prefix="drift_flow_spread",
+        )
+        decision = drift_flow_spread_13m_decision(enriched)
         if decision is None:
             return None
         row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
-        if row_id is None or not drift_notify_enabled():
+        if (
+            row_id is None
+            or decision.decision_status != ACCEPTED
+            or not drift_flow_spread_notify_enabled()
+        ):
             return row_id
         recorded = ledger.row_by_id(row_id)
         if recorded is None:

@@ -903,12 +903,22 @@ def test_drift_decision_gates(monkeypatch):
 
 
 def test_record_drift_pick_dedup_per_window_ticker_and_card(tmp_path, monkeypatch):
-    from q15_upgrade.strategy_bots.rules import BOT_DRIFT_13M
+    from q15_upgrade.strategy_bots.rules import BOT_DRIFT_FLOW_SPREAD
 
     tg = _Telegram()
     _reset_runtime(tmp_path, monkeypatch, tg)
     monkeypatch.setenv("Q15_V3_DRIFT_13M", "true")
-    monkeypatch.setenv("Q15_V3_DRIFT_13M_NOTIFY", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_FLOW_SPREAD", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_FLOW_SPREAD_NOTIFY", "true")
+    monkeypatch.setattr(
+        runtime,
+        "enrich_spot_depth",
+        lambda row: dict(
+            row,
+            spot_depth_status="ok",
+            spot_depth_trade_net_notional_60s=500.0,
+        ),
+    )
     monkeypatch.setattr(runtime, "_enrich_source_row", lambda row, **_: dict(row))
 
     assert runtime.record_drift_pick_row(_drift_row()) is not None
@@ -917,14 +927,15 @@ def test_record_drift_pick_dedup_per_window_ticker_and_card(tmp_path, monkeypatc
     assert runtime.record_drift_pick_row(_drift_row(ticker="KXDOGE15M-DP")) is not None
 
     led = runtime.get_ledger()
-    rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == "drift_13m"]
+    rows = [r for r in led.rows(STRATEGY_VERSION) if r["bot_name"] == BOT_DRIFT_FLOW_SPREAD]
     assert len(rows) == 2 and all(r["decision_status"] == ACCEPTED for r in rows)
     assert len(tg.sent) == 2
     text = tg.sent[0]
-    assert "DRIFT PICK 13M" in text and "FULL SIZE" in text
+    assert "DRIFT FLOW CONFIRMED 13M" in text and "FULL SIZE" in text
+    assert "Confirmed: 60s spot flow" in text
     assert "BUY YES — XRP @ 60¢" in text and "breakeven 62%" in text
     assert "rest at 60¢" in text
-    assert "8W-3L" in text and "verdict at n=60" in text
+    assert "no resolved picks yet" in text and "verdict at n=60" in text
     assert "<pre>" in text  # v2-channel panel grammar: header outside, body inside
     for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK",
                    "Hourly Report", "TOP 3 PICKS"):
@@ -952,7 +963,17 @@ def test_drift_card_thin_depth_half_size_and_empty_book():
 def test_drift_notify_explicit_off(tmp_path, monkeypatch):
     tg = _Telegram()
     _reset_runtime(tmp_path, monkeypatch, tg)
-    monkeypatch.setenv("Q15_V3_DRIFT_13M_NOTIFY", "false")
+    monkeypatch.setenv("Q15_V3_DRIFT_FLOW_SPREAD_NOTIFY", "false")
+    monkeypatch.setattr(
+        runtime,
+        "enrich_spot_depth",
+        lambda row: dict(
+            row,
+            spot_depth_status="ok",
+            spot_depth_trade_net_notional_60s=500.0,
+        ),
+    )
+    monkeypatch.setattr(runtime, "_enrich_source_row", lambda row, **_: dict(row))
     assert runtime.record_drift_pick_row(_drift_row(window_key=778)) is not None
     assert tg.sent == []
 
