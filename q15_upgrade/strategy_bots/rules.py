@@ -32,6 +32,7 @@ BOT_DRIFT_FLOW_SPREAD = "drift_flow_spread_13m"
 BOT_DRIFT_ADDON = "drift_addon_requal"
 BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
 BOT_DRIFT_NO_MIRROR = "drift_no_mirror"
+BOT_DRIFT_NO_EXPANSION = "drift_no_expansion"
 
 # Source-row record_kind stamped by the ultoim_v2 exit-warning feed (Book 1).
 WARN_FLIP_RECORD_KIND = "EXIT_WARNING_FLIP"
