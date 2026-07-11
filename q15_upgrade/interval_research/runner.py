@@ -141,7 +141,7 @@ class IntervalResearchRunner:
                     slate=slate, now=now)
                 if wrote:
                     self._alert_drift_picks(rec, wk, now)
-                    self._alert_drift_no_mirror(rec, wk, now)
+                    self._alert_drift_no_expansion(rec, wk, now)
             break  # one window per cycle is enough; dedup is by (mv, window_key)
 
     def _alert_drift_picks(self, rec: Any, wk: int, now: float) -> None:
@@ -189,28 +189,24 @@ class IntervalResearchRunner:
         except Exception:  # noqa: BLE001 - alerting must never break the loop
             logger.debug("drift pick alert failed (ignored)", exc_info=True)
 
-    def _alert_drift_no_mirror(self, rec: Any, wk: int, now: float) -> None:
-        """Forward the window's filtered NO research rows as one group."""
+    def _alert_drift_no_expansion(self, rec: Any, wk: int, now: float) -> None:
+        """Forward the NO candidate envelope for flow/spread confirmation."""
         try:
             rows = rec.no_mirror_rows_recorded_at(
                 self.config.model_version, wk, now)
             if not rows:
                 return
-            book = (rec.scoreboard() or {}).get("book_no_mirror_research", {})
-            wins = None
-            if book.get("n_resolved") and book.get("win_rate") is not None:
-                wins = round(float(book["win_rate"]) * int(book["n_resolved"]))
             from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
             payloads = []
             for row in rows:
                 payloads.append({
                     "created_at": row.get("created_at", now),
                     "model_version": self.config.model_version,
-                    "record_kind": "DRIFT_NO_MIRROR",
-                    "rule_code": "DRIFT_NO_MIRROR_POSITIVE_FILTER_V1",
+                    "record_kind": "DRIFT_NO_EXPANSION",
+                    "rule_code": "DRIFT_NO_EXPANSION_FLOW_SPREAD_V1",
                     "reason_codes": row.get("reason_codes"),
                     "drift_no_tags": row.get("reason_codes"),
-                    "delivery_status": "RESEARCH",
+                    "delivery_status": "PAPER_DRIFT_NO_EXPANSION",
                     "asset": row.get("asset"),
                     "ticker": row.get("ticker"),
                     "interval": "13M",
@@ -224,16 +220,13 @@ class IntervalResearchRunner:
                     "entry_ask_cents": row.get("ask_cents"),
                     "spread_cents": row.get("spread_cents"),
                     "depth_contracts": row.get("depth_contracts"),
+                    "distance_sigma": row.get("distance_sigma"),
+                    "flip_probability": row.get("flip_probability"),
                     "drift_btc_side_at_capture": row.get("btc_side"),
-                    "drift_track_n_resolved": book.get("n_resolved"),
-                    "drift_track_wins": wins,
-                    "drift_track_total_pnl_cents": book.get("total_pnl_cents"),
-                    "drift_track_status": book.get("status"),
-                    "drift_track_verdict_n": 60,
                 })
-            strategy_bots_runtime.record_drift_no_mirror_window(payloads)
+            strategy_bots_runtime.record_drift_no_expansion_window(payloads)
         except Exception:  # noqa: BLE001 - research alert must never break capture
-            logger.debug("drift NO mirror alert failed (ignored)", exc_info=True)
+            logger.debug("drift NO expansion alert failed (ignored)", exc_info=True)
 
     # drift-shadow v3 later-checkpoint bands: fire once captures for that mark
     # have landed (mark-40..mark-10s), mirroring the 13M band above.

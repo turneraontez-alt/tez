@@ -68,6 +68,11 @@ cohorts from the expanded audit: XRP/HYPE/SOL plus either a 65-69c entry or a
 tight (<=2c) spread with BTC also predicting NO. BNB, DOGE, and untagged rows
 are intentionally absent. This track never changes the YES books or their bars.
 
+v5 (2026-07-11): the old NO mirror becomes a legacy shadow. Its source table
+now captures the candidate envelope for the separately scored NO expansion:
+XRP 60-69c, HYPE 60-64c, and DOGE 65-69c. Point-in-time spot-flow/spread
+confirmation is applied downstream; this recorder still never sends alerts.
+
 scoreboard()["full_enable_blueprint"] lists every component with its live
 status — the assembly list for an eventual promotion: if the shadow is ever
 enabled as a live book, it takes ALL components whose bars passed (owner
@@ -81,18 +86,18 @@ import sqlite3
 import time
 from typing import Any, Mapping, Sequence
 
-FEATURES_VERSION = "drift-shadow-v4-no-mirror"
+FEATURES_VERSION = "drift-shadow-v5-no-expansion"
 
 # volume-book band ceiling: the tradeable band is 60-73; 74-80 is diagnostic only
 _BOOK_HI = 73.0
 # add-on / late-qual entry checkpoints, in firing order
 _ADDON_INTERVALS = ("12M", "11M", "10M", "9M", "8M", "7M")
 _LATEQUAL_INTERVALS = ("12M", "11M")
-_NO_MIRROR_ASSETS = frozenset({"XRP", "HYPE", "SOL"})
-_NO_MIRROR_ASK_LO = 60.0
-_NO_MIRROR_ASK_HI = 73.0
-_NO_MIRROR_MID_LO = 65.0
-_NO_MIRROR_MID_HI = 70.0
+_NO_EXPANSION_BANDS = {
+    "XRP": (60.0, 69.0),
+    "HYPE": (60.0, 64.0),
+    "DOGE": (65.0, 69.0),
+}
 _NO_MIRROR_TIGHT_SPREAD = 2.0
 
 _SCHEMA = """
@@ -428,25 +433,26 @@ class DriftShadow:
             return False
         return True
 
-    def _no_mirror_tags(
+    def _no_expansion_tags(
         self,
         cap: Mapping[str, Any],
         *,
         btc_side: str | None,
     ) -> tuple[str, ...]:
-        """Return the profitable prospective NO cohort tags, or no tags.
+        """Return the asset/price envelope tags for the NO expansion.
 
-        This deliberately has no generic fallback. The historical BNB, DOGE,
-        and untagged cohorts were negative after conservative execution costs,
-        so they are excluded before a source or strategy decision can exist.
+        Executed-flow confirmation belongs to the strategy adapter because the
+        interval ledger does not persist spot trades. This source recorder only
+        captures candidates that could pass after point-in-time enrichment.
         """
         asset = str(cap.get("asset") or "").upper()
-        if asset not in _NO_MIRROR_ASSETS:
+        band = _NO_EXPANSION_BANDS.get(asset)
+        if band is None:
             return ()
         if str(cap.get("predicted_side") or "").upper() != "NO":
             return ()
         ask = _num(cap.get("entry_ask_cents"))
-        if ask is None or not (_NO_MIRROR_ASK_LO <= ask <= _NO_MIRROR_ASK_HI):
+        if ask is None or not (band[0] <= ask <= band[1]):
             return ()
         dist = _num(cap.get("distance_from_strike"))
         if dist is None or dist > self.dist_max:
@@ -456,15 +462,12 @@ class DriftShadow:
             return ()
 
         spread = _num(cap.get("spread_cents"))
-        mid_price = _NO_MIRROR_MID_LO <= ask < _NO_MIRROR_MID_HI
         tight_spread = spread is not None and spread <= _NO_MIRROR_TIGHT_SPREAD
         btc_agrees_no = btc_side == "NO"
-        if not (mid_price or (tight_spread and btc_agrees_no)):
-            return ()
-
-        tags = ["DRIFT_NO_MIRROR_RESEARCH"]
-        if mid_price:
-            tags.append("MID_PRICE_65_69")
+        tags = [
+            "DRIFT_NO_EXPANSION_CANDIDATE",
+            f"{asset}_NO_{int(band[0])}_{int(band[1])}",
+        ]
         if tight_spread:
             tags.append("TIGHT_SPREAD")
         if btc_agrees_no:
@@ -521,8 +524,8 @@ class DriftShadow:
                     (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
                      int(window_key), close_time, _num(cand.get("yes_ask_cents"))))
 
-            # v4: a separate NO mirror. The selected-side entry ask is the real
-            # NO ask captured by interval research; do not infer it as 100-YES.
+            # v5: record the NO expansion candidate envelope. The selected-side
+            # entry ask is the real NO ask; downstream adds point-in-time flow.
             btc_side = next((
                 str(cand.get("predicted_side") or "").upper()
                 for cand in slate
@@ -530,7 +533,7 @@ class DriftShadow:
                 and str(cand.get("predicted_side") or "").upper() in {"YES", "NO"}
             ), None)
             for cand in slate:
-                tags = self._no_mirror_tags(cand, btc_side=btc_side)
+                tags = self._no_expansion_tags(cand, btc_side=btc_side)
                 if not tags:
                     continue
                 ask = _num(cand.get("entry_ask_cents"))

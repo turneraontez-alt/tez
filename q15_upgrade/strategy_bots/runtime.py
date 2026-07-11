@@ -26,6 +26,7 @@ from .rules import (
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
+    BOT_DRIFT_NO_EXPANSION,
     BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
     BOT_TOP_PICK_13M,
@@ -38,6 +39,7 @@ from .rules import (
     drift_addon_requal_decision,
     drift_flow_spread_13m_decision,
     drift_latequal_decision,
+    drift_no_expansion_decision,
     drift_no_mirror_decision,
     source_side,
     top_pick_13m_decision,
@@ -45,6 +47,7 @@ from .rules import (
 )
 from .telegram import (
     V3Telegram,
+    build_drift_no_expansion_group_alert,
     build_drift_no_mirror_group_alert,
     build_v3_alert,
     build_v3_auto_mute_alert,
@@ -122,7 +125,11 @@ def drift_latequal_notify_enabled() -> bool:
 
 
 def drift_no_mirror_notify_enabled() -> bool:
-    return _bool("Q15_V3_DRIFT_NO_MIRROR_NOTIFY", True)
+    return _bool("Q15_V3_DRIFT_NO_MIRROR_NOTIFY", False)
+
+
+def drift_no_expansion_notify_enabled() -> bool:
+    return _bool("Q15_V3_DRIFT_NO_EXPANSION_NOTIFY", True)
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -669,6 +676,84 @@ def record_drift_no_mirror_window(rows: Sequence[Mapping[str, Any]]) -> list[int
         return row_ids
     except Exception:  # noqa: BLE001 - research mirror must never break capture
         logger.warning("v3 drift NO mirror record failed (ignored)", exc_info=True)
+        return []
+
+
+def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[int]:
+    """Record every NO-expansion decision and group only accepted alerts."""
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return []
+        row_ids: list[int] = []
+        accepted: list[tuple[int, dict[str, Any]]] = []
+        window_key: int | None = None
+        for row in rows:
+            wk = row.get("window_key")
+            ticker = str(row.get("ticker") or "")
+            if wk is None or not ticker:
+                continue
+            wk_int = int(wk)
+            if window_key is None:
+                window_key = wk_int
+            if wk_int != window_key:
+                logger.warning("drift NO expansion mixed windows; skipping %s", ticker)
+                continue
+            if not ledger.claim_meta_once(
+                f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_EXPANSION}:{wk_int}:{ticker}"
+            ):
+                continue
+            source = dict(row)
+            source.setdefault("delivery_status", "PAPER_DRIFT_NO_EXPANSION")
+            enriched = enrich_spot_depth(source)
+            enriched = _enrich_source_row(enriched)
+            enriched = _with_book_stats_context(
+                ledger,
+                enriched,
+                bot_name=BOT_DRIFT_NO_EXPANSION,
+                prefix="drift_no_expansion",
+            )
+            decision = drift_no_expansion_decision(enriched)
+            if decision is None:
+                continue
+            row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
+            if row_id is None:
+                continue
+            row_ids.append(row_id)
+            if decision.decision_status != ACCEPTED:
+                continue
+            recorded = ledger.row_by_id(row_id)
+            if recorded is not None:
+                accepted.append((row_id, recorded))
+
+        if (
+            not accepted
+            or window_key is None
+            or not drift_no_expansion_notify_enabled()
+        ):
+            return row_ids
+        if not ledger.claim_meta_once(
+            f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_EXPANSION}:group-notify:{window_key}"
+        ):
+            return row_ids
+        stamped = [_with_feed_degraded_stamp(row) for _, row in accepted]
+        result = get_telegram().send(build_drift_no_expansion_group_alert(stamped))
+        if result.get("delivered"):
+            status, mid = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, mid = "MUTED", None
+        else:
+            status, mid = "DELIVERY_FAILED", None
+        for row_id, _ in accepted:
+            ledger.mark_notification(
+                row_id,
+                status=status,
+                message_id=mid,
+                error=result.get("error"),
+            )
+        return row_ids
+    except Exception:  # noqa: BLE001 - research expansion must never break capture
+        logger.warning("v3 drift NO expansion record failed (ignored)", exc_info=True)
         return []
 
 

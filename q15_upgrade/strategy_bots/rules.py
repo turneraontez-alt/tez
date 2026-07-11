@@ -661,6 +661,10 @@ def _drift_no_mirror_enabled() -> bool:
     return _env_bool("Q15_V3_DRIFT_NO_MIRROR", True)
 
 
+def _drift_no_expansion_enabled() -> bool:
+    return _env_bool("Q15_V3_DRIFT_NO_EXPANSION", True)
+
+
 def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
     """Paper card for one recorded drift-book pick (alt YES, 60-73c,
     near-strike, low flip). ACCEPTED always — the book records every qualifying
@@ -962,6 +966,119 @@ def drift_no_mirror_decision(row: Mapping[str, Any]) -> BotDecision | None:
     return BotDecision(
         BOT_DRIFT_NO_MIRROR,
         RESEARCH_ONLY,
+        tuple(reasons),
+        threshold_profile=profile,
+        side_override="NO",
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def drift_no_expansion_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Asset-specific NO expansion confirmed by sell flow or a tight spread."""
+    if not _drift_no_expansion_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "DRIFT_NO_EXPANSION":
+        return None
+    asset = _asset(row)
+    ask = _entry_ask(row)
+    bands = {
+        "XRP": (60.0, 69.0),
+        "HYPE": (60.0, 64.0),
+        "DOGE": (65.0, 69.0),
+    }
+    band = bands.get(asset)
+    distance = _num(row.get("distance_sigma"))
+    flip = _num(row.get("flip_probability"))
+    if (
+        band is None
+        or source_side(row) != "NO"
+        or ask is None
+        or not band[0] <= ask <= band[1]
+        or distance is None
+        or distance > 3e-5
+        or flip is None
+        or flip > 30.0
+    ):
+        return None
+
+    spread_max = _env_float("Q15_V3_DRIFT_NO_EXPANSION_SPREAD_MAX_CENTS", 2.0, 0.0)
+    spread = _num(row.get("spread_cents"))
+    spot_status = str(row.get("spot_depth_status") or "").lower()
+    flow60 = _num(row.get("spot_depth_trade_net_notional_60s"))
+    flow_is_fresh = spot_status == "ok" and flow60 is not None
+    flow_pass = flow_is_fresh and flow60 < 0.0
+    spread_pass = spread is not None and spread <= spread_max
+
+    reasons = [
+        "V3_DRIFT_NO_EXPANSION",
+        f"{asset}_NO_{int(band[0])}_{int(band[1])}",
+    ]
+    if flow_pass:
+        reasons.append("DRIFT_NO_SPOT_FLOW_60S_NEGATIVE")
+    if spread_pass:
+        reasons.append("DRIFT_NO_KALSHI_SPREAD_LTE_2")
+
+    if flow_pass or spread_pass:
+        status = ACCEPTED
+        gate_path = "FLOW_AND_SPREAD" if flow_pass and spread_pass else (
+            "FLOW_60S_NEGATIVE" if flow_pass else "SPREAD_LTE_2"
+        )
+        reasons.append("DRIFT_NO_EXPANSION_CONFIRMED")
+    elif not flow_is_fresh:
+        status = RESEARCH_ONLY
+        gate_path = "FLOW_MISSING_OR_STALE"
+        reasons.extend((
+            "DRIFT_NO_EXPANSION_INCONCLUSIVE",
+            "DRIFT_NO_SPOT_FLOW_MISSING_OR_STALE",
+        ))
+    else:
+        status = REJECTED
+        gate_path = "FLOW_NONNEGATIVE_AND_SPREAD_GT_2"
+        reasons.extend((
+            "DRIFT_NO_EXPANSION_REJECTED",
+            "DRIFT_NO_SPOT_FLOW_60S_NONNEGATIVE",
+            "DRIFT_NO_KALSHI_SPREAD_GT_2",
+        ))
+
+    n_resolved = int(_num(row.get("drift_no_expansion_resolved_n")) or 0)
+    profile = {
+        "paper_only": True,
+        "not_a_live_order": True,
+        "rule_version": "drift-no-expansion-13m-v1",
+        "passed": status == ACCEPTED,
+        "gate_path": gate_path,
+        "asset_entry_band_cents": list(band),
+        "distance_sigma_max": 3e-5,
+        "flip_probability_max": 30.0,
+        "spot_flow_60s_max_exclusive": 0.0,
+        "spread_max_cents": spread_max,
+        "spot_depth_status": spot_status or None,
+        "spot_depth_missing_reason": row.get("spot_depth_missing_reason"),
+        "spot_depth_snapshot_age_seconds": _num(
+            row.get("spot_depth_snapshot_age_seconds")
+        ),
+        "spot_depth_raw_book_age_seconds": _num(
+            row.get("spot_depth_raw_book_age_seconds")
+        ),
+        "spot_depth_raw_trade_age_seconds": _num(
+            row.get("spot_depth_raw_trade_age_seconds")
+        ),
+        "spot_depth_trade_net_notional_60s": flow60,
+        "entry_ask_cents": ask,
+        "spread_cents": spread,
+        "depth_contracts": _num(row.get("depth_contracts")),
+        "counts_as_independent_pick": True,
+        "exposure_class": "INDEPENDENT_NO_EXPANSION",
+        "track_n_resolved": n_resolved,
+        "track_wins": _num(row.get("drift_no_expansion_correct")),
+        "track_total_pnl_cents": _num(row.get("drift_no_expansion_net_pnl_cents")),
+        "track_status": "PROVISIONAL" if n_resolved < 60 else "EVALUATE",
+        "track_verdict_n": 60,
+    }
+    return BotDecision(
+        BOT_DRIFT_NO_EXPANSION,
+        status,
         tuple(reasons),
         threshold_profile=profile,
         side_override="NO",

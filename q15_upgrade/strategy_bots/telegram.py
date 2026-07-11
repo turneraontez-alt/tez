@@ -54,6 +54,7 @@ def _bot_label(name: str) -> str:
         "drift_addon_requal": "Drift Requalification Add-On",
         "drift_latequal_12m_11m": "Drift Late Qualifier",
         "drift_no_mirror": "Drift NO Mirror",
+        "drift_no_expansion": "Drift NO Expansion",
         "baseline_control": "Baseline Control",
     }.get(name, name)
 
@@ -457,6 +458,10 @@ def _is_drift_no_mirror(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "drift_no_mirror"
 
 
+def _is_drift_no_expansion(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "drift_no_expansion"
+
+
 def _drift_size_banner(stack: Any) -> str:
     """One-glance size grade from the stacked tilt weight."""
     try:
@@ -735,6 +740,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_drift_addon_alert(row)
     if _is_drift_latequal(row):
         return build_drift_latequal_alert(row)
+    if _is_drift_no_expansion(row):
+        return build_drift_no_expansion_group_alert([row])
     if _is_drift_no_mirror(row):
         return build_drift_no_mirror_group_alert([row])
     if _is_drift_pick(row):
