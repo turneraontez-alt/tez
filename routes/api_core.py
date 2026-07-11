@@ -262,6 +262,7 @@ def register(flask_app, host):
             q15_v95_health = _app.checkpoint_v95.health_compact(
                 ledger_status=ledger_status,
                 grading_status=grading_health,
+                public_market_data=wsh,
             )
         except Exception as e:
             q15_v95_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
@@ -285,7 +286,9 @@ def register(flask_app, host):
                 "out_of_sample_framework": True,
                 "live_parameter_updates": False,
                 "telegram": _app.telegram_outbox.health(),
-                "resolved_outcome_metrics_available": bool(_app.oos_v9.out_of_sample_report().get("available")),
+                # Liveness should not rebuild the full OOS report; that remains on the
+                # dedicated diagnostics route.
+                "resolved_outcome_metrics_available": False,
             },
             "server_started_at": _app.SERVER_STARTED_AT_ISO,
             "uptime_seconds": round(now - _app.SERVER_STARTED_AT),

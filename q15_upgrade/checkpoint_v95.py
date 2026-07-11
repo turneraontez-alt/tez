@@ -4260,6 +4260,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         *,
         ledger_status: Mapping[str, Any] | None = None,
         grading_status: Mapping[str, Any] | None = None,
+        public_market_data: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fast health block for the top-level HTTP health endpoint.
 
@@ -4269,6 +4270,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         """
         ledger = copy.deepcopy(ledger_status) if ledger_status is not None else self.ledger.status()
         grading = copy.deepcopy(grading_status) if grading_status is not None else self.ledger.reconcile_backlog_status()
+        market_data = copy.deepcopy(public_market_data) if public_market_data is not None else self.market_data.health()
         return {
             "version": VERSION, "enabled": self.v95_enabled, "read_only": True,
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
@@ -4291,7 +4293,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "automatic_promotion": False, "order_placement": False,
             "ledger": ledger,
             "grading": grading,
-            "public_market_data": self.market_data.health(),
+            "public_market_data": market_data,
         }
 
     def health(self) -> dict[str, Any]:
