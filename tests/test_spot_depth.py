@@ -47,9 +47,10 @@ def test_coinbase_depth_and_trade_are_recorded(tmp_path):
     assert row["best_ask"] == 100.5
     assert row["bid_depth_levels"] == 5.0
     assert row["ask_depth_levels"] == 5.0
-    assert row["trade_buy_qty_60s"] == 0.4
-    assert row["trade_sell_qty_60s"] == 0.0
-    assert row["last_trade_side"] == "buy"
+    assert row["trade_buy_qty_60s"] == 0.0
+    assert row["trade_sell_qty_60s"] == 0.4
+    assert row["last_trade_side"] == "sell"
+    assert row["trade_side_semantics"] == "aggressor"
 
 
 def test_coinbase_last_match_and_errors_are_recorded(tmp_path):
@@ -79,8 +80,9 @@ def test_coinbase_last_match_and_errors_are_recorded(tmp_path):
 
     assert feed.record_once() == 1
     row = _row(db)
-    assert row["trade_sell_qty_60s"] == 0.2
-    assert row["last_trade_side"] == "sell"
+    assert row["trade_buy_qty_60s"] == 0.2
+    assert row["trade_sell_qty_60s"] == 0.0
+    assert row["last_trade_side"] == "buy"
 
 
 def test_okx_depth_trade_order_count_and_health(tmp_path):

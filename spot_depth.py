@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS spot_depth_snapshots (
     source TEXT NOT NULL,
     book_age_seconds REAL,
     trade_age_seconds REAL,
+    trade_side_semantics TEXT,
     best_bid REAL,
     best_ask REAL,
     mid REAL,
@@ -188,6 +189,16 @@ def _side(value: Any) -> str | None:
     return None
 
 
+def _coinbase_aggressor_side(value: Any) -> str | None:
+    """Convert Coinbase Exchange's maker-side match label to taker side."""
+    maker_side = _side(value)
+    if maker_side == "buy":
+        return "sell"
+    if maker_side == "sell":
+        return "buy"
+    return None
+
+
 class SpotDepthRecorder:
     """Background actual-coin depth/trade collector."""
 
@@ -268,6 +279,7 @@ class SpotDepthRecorder:
                 "record_seconds": self._record_seconds,
                 "retention_days": self._retention_days,
                 "levels": self.level_count,
+                "trade_side_semantics": "aggressor",
                 "connected": dict(self._connected),
                 "book_age_seconds": books,
                 "trade_age_seconds": trades,
@@ -325,7 +337,7 @@ class SpotDepthRecorder:
                 asset,
                 provider="coinbase",
                 symbol=str(data.get("product_id")),
-                side=_side(data.get("side")),
+                side=_coinbase_aggressor_side(data.get("side")),
                 price=_f(data.get("price")),
                 size=_f(data.get("size")),
                 ts=_source_ts(data.get("time")) or time.time(),
@@ -520,6 +532,7 @@ class SpotDepthRecorder:
             "trade_age_seconds": (
                 round(now - float(last_trade.get("ts")), 3) if last_trade.get("ts") else None
             ),
+            "trade_side_semantics": "aggressor",
             "best_bid": best_bid,
             "best_ask": best_ask,
             "mid": mid,
@@ -587,6 +600,13 @@ class SpotDepthRecorder:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(spot_depth_snapshots)")
+            }
+            if "trade_side_semantics" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE spot_depth_snapshots ADD COLUMN trade_side_semantics TEXT"
+                )
             self._conn.commit()
             return self._conn
 
@@ -594,7 +614,8 @@ class SpotDepthRecorder:
     def _insert_row_locked(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         cols = (
             "created_at", "asset", "provider", "symbol", "source",
-            "book_age_seconds", "trade_age_seconds", "best_bid", "best_ask",
+            "book_age_seconds", "trade_age_seconds", "trade_side_semantics",
+            "best_bid", "best_ask",
             "mid", "spread_bps", "bid_depth_top", "ask_depth_top",
             "bid_depth_levels", "ask_depth_levels", "bid_notional_levels",
             "ask_notional_levels", "depth_imbalance", "bid_levels_json",
