@@ -775,6 +775,7 @@ class DriftShadow:
                        "weights": [0.5, 1.0, 1.5]},
             "n_pending": int(pending),
             "n_pending_no_mirror": int(no_mirror_pending),
+            "n_pending_no_expansion_candidate": int(no_mirror_pending),
             "book_primary_65_73_top1": book_primary,
             "book_volume_60_73_all": book_volume,
             "book_diag_74_80": self._grade_book(
@@ -783,6 +784,7 @@ class DriftShadow:
             "book_addon_requal": book_addon,
             "book_latequal": book_latequal,
             "book_no_mirror_research": book_no_mirror,
+            "book_no_expansion_candidate_envelope": book_no_mirror,
             "tilts_volume_book": tilts,
             "bars": {
                 "primary": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be & day<=40% & assets>=3",
@@ -791,6 +793,7 @@ class DriftShadow:
                 "addon_requal": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=120 if EV>=4 & WLB>be",
                 "latequal": "KILL n>=40 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be",
                 "no_mirror_research": "KILL n>=60 if EV<=0|WR<be; PROMOTE n>=150 if EV>=2 & WLB>be; manual review required",
+                "no_expansion_candidate": "source envelope only; downstream flow/spread bot owns acceptance",
             },
             # the assembly list for an eventual full enable (owner directive
             # 2026-07-08): a promoted live book takes every component whose bar
@@ -804,6 +807,7 @@ class DriftShadow:
                                           "session_weight", "stack_weight"],
                 "execution_doctrine": "chase +1c only when depth<50; 25-50 contracts/pick comfort, ~100 ceiling",
                 "no_mirror_research": "separate prospective book; never auto-promoted or mixed with YES",
+                "no_expansion": "downstream paper bot; grouped Telegram only after flow/spread confirmation",
             },
         }
 
@@ -830,7 +834,7 @@ class DriftShadow:
         window_key: int,
         recorded_at: float,
     ) -> list[dict[str, Any]]:
-        """Filtered NO rows inserted by one 13M observation."""
+        """NO-expansion envelope rows inserted by one 13M observation."""
         if not self.enabled or self._conn is None:
             return []
         try:

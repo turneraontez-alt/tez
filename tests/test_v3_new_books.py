@@ -1209,7 +1209,7 @@ def test_drift_no_mirror_runtime_groups_and_separates_scoreboard(tmp_path, monke
     assert drift["no_mirror_by_asset"]["HYPE"]["correct"] == 0
 
 
-def test_drift_no_mirror_runner_adapter_groups_window():
+def test_drift_no_expansion_runner_adapter_groups_window():
     from types import SimpleNamespace
     from q15_upgrade.interval_research.runner import IntervalResearchRunner
 
@@ -1221,29 +1221,24 @@ def test_drift_no_mirror_runner_adapter_groups_window():
             assert (model_version, window_key, now) == ("interval-research-v1", 55, 1000.0)
             return [{
                 "created_at": 1000.0,
-                "asset": "SOL",
-                "ticker": "KXSOL-NO",
+                "asset": "DOGE",
+                "ticker": "KXDOGE-NO",
                 "close_time": 1780.0,
-                "ask_cents": 68.0,
+                "ask_cents": 67.0,
                 "spread_cents": 3.0,
                 "depth_contracts": 70.0,
+                "distance_sigma": 1e-5,
+                "flip_probability": 20.0,
                 "btc_side": "YES",
-                "reason_codes": "DRIFT_NO_MIRROR_RESEARCH,MID_PRICE_65_69",
+                "reason_codes": "DRIFT_NO_EXPANSION_CANDIDATE,DOGE_NO_65_69",
             }]
 
-        def scoreboard(self):
-            return {"book_no_mirror_research": {
-                "n_resolved": 10,
-                "win_rate": 0.8,
-                "total_pnl_cents": 210.0,
-                "status": "ACCRUING",
-            }}
-
-    with patch("q15_upgrade.strategy_bots.runtime.record_drift_no_mirror_window") as record:
-        runner._alert_drift_no_mirror(Recorder(), 55, 1000.0)
+    with patch("q15_upgrade.strategy_bots.runtime.record_drift_no_expansion_window") as record:
+        runner._alert_drift_no_expansion(Recorder(), 55, 1000.0)
     record.assert_called_once()
     payload = record.call_args.args[0]
     assert len(payload) == 1
     assert payload[0]["predicted_side"] == "NO"
-    assert payload[0]["entry_ask_cents"] == 68.0
-    assert payload[0]["drift_track_wins"] == 8
+    assert payload[0]["entry_ask_cents"] == 67.0
+    assert payload[0]["record_kind"] == "DRIFT_NO_EXPANSION"
+    assert payload[0]["distance_sigma"] == 1e-5

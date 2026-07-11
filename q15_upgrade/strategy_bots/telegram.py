@@ -674,6 +674,58 @@ def build_drift_no_mirror_group_alert(rows: Sequence[Mapping[str, Any]]) -> str:
     return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
 
 
+def build_drift_no_expansion_group_alert(rows: Sequence[Mapping[str, Any]]) -> str:
+    """One compact card containing accepted NO-expansion picks for a window."""
+    candidates = [row for row in rows if _is_drift_no_expansion(row)]
+    if not candidates:
+        return "<b>DRIFT NO EXPANSION | PAPER</b>\nNo confirmed candidates."
+    first = candidates[0]
+    window_key = first.get("window_key")
+    body = [
+        "FLOW/SPREAD CONFIRMED - no order is placed.",
+        f"Window: {window_key if window_key is not None else 'n/a'} | "
+        f"Candidates: {len(candidates)}",
+        "",
+    ]
+    for row in candidates:
+        thresholds = _thresholds(row)
+        path = str(thresholds.get("gate_path") or "")
+        flow = thresholds.get("spot_depth_trade_net_notional_60s")
+        spread = row.get("spread_cents")
+        try:
+            flow_text = f"${float(flow):+,.0f}"
+        except (TypeError, ValueError):
+            flow_text = "n/a"
+        if path == "FLOW_AND_SPREAD":
+            confirmation = (
+                f"negative 60s flow {flow_text} + spread {_plain_whole(spread)}c"
+            )
+        elif path == "FLOW_60S_NEGATIVE":
+            confirmation = f"negative 60s spot flow {flow_text}"
+        else:
+            confirmation = f"Kalshi spread {_plain_whole(spread)}c (<=2c fallback)"
+        body.extend([
+            (
+                f"{str(row.get('asset') or '')} NO @ "
+                f"{_plain_whole(row.get('entry_ask_cents'))}c | "
+                f"spread {_plain_whole(spread)}c"
+            ),
+            f"Confirmed: {confirmation}",
+            f"Ticker: {str(row.get('ticker') or '')}",
+        ])
+    body.extend([
+        "",
+        _drift_track_book_line(_thresholds(first)),
+        "Bands: XRP 60-69c | HYPE 60-64c | DOGE 65-69c",
+        "Separate from Drift YES | paper tracking only",
+    ])
+    header = "<b>DRIFT NO EXPANSION | PAPER</b>"
+    degraded = _degraded_line(first)
+    if degraded:
+        header += "\n" + degraded
+    return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
+
+
 def _plain_whole(value: Any) -> str:
     try:
         v = float(value)

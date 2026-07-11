@@ -19,6 +19,7 @@ from .rules import (
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
+    BOT_DRIFT_NO_EXPANSION,
     BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
     BTC_REGIME_KEYS,
@@ -858,6 +859,10 @@ class StrategyBotLedger:
         addons = [r for r in rows if r.get("bot_name") == BOT_DRIFT_ADDON]
         latequal = [r for r in rows if r.get("bot_name") == BOT_DRIFT_LATEQUAL]
         no_mirror = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_MIRROR]
+        no_expansion = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_EXPANSION]
+        no_expansion_accepted = [
+            r for r in no_expansion if r.get("decision_status") == ACCEPTED
+        ]
         independent = core + latequal
         return {
             "independent_picks": cls._agg(independent, min_n),
@@ -869,12 +874,23 @@ class StrategyBotLedger:
             "total_exposure": cls._agg(independent + addons, min_n),
             "no_mirror_research": cls._agg(no_mirror, min_n),
             "no_mirror_by_asset": cls._group(no_mirror, ("asset",), min_n),
-            "all_drift_research_exposure": cls._agg(independent + addons + no_mirror, min_n),
+            "no_expansion": cls._agg(no_expansion, min_n),
+            "no_expansion_accepted": cls._agg(no_expansion_accepted, min_n),
+            "no_expansion_by_status": cls._group(
+                no_expansion, ("decision_status",), min_n
+            ),
+            "no_expansion_by_asset_status": cls._group(
+                no_expansion, ("asset", "decision_status"), min_n
+            ),
+            "all_drift_research_exposure": cls._agg(
+                independent + addons + no_mirror + no_expansion, min_n
+            ),
             "accounting": (
                 "raw drift_13m is the legacy shadow/control and is excluded from "
                 "current independent performance; drift_flow_spread_13m owns base "
                 "Telegram delivery. drift_addon_requal is correlated exposure; "
-                "drift_no_mirror is a separate research-only NO book"
+                "drift_no_mirror is the legacy NO shadow; drift_no_expansion "
+                "owns accepted grouped NO Telegram delivery"
             ),
         }
 

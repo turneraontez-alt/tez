@@ -465,14 +465,15 @@ def _no_cap(**over):
     return base
 
 
-def test_v4_no_mirror_records_only_positive_filtered_cohorts(rec):
+def test_v5_no_expansion_records_asset_price_envelope(rec):
     slate = [
         _no_cap(asset="BTC", ticker="KXBTC-NO", entry_ask_cents=70.0),
         _no_cap(asset="XRP", ticker="XRP-TIGHT", entry_ask_cents=64.0, spread_cents=2.0),
-        _no_cap(asset="HYPE", ticker="HYPE-MID", entry_ask_cents=67.0, spread_cents=5.0),
-        _no_cap(asset="SOL", ticker="SOL-UNTAGGED", entry_ask_cents=64.0, spread_cents=3.0),
+        _no_cap(asset="HYPE", ticker="HYPE-IN", entry_ask_cents=63.0, spread_cents=5.0),
+        _no_cap(asset="HYPE", ticker="HYPE-OUT", entry_ask_cents=67.0, spread_cents=5.0),
+        _no_cap(asset="SOL", ticker="SOL-EXCLUDED", entry_ask_cents=64.0, spread_cents=3.0),
         _no_cap(asset="BNB", ticker="BNB-NEG", entry_ask_cents=67.0),
-        _no_cap(asset="DOGE", ticker="DOGE-NEG", entry_ask_cents=67.0),
+        _no_cap(asset="DOGE", ticker="DOGE-IN", entry_ask_cents=67.0),
     ]
     assert rec.observe_window(
         model_version="m", window_key=1001, close_time=1900.0, slate=slate, now=1000.0
@@ -480,28 +481,30 @@ def test_v4_no_mirror_records_only_positive_filtered_cohorts(rec):
     rows = rec._conn.execute(
         "SELECT ticker, ask_cents, btc_side, reason_codes FROM drift_no_mirror ORDER BY ticker"
     ).fetchall()
-    assert [row["ticker"] for row in rows] == ["HYPE-MID", "XRP-TIGHT"]
+    assert [row["ticker"] for row in rows] == ["DOGE-IN", "HYPE-IN", "XRP-TIGHT"]
     assert rows[0]["ask_cents"] == 67.0
-    assert rows[1]["ask_cents"] == 64.0  # actual selected-side NO ask, not 100-YES ask
-    assert rows[1]["btc_side"] == "NO"
-    assert "MID_PRICE_65_69" in rows[0]["reason_codes"]
-    assert {"TIGHT_SPREAD", "BTC_AGREES_NO"} <= set(rows[1]["reason_codes"].split(","))
+    assert rows[1]["ask_cents"] == 63.0
+    assert rows[2]["ask_cents"] == 64.0  # actual selected-side NO ask, not 100-YES ask
+    assert rows[2]["btc_side"] == "NO"
+    assert "DOGE_NO_65_69" in rows[0]["reason_codes"]
+    assert "HYPE_NO_60_64" in rows[1]["reason_codes"]
+    assert {"XRP_NO_60_69", "TIGHT_SPREAD"} <= set(rows[2]["reason_codes"].split(","))
     fresh = rec.no_mirror_rows_recorded_at("m", 1001, 1000.0)
-    assert {row["ticker"] for row in fresh} == {"HYPE-MID", "XRP-TIGHT"}
+    assert {row["ticker"] for row in fresh} == {"DOGE-IN", "HYPE-IN", "XRP-TIGHT"}
 
 
-def test_v4_no_mirror_tight_path_requires_btc_no(rec):
+def test_v5_no_expansion_does_not_require_btc_no(rec):
     slate = [
         _no_cap(asset="BTC", ticker="KXBTC-YES", predicted_side="YES"),
         _no_cap(ticker="XRP-TIGHT", entry_ask_cents=64.0, spread_cents=2.0),
     ]
     assert rec.observe_window(
         model_version="m", window_key=1002, close_time=1900.0, slate=slate, now=1000.0
-    ) is False
-    assert rec._conn.execute("SELECT COUNT(*) FROM drift_no_mirror").fetchone()[0] == 0
+    ) is True
+    assert rec._conn.execute("SELECT COUNT(*) FROM drift_no_mirror").fetchone()[0] == 1
 
 
-def test_v4_no_mirror_resolves_no_and_stays_separate(rec):
+def test_v5_no_expansion_source_resolves_no_and_stays_separate(rec):
     rec.observe_window(
         model_version="m",
         window_key=1003,
