@@ -19,6 +19,7 @@ BOT_BNB_NO = "bnb_no_confirmation"
 BOT_BNB_YES_REVERSAL = "bnb_yes_reversal"
 BOT_HYPE_YES = "hype_yes_confirmation"
 BOT_MOREFIRE_BTC = "morefire_btc_confirmed"
+BOT_MOREFIRE_NO_ENTRY_PRICE = "morefire_no_entry_price_probe"
 BOT_HVF_DEPTH_FLOW = "hvf_depth_flow_wrapper"
 BOT_BTC_REGIME = "btc_regime_context_probe"
 BOT_DEPTH_FORMULA_15M = "v3_15m_depth_formula_research"
@@ -1740,6 +1741,132 @@ def morefire_btc_confirmed_decision(
     )
 
 
+def morefire_no_entry_price_probe_decision(
+    row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> BotDecision | None:
+    """Track a MoreFire confirmation that never reads the entry price.
+
+    The source MoreFire feed is historically bounded to a 55-75c YES ask. This
+    prospective probe measures whether the additional depth/flow decision works
+    without adding another price threshold or changing operator alerts.
+    """
+    if not _env_bool("Q15_V3_MOREFIRE_NO_ENTRY_PRICE_PROBE_ENABLED", True):
+        return None
+    if source_system != "high_vol_flip":
+        return None
+    rule = source_rule(row)
+    kind = str(row.get("record_kind") or "")
+    if rule != "HVF_MORE_FIRE_STRICT" and kind not in {
+        "MORE_FIRE_STRICT_ALERT",
+        "MORE_FIRE_STRICT_RESEARCH",
+    }:
+        return None
+
+    side = source_side(row)
+    interval = str(row.get("interval") or "").upper()
+    allowed_intervals = {"8M", "10M", "12M"}
+    max_age_seconds = _env_float(
+        "Q15_V3_MOREFIRE_NO_ENTRY_PRICE_MAX_AGE_SECONDS",
+        15.0,
+        minimum=0.1,
+    )
+    spot_status = str(row.get("spot_depth_status") or "").lower()
+    spot_trade_age = _num(row.get("spot_depth_trade_age_seconds"))
+    spot_net_15s = _num(row.get("spot_depth_trade_net_notional_15s"))
+    taker_net_yes_15s = _num(row.get("kalshi_taker_net_yes_volume_15s"))
+    kraken_status = str(row.get("kraken_l3_status") or "").lower()
+    kraken_age = _num(row.get("kraken_l3_age_seconds"))
+    kraken_imbalance = _num(row.get("kraken_l3_depth_imbalance"))
+
+    profile = {
+        "paper_only": True,
+        "research_only": True,
+        "provisional": True,
+        "notifications_enabled": False,
+        "source_system": source_system,
+        "source_rule": rule,
+        "record_kind": kind,
+        "side_required": "YES",
+        "allowed_intervals": sorted(allowed_intervals),
+        "entry_ask_gate": None,
+        "entry_ask_used_by_probe": False,
+        "spot_trade_net_notional_15s_gt": 0.0,
+        "kalshi_taker_net_yes_volume_15s_lte": 0.0,
+        "kraken_l3_depth_imbalance_gt": 0.0,
+        "max_feature_age_seconds": max_age_seconds,
+        "spot_depth_status": spot_status or None,
+        "spot_depth_trade_age_seconds": spot_trade_age,
+        "spot_depth_trade_net_notional_15s": spot_net_15s,
+        "kalshi_taker_net_yes_volume_15s": taker_net_yes_15s,
+        "kraken_l3_status": kraken_status or None,
+        "kraken_l3_age_seconds": kraken_age,
+        "kraken_l3_depth_imbalance": kraken_imbalance,
+        "retrospective_rows": 63,
+        "retrospective_correct": 56,
+        "retrospective_accuracy": 56.0 / 63.0,
+        "retrospective_pnl_cents": 1111.0,
+        "retrospective_sub_75_rows": 51,
+        "retrospective_sub_75_correct": 45,
+        "prospective_promotion_min_resolved": 30,
+    }
+    reasons = ["MOREFIRE_NO_ENTRY_PRICE_PROBE_EVAL"]
+    failures: list[str] = []
+
+    if side != "YES":
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_SIDE_NOT_YES")
+    if interval not in allowed_intervals:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_INTERVAL_NOT_8_10_12M")
+
+    if spot_status != "ok":
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_SPOT_STATUS_NOT_OK")
+    if spot_trade_age is None:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_SPOT_TRADE_AGE_MISSING")
+    elif spot_trade_age > max_age_seconds:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_SPOT_TRADE_STALE")
+    if spot_net_15s is None:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_SPOT15_MISSING")
+    elif spot_net_15s <= 0.0:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_SPOT15_NOT_POSITIVE")
+    else:
+        reasons.append("MOREFIRE_NO_ENTRY_PRICE_SPOT15_BUYERS_POSITIVE")
+
+    if taker_net_yes_15s is None:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KALSHI_TAKER_MISSING")
+    elif taker_net_yes_15s > 0.0:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KALSHI_TAKER_NET_YES_POSITIVE")
+    else:
+        reasons.append("MOREFIRE_NO_ENTRY_PRICE_KALSHI_TAKER_NOT_NET_YES")
+
+    if kraken_status != "ok":
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KRAKEN_STATUS_NOT_OK")
+    if kraken_age is None:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KRAKEN_AGE_MISSING")
+    elif kraken_age > max_age_seconds:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KRAKEN_STALE")
+    if kraken_imbalance is None:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KRAKEN_IMBALANCE_MISSING")
+    elif kraken_imbalance <= 0.0:
+        failures.append("MOREFIRE_NO_ENTRY_PRICE_KRAKEN_IMBALANCE_NOT_POSITIVE")
+    else:
+        reasons.append("MOREFIRE_NO_ENTRY_PRICE_KRAKEN_BID_HEAVY")
+
+    if failures:
+        return BotDecision(
+            BOT_MOREFIRE_NO_ENTRY_PRICE,
+            REJECTED,
+            tuple(reasons + failures),
+            threshold_profile={**profile, "passed": False},
+        )
+    return BotDecision(
+        BOT_MOREFIRE_NO_ENTRY_PRICE,
+        RESEARCH_ONLY,
+        tuple(reasons + ["MOREFIRE_NO_ENTRY_PRICE_MATCH_RESEARCH_ONLY"]),
+        threshold_profile={**profile, "passed": True},
+    )
+
+
 def hvf_depth_flow_wrapper_decision(
     row: Mapping[str, Any],
     *,
@@ -2798,6 +2925,12 @@ def decisions_for_row(
     if hype is not None:
         decisions.append(hype)
     if source_system == "high_vol_flip":
+        no_entry_price = morefire_no_entry_price_probe_decision(
+            row,
+            source_system=source_system,
+        )
+        if no_entry_price is not None:
+            decisions.append(no_entry_price)
         hvf_wrapper = hvf_depth_flow_wrapper_decision(row, source_system=source_system)
         if hvf_wrapper is not None:
             decisions.append(hvf_wrapper)

@@ -19,6 +19,7 @@ from q15_upgrade.strategy_bots.rules import (
     BOT_HYPE_YES,
     BOT_HVF_DEPTH_FLOW,
     BOT_MOREFIRE_BTC,
+    BOT_MOREFIRE_NO_ENTRY_PRICE,
     BOT_THIRTEEN_M_SNIPER,
     REJECTED,
     RESEARCH_ONLY,
@@ -32,6 +33,7 @@ from q15_upgrade.strategy_bots.rules import (
     hvf_depth_flow_wrapper_decision,
     hype_yes_confirmation_decision,
     morefire_btc_confirmed_decision,
+    morefire_no_entry_price_probe_decision,
     thirteen_m_sniper_decision,
 )
 from q15_upgrade.strategy_bots.btc_regime import enrich_btc_regime
@@ -507,6 +509,86 @@ def test_morefire_btc_override_restores_acceptance(monkeypatch):
     assert d is not None
     assert d.decision_status == ACCEPTED
     assert "V3_POSITIVE_EV_GATE_MOREFIRE_ALLOWED_BY_OVERRIDE" in d.reason_codes
+
+
+@pytest.mark.parametrize("entry_ask", [10.0, 75.0, 99.0])
+def test_morefire_no_entry_price_probe_ignores_entry_ask(entry_ask):
+    d = morefire_no_entry_price_probe_decision(
+        _row(
+            asset="SOL",
+            ticker=f"KXSOL-NO-PRICE-{entry_ask}",
+            interval="10M",
+            predicted_side=None,
+            predicted_outcome="YES",
+            rule_code="HVF_MORE_FIRE_STRICT",
+            record_kind="MORE_FIRE_STRICT_ALERT",
+            entry_ask_cents=entry_ask,
+            spot_depth_status="ok",
+            spot_depth_trade_age_seconds=2.0,
+            spot_depth_trade_net_notional_15s=1200.0,
+            kalshi_taker_net_yes_volume_15s=-10.0,
+            kraken_l3_status="ok",
+            kraken_l3_age_seconds=3.0,
+            kraken_l3_depth_imbalance=0.12,
+        ),
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.bot_name == BOT_MOREFIRE_NO_ENTRY_PRICE
+    assert d.decision_status == RESEARCH_ONLY
+    assert d.threshold_profile["entry_ask_gate"] is None
+    assert d.threshold_profile["entry_ask_used_by_probe"] is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        (
+            {"spot_depth_trade_net_notional_15s": 0.0},
+            "MOREFIRE_NO_ENTRY_PRICE_SPOT15_NOT_POSITIVE",
+        ),
+        (
+            {"kalshi_taker_net_yes_volume_15s": 1.0},
+            "MOREFIRE_NO_ENTRY_PRICE_KALSHI_TAKER_NET_YES_POSITIVE",
+        ),
+        (
+            {"kraken_l3_depth_imbalance": 0.0},
+            "MOREFIRE_NO_ENTRY_PRICE_KRAKEN_IMBALANCE_NOT_POSITIVE",
+        ),
+        (
+            {"interval": "7M"},
+            "MOREFIRE_NO_ENTRY_PRICE_INTERVAL_NOT_8_10_12M",
+        ),
+    ],
+)
+def test_morefire_no_entry_price_probe_rejects_missing_confirmation(overrides, reason):
+    row = _row(
+        asset="XRP",
+        ticker="KXXRP-NO-PRICE-REJECT",
+        interval="12M",
+        predicted_side=None,
+        predicted_outcome="YES",
+        rule_code="HVF_MORE_FIRE_STRICT",
+        record_kind="MORE_FIRE_STRICT_ALERT",
+        spot_depth_status="ok",
+        spot_depth_trade_age_seconds=2.0,
+        spot_depth_trade_net_notional_15s=500.0,
+        kalshi_taker_net_yes_volume_15s=-5.0,
+        kraken_l3_status="ok",
+        kraken_l3_age_seconds=3.0,
+        kraken_l3_depth_imbalance=0.20,
+    )
+    row.update(overrides)
+
+    d = morefire_no_entry_price_probe_decision(
+        row,
+        source_system="high_vol_flip",
+    )
+
+    assert d is not None
+    assert d.decision_status == REJECTED
+    assert reason in d.reason_codes
 
 
 def test_morefire_btc_contra_only_hardens_when_local_depth_flow_contradicts():
@@ -2074,17 +2156,22 @@ def test_hvf_wrapper_is_only_hvf_v3_notification_owner(tmp_path, monkeypatch):
         "model_yes_probability": 0.62,
     }
 
-    assert runtime.record_source_row(row, source_system="high_vol_flip", btc_context=btc) == 5
+    assert runtime.record_source_row(row, source_system="high_vol_flip", btc_context=btc) == 6
     led = runtime.get_ledger()
     assert led is not None
     rows = led.rows(STRATEGY_VERSION)
     wrapper = next(r for r in rows if r["bot_name"] == BOT_HVF_DEPTH_FLOW)
     morefire = next(r for r in rows if r["bot_name"] == BOT_MOREFIRE_BTC)
+    no_entry_price = next(
+        r for r in rows if r["bot_name"] == BOT_MOREFIRE_NO_ENTRY_PRICE
+    )
 
     assert wrapper["decision_status"] == ACCEPTED
     assert wrapper["notification_status"] == "MUTED"
     assert morefire["decision_status"] == ACCEPTED
     assert morefire["notification_status"] is None
+    assert no_entry_price["decision_status"] == REJECTED
+    assert no_entry_price["notification_status"] is None
 
 
 def test_hvf_wrapper_only_mode_mutes_generic_v3_notifications(tmp_path, monkeypatch):
