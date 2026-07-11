@@ -99,6 +99,22 @@ class IntervalResearchConfig:
     mark_band_seconds: float = field(
         default_factory=lambda: _float("Q15_INTERVAL_RESEARCH_BAND_SECONDS", 25.0)
     )
+    # A slow refresh can step from above 13M to below its normal 25-second
+    # capture band.  The runner may recover that *observed* crossing from the
+    # two adjacent snapshots, but never across a longer gap (or process
+    # downtime).  It records whichever endpoint is closest to the mark and
+    # separately caps that endpoint's distance so a stale late point cannot be
+    # relabelled as 13M.
+    crossing_max_seconds: float = field(
+        default_factory=lambda: _float(
+            "Q15_INTERVAL_RESEARCH_CROSSING_MAX_SECONDS", 90.0
+        )
+    )
+    crossing_max_offset_seconds: float = field(
+        default_factory=lambda: _float(
+            "Q15_INTERVAL_RESEARCH_CROSSING_MAX_OFFSET_SECONDS", 45.0
+        )
+    )
     # Minimum snapshot data-quality to record a *capture* (below this we record a
     # DATA_QUALITY_FAILED missing-row instead, so coverage stays honest).
     min_data_quality: float = field(

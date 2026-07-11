@@ -17,7 +17,9 @@ from typing import Any, Mapping
 
 VERSION = "q15-v9-telegram-outbox"
 LOGGER = logging.getLogger(__name__)
-STATUSES = {"PENDING", "SENDING", "SENT", "FAILED_RETRYABLE", "DEAD_LETTER"}
+STATUSES = {
+    "PENDING", "SENDING", "SENT", "FAILED_RETRYABLE", "DEAD_LETTER", "EXPIRED",
+}
 
 
 def _now() -> float:
@@ -59,12 +61,23 @@ class _SQLiteBackend:
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
                     next_attempt_at REAL NOT NULL,
+                    expires_at REAL,
                     last_attempt_at REAL,
                     sent_at REAL,
                     last_error TEXT
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(q15_telegram_outbox)"
+                ).fetchall()
+            }
+            if "expires_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE q15_telegram_outbox ADD COLUMN expires_at REAL"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_q15_outbox_due ON q15_telegram_outbox(status, next_attempt_at)"
             )
@@ -72,10 +85,17 @@ class _SQLiteBackend:
 
     def recover(self) -> None:
         with self._connect() as connection:
+            now = _now()
+            connection.execute(
+                "UPDATE q15_telegram_outbox SET status='EXPIRED', "
+                "last_error='outbox:EXPIRED' WHERE expires_at IS NOT NULL "
+                "AND expires_at<=? AND status IN ('PENDING','FAILED_RETRYABLE','SENDING')",
+                (now,),
+            )
             connection.execute(
                 "UPDATE q15_telegram_outbox SET status='FAILED_RETRYABLE', next_attempt_at=? "
                 "WHERE status='SENDING'",
-                (_now(),),
+                (now,),
             )
             connection.commit()
 
@@ -85,15 +105,23 @@ class _SQLiteBackend:
                 """
                 INSERT OR IGNORE INTO q15_telegram_outbox (
                     idempotency_key, contract_id, checkpoint, alert_type, payload,
-                    status, attempt_count, created_at, next_attempt_at
-                ) VALUES (?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
+                    status, attempt_count, created_at, next_attempt_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                 """,
                 (
                     record["idempotency_key"], record.get("contract_id"),
                     record.get("checkpoint"), record.get("alert_type"),
-                    record["payload"], record["created_at"], record["next_attempt_at"],
+                    record["payload"], record.get("status", "PENDING"),
+                    record["created_at"], record["next_attempt_at"],
+                    record.get("expires_at"),
                 ),
             )
+            if record.get("expires_at") is not None:
+                connection.execute(
+                    "UPDATE q15_telegram_outbox SET expires_at=COALESCE(expires_at, ?) "
+                    "WHERE idempotency_key=?",
+                    (record.get("expires_at"), record["idempotency_key"]),
+                )
             row = connection.execute(
                 "SELECT * FROM q15_telegram_outbox WHERE idempotency_key=?",
                 (record["idempotency_key"],),
@@ -146,6 +174,15 @@ class _SQLiteBackend:
                     "next_attempt_at=?, last_error=? WHERE id=?",
                     (status, float(next_attempt or _now()), error, row_id),
                 )
+            connection.commit()
+
+    def expire(self, row_id: int) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE q15_telegram_outbox SET status='EXPIRED', "
+                "last_error='outbox:EXPIRED' WHERE id=? AND status<>'SENT'",
+                (int(row_id),),
+            )
             connection.commit()
 
     def rows(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -216,6 +253,7 @@ class _PostgresBackend:
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 created_at DOUBLE PRECISION NOT NULL,
                 next_attempt_at DOUBLE PRECISION NOT NULL,
+                expires_at DOUBLE PRECISION,
                 last_attempt_at DOUBLE PRECISION,
                 sent_at DOUBLE PRECISION,
                 last_error TEXT
@@ -225,13 +263,24 @@ class _PostgresBackend:
         if ok is False:
             raise RuntimeError("Postgres outbox migration failed")
         self.store.execute(
+            "ALTER TABLE q15_telegram_outbox ADD COLUMN IF NOT EXISTS "
+            "expires_at DOUBLE PRECISION"
+        )
+        self.store.execute(
             "CREATE INDEX IF NOT EXISTS idx_q15_outbox_due ON q15_telegram_outbox(status, next_attempt_at)"
         )
 
     def recover(self) -> None:
+        now = _now()
+        self.store.execute(
+            "UPDATE q15_telegram_outbox SET status='EXPIRED', "
+            "last_error='outbox:EXPIRED' WHERE expires_at IS NOT NULL "
+            "AND expires_at<=%s AND status IN ('PENDING','FAILED_RETRYABLE','SENDING')",
+            (now,),
+        )
         self.store.execute(
             "UPDATE q15_telegram_outbox SET status='FAILED_RETRYABLE', next_attempt_at=%s WHERE status='SENDING'",
-            (_now(),),
+            (now,),
         )
 
     def enqueue(self, record: Mapping[str, Any]) -> dict[str, Any]:
@@ -239,15 +288,23 @@ class _PostgresBackend:
             """
             INSERT INTO q15_telegram_outbox (
                 idempotency_key, contract_id, checkpoint, alert_type, payload,
-                status, attempt_count, created_at, next_attempt_at
-            ) VALUES (%s,%s,%s,%s,%s,'PENDING',0,%s,%s)
+                status, attempt_count, created_at, next_attempt_at, expires_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,0,%s,%s,%s)
             ON CONFLICT (idempotency_key) DO NOTHING
             """,
             (
                 record["idempotency_key"], record.get("contract_id"), record.get("checkpoint"),
-                record.get("alert_type"), record["payload"], record["created_at"], record["next_attempt_at"],
+                record.get("alert_type"), record["payload"],
+                record.get("status", "PENDING"), record["created_at"],
+                record["next_attempt_at"], record.get("expires_at"),
             ),
         )
+        if record.get("expires_at") is not None:
+            self.store.execute(
+                "UPDATE q15_telegram_outbox SET expires_at=COALESCE(expires_at, %s) "
+                "WHERE idempotency_key=%s",
+                (record.get("expires_at"), record["idempotency_key"]),
+            )
         rows = self.store.query(
             "SELECT * FROM q15_telegram_outbox WHERE idempotency_key=%s LIMIT 1",
             (record["idempotency_key"],),
@@ -287,6 +344,13 @@ class _PostgresBackend:
                 "UPDATE q15_telegram_outbox SET status=%s, attempt_count=attempt_count+1, next_attempt_at=%s, last_error=%s WHERE id=%s",
                 ("DEAD_LETTER" if dead else "FAILED_RETRYABLE", float(next_attempt or _now()), error, row_id),
             )
+
+    def expire(self, row_id: int) -> None:
+        self.store.execute(
+            "UPDATE q15_telegram_outbox SET status='EXPIRED', "
+            "last_error='outbox:EXPIRED' WHERE id=%s AND status<>'SENT'",
+            (int(row_id),),
+        )
 
     def rows(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
@@ -386,34 +450,104 @@ class ReliableTelegramOutbox:
         contract_id = None
         return contract_id, checkpoint, alert_type
 
-    def _enqueue(self, text: str, idempotency_key: str | None) -> dict[str, Any]:
+    def _enqueue(
+        self,
+        text: str,
+        idempotency_key: str | None,
+        *,
+        expires_at: float | None = None,
+    ) -> dict[str, Any]:
         key = self._key(str(text), idempotency_key)
         contract_id, checkpoint, alert_type = self._metadata(str(text))
+        expiry = None if expires_at is None else float(expires_at)
+        now = _now()
         return self.backend.enqueue({
             "idempotency_key": key,
             "contract_id": contract_id,
             "checkpoint": checkpoint,
             "alert_type": alert_type,
             "payload": str(text),
-            "created_at": _now(),
-            "next_attempt_at": _now(),
+            "status": "EXPIRED" if expiry is not None and expiry <= now else "PENDING",
+            "created_at": now,
+            "next_attempt_at": now,
+            "expires_at": expiry,
         })
 
-    def send(self, text: str, idempotency_key: str | None = None, **_: Any) -> bool:
+    def send(
+        self,
+        text: str,
+        idempotency_key: str | None = None,
+        *,
+        expires_at: float | None = None,
+        not_after: float | None = None,
+        **_: Any,
+    ) -> bool:
         if not self.enabled:
             return False
-        row = self._enqueue(str(text), idempotency_key)
+        expiry = expires_at if expires_at is not None else not_after
+        row = self._enqueue(str(text), idempotency_key, expires_at=expiry)
         if not row:
             self.last_error = "outbox_enqueue_failed"
             return False
         if row.get("status") == "SENT":
             return True
+        if row.get("status") == "EXPIRED":
+            self.last_error = "outbox:EXPIRED"
+            return False
         if not self.network_disabled:
             self._attempt(int(row["id"]))
         # True means durably accepted by the outbox, not necessarily delivered.
         return True
 
-    def send_with_result(self, text: str, idempotency_key: str | None = None, **_: Any) -> dict[str, Any]:
+    def enqueue_with_result(
+        self,
+        text: str,
+        idempotency_key: str | None = None,
+        *,
+        expires_at: float | None = None,
+        not_after: float | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Persist a message without performing network I/O in the caller.
+
+        This is the producer-side API for latency-sensitive refresh loops.  The
+        background worker owns delivery.  A pre-existing ``SENT`` key is exposed
+        as delivered so callers can reconcile their own durable ledger without
+        creating another Telegram message.
+        """
+        base = {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": None,
+            "outbox_status": None,
+        }
+        if not self.enabled:
+            return {**base, "muted": True, "error": "telegram_unconfigured"}
+        expiry = expires_at if expires_at is not None else not_after
+        row = self._enqueue(str(text), idempotency_key, expires_at=expiry)
+        if not row:
+            self.last_error = "outbox_enqueue_failed"
+            return {**base, "error": self.last_error}
+        status = str(row.get("status") or "") or None
+        delivered = status == "SENT"
+        return {
+            **base,
+            "ok": True,
+            "delivered": delivered,
+            "outbox_status": status,
+        }
+
+    def send_with_result(
+        self,
+        text: str,
+        idempotency_key: str | None = None,
+        *,
+        expires_at: float | None = None,
+        not_after: float | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
         """Outbox-backed equivalent of ``TelegramNotifier.send_with_result``.
 
         Returns ``{ok, delivered, muted, message_id}`` describing the SYNCHRONOUS
@@ -430,7 +564,8 @@ class ReliableTelegramOutbox:
         base = {"ok": False, "delivered": False, "muted": False, "message_id": None}
         if not self.enabled:
             return dict(base)
-        row = self._enqueue(str(text), idempotency_key)
+        expiry = expires_at if expires_at is not None else not_after
+        row = self._enqueue(str(text), idempotency_key, expires_at=expiry)
         if not row:
             self.last_error = "outbox_enqueue_failed"
             return dict(base)
@@ -438,6 +573,16 @@ class ReliableTelegramOutbox:
             # Idempotent dedup: an identical message already delivered. Handled, but
             # there is no fresh message_id to attach for this call.
             return {"ok": True, "delivered": True, "muted": False, "message_id": None}
+        if row.get("status") == "EXPIRED":
+            self.last_error = "outbox:EXPIRED"
+            return {
+                "ok": False,
+                "delivered": False,
+                "muted": False,
+                "message_id": None,
+                "error": self.last_error,
+                "outbox_status": "EXPIRED",
+            }
         if self.network_disabled:
             # Durably queued; the worker is disabled, so nothing was attempted now.
             return {"ok": True, "delivered": False, "muted": False, "message_id": None}
@@ -450,27 +595,68 @@ class ReliableTelegramOutbox:
         ``{ok, delivered, muted, message_id, error}``.
 
         Prefers the rich ``send_with_result`` interface (which carries the Telegram
-        message_id) and falls back to the boolean ``send`` for legacy notifiers,
-        where a handled send counts as delivered and exposes no id."""
+        message_id) and falls back to ``send`` for legacy notifiers.  Some legacy
+        adapters return the same structured mapping as the rich interface rather
+        than a bool; those mappings must be interpreted by their fields, not by
+        container truthiness (a non-empty failure dict is still a failure)."""
         token = getattr(self.raw, "token", None)
         if hasattr(self.raw, "send_with_result"):
             try:
-                result = self.raw.send_with_result(payload) or {}
+                result = self.raw.send_with_result(payload)
             except Exception as exc:
                 return {"ok": False, "delivered": False, "muted": False,
                         "message_id": None, "error": _safe_error(exc, token)}
-            ok = bool(result.get("ok"))
-            return {"ok": ok, "delivered": bool(result.get("delivered")),
-                    "muted": bool(result.get("muted")), "message_id": result.get("message_id"),
-                    "error": None if ok else _safe_error(getattr(self.raw, "last_error", None), token)}
+            return self._normalize_send_result(result, token)
         try:
-            ok = bool(self.raw.send(payload))
+            result = self.raw.send(payload)
         except Exception as exc:
             return {"ok": False, "delivered": False, "muted": False,
                     "message_id": None, "error": _safe_error(exc, token)}
-        return {"ok": ok, "delivered": ok, "muted": False,
-                "message_id": getattr(self.raw, "last_message_id", None),
-                "error": None if ok else _safe_error(getattr(self.raw, "last_error", None), token)}
+        return self._normalize_send_result(result, token)
+
+    def _normalize_send_result(self, result: Any, token: str | None) -> dict[str, Any]:
+        """Normalize rich mappings and legacy booleans without inventing delivery.
+
+        ``ok`` is the outbox's *handled* bit: a real delivery or an intentional
+        mute completes the row, while accepted-but-not-delivered results remain
+        retryable.  For old bool-only notifiers, ``True`` retains its historical
+        meaning of a delivered send without a proof id.
+        """
+        if isinstance(result, Mapping):
+            has_delivery_contract = "delivered" in result or "muted" in result
+            delivered = bool(result.get("delivered"))
+            muted = bool(result.get("muted"))
+            if has_delivery_contract:
+                handled = delivered or muted
+            else:
+                # Mapping-only legacy adapters sometimes expose just {ok: ...}.
+                # Preserve their bool semantics, including delivery without an id.
+                handled = bool(result.get("ok"))
+                delivered = handled
+            message_id = result.get("message_id")
+            if message_id is None and delivered:
+                message_id = getattr(self.raw, "last_message_id", None)
+            raw_error = result.get("error") or getattr(self.raw, "last_error", None)
+            return {
+                "ok": handled,
+                "delivered": delivered,
+                "muted": muted,
+                "message_id": message_id,
+                "error": None if handled else _safe_error(raw_error, token),
+            }
+
+        delivered = bool(result)
+        return {
+            "ok": delivered,
+            "delivered": delivered,
+            "muted": False,
+            "message_id": getattr(self.raw, "last_message_id", None) if delivered else None,
+            "error": (
+                None
+                if delivered
+                else _safe_error(getattr(self.raw, "last_error", None), token)
+            ),
+        }
 
     def _attempt(self, row_id: int | None = None) -> bool:
         # True when a claimed row was handled (delivered or an intentional mute);
@@ -482,6 +668,19 @@ class ReliableTelegramOutbox:
             row = self.backend.claim(row_id)
             if not row:
                 return {"ok": False, "delivered": False, "muted": False, "message_id": None}
+            expires_at = row.get("expires_at")
+            if expires_at is not None and _now() >= float(expires_at):
+                self.backend.expire(int(row["id"]))
+                self.last_error = "outbox:EXPIRED"
+                return {
+                    "ok": True,
+                    "delivered": False,
+                    "muted": False,
+                    "message_id": None,
+                    "error": self.last_error,
+                    "expired": True,
+                    "outbox_status": "EXPIRED",
+                }
             attempts_before = int(row.get("attempt_count") or 0)
             res = self._raw_send(row["payload"])
             if res["ok"]:

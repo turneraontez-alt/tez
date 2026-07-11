@@ -1,6 +1,6 @@
 """Interval-timing research — live-loop observer (read-only, default-OFF).
 
-Mirrors the Ultoim observer: invoked every ~1s from checkpoint_v95.run_cycle, it
+Mirrors the Ultoim observer: invoked once per refresh from checkpoint_v95.run_cycle, it
 captures the champion's frozen analysis at each of the eight marks (band around
 each mark), deduped per (ticker, interval). It NEVER trades, sends, or alters the
 champion. ``resolve_settled`` attaches official outcomes from the same settlement
@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .config import (INTERVAL_MARKS, IntervalResearchConfig, window_key)
@@ -46,6 +47,34 @@ def _analysis_value(analysis: Mapping[str, Any], quote: Mapping[str, Any], key: 
     return analysis.get(key)
 
 
+@dataclass(frozen=True)
+class _PreparedCapture:
+    """Compact point-in-time capture candidate retained across one slow cycle."""
+
+    asset: str
+    ticker: str
+    window_key: int
+    interval: str
+    mark_seconds: int
+    seconds_remaining: float
+    observed_at: float
+    close_time: float | None
+    missing_reason: str | None
+    row: dict[str, Any] | None
+    capture_analysis: dict[str, Any]
+
+
+@dataclass
+class _PendingDriftWindow:
+    """Bounded cross-asset barrier for one 13M Drift slate."""
+
+    first_seen_at: float
+    fallback_close: float | None
+    fallback_at: float
+    expected_tickers: set[str] = field(default_factory=set)
+    accounted_tickers: set[str] = field(default_factory=set)
+
+
 class IntervalResearchRunner:
     def __init__(self, config: IntervalResearchConfig | None = None):
         self.config = config or IntervalResearchConfig.from_env()
@@ -53,11 +82,153 @@ class IntervalResearchRunner:
         self._lock = threading.Lock()
         # top-pick-13M one-shot state: window_key -> decided-at timestamp
         self._top_pick_done: dict[int, float] = {}
+        # At most one compact 13M candidate per asset.  A same-contract downward
+        # threshold crossing can choose the nearer endpoint when a 30-80s refresh
+        # skips the normal capture band.  This state is intentionally in-memory:
+        # a cold restart below the band must not fabricate an unseen 13M point.
+        self._last_13m_candidate: dict[str, _PreparedCapture] = {}
+        # A staggered refresh can put one mapped contract below 780s while
+        # another is still above it. Accumulate behind a bounded barrier so
+        # Drift never freezes the first partial slate.
+        self._pending_drift_13m: dict[int, _PendingDriftWindow] = {}
+        self._drift_13m_done: dict[int, float] = {}
+        # Restart repair runs once per process unless a new source-capture event
+        # explicitly asks for another idempotent checkpoint replay.
+        self._drift_checkpoint_replayed: set[tuple[str, int]] = set()
         self._drift_strategy_reconciled = False
 
     @property
     def model_version(self) -> str:
         return self.config.model_version
+
+    def _prepare_capture(
+        self,
+        *,
+        asset: str,
+        analysis: Mapping[str, Any],
+        canonical: Any,
+        ticker: str,
+        window_key_value: int,
+        interval: str,
+        mark_seconds: int,
+        seconds_remaining: float,
+        observed_at: float,
+    ) -> _PreparedCapture:
+        """Freeze the compact fields needed if a later cycle crosses a mark.
+
+        Settlement-index context is captured now as well.  Looking it up only
+        after a later crossing would pair an older quote/model snapshot with a
+        newer index observation.
+        """
+        reason = missing_reason(analysis, canonical, self.config.min_data_quality)
+        capture_analysis = dict(analysis)
+        row: dict[str, Any] | None = None
+        if reason is None:
+            try:
+                from settlement_index import settlement_index_context
+
+                capture_analysis["settlement_index"] = settlement_index_context(
+                    asset, spot_px=getattr(canonical, "spot", None), now=observed_at
+                )
+            except Exception:  # noqa: BLE001 - record-only context must not break capture
+                capture_analysis["settlement_index"] = {
+                    "index_px": None,
+                    "basis_cents": None,
+                    "index_age_s": None,
+                }
+            row = build_capture_row(
+                model_version=self.config.model_version,
+                interval=interval,
+                mark_seconds=mark_seconds,
+                asset=asset,
+                analysis=capture_analysis,
+                canonical=canonical,
+                window_key=window_key_value,
+                now=observed_at,
+            )
+        return _PreparedCapture(
+            asset=asset,
+            ticker=ticker,
+            window_key=window_key_value,
+            interval=interval,
+            mark_seconds=mark_seconds,
+            seconds_remaining=seconds_remaining,
+            observed_at=observed_at,
+            close_time=_num(getattr(canonical, "settlement_time", None)),
+            missing_reason=reason,
+            row=row,
+            capture_analysis=capture_analysis,
+        )
+
+    def _record_prepared(self, candidate: _PreparedCapture) -> bool:
+        """Persist one prepared capture/missing row; return whether it was new."""
+        if self.ledger.has_row(
+            self.config.model_version, candidate.ticker, candidate.interval
+        ):
+            return False
+        if candidate.missing_reason is not None:
+            return self.ledger.record_missing(
+                model_version=self.config.model_version,
+                ticker=candidate.ticker,
+                asset=candidate.asset,
+                interval=candidate.interval,
+                reason=candidate.missing_reason,
+                window_key=candidate.window_key,
+                captured_at=candidate.observed_at,
+            )
+        if candidate.row is None:
+            return False
+        wrote = self.ledger.record_capture(candidate.row)
+        if wrote:
+            self._feed_v3_marks(candidate.row, candidate.capture_analysis)
+        return wrote
+
+    def _select_13m_capture(
+        self, asset: str, current: _PreparedCapture
+    ) -> _PreparedCapture | None:
+        """Select the normal in-band point or the nearer endpoint of a crossing."""
+        previous = self._last_13m_candidate.get(asset)
+        self._last_13m_candidate[asset] = current
+        mark = float(INTERVAL_MARKS["13M"])
+        band = max(0.0, float(self.config.mark_band_seconds))
+        if mark - band <= current.seconds_remaining <= mark:
+            return current
+        if previous is None:
+            return None
+
+        max_span = max(0.0, float(self.config.crossing_max_seconds))
+        max_offset = max(0.0, float(self.config.crossing_max_offset_seconds))
+        wall_gap = current.observed_at - previous.observed_at
+        clock_drop = previous.seconds_remaining - current.seconds_remaining
+        crossed = (
+            previous.ticker == current.ticker
+            and previous.window_key == current.window_key
+            and 0.0 < wall_gap <= max_span
+            and 0.0 < clock_drop <= max_span
+            and previous.seconds_remaining > mark >= current.seconds_remaining
+        )
+        if not crossed:
+            return None
+        # Prefer the current endpoint on an exact tie.  Both the source row and
+        # downstream point-in-time enrichment keep the selected endpoint's real
+        # timestamp; nothing is relabelled with the nominal threshold time.
+        selected = min(
+            (current, previous),
+            key=lambda item: abs(item.seconds_remaining - mark),
+        )
+        if abs(selected.seconds_remaining - mark) > max_offset:
+            return None
+        return selected
+
+    @staticmethod
+    def _slate_close_time(
+        slate: Sequence[Mapping[str, Any]], fallback: float | None
+    ) -> float | None:
+        for row in slate:
+            value = _num(row.get("close_time"))
+            if value is not None:
+                return value
+        return fallback
 
     def observe(self, *, analyses: Mapping[str, Mapping[str, Any]],
                 canonicals: Mapping[str, Any], now: float) -> None:
@@ -68,10 +239,16 @@ class IntervalResearchRunner:
         key, so repeated in-band cycles are no-ops after the first."""
         if not self.config.enabled or not self.ledger.available:
             return
-        band = self.config.mark_band_seconds
-        mv = self.config.model_version
+        band = max(0.0, float(self.config.mark_band_seconds))
         try:
             with self._lock:
+                drift_13m_targets: dict[int, tuple[float | None, float]] = {}
+                drift_checkpoint_targets: dict[
+                    tuple[str, int], tuple[float | None, float]
+                ] = {}
+                drift_checkpoint_intervals = {
+                    interval for interval, _ in self._DRIFT_CKPT_MARKS
+                }
                 for asset, canonical in (canonicals or {}).items():
                     sr = _num(getattr(canonical, "seconds_remaining", None))
                     if sr is None:
@@ -80,71 +257,192 @@ class IntervalResearchRunner:
                     wk = window_key(getattr(canonical, "settlement_time", None), now)
                     analysis = analyses.get(asset) if isinstance(analyses, Mapping) else None
                     analysis = analysis if isinstance(analysis, Mapping) else {}
-                    for interval, mark in INTERVAL_MARKS.items():
-                        if not (mark - band) <= sr <= mark:
-                            continue
-                        if ticker and self.ledger.has_row(mv, str(ticker), interval):
-                            continue
-                        reason = missing_reason(analysis, canonical, self.config.min_data_quality)
-                        if reason is not None:
-                            # CONTRACT_NOT_MAPPED has no ticker to key — unrecordable.
-                            if ticker:
-                                self.ledger.record_missing(
-                                    model_version=mv, ticker=str(ticker), asset=str(asset),
-                                    interval=interval, reason=reason, window_key=wk, captured_at=now)
-                            continue
-                        capture_analysis = dict(analysis)
-                        try:
-                            from settlement_index import settlement_index_context
 
-                            capture_analysis["settlement_index"] = settlement_index_context(
-                                str(asset), spot_px=getattr(canonical, "spot", None), now=now)
-                        except Exception:  # noqa: BLE001 - record-only context must not break capture
-                            capture_analysis["settlement_index"] = {
-                                "index_px": None, "basis_cents": None, "index_age_s": None}
-                        row = build_capture_row(
-                            model_version=mv, interval=interval, mark_seconds=mark,
-                            asset=str(asset), analysis=capture_analysis, canonical=canonical,
-                            window_key=wk, now=now)
-                        if self.ledger.record_capture(row):
-                            self._feed_v3_marks(row, capture_analysis)
+                    # 13M is crossing-aware. Retain only the immediately prior
+                    # compact point, then choose the endpoint nearest 780s when a
+                    # fresh same-market cycle skips the normal capture band.
+                    mark_13m = INTERVAL_MARKS["13M"]
+                    max_span = max(0.0, float(self.config.crossing_max_seconds))
+                    in_13m_neighbourhood = (
+                        (mark_13m - band) <= sr <= mark_13m
+                        or abs(sr - mark_13m) <= max_span
+                    )
+                    if ticker and in_13m_neighbourhood:
+                        current_13m = self._prepare_capture(
+                            asset=str(asset), analysis=analysis, canonical=canonical,
+                            ticker=str(ticker), window_key_value=wk, interval="13M",
+                            mark_seconds=mark_13m, seconds_remaining=sr, observed_at=now,
+                        )
+                        selected_13m = self._select_13m_capture(str(asset), current_13m)
+                        if selected_13m is not None:
+                            self._record_prepared(selected_13m)
+                            drift_13m_targets.setdefault(
+                                selected_13m.window_key,
+                                (selected_13m.close_time, selected_13m.observed_at),
+                            )
+                    elif ticker:
+                        self._last_13m_candidate.pop(str(asset), None)
+
+                    for interval, mark in INTERVAL_MARKS.items():
+                        if interval == "13M":
+                            continue
+                        if not (mark - band) <= sr <= mark or not ticker:
+                            continue
+                        candidate = self._prepare_capture(
+                            asset=str(asset), analysis=analysis, canonical=canonical,
+                            ticker=str(ticker), window_key_value=wk, interval=interval,
+                            mark_seconds=mark, seconds_remaining=sr, observed_at=now,
+                        )
+                        self._record_prepared(candidate)
+                        if interval in drift_checkpoint_intervals:
+                            drift_checkpoint_targets.setdefault(
+                                (interval, wk), (candidate.close_time, now)
+                            )
                 self._maybe_top_pick_13m(canonicals, now)
-                self._maybe_drift_shadow(canonicals, now)
-                self._maybe_drift_checkpoints(canonicals, now)
+                self._maybe_drift_shadow(canonicals, now, drift_13m_targets)
+                self._maybe_drift_checkpoints(
+                    canonicals, now, drift_checkpoint_targets
+                )
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
 
-    def _maybe_drift_shadow(self, canonicals: Mapping[str, Any], now: float) -> None:
-        """Feed the record-only drift-hypothesis forward test (near-strike YES).
+    def _maybe_drift_shadow(
+        self,
+        canonicals: Mapping[str, Any],
+        now: float,
+        forced_targets: Mapping[int, tuple[float | None, float]] | None = None,
+    ) -> None:
+        """Feed a complete 13M slate after a bounded cross-asset barrier.
 
-        Fires once per window in the same [740, 770]s band as the top pick, using
-        the window's full 13M slate. Record-only; never trades or notifies."""
-        try:
-            from q15_upgrade.drift_shadow import get_recorder
-        except Exception:  # noqa: BLE001 - optional research recorder
-            return
-        rec = get_recorder()
-        if rec is None:
-            return
+        A refresh can be staggered: SOL may already be at 776s while XRP is at
+        781s.  The first source row is durable immediately, but Drift waits
+        until every mapped ticker seen for that window has reached the mark and
+        has either a capture/missing row, or is already cold-late below the
+        capture band.  A disappeared ticker is released by the bounded timeout.
+
+        Restart repair is source-ledger driven for the whole active window. It
+        may replay a real persisted slate long after the old 45-second band,
+        but it never manufactures a source capture.
+        """
+        mark = float(INTERVAL_MARKS["13M"])
+        band = max(0.0, float(self.config.mark_band_seconds))
+        max_wait = max(0.0, float(self.config.crossing_max_seconds))
+
+        current_by_window: dict[int, list[tuple[str, float, float | None]]] = {}
         for canonical in (canonicals or {}).values():
+            ticker = getattr(canonical, "ticker", None)
             sr = _num(getattr(canonical, "seconds_remaining", None))
-            if sr is None or not (740.0 <= sr <= 770.0):
+            if not ticker or sr is None:
                 continue
             wk = window_key(getattr(canonical, "settlement_time", None), now)
-            if wk is None:
-                continue
-            slate = self.ledger.captures_for_window(self.config.model_version, "13M", wk)
-            if slate:
-                wrote = rec.observe_window(
-                    model_version=self.config.model_version, window_key=wk,
-                    close_time=_num(getattr(canonical, "settlement_time", None)),
-                    slate=slate, now=now)
-                if wrote:
-                    self._alert_drift_picks(rec, wk, now)
-                    self._alert_drift_no_expansion(rec, wk, now)
-            break  # one window per cycle is enough; dedup is by (mv, window_key)
+            current_by_window.setdefault(wk, []).append(
+                (
+                    str(ticker),
+                    sr,
+                    _num(getattr(canonical, "settlement_time", None)),
+                )
+            )
 
-    def _alert_drift_picks(self, rec: Any, wk: int, now: float) -> None:
+        targets = dict(forced_targets or {})
+        # A durable source slate is enough to request replay anywhere in the
+        # still-active market.  Merely being late is never enough to create one.
+        for wk, current in current_by_window.items():
+            if not any(0.0 < sr <= mark for _, sr, _ in current):
+                continue
+            persisted = self.ledger.captures_for_window(
+                self.config.model_version, "13M", wk
+            )
+            if not persisted:
+                continue
+            close_time = next((close for _, _, close in current if close is not None), None)
+            targets.setdefault(wk, (close_time, now))
+        for wk, pending in self._pending_drift_13m.items():
+            targets.setdefault(wk, (pending.fallback_close, pending.fallback_at))
+
+        # Keep the small in-memory dedup maps bounded to recent windows.
+        for wk, done_at in list(self._drift_13m_done.items()):
+            if now - done_at > 1800.0:
+                self._drift_13m_done.pop(wk, None)
+        try:
+            from q15_upgrade.drift_shadow import get_recorder
+
+            rec = get_recorder()
+        except Exception:  # noqa: BLE001 - optional research recorder
+            rec = None
+        for wk, (fallback_close, fallback_at) in targets.items():
+            if wk in self._drift_13m_done:
+                continue
+            pending = self._pending_drift_13m.get(wk)
+            if pending is None:
+                pending = _PendingDriftWindow(
+                    first_seen_at=now,
+                    fallback_close=fallback_close,
+                    fallback_at=fallback_at,
+                )
+                self._pending_drift_13m[wk] = pending
+            elif pending.fallback_close is None and fallback_close is not None:
+                pending.fallback_close = fallback_close
+
+            expired = (
+                pending.fallback_close is not None
+                and now >= pending.fallback_close
+            ) or now - pending.first_seen_at > max(1800.0, max_wait)
+            if expired:
+                self._pending_drift_13m.pop(wk, None)
+                self._drift_13m_done[wk] = now
+                continue
+
+            for ticker, sr, _ in current_by_window.get(wk, ()):
+                pending.expected_tickers.add(ticker)
+                if sr > mark:
+                    continue
+                if self.ledger.has_row(self.config.model_version, ticker, "13M"):
+                    pending.accounted_tickers.add(ticker)
+                elif sr < mark - band:
+                    # A cold process already below the capture band has no
+                    # observed crossing to recover. Account it honestly rather
+                    # than fabricating a 13M row or blocking a real replay.
+                    pending.accounted_tickers.add(ticker)
+
+            barrier_ready = pending.expected_tickers.issubset(
+                pending.accounted_tickers
+            )
+            timed_out = now - pending.first_seen_at >= max_wait
+            if not barrier_ready and not timed_out:
+                continue
+
+            slate = self.ledger.captures_for_window(
+                self.config.model_version, "13M", wk
+            )
+            if not slate:
+                # Missing-only/accounted windows have nothing for Drift to
+                # score, but they are complete and must not loop forever.
+                self._pending_drift_13m.pop(wk, None)
+                self._drift_13m_done[wk] = now
+                continue
+            if rec is None:
+                continue
+            close_time = self._slate_close_time(slate, pending.fallback_close)
+            rec.observe_window(
+                model_version=self.config.model_version,
+                window_key=wk,
+                close_time=close_time,
+                slate=slate,
+                now=pending.fallback_at,
+            )
+            # Replay every source row, not only rows inserted by this call. A
+            # crash after Drift commit but before the strategy adapter is then
+            # repaired safely by the downstream durable claims.
+            self._alert_drift_picks(rec, wk, pending.fallback_at, replay_all=True)
+            self._alert_drift_no_expansion(
+                rec, wk, pending.fallback_at, replay_all=True
+            )
+            self._pending_drift_13m.pop(wk, None)
+            self._drift_13m_done[wk] = now
+
+    def _alert_drift_picks(
+        self, rec: Any, wk: int, now: float, *, replay_all: bool = False
+    ) -> None:
         """Deliver a V3-channel card for each pick the recorder just wrote.
 
         The recorder stays record-only; this adapter reads its new rows and
@@ -152,7 +450,10 @@ class IntervalResearchRunner:
         ticker) claim there, so restarts/re-observations never double-send).
         Never raises into the live loop."""
         try:
-            picks = rec.picks_recorded_at(self.config.model_version, wk, now)
+            if replay_all and hasattr(rec, "picks_for_window"):
+                picks = rec.picks_for_window(self.config.model_version, wk)
+            else:
+                picks = rec.picks_recorded_at(self.config.model_version, wk, now)
             if not picks:
                 return
             book = (rec.scoreboard() or {}).get("book_volume_60_73_all", {})
@@ -162,7 +463,10 @@ class IntervalResearchRunner:
             from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
             for p in picks:
                 strategy_bots_runtime.record_drift_pick_row({
-                    "created_at": now,
+                    "created_at": (
+                        p.get("created_at")
+                        if p.get("created_at") is not None else now
+                    ),
                     "model_version": self.config.model_version,
                     "record_kind": "DRIFT_PICK_13M",
                     "asset": p.get("asset"),
@@ -189,18 +493,27 @@ class IntervalResearchRunner:
         except Exception:  # noqa: BLE001 - alerting must never break the loop
             logger.debug("drift pick alert failed (ignored)", exc_info=True)
 
-    def _alert_drift_no_expansion(self, rec: Any, wk: int, now: float) -> None:
+    def _alert_drift_no_expansion(
+        self, rec: Any, wk: int, now: float, *, replay_all: bool = False
+    ) -> None:
         """Forward the NO candidate envelope for flow/spread confirmation."""
         try:
-            rows = rec.no_mirror_rows_recorded_at(
-                self.config.model_version, wk, now)
+            if replay_all and hasattr(rec, "no_mirror_rows_for_window"):
+                rows = rec.no_mirror_rows_for_window(self.config.model_version, wk)
+            else:
+                rows = rec.no_mirror_rows_recorded_at(
+                    self.config.model_version, wk, now
+                )
             if not rows:
                 return
             from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
             payloads = []
             for row in rows:
+                source_at = _num(row.get("created_at"))
+                if source_at is None:
+                    source_at = now
                 payloads.append({
-                    "created_at": row.get("created_at", now),
+                    "created_at": source_at,
                     "model_version": self.config.model_version,
                     "record_kind": "DRIFT_NO_EXPANSION",
                     "rule_code": "DRIFT_NO_EXPANSION_FLOW_SPREAD_V1",
@@ -213,8 +526,9 @@ class IntervalResearchRunner:
                     "window_key": wk,
                     "close_time": row.get("close_time"),
                     "seconds_remaining": (
-                        float(row["close_time"]) - now
-                        if row.get("close_time") is not None else None
+                        float(row["close_time"]) - source_at
+                        if row.get("close_time") is not None and source_at is not None
+                        else None
                     ),
                     "predicted_side": "NO",
                     "entry_ask_cents": row.get("ask_cents"),
@@ -228,12 +542,20 @@ class IntervalResearchRunner:
         except Exception:  # noqa: BLE001 - research alert must never break capture
             logger.debug("drift NO expansion alert failed (ignored)", exc_info=True)
 
-    # drift-shadow v3 later-checkpoint bands: fire once captures for that mark
-    # have landed (mark-40..mark-10s), mirroring the 13M band above.
+    # Drift-shadow v3 later checkpoints. Source-capture events are primary;
+    # the bounded bands below exist only to repair a persisted current-window
+    # slate after process restart.
     _DRIFT_CKPT_MARKS = (("12M", 720), ("11M", 660), ("10M", 600),
                          ("9M", 540), ("8M", 480), ("7M", 420))
 
-    def _maybe_drift_checkpoints(self, canonicals: Mapping[str, Any], now: float) -> None:
+    def _maybe_drift_checkpoints(
+        self,
+        canonicals: Mapping[str, Any],
+        now: float,
+        forced_targets: Mapping[
+            tuple[str, int], tuple[float | None, float]
+        ] | None = None,
+    ) -> None:
         """Feed the drift shadow's v3 record-only tracks (re-qualification
         add-ons and late-qualifier entries) at the 12M..7M marks. Never trades
         or notifies; idempotent per (window, ticker) inside the recorder."""
@@ -244,30 +566,53 @@ class IntervalResearchRunner:
         rec = get_recorder()
         if rec is None or not hasattr(rec, "observe_checkpoint"):
             return
+
+        targets = dict(forced_targets or {})
+        forced_keys = set(targets)
+        # Re-drive any real persisted checkpoint slate after its mark while the
+        # contract is still active. This repairs a restart outside the old
+        # 45-second band without fabricating a checkpoint source row.
         for canonical in (canonicals or {}).values():
             sr = _num(getattr(canonical, "seconds_remaining", None))
-            if sr is None:
+            if sr is None or sr <= 0.0:
                 continue
+            wk = window_key(getattr(canonical, "settlement_time", None), now)
+            close_time = _num(getattr(canonical, "settlement_time", None))
             for interval, mark in self._DRIFT_CKPT_MARKS:
-                if not (mark - 40.0) <= sr <= (mark - 10.0):
+                if sr > mark:
                     continue
-                wk = window_key(getattr(canonical, "settlement_time", None), now)
-                if wk is None:
-                    break
+                key = (interval, wk)
+                if key in self._drift_checkpoint_replayed and key not in forced_keys:
+                    continue
                 slate = self.ledger.captures_for_window(
-                    self.config.model_version, interval, wk)
-                if slate:
-                    wrote = rec.observe_checkpoint(
-                        model_version=self.config.model_version, window_key=wk,
-                        interval=interval,
-                        close_time=_num(getattr(canonical, "settlement_time", None)),
-                        slate=slate, now=now)
-                    if wrote:
-                        self._alert_drift_checkpoint_rows(rec, wk, interval, now)
-                break
-            else:
+                    self.config.model_version, interval, wk
+                )
+                if not slate:
+                    continue
+                targets.setdefault(
+                    key,
+                    (close_time, now),
+                )
+
+        for (interval, wk), (fallback_close, fallback_at) in targets.items():
+            slate = self.ledger.captures_for_window(
+                self.config.model_version, interval, wk
+            )
+            if not slate:
                 continue
-            break  # one (window, interval) per cycle; recorder is idempotent
+            close_time = self._slate_close_time(slate, fallback_close)
+            rec.observe_checkpoint(
+                model_version=self.config.model_version,
+                window_key=wk,
+                interval=interval,
+                close_time=close_time,
+                slate=slate,
+                now=fallback_at,
+            )
+            self._alert_drift_checkpoint_rows(
+                rec, wk, interval, fallback_at, replay_all=True
+            )
+            self._drift_checkpoint_replayed.add((interval, wk))
 
     def _alert_drift_checkpoint_rows(
         self,
@@ -275,17 +620,28 @@ class IntervalResearchRunner:
         window_key_value: int,
         interval: str,
         now: float,
+        *,
+        replay_all: bool = False,
     ) -> None:
         """Send newly recorded checkpoint tracks through the paper V3 rail."""
         try:
-            rows = rec.checkpoint_rows_recorded_at(
-                self.config.model_version, window_key_value, interval, now)
+            if replay_all and hasattr(rec, "checkpoint_rows_for_window"):
+                rows = rec.checkpoint_rows_for_window(
+                    self.config.model_version, window_key_value, interval
+                )
+            else:
+                rows = rec.checkpoint_rows_recorded_at(
+                    self.config.model_version, window_key_value, interval, now
+                )
             if not rows:
                 return
             scoreboard = rec.scoreboard() or {}
             from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
 
             for row in rows:
+                source_at = _num(row.get("created_at"))
+                if source_at is None:
+                    source_at = now
                 kind = str(row.get("record_kind") or "")
                 if kind == "DRIFT_ADDON_REQUAL":
                     book = scoreboard.get("book_addon_requal", {})
@@ -303,7 +659,7 @@ class IntervalResearchRunner:
                 if book.get("n_resolved") and book.get("win_rate") is not None:
                     wins = round(float(book["win_rate"]) * int(book["n_resolved"]))
                 strategy_bots_runtime.record_drift_checkpoint_row({
-                    "created_at": row.get("created_at", now),
+                    "created_at": source_at,
                     "model_version": self.config.model_version,
                     "record_kind": kind,
                     "delivery_status": delivery_status,
@@ -313,7 +669,7 @@ class IntervalResearchRunner:
                     "window_key": window_key_value,
                     "close_time": row.get("close_time"),
                     "seconds_remaining": (
-                        float(row["close_time"]) - now
+                        float(row["close_time"]) - source_at
                         if row.get("close_time") is not None else None
                     ),
                     "predicted_side": "YES",

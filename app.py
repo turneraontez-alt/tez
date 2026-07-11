@@ -1175,6 +1175,11 @@ def _start_refresh():
     with _refresh_lock:
         if not _refresh_started:
             try:
+                from q15_upgrade.strategy_bots.runtime import initialize_drift_outbox
+                initialize_drift_outbox()
+            except Exception as exc:
+                logger.warning("V3 Drift delivery outbox did not start: %s", exc)
+            try:
                 from spot_depth import start_spot_depth
                 start_spot_depth()
             except Exception as exc:

@@ -24,7 +24,7 @@ def _row(**over):
         "ticker": "KXXRP15M-FLOW",
         "interval": "13M",
         "window_key": 77,
-        "close_time": 900.0,
+        "close_time": 4_102_444_800.0,
         "predicted_side": "YES",
         "entry_ask_cents": 65.0,
         "spread_cents": 3.0,
@@ -95,10 +95,79 @@ def test_spot_enrichment_is_point_in_time_and_corrects_old_coinbase_side(
 
     assert out["spot_depth_status"] == "ok"
     assert out["spot_depth_snapshot_age_seconds"] == 10.0
+    assert out["spot_depth_age_seconds"] == 13.0
+    assert out["spot_depth_trade_age_seconds"] == 14.0
     assert out["spot_depth_trade_net_notional_60s"] == 300.0
     assert out["spot_depth_trade_buy_notional_60s"] == 400.0
     assert out["spot_depth_trade_sell_notional_60s"] == 100.0
     assert out["spot_depth_last_trade_side"] == "sell"
+
+
+def _spot_age_row(tmp_path, monkeypatch, *, book_age: float, trade_age: float):
+    db = tmp_path / f"spot-{book_age}-{trade_age}.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE spot_depth_snapshots ("
+            "created_at REAL, asset TEXT, provider TEXT, source TEXT, "
+            "book_age_seconds REAL, trade_age_seconds REAL, trade_side_semantics TEXT, "
+            "trade_buy_notional_60s REAL, trade_sell_notional_60s REAL)"
+        )
+        conn.execute(
+            "INSERT INTO spot_depth_snapshots VALUES (?,?,?,?,?,?,?,?,?)",
+            (90.0, "XRP", "coinbase", "coinbase XRP-USD", book_age, trade_age,
+             "aggressor", 100.0, 50.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setenv("Q15_SPOT_DEPTH_DB", str(db))
+    monkeypatch.setenv("Q15_V3_DRIFT_SPOT_SNAPSHOT_MAX_AGE_SECONDS", "15")
+    monkeypatch.setenv("Q15_V3_DRIFT_SPOT_BOOK_MAX_AGE_SECONDS", "15")
+    monkeypatch.setenv("Q15_V3_DRIFT_SPOT_TRADE_MAX_AGE_SECONDS", "15")
+    return enrich_spot_depth(_row(created_at=100.0))
+
+
+def test_spot_freshness_uses_effective_age_and_includes_boundary(
+    tmp_path, monkeypatch
+):
+    boundary = _spot_age_row(
+        tmp_path, monkeypatch, book_age=5.0, trade_age=5.0
+    )
+    assert boundary["spot_depth_status"] == "ok"
+    assert boundary["spot_depth_age_seconds"] == 15.0
+    assert boundary["spot_depth_trade_age_seconds"] == 15.0
+
+    stale_book = _spot_age_row(
+        tmp_path, monkeypatch, book_age=5.001, trade_age=5.0
+    )
+    assert stale_book["spot_depth_status"] == "stale"
+    assert stale_book["spot_depth_missing_reason"] == "spot_depth_book_stale"
+
+    stale_trade = _spot_age_row(
+        tmp_path, monkeypatch, book_age=5.0, trade_age=5.001
+    )
+    assert stale_trade["spot_depth_status"] == "stale"
+    assert stale_trade["spot_depth_missing_reason"] == "spot_depth_trade_stale"
+
+
+def test_spot_freshness_normalizes_negative_source_clock_skew(
+    tmp_path, monkeypatch
+):
+    out = _spot_age_row(tmp_path, monkeypatch, book_age=-4.0, trade_age=-2.0)
+    assert out["spot_depth_status"] == "ok"
+    assert out["spot_depth_raw_book_age_seconds"] == 0.0
+    assert out["spot_depth_raw_trade_age_seconds"] == 0.0
+    assert out["spot_depth_age_seconds"] == 10.0
+    assert out["spot_depth_trade_age_seconds"] == 10.0
+
+
+def test_spot_freshness_fails_closed_without_source_book_age(
+    tmp_path, monkeypatch
+):
+    out = _spot_age_row(tmp_path, monkeypatch, book_age=None, trade_age=1.0)
+    assert out["spot_depth_status"] == "stale"
+    assert out["spot_depth_missing_reason"] == "spot_depth_book_stale"
 
 
 def test_drift_flow_spread_decision_paths(monkeypatch):
@@ -194,6 +263,32 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
     assert not [r for r in recorded if r["bot_name"] == BOT_DRIFT_13M]
     assert confirmed[0]["spot_depth_trade_net_notional_60s"] == 100.0
 
+    for ticker, result in (
+        ("FLOW", "YES"),
+        ("SPREAD", "YES"),
+        ("REJECT", "NO"),
+        ("STALE", "NO"),
+    ):
+        assert ledger.resolve(
+            source_system="drift_shadow",
+            source_model_version="interval-research-v1",
+            ticker=ticker,
+            official_result=result,
+        ) == 1
+
     scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
-    assert scoreboard["drift_system"]["flow_spread_13m"]["rows"] == 4
-    assert scoreboard["drift_system"]["raw_13m_legacy_shadow"]["rows"] == 0
+    drift = scoreboard["drift_system"]
+    assert drift["flow_spread_13m"]["rows"] == 2
+    assert drift["flow_spread_13m"]["resolved"] == 2
+    assert drift["flow_spread_13m"]["accuracy"] == 1.0
+    assert drift["base_13m"]["rows"] == 2
+    assert drift["independent_picks"]["rows"] == 2
+
+    assert drift["flow_spread_13m_all_candidates"]["rows"] == 4
+    assert drift["flow_spread_13m_all_candidates"]["resolved"] == 4
+    assert drift["flow_spread_13m_all_candidates"]["accuracy"] == 0.5
+    assert drift["independent_candidates"]["rows"] == 4
+    assert drift["flow_spread_13m_by_status"][ACCEPTED]["rows"] == 2
+    assert drift["flow_spread_13m_by_status"][REJECTED]["rows"] == 1
+    assert drift["flow_spread_13m_by_status"][RESEARCH_ONLY]["rows"] == 1
+    assert drift["raw_13m_legacy_shadow"]["rows"] == 0

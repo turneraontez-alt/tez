@@ -910,5 +910,14 @@ class V3Telegram:
         self.retries = self._client.retries
         self.sleep_seconds = self._client.sleep_seconds
 
-    def send(self, text: str) -> dict[str, Any]:
+    def send_with_result(self, text: str) -> dict[str, Any]:
+        """Rich outbox-compatible delivery result.
+
+        The shared client already returns the full delivery contract; exposing it
+        explicitly prevents retry adapters from treating a non-empty failure dict
+        as a successful legacy boolean send.
+        """
         return self._client.send(text)
+
+    def send(self, text: str) -> dict[str, Any]:
+        return self.send_with_result(text)

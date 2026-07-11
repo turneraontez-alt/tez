@@ -837,7 +837,7 @@ def _drift_row(**over):
         "ticker": "KXXRP15M-DP",
         "interval": "13M",
         "window_key": 777,
-        "close_time": 5800.0,
+        "close_time": 4_102_444_800.0,
         "predicted_side": "YES",
         "entry_ask_cents": 60.0,
         "spread_cents": 3.0,
@@ -868,7 +868,7 @@ def _drift_checkpoint_row(**over):
         "ticker": "KXXRP15M-ADD",
         "interval": "12M",
         "window_key": 778,
-        "close_time": 1800.0,
+        "close_time": 4_102_444_800.0,
         "predicted_side": "YES",
         "entry_ask_cents": 66.0,
         "spread_cents": 2.0,
@@ -1049,7 +1049,10 @@ def test_drift_checkpoint_cards_accounting_and_settlement(tmp_path, monkeypatch)
     scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
     assert scoreboard["all"]["rows"] == 1
     assert scoreboard["all_exposure"]["rows"] == 2
-    assert scoreboard["drift_system"]["independent_picks"]["rows"] == 1
+    # The late qualifier is RESEARCH_ONLY: retain it in the diagnostic funnel,
+    # but never count it as a deployable independent pick.
+    assert scoreboard["drift_system"]["independent_picks"]["rows"] == 0
+    assert scoreboard["drift_system"]["independent_candidates"]["rows"] == 1
     assert scoreboard["drift_system"]["correlated_addon_exposure"]["rows"] == 1
     assert scoreboard["by_bot"][BOT_DRIFT_ADDON]["resolved"] == 1
     assert scoreboard["by_bot"][BOT_DRIFT_LATEQUAL]["resolved"] == 1
@@ -1112,7 +1115,7 @@ def _drift_no_row(**over):
         "ticker": "KXXRP15M-NO",
         "interval": "13M",
         "window_key": 1200,
-        "close_time": 2780.0,
+        "close_time": 4_102_444_800.0,
         "predicted_side": "NO",
         "entry_ask_cents": 67.0,
         "spread_cents": 2.0,

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 import logging
+import math
 import os
+import time
 from typing import Any, Mapping, Sequence
 
 import cycle_watchdog
@@ -57,6 +59,8 @@ logger = logging.getLogger("strategy_bots.runtime")
 
 _ledger: StrategyBotLedger | None = None
 _telegram: V3Telegram | None = None
+_drift_outbox: Any | None = None
+_drift_outbox_identity: tuple[int, str] | None = None
 _thirteen_m_stats_warning_logged = False
 _thirteen_m_flow_warning_logged = False
 
@@ -194,6 +198,270 @@ def get_telegram() -> V3Telegram:
     if _telegram is None:
         _telegram = V3Telegram()
     return _telegram
+
+
+def drift_outbox_enabled() -> bool:
+    """Explicit opt-in for the dedicated Drift delivery outbox."""
+    return _bool("Q15_V3_DRIFT_OUTBOX_ENABLED", False)
+
+
+def drift_outbox_path() -> str:
+    return (
+        os.environ.get("Q15_V3_DRIFT_OUTBOX_DB")
+        or "data/q15_drift_telegram_outbox.sqlite3"
+    )
+
+
+def reset_drift_outbox() -> None:
+    """Close and drop the optional outbox (test/reconfiguration hook)."""
+    global _drift_outbox, _drift_outbox_identity
+    current = _drift_outbox
+    _drift_outbox = None
+    _drift_outbox_identity = None
+    if current is not None:
+        try:
+            current.close()
+        except Exception:  # noqa: BLE001 - shutdown must remain best-effort
+            logger.debug("v3 Drift outbox close failed", exc_info=True)
+
+
+def get_drift_outbox() -> Any | None:
+    """Return the dedicated retry outbox only under explicit opt-in.
+
+    The V3 Telegram gate/credentials remain authoritative.  When that channel
+    is muted we preserve the normal MUTED result instead of accumulating rows
+    that can never be delivered.
+    """
+    global _drift_outbox, _drift_outbox_identity
+    if not drift_outbox_enabled():
+        if _drift_outbox is not None:
+            reset_drift_outbox()
+        return None
+    telegram = get_telegram()
+    if not bool(getattr(telegram, "enabled", False)):
+        return None
+    path = drift_outbox_path()
+    identity = (id(telegram), path)
+    if _drift_outbox is not None and _drift_outbox_identity == identity:
+        return _drift_outbox
+    reset_drift_outbox()
+    try:
+        from notifications.outbox_v9 import ReliableTelegramOutbox
+
+        _drift_outbox = ReliableTelegramOutbox(
+            None, telegram, sqlite_path=path,
+        )
+        _drift_outbox_identity = identity
+    except Exception:  # noqa: BLE001 - optional rail must never block recording
+        logger.warning("v3 Drift outbox unavailable; delivery remains fail-closed", exc_info=True)
+        _drift_outbox = None
+        _drift_outbox_identity = None
+    return _drift_outbox
+
+
+def initialize_drift_outbox() -> bool:
+    """Start the optional Drift retry worker during application startup.
+
+    No database or worker is created unless both the dedicated outbox and the
+    credentialed V3 Telegram channel are enabled.
+    """
+    if not enabled() or not telegram_enabled() or not drift_outbox_enabled():
+        return False
+    telegram = get_telegram()
+    if not bool(getattr(telegram, "enabled", False)):
+        return False
+    return get_drift_outbox() is not None
+
+
+def _drift_delivery_key(
+    bot_name: str,
+    window_key: int,
+    ticker: str | None = None,
+    *,
+    grouped: bool = False,
+) -> str:
+    scope = "group" if grouped else "row"
+    parts = [STRATEGY_VERSION, "drift", str(bot_name), scope, str(int(window_key))]
+    if ticker:
+        parts.append(str(ticker))
+    return ":".join(parts)
+
+
+def _normalize_delivery_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, Mapping):
+        return {
+            "ok": bool(result.get("ok")),
+            "delivered": bool(result.get("delivered")),
+            "muted": bool(result.get("muted")),
+            "message_id": result.get("message_id"),
+            "error": result.get("error"),
+        }
+    delivered = bool(result)
+    return {
+        "ok": delivered,
+        "delivered": delivered,
+        "muted": False,
+        "message_id": None,
+        "error": None if delivered else "telegram_send_failed",
+    }
+
+
+def _send_drift_notification(
+    text: str,
+    *,
+    idempotency_key: str,
+    expires_at: float | None,
+) -> dict[str, Any]:
+    """Send directly or enqueue the exact rendered Drift payload for retry."""
+    if expires_at is None:
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": "drift_expiry_missing",
+        }
+    try:
+        expiry = float(expires_at)
+    except (TypeError, ValueError):
+        expiry = float("nan")
+    if not math.isfinite(expiry):
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": "drift_expiry_invalid",
+        }
+    outbox = get_drift_outbox()
+    if outbox is None:
+        # Explicit outbox opt-in is a nonblocking safety contract.  Construction
+        # failure must not silently turn the live refresh loop into a network
+        # caller; a later replay can recover after the rail becomes available.
+        if drift_outbox_enabled():
+            return {
+                "ok": False,
+                "delivered": False,
+                "muted": False,
+                "message_id": None,
+                "error": "outbox_unavailable",
+            }
+        if time.time() >= expiry:
+            return {
+                "ok": False,
+                "delivered": False,
+                "muted": False,
+                "message_id": None,
+                "error": "outbox:EXPIRED",
+            }
+        telegram = get_telegram()
+        sender = getattr(telegram, "send_with_result", None)
+        try:
+            raw = sender(text) if callable(sender) else telegram.send(text)
+        except Exception as exc:  # noqa: BLE001 - delivery cannot break recording
+            return {
+                "ok": False,
+                "delivered": False,
+                "muted": False,
+                "message_id": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return _normalize_delivery_result(raw)
+
+    # The live refresh loop is a producer only.  Persist now; the outbox worker
+    # performs all network I/O so a slow Telegram request cannot stall capture.
+    raw_result = outbox.enqueue_with_result(
+        text, idempotency_key=idempotency_key, expires_at=expiry,
+    )
+    result = _normalize_delivery_result(raw_result)
+    outbox_status = (
+        raw_result.get("outbox_status")
+        if isinstance(raw_result, Mapping)
+        else None
+    ) or outbox.status_by_key(idempotency_key)
+    result["outbox_status"] = outbox_status
+    if (
+        not result.get("delivered")
+        and not result.get("muted")
+        and not result.get("error")
+        and outbox_status
+    ):
+        result["error"] = f"outbox:{outbox_status}"
+    return result
+
+
+def _delivery_fields(result: Mapping[str, Any]) -> tuple[str, int | None, str | None]:
+    if result.get("delivered") or result.get("outbox_status") == "SENT":
+        return "SENT", result.get("message_id"), result.get("error")
+    if result.get("muted"):
+        return "MUTED", None, result.get("error")
+    if result.get("outbox_status") in {"PENDING", "SENDING", "FAILED_RETRYABLE"}:
+        return "QUEUED_RETRY", None, result.get("error")
+    return "DELIVERY_FAILED", None, result.get("error")
+
+
+def _stored_decision(
+    ledger: StrategyBotLedger,
+    decision: BotDecision,
+    source_row: Mapping[str, Any],
+    *,
+    source_system: str,
+) -> tuple[int | None, dict[str, Any] | None]:
+    """Insert a decision or retrieve its durable duplicate for recovery."""
+    row_id = ledger.record_decision(
+        decision, source_row, source_system=source_system,
+    )
+    if row_id is not None:
+        return row_id, ledger.row_by_id(row_id)
+    return None, ledger.row_for_decision(
+        decision, source_row, source_system=source_system,
+    )
+
+
+def _notification_needs_delivery(
+    ledger: StrategyBotLedger,
+    row: Mapping[str, Any],
+    *,
+    idempotency_key: str,
+) -> bool:
+    """Return whether a stored row needs enqueue, reconciling worker outcomes."""
+    status = row.get("notification_status")
+    if status in {"SENT", "MUTED"}:
+        return False
+    if status == "QUEUED_RETRY":
+        outbox = get_drift_outbox()
+        if outbox is None:
+            return False
+        outbox_status = outbox.status_by_key(idempotency_key)
+        if outbox_status == "SENT":
+            ledger.mark_notification(
+                int(row["id"]), status="SENT", message_id=None, error=None,
+            )
+        elif outbox_status in {"DEAD_LETTER", "EXPIRED"}:
+            ledger.mark_notification(
+                int(row["id"]),
+                status="DELIVERY_FAILED",
+                message_id=None,
+                error=f"outbox:{outbox_status}",
+            )
+        # A queued row never creates a second delivery attempt from replay.  Its
+        # deterministic outbox record (or terminal state) remains authoritative.
+        return False
+    return status is None or status == "DELIVERY_FAILED"
+
+
+def _group_expiry(rows: Sequence[Mapping[str, Any]]) -> float | None:
+    """Earliest settlement boundary, failing closed if any row lacks one."""
+    expiries: list[float] = []
+    for row in rows:
+        try:
+            value = float(row.get("close_time"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        expiries.append(value)
+    return min(expiries) if expiries else None
 
 
 def _with_thirteen_m_sniper_context(
@@ -523,9 +791,7 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             return None
         wk = row.get("window_key")
         ticker = str(row.get("ticker") or "")
-        if wk is None or not ticker or not ledger.claim_meta_once(
-            f"{STRATEGY_VERSION}:{BOT_DRIFT_FLOW_SPREAD}:{int(wk)}:{ticker}"
-        ):
+        if wk is None or not ticker:
             return None
         source = dict(row)
         source.setdefault("delivery_status", "PAPER_DRIFT_FLOW_SPREAD")
@@ -540,24 +806,32 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         decision = drift_flow_spread_13m_decision(enriched)
         if decision is None:
             return None
-        row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
+        row_id, recorded = _stored_decision(
+            ledger, decision, enriched, source_system="drift_shadow",
+        )
         if (
-            row_id is None
-            or decision.decision_status != ACCEPTED
+            recorded is None
+            or recorded.get("decision_status") != ACCEPTED
             or not drift_flow_spread_notify_enabled()
         ):
             return row_id
-        recorded = ledger.row_by_id(row_id)
-        if recorded is None:
+        delivery_key = _drift_delivery_key(
+            BOT_DRIFT_FLOW_SPREAD, int(wk), ticker,
+        )
+        if not _notification_needs_delivery(
+            ledger, recorded, idempotency_key=delivery_key,
+        ):
             return row_id
-        result = get_telegram().send(build_v3_alert(_with_feed_degraded_stamp(recorded)))
-        if result.get("delivered"):
-            status, mid = "SENT", result.get("message_id")
-        elif result.get("muted"):
-            status, mid = "MUTED", None
-        else:
-            status, mid = "DELIVERY_FAILED", None
-        ledger.mark_notification(row_id, status=status, message_id=mid, error=result.get("error"))
+        payload = build_v3_alert(_with_feed_degraded_stamp(recorded))
+        result = _send_drift_notification(
+            payload,
+            idempotency_key=delivery_key,
+            expires_at=recorded.get("close_time"),
+        )
+        status, mid, error = _delivery_fields(result)
+        ledger.mark_notification(
+            int(recorded["id"]), status=status, message_id=mid, error=error,
+        )
         return row_id
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 drift-pick record failed (ignored)", exc_info=True)
@@ -583,28 +857,32 @@ def record_drift_checkpoint_row(row: Mapping[str, Any]) -> int | None:
             return None
         wk = row.get("window_key")
         ticker = str(row.get("ticker") or "")
-        if wk is None or not ticker or not ledger.claim_meta_once(
-            f"{STRATEGY_VERSION}:{bot_name}:{int(wk)}:{ticker}"
-        ):
+        if wk is None or not ticker:
             return None
         enriched = _enrich_source_row(row)
         decision = decision_fn(enriched)
         if decision is None:
             return None
-        row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
-        if row_id is None or not notify:
+        row_id, recorded = _stored_decision(
+            ledger, decision, enriched, source_system="drift_shadow",
+        )
+        if recorded is None or not notify:
             return row_id
-        recorded = ledger.row_by_id(row_id)
-        if recorded is None:
+        delivery_key = _drift_delivery_key(bot_name, int(wk), ticker)
+        if not _notification_needs_delivery(
+            ledger, recorded, idempotency_key=delivery_key,
+        ):
             return row_id
-        result = get_telegram().send(build_v3_alert(_with_feed_degraded_stamp(recorded)))
-        if result.get("delivered"):
-            status, mid = "SENT", result.get("message_id")
-        elif result.get("muted"):
-            status, mid = "MUTED", None
-        else:
-            status, mid = "DELIVERY_FAILED", None
-        ledger.mark_notification(row_id, status=status, message_id=mid, error=result.get("error"))
+        payload = build_v3_alert(_with_feed_degraded_stamp(recorded))
+        result = _send_drift_notification(
+            payload,
+            idempotency_key=delivery_key,
+            expires_at=recorded.get("close_time"),
+        )
+        status, mid, error = _delivery_fields(result)
+        ledger.mark_notification(
+            int(recorded["id"]), status=status, message_id=mid, error=error,
+        )
         return row_id
     except Exception:  # noqa: BLE001 - checkpoint tracking must never break capture
         logger.warning("v3 drift checkpoint record failed (ignored)", exc_info=True)
@@ -623,6 +901,7 @@ def record_drift_no_mirror_window(rows: Sequence[Mapping[str, Any]]) -> list[int
             return []
         row_ids: list[int] = []
         recorded_rows: list[dict[str, Any]] = []
+        seen_record_ids: set[int] = set()
         window_key: int | None = None
         for row in rows:
             wk = row.get("window_key")
@@ -635,43 +914,54 @@ def record_drift_no_mirror_window(rows: Sequence[Mapping[str, Any]]) -> list[int
             if wk_int != window_key:
                 logger.warning("drift NO group contained multiple windows; skipping %s", ticker)
                 continue
-            if not ledger.claim_meta_once(
-                f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_MIRROR}:{wk_int}:{ticker}"
-            ):
-                continue
             enriched = _enrich_source_row(row)
             decision = drift_no_mirror_decision(enriched)
             if decision is None:
                 continue
-            row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
-            if row_id is None:
-                continue
-            recorded = ledger.row_by_id(row_id)
+            row_id, recorded = _stored_decision(
+                ledger, decision, enriched, source_system="drift_shadow",
+            )
+            if row_id is not None:
+                row_ids.append(row_id)
             if recorded is None:
                 continue
-            row_ids.append(row_id)
-            recorded_rows.append(recorded)
+            record_id = int(recorded["id"])
+            if record_id not in seen_record_ids:
+                seen_record_ids.add(record_id)
+                recorded_rows.append(recorded)
 
-        if not row_ids or window_key is None or not drift_no_mirror_notify_enabled():
-            return row_ids
-        if not ledger.claim_meta_once(
-            f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_MIRROR}:group-notify:{window_key}"
+        if (
+            not recorded_rows
+            or window_key is None
+            or not drift_no_mirror_notify_enabled()
         ):
             return row_ids
-        stamped = [_with_feed_degraded_stamp(row) for row in recorded_rows]
-        result = get_telegram().send(build_drift_no_mirror_group_alert(stamped))
-        if result.get("delivered"):
-            status, mid = "SENT", result.get("message_id")
-        elif result.get("muted"):
-            status, mid = "MUTED", None
-        else:
-            status, mid = "DELIVERY_FAILED", None
-        for row_id in row_ids:
+        delivery_key = _drift_delivery_key(
+            BOT_DRIFT_NO_MIRROR, window_key, grouped=True,
+        )
+        pending_rows = [
+            row
+            for row in recorded_rows
+            if _notification_needs_delivery(
+                ledger, row, idempotency_key=delivery_key,
+            )
+        ]
+        if not pending_rows:
+            return row_ids
+        stamped = [_with_feed_degraded_stamp(row) for row in pending_rows]
+        payload = build_drift_no_mirror_group_alert(stamped)
+        result = _send_drift_notification(
+            payload,
+            idempotency_key=delivery_key,
+            expires_at=_group_expiry(pending_rows),
+        )
+        status, mid, error = _delivery_fields(result)
+        for recorded in pending_rows:
             ledger.mark_notification(
-                row_id,
+                int(recorded["id"]),
                 status=status,
                 message_id=mid,
-                error=result.get("error"),
+                error=error,
             )
         return row_ids
     except Exception:  # noqa: BLE001 - research mirror must never break capture
@@ -686,7 +976,8 @@ def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[
         if ledger is None:
             return []
         row_ids: list[int] = []
-        accepted: list[tuple[int, dict[str, Any]]] = []
+        accepted: list[dict[str, Any]] = []
+        seen_accepted_ids: set[int] = set()
         window_key: int | None = None
         for row in rows:
             wk = row.get("window_key")
@@ -698,10 +989,6 @@ def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[
                 window_key = wk_int
             if wk_int != window_key:
                 logger.warning("drift NO expansion mixed windows; skipping %s", ticker)
-                continue
-            if not ledger.claim_meta_once(
-                f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_EXPANSION}:{wk_int}:{ticker}"
-            ):
                 continue
             source = dict(row)
             source.setdefault("delivery_status", "PAPER_DRIFT_NO_EXPANSION")
@@ -716,15 +1003,16 @@ def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[
             decision = drift_no_expansion_decision(enriched)
             if decision is None:
                 continue
-            row_id = ledger.record_decision(decision, enriched, source_system="drift_shadow")
-            if row_id is None:
+            row_id, recorded = _stored_decision(
+                ledger, decision, enriched, source_system="drift_shadow",
+            )
+            if row_id is not None:
+                row_ids.append(row_id)
+            if recorded is None or recorded.get("decision_status") != ACCEPTED:
                 continue
-            row_ids.append(row_id)
-            if decision.decision_status != ACCEPTED:
-                continue
-            recorded = ledger.row_by_id(row_id)
-            if recorded is not None:
-                accepted.append((row_id, recorded))
+            if int(recorded["id"]) not in seen_accepted_ids:
+                seen_accepted_ids.add(int(recorded["id"]))
+                accepted.append(recorded)
 
         if (
             not accepted
@@ -732,24 +1020,32 @@ def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[
             or not drift_no_expansion_notify_enabled()
         ):
             return row_ids
-        if not ledger.claim_meta_once(
-            f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_EXPANSION}:group-notify:{window_key}"
-        ):
+        delivery_key = _drift_delivery_key(
+            BOT_DRIFT_NO_EXPANSION, window_key, grouped=True,
+        )
+        pending_rows = [
+            row
+            for row in accepted
+            if _notification_needs_delivery(
+                ledger, row, idempotency_key=delivery_key,
+            )
+        ]
+        if not pending_rows:
             return row_ids
-        stamped = [_with_feed_degraded_stamp(row) for _, row in accepted]
-        result = get_telegram().send(build_drift_no_expansion_group_alert(stamped))
-        if result.get("delivered"):
-            status, mid = "SENT", result.get("message_id")
-        elif result.get("muted"):
-            status, mid = "MUTED", None
-        else:
-            status, mid = "DELIVERY_FAILED", None
-        for row_id, _ in accepted:
+        stamped = [_with_feed_degraded_stamp(row) for row in pending_rows]
+        payload = build_drift_no_expansion_group_alert(stamped)
+        result = _send_drift_notification(
+            payload,
+            idempotency_key=delivery_key,
+            expires_at=_group_expiry(pending_rows),
+        )
+        status, mid, error = _delivery_fields(result)
+        for recorded in pending_rows:
             ledger.mark_notification(
-                row_id,
+                int(recorded["id"]),
                 status=status,
                 message_id=mid,
-                error=result.get("error"),
+                error=error,
             )
         return row_ids
     except Exception:  # noqa: BLE001 - research expansion must never break capture

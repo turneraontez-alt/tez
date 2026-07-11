@@ -241,6 +241,12 @@ def _num(v: Any) -> float | None:
         return None
 
 
+def _source_at(row: Mapping[str, Any], fallback: float) -> float:
+    """Return the row's real point-in-time capture timestamp when available."""
+    captured_at = _num(row.get("captured_at"))
+    return captured_at if captured_at is not None else float(fallback)
+
+
 def taker_fee_cents(ask: float) -> int:
     p = max(0.0, min(100.0, ask)) / 100.0
     if p <= 0.0 or p >= 1.0:
@@ -490,6 +496,7 @@ class DriftShadow:
             quals = [c for c in slate if self._qualifies(c)]
             quals.sort(key=self._disagreement, reverse=True)
             for rank, cand in enumerate(quals, start=1):
+                created_at = _source_at(cand, now)
                 cal = _num(cand.get("calibrated_yes_probability"))
                 ask = _num(cand.get("yes_ask_cents"))
                 side = str(cand.get("predicted_side") or "").upper()
@@ -503,7 +510,7 @@ class DriftShadow:
                     " slate_n, pick_rank, size_weight, spread_cents, depth_contracts,"
                     " spread_weight, session_weight, stack_weight, features_version)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
+                    (created_at, model_version, str(cand.get("asset")), str(cand.get("ticker")),
                      int(window_key), close_time, side, ask,
                      _num(cand.get("distance_from_strike")), _num(cand.get("flip_probability")),
                      cal, (cal if side == "YES" else 1.0 - cal) if cal is not None else None,
@@ -517,11 +524,12 @@ class DriftShadow:
             for cand in slate:
                 if not self._lq_watchable(cand):
                     continue
+                created_at = _source_at(cand, now)
                 self._conn.execute(
                     "INSERT OR IGNORE INTO drift_lq_watch (created_at, model_version,"
                     " asset, ticker, window_key, close_time, ask13_cents)"
                     " VALUES (?,?,?,?,?,?,?)",
-                    (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
+                    (created_at, model_version, str(cand.get("asset")), str(cand.get("ticker")),
                      int(window_key), close_time, _num(cand.get("yes_ask_cents"))))
 
             # v5: record the NO expansion candidate envelope. The selected-side
@@ -536,6 +544,7 @@ class DriftShadow:
                 tags = self._no_expansion_tags(cand, btc_side=btc_side)
                 if not tags:
                     continue
+                created_at = _source_at(cand, now)
                 ask = _num(cand.get("entry_ask_cents"))
                 cal = _num(cand.get("calibrated_yes_probability"))
                 side_prob = (1.0 - cal) if cal is not None else None
@@ -546,7 +555,7 @@ class DriftShadow:
                     " distance_sigma, flip_probability, calibrated_yes_probability,"
                     " side_prob, disagreement, spread_cents, depth_contracts, btc_side,"
                     " reason_codes, features_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (now, model_version, str(cand.get("asset")), str(cand.get("ticker")),
+                    (created_at, model_version, str(cand.get("asset")), str(cand.get("ticker")),
                      int(window_key), close_time, "NO", ask,
                      _num(cand.get("distance_from_strike")),
                      _num(cand.get("flip_probability")), cal, side_prob, disagreement,
@@ -577,6 +586,7 @@ class DriftShadow:
             for cand in slate:
                 if not self._qualifies(cand):
                     continue
+                created_at = _source_at(cand, now)
                 ask = _num(cand.get("yes_ask_cents"))
                 if ask is None or ask > _BOOK_HI:
                     continue  # add/late-qual band is the tradeable 60-73 only
@@ -586,7 +596,7 @@ class DriftShadow:
                     " window_key=? AND ticker=? AND ask_cents<=?",
                     (model_version, int(window_key), ticker, _BOOK_HI)).fetchone()
                 dis = self._disagreement(cand)
-                common = (now, model_version, str(cand.get("asset")), ticker,
+                common = (created_at, model_version, str(cand.get("asset")), ticker,
                           int(window_key), close_time, interval, ask,
                           _num(cand.get("distance_from_strike")),
                           _num(cand.get("flip_probability")), dis,
@@ -828,6 +838,27 @@ class DriftShadow:
         except sqlite3.Error:
             return []
 
+    def picks_for_window(
+        self, model_version: str, window_key: int
+    ) -> list[dict[str, Any]]:
+        """All base-pick source rows for durable adapter replay.
+
+        Unlike ``picks_recorded_at``, this intentionally returns rows from a
+        prior process.  Their original ``created_at`` values are left untouched;
+        downstream strategy claims make repeated replay idempotent.
+        """
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM drift_picks WHERE model_version=? AND window_key=?"
+                " ORDER BY id",
+                (model_version, int(window_key)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
     def no_mirror_rows_recorded_at(
         self,
         model_version: str,
@@ -842,6 +873,22 @@ class DriftShadow:
                 "SELECT * FROM drift_no_mirror WHERE model_version=? AND window_key=?"
                 " AND created_at=? ORDER BY asset, ticker",
                 (model_version, int(window_key), recorded_at),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
+    def no_mirror_rows_for_window(
+        self, model_version: str, window_key: int
+    ) -> list[dict[str, Any]]:
+        """All NO-expansion envelope rows for durable adapter replay."""
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM drift_no_mirror WHERE model_version=? AND window_key=?"
+                " ORDER BY asset, ticker, id",
+                (model_version, int(window_key)),
             ).fetchall()
             return [dict(row) for row in rows]
         except sqlite3.Error:
@@ -867,6 +914,31 @@ class DriftShadow:
                     f"SELECT * FROM {table} WHERE model_version=? AND window_key=?"
                     f" AND {interval_col}=? AND created_at=?",
                     (model_version, int(window_key), str(interval), recorded_at),
+                ).fetchall()
+                for row in rows:
+                    item = dict(row)
+                    item["record_kind"] = record_kind
+                    out.append(item)
+        except sqlite3.Error:
+            return []
+        return out
+
+    def checkpoint_rows_for_window(
+        self, model_version: str, window_key: int, interval: str
+    ) -> list[dict[str, Any]]:
+        """All add-on/late-qual source rows for one checkpoint replay."""
+        if not self.enabled or self._conn is None:
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            for table, interval_col, record_kind in (
+                ("drift_addons", "add_interval", "DRIFT_ADDON_REQUAL"),
+                ("drift_latequal", "entry_interval", "DRIFT_LATEQUAL"),
+            ):
+                rows = self._conn.execute(
+                    f"SELECT * FROM {table} WHERE model_version=? AND window_key=?"
+                    f" AND {interval_col}=? ORDER BY id",
+                    (model_version, int(window_key), str(interval)),
                 ).fetchall()
                 for row in rows:
                     item = dict(row)

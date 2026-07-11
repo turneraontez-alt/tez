@@ -530,6 +530,40 @@ class StrategyBotLedger:
             except sqlite3.IntegrityError:
                 return None
 
+    def row_for_decision(
+        self,
+        decision: BotDecision,
+        source_row: Mapping[str, Any],
+        *,
+        source_system: str,
+    ) -> dict[str, Any] | None:
+        """Return the persisted row matching ``record_decision``'s identity.
+
+        Recorders use this after an idempotent insert reports a duplicate.  It
+        lets a replay finish notification delivery when the process previously
+        crashed after committing the strategy decision but before enqueueing its
+        card.  ``IS`` deliberately gives NULL-safe equality for legacy rows.
+        """
+        identity = _build_record(decision, source_row, source_system)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM strategy_bot_decisions WHERE "
+                "strategy_version IS ? AND bot_name IS ? AND source_system IS ? "
+                "AND source_model_version IS ? AND ticker IS ? AND interval IS ? "
+                "AND window_key IS ? AND source_rule IS ? ORDER BY id LIMIT 1",
+                (
+                    identity.get("strategy_version"),
+                    identity.get("bot_name"),
+                    identity.get("source_system"),
+                    identity.get("source_model_version"),
+                    identity.get("ticker"),
+                    identity.get("interval"),
+                    identity.get("window_key"),
+                    identity.get("source_rule"),
+                ),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def mark_notification(
         self,
         row_id: int,
@@ -855,23 +889,52 @@ class StrategyBotLedger:
         min_n: int,
     ) -> dict[str, Any]:
         raw_shadow = [r for r in rows if r.get("bot_name") == BOT_DRIFT_13M]
-        core = [r for r in rows if r.get("bot_name") == BOT_DRIFT_FLOW_SPREAD]
-        addons = [r for r in rows if r.get("bot_name") == BOT_DRIFT_ADDON]
-        latequal = [r for r in rows if r.get("bot_name") == BOT_DRIFT_LATEQUAL]
+        core_candidates = [
+            r for r in rows if r.get("bot_name") == BOT_DRIFT_FLOW_SPREAD
+        ]
+        addon_candidates = [r for r in rows if r.get("bot_name") == BOT_DRIFT_ADDON]
+        latequal_candidates = [
+            r for r in rows if r.get("bot_name") == BOT_DRIFT_LATEQUAL
+        ]
         no_mirror = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_MIRROR]
         no_expansion = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_EXPANSION]
+        core = [
+            r for r in core_candidates if r.get("decision_status") == ACCEPTED
+        ]
+        addons = [
+            r for r in addon_candidates if r.get("decision_status") == ACCEPTED
+        ]
+        latequal = [
+            r for r in latequal_candidates if r.get("decision_status") == ACCEPTED
+        ]
         no_expansion_accepted = [
             r for r in no_expansion if r.get("decision_status") == ACCEPTED
         ]
         independent = core + latequal
+        independent_candidates = core_candidates + latequal_candidates
         return {
+            # Deployable performance views are ACCEPTED-only. Candidate/funnel
+            # views below retain rejected and inconclusive rows for diagnosis.
             "independent_picks": cls._agg(independent, min_n),
             "base_13m": cls._agg(core, min_n),
             "flow_spread_13m": cls._agg(core, min_n),
+            "independent_candidates": cls._agg(independent_candidates, min_n),
+            "base_13m_all_candidates": cls._agg(core_candidates, min_n),
+            "flow_spread_13m_all_candidates": cls._agg(core_candidates, min_n),
+            "flow_spread_13m_by_status": cls._group(
+                core_candidates, ("decision_status",), min_n
+            ),
             "raw_13m_legacy_shadow": cls._agg(raw_shadow, min_n),
             "latequal_12m_11m": cls._agg(latequal, min_n),
+            "latequal_12m_11m_all_candidates": cls._agg(
+                latequal_candidates, min_n
+            ),
             "correlated_addon_exposure": cls._agg(addons, min_n),
+            "correlated_addon_candidates": cls._agg(addon_candidates, min_n),
             "total_exposure": cls._agg(independent + addons, min_n),
+            "total_candidate_exposure": cls._agg(
+                independent_candidates + addon_candidates, min_n
+            ),
             "no_mirror_research": cls._agg(no_mirror, min_n),
             "no_mirror_by_asset": cls._group(no_mirror, ("asset",), min_n),
             "no_expansion": cls._agg(no_expansion, min_n),
@@ -883,14 +946,18 @@ class StrategyBotLedger:
                 no_expansion, ("asset", "decision_status"), min_n
             ),
             "all_drift_research_exposure": cls._agg(
-                independent + addons + no_mirror + no_expansion, min_n
+                independent_candidates + addon_candidates + no_mirror + no_expansion,
+                min_n,
             ),
             "accounting": (
                 "raw drift_13m is the legacy shadow/control and is excluded from "
-                "current independent performance; drift_flow_spread_13m owns base "
-                "Telegram delivery. drift_addon_requal is correlated exposure; "
-                "drift_no_mirror is the legacy NO shadow; drift_no_expansion "
-                "owns accepted grouped NO Telegram delivery"
+                "current independent performance; deployable base, independent, "
+                "and total-exposure views count ACCEPTED decisions only. Explicit "
+                "candidate/status views retain rejected and inconclusive rows. "
+                "drift_flow_spread_13m owns base Telegram delivery; "
+                "drift_addon_requal is correlated exposure; drift_no_mirror is the "
+                "legacy NO shadow; drift_no_expansion owns accepted grouped NO "
+                "Telegram delivery"
             ),
         }
 

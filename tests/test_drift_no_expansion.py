@@ -23,7 +23,7 @@ def _row(**over):
         "ticker": "KXXRP15M-NO-EXP",
         "interval": "13M",
         "window_key": 1200,
-        "close_time": 2780.0,
+        "close_time": 4_102_444_800.0,
         "predicted_side": "NO",
         "entry_ask_cents": 67.0,
         "spread_cents": 3.0,

@@ -115,24 +115,31 @@ def enrich_spot_depth(row: Mapping[str, Any]) -> dict[str, Any]:
     snapshot = dict(found)
     snapshot_at = _num(snapshot.get("created_at"))
     snapshot_age = max(0.0, timestamp - snapshot_at) if snapshot_at is not None else None
-    raw_book_age = _num(snapshot.get("book_age_seconds"))
-    raw_trade_age = _num(snapshot.get("trade_age_seconds"))
+    source_book_age = _num(snapshot.get("book_age_seconds"))
+    source_trade_age = _num(snapshot.get("trade_age_seconds"))
+    # Exchange timestamps can lead the local clock by a small amount. A negative
+    # source age must never make an older persisted snapshot look fresher at the
+    # decision timestamp, so normalize it before computing effective age.
+    raw_book_age = max(0.0, source_book_age) if source_book_age is not None else None
+    raw_trade_age = max(0.0, source_trade_age) if source_trade_age is not None else None
+    effective_book_age = (
+        snapshot_age + raw_book_age
+        if snapshot_age is not None and raw_book_age is not None
+        else snapshot_age
+    )
+    effective_trade_age = (
+        snapshot_age + raw_trade_age
+        if snapshot_age is not None and raw_trade_age is not None
+        else None
+    )
     provider = str(snapshot.get("provider") or "").lower()
     semantics = str(snapshot.get("trade_side_semantics") or "").lower()
     invert = provider == "coinbase" and semantics != "aggressor"
 
     out.update({
         "spot_depth_source": snapshot.get("source") or snapshot.get("provider"),
-        "spot_depth_age_seconds": (
-            snapshot_age + raw_book_age
-            if snapshot_age is not None and raw_book_age is not None
-            else snapshot_age
-        ),
-        "spot_depth_trade_age_seconds": (
-            snapshot_age + raw_trade_age
-            if snapshot_age is not None and raw_trade_age is not None
-            else None
-        ),
+        "spot_depth_age_seconds": effective_book_age,
+        "spot_depth_trade_age_seconds": effective_trade_age,
         "spot_depth_best_bid": snapshot.get("best_bid"),
         "spot_depth_best_ask": snapshot.get("best_ask"),
         "spot_depth_mid": snapshot.get("mid"),
@@ -168,9 +175,9 @@ def enrich_spot_depth(row: Mapping[str, Any]) -> dict[str, Any]:
     stale_reason = None
     if snapshot_age is None or snapshot_age > snapshot_max:
         stale_reason = "spot_depth_snapshot_stale"
-    elif raw_book_age is None or raw_book_age > book_max:
+    elif raw_book_age is None or effective_book_age is None or effective_book_age > book_max:
         stale_reason = "spot_depth_book_stale"
-    elif raw_trade_age is None or raw_trade_age > trade_max:
+    elif effective_trade_age is None or effective_trade_age > trade_max:
         stale_reason = "spot_depth_trade_stale"
 
     buy60 = _num(out.get("spot_depth_trade_buy_notional_60s"))
