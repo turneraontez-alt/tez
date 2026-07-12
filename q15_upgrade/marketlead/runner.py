@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -11,6 +12,7 @@ from .features import MarketLeadFeatureEngine
 from .ledger import MarketLeadLedger
 
 logger = logging.getLogger(__name__)
+_SOURCE_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE")
 
 
 def _num(value: Any) -> float | None:
@@ -54,6 +56,7 @@ class MarketLeadRunner:
         *,
         microstructure_provider: Callable[..., Mapping[str, Any]] | None = None,
         index_provider: Callable[..., Mapping[str, Any]] | None = None,
+        market_source_provider: Callable[..., Mapping[str, Any]] | None = None,
     ):
         self.config = config or MarketLeadConfig.from_env()
         self.ledger = MarketLeadLedger(self.config.db_path)
@@ -61,8 +64,11 @@ class MarketLeadRunner:
         self._lock = threading.Lock()
         self._last: dict[str, _Candidate] = {}
         self._pending: dict[str, _PendingExecution] = {}
+        self._source_status: dict[str, dict[str, Any]] = {}
+        self._source_status_checked_at = 0.0
         self._microstructure_provider = microstructure_provider
         self._index_provider = index_provider
+        self._market_source_provider = market_source_provider
         self._restore_pending()
 
     def _restore_pending(self) -> None:
@@ -93,6 +99,108 @@ class MarketLeadRunner:
         from settlement_index import settlement_index_context
 
         return settlement_index_context(asset, spot_px=spot, now=now)
+
+    @staticmethod
+    def _default_market_sources(asset: str, now: float) -> Mapping[str, Any]:
+        from .live_sources import live_market_sources
+
+        return live_market_sources(asset, now)
+
+    def _live_sources(self, asset: str, now: float) -> Mapping[str, Any]:
+        provider = self._market_source_provider or self._default_market_sources
+        try:
+            result = provider(asset, now)
+        except Exception as exc:
+            result = {
+                "sources": {},
+                "diagnostics": {
+                    "provider": {"status": f"error:{type(exc).__name__}"}
+                },
+            }
+        status_now = (
+            max(now, time.time())
+            if self._market_source_provider is None and now > 1_000_000_000
+            else now
+        )
+        sources = result.get("sources") if isinstance(result, Mapping) else {}
+        source_rows: dict[str, Any] = {}
+        if isinstance(sources, Mapping):
+            for name, source in sources.items():
+                if not isinstance(source, Mapping):
+                    continue
+                timestamp = _num(source.get("timestamp"))
+                price = _num(source.get("price"))
+                age = None if timestamp is None else max(0.0, status_now - timestamp)
+                spread = _num(source.get("spread_bps"))
+                transport = str(source.get("transport") or "")
+                transport_connected = bool(source.get("transport_connected"))
+                message_age = _num(source.get("transport_message_age_seconds"))
+                rejected: list[str] = []
+                if timestamp is None or price is None or price <= 0:
+                    rejected.append("missing_price_or_timestamp")
+                elif timestamp > status_now + self.config.source_future_tolerance_seconds:
+                    rejected.append("future_timestamp")
+                elif age is not None and age > self.config.source_stale_seconds:
+                    rejected.append("stale")
+                if not transport.startswith("websocket_"):
+                    rejected.append("not_live_websocket")
+                if not transport_connected:
+                    rejected.append("transport_disconnected")
+                if (
+                    message_age is None
+                    or message_age > self.config.transport_stale_seconds
+                ):
+                    rejected.append("transport_message_stale")
+                if spread is None or spread > self.config.max_source_spread_bps:
+                    rejected.append("spread_invalid_or_wide")
+                source_rows[str(name)] = {
+                    "timestamp": timestamp,
+                    "age_seconds": age,
+                    "price": price,
+                    "transport": transport or None,
+                    "transport_connected": transport_connected,
+                    "transport_message_age_seconds": message_age,
+                    "book_update_age_seconds": _num(
+                        source.get("book_update_age_seconds")
+                    ),
+                    "spread_bps": spread,
+                    "eligible": not rejected,
+                    "rejected_reasons": rejected,
+                }
+        proxy_rows = [
+            row
+            for name, row in source_rows.items()
+            if name.lower() in self.config.proxy_sources and row["eligible"]
+        ]
+        timestamps = [float(row["timestamp"]) for row in proxy_rows]
+        prices = [float(row["price"]) for row in proxy_rows]
+        timestamp_spread = (
+            max(timestamps) - min(timestamps) if len(timestamps) >= 2 else None
+        )
+        proxy_mid = sum(prices) / len(prices) if prices else None
+        price_dispersion = (
+            (max(prices) - min(prices)) / proxy_mid * 10_000.0
+            if len(prices) >= 2 and proxy_mid
+            else None
+        )
+        proxy_ready = (
+            len(proxy_rows) >= self.config.min_proxy_sources
+            and timestamp_spread is not None
+            and timestamp_spread <= self.config.sync_tolerance_seconds
+            and price_dispersion is not None
+            and price_dispersion <= self.config.max_proxy_dispersion_bps
+        )
+        diagnostics = result.get("diagnostics") if isinstance(result, Mapping) else {}
+        self._source_status[str(asset).upper()] = {
+            "checked_at": status_now,
+            "sources": source_rows,
+            "proxy_ready": proxy_ready,
+            "proxy_source_count": len(proxy_rows),
+            "timestamp_spread_seconds": timestamp_spread,
+            "price_dispersion_bps": price_dispersion,
+            "diagnostics": dict(diagnostics) if isinstance(diagnostics, Mapping) else {},
+        }
+        return result if isinstance(result, Mapping) else {}
 
     def _providers(
         self, asset: str, ticker: str, spot: float | None, now: float
@@ -207,10 +315,25 @@ class MarketLeadRunner:
             return
         try:
             with self._lock:
-                self._expire_stale_pending(now)
+                cycle_now = (
+                    max(now, time.time())
+                    if self._market_source_provider is None and now > 1_000_000_000
+                    else now
+                )
+                self._expire_stale_pending(cycle_now)
                 for asset, canonical in (canonicals or {}).items():
                     ticker = str(getattr(canonical, "ticker", "") or "")
-                    seconds = _num(getattr(canonical, "seconds_remaining", None))
+                    observed_now = (
+                        max(now, time.time())
+                        if self._market_source_provider is None and now > 1_000_000_000
+                        else now
+                    )
+                    settlement_time = _num(getattr(canonical, "settlement_time", None))
+                    seconds = (
+                        max(0.0, settlement_time - observed_now)
+                        if settlement_time is not None and observed_now > 1_000_000_000
+                        else _num(getattr(canonical, "seconds_remaining", None))
+                    )
                     if not ticker or seconds is None:
                         continue
                     history_start = self.config.mark_seconds + max(
@@ -225,14 +348,21 @@ class MarketLeadRunner:
                         continue
                     analysis = analyses.get(asset) if isinstance(analyses, Mapping) else None
                     analysis = analysis if isinstance(analysis, Mapping) else {}
+                    live_sources = self._live_sources(str(asset), observed_now)
+                    if self._market_source_provider is None and now > 1_000_000_000:
+                        observed_now = max(observed_now, time.time())
+                        if settlement_time is not None:
+                            seconds = max(0.0, settlement_time - observed_now)
                     spot = _num(getattr(canonical, "spot", None))
                     near_mark = abs(seconds - self.config.mark_seconds) <= max(
                         self.config.crossing_max_seconds,
                         self.config.mark_band_seconds,
                     )
                     if near_mark:
-                        official, kalshi = self._providers(str(asset), ticker, spot, now)
-                        self._track_execution(ticker, kalshi, now)
+                        official, kalshi = self._providers(
+                            str(asset), ticker, spot, observed_now
+                        )
+                        self._track_execution(ticker, kalshi, observed_now)
                     else:
                         official = {"index_px": None, "index_status": "not_sampled"}
                         kalshi = {"available": False, "reason": "not_sampled"}
@@ -240,11 +370,13 @@ class MarketLeadRunner:
                         asset=str(asset),
                         analysis=analysis,
                         canonical=canonical,
-                        now=now,
+                        now=observed_now,
                         official_index=official,
                         kalshi=kalshi,
+                        live_sources=live_sources,
+                        seconds_remaining=seconds,
                     )
-                    candidate = _Candidate(ticker, seconds, now, row)
+                    candidate = _Candidate(ticker, seconds, observed_now, row)
                     if not near_mark:
                         continue
                     selected = self._select(str(asset), candidate)
@@ -287,12 +419,35 @@ class MarketLeadRunner:
         return resolved
 
     def status(self) -> dict[str, Any]:
+        with self._lock:
+            wall_now = time.time()
+            if (
+                self._market_source_provider is None
+                and wall_now - self._source_status_checked_at >= 1.0
+            ):
+                for asset in _SOURCE_ASSETS:
+                    self._live_sources(asset, wall_now)
+                self._source_status_checked_at = wall_now
+            source_status = {
+                asset: dict(status) for asset, status in self._source_status.items()
+            }
         return {
             "system": "Q15 MarketLead",
             "system_version": self.config.system_version,
             "paper_only": True,
             "notifies": False,
             "trades": False,
+            "source_requirements": {
+                "stale_seconds": self.config.source_stale_seconds,
+                "transport_stale_seconds": self.config.transport_stale_seconds,
+                "future_tolerance_seconds": (
+                    self.config.source_future_tolerance_seconds
+                ),
+                "sync_tolerance_seconds": self.config.sync_tolerance_seconds,
+                "max_source_spread_bps": self.config.max_source_spread_bps,
+                "max_proxy_dispersion_bps": self.config.max_proxy_dispersion_bps,
+            },
+            "source_status": source_status,
             **self.ledger.status(),
         }
 

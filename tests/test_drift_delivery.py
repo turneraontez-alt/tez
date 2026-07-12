@@ -146,6 +146,7 @@ def _configure_runtime(tmp_path: Path, monkeypatch, telegram: _Telegram) -> None
         ),
     )
     monkeypatch.setattr(runtime, "_enrich_source_row", lambda row, **_: dict(row))
+    monkeypatch.setattr(runtime, "enrich_drift_evidence", lambda row: dict(row))
 
 
 def _enable_outbox(tmp_path: Path, monkeypatch) -> Path:
@@ -306,7 +307,7 @@ def test_periodic_reconciliation_preserves_per_row_terminal_status(
     assert telegram.sent == []
 
 
-def test_no_expansion_group_uses_one_deterministic_outbox_message(
+def test_no_expansion_quarantine_never_creates_an_outbox_message(
     tmp_path, monkeypatch
 ):
     telegram = _Telegram()
@@ -327,21 +328,13 @@ def test_no_expansion_group_uses_one_deterministic_outbox_message(
 
     outbox = runtime.get_drift_outbox()
     queued = outbox.rows()
-    assert len(queued) == 1
-    assert queued[0]["idempotency_key"] == (
-        f"{STRATEGY_VERSION}:drift:{BOT_DRIFT_NO_EXPANSION}:group:1200"
-    )
-    assert "XRP NO" in queued[0]["payload"]
-    assert "HYPE NO" in queued[0]["payload"]
+    assert queued == []
     ledger_rows = runtime.get_ledger().rows(STRATEGY_VERSION)
-    assert {row["notification_status"] for row in ledger_rows} == {"QUEUED_RETRY"}
-    assert queued[0]["expires_at"] == 4_102_444_800.0
+    assert {row["decision_status"] for row in ledger_rows} == {"RESEARCH_ONLY"}
+    assert {row["notification_status"] for row in ledger_rows} == {None}
 
 
-@pytest.mark.parametrize("terminal", ["SENT", "EXPIRED", "DEAD_LETTER"])
-def test_periodic_reconciliation_updates_every_grouped_row_once(
-    tmp_path, monkeypatch, terminal
-):
+def test_no_expansion_quarantine_stays_silent_across_replay(tmp_path, monkeypatch):
     telegram = _Telegram()
     _configure_runtime(tmp_path, monkeypatch, telegram)
     _enable_outbox(tmp_path, monkeypatch)
@@ -357,27 +350,11 @@ def test_periodic_reconciliation_updates_every_grouped_row_once(
 
     row_ids = runtime.record_drift_no_expansion_window(rows)
     assert len(row_ids) == 2
-    outbox = runtime.get_drift_outbox()
-    queued = outbox.rows()[0]
-    frozen_payload = queued["payload"]
-    _force_outbox_terminal(outbox, queued, terminal)
-
-    summary = runtime.reconcile_drift_delivery_statuses()
-    assert summary["scanned"] == 2
-    assert summary["keys_checked"] == 1
-    assert summary["updated"] == 2
-    assert summary[terminal.lower()] == 2
-    recorded = [runtime.get_ledger().row_by_id(row_id) for row_id in row_ids]
-    assert {row["notification_status"] for row in recorded} == {terminal}
-    expected_error = None if terminal == "SENT" else f"outbox:{terminal}"
-    assert {row["notification_error"] for row in recorded} == {expected_error}
-
-    sent_before = list(telegram.sent)
-    assert sent_before == ([frozen_payload] if terminal == "SENT" else [])
+    assert runtime.get_drift_outbox().rows() == []
     assert runtime.reconcile_drift_delivery_statuses()["updated"] == 0
     assert runtime.record_drift_no_expansion_window(rows) == []
-    assert len(outbox.rows()) == 1
-    assert telegram.sent == sent_before
+    assert runtime.get_drift_outbox().rows() == []
+    assert telegram.sent == []
 
 
 @pytest.mark.parametrize("persisted_status", [None, "DELIVERY_FAILED"])
@@ -411,7 +388,7 @@ def test_replayed_flow_row_recovers_committed_notification(
     assert len(outbox.rows()) == 1
 
 
-def test_replayed_group_recovers_rows_without_pre_enqueue_claim(
+def test_replayed_no_expansion_group_cannot_reenable_delivery(
     tmp_path, monkeypatch
 ):
     telegram = _Telegram()
@@ -436,19 +413,15 @@ def test_replayed_group_recovers_rows_without_pre_enqueue_claim(
         for row_id in row_ids
     )
 
-    # A legacy claim left by a crashed build cannot suppress durable recovery;
-    # the deterministic outbox key is the delivery claim now.
+    # Even a legacy claim and an explicit old notify=true flag cannot recover
+    # delivery from the hard-quarantined research lane.
     assert runtime.get_ledger().claim_meta_once(
         f"{STRATEGY_VERSION}:{BOT_DRIFT_NO_EXPANSION}:group-notify:1200"
     )
     monkeypatch.setenv("Q15_V3_DRIFT_NO_EXPANSION_NOTIFY", "true")
     assert runtime.record_drift_no_expansion_window(rows) == []
     queued = runtime.get_drift_outbox().rows()
-    assert len(queued) == 1
-    assert queued[0]["status"] == "PENDING"
-    assert queued[0]["expires_at"] == 4_102_444_700.0
-    assert "XRP NO" in queued[0]["payload"]
-    assert "HYPE NO" in queued[0]["payload"]
+    assert queued == []
 
 
 def test_enabled_outbox_enqueue_never_calls_notifier_synchronously(

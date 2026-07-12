@@ -159,8 +159,8 @@ def test_positive_flow_must_be_fresh_at_every_effective_age_gate(age_field):
     assert _not_accepted(drift_flow_spread_13m_decision(row))
 
 
-def test_tight_spread_fallback_is_the_only_branch_independent_of_flow_freshness():
-    accepted = drift_flow_spread_13m_decision(
+def test_tight_spread_never_replaces_fresh_directional_flow():
+    stale = drift_flow_spread_13m_decision(
         _row(
             spread_cents=2.0,
             spot_depth_status="stale",
@@ -170,19 +170,19 @@ def test_tight_spread_fallback_is_the_only_branch_independent_of_flow_freshness(
             spot_depth_trade_net_notional_60s=-100.0,
         )
     )
-    assert accepted is not None and accepted.decision_status == ACCEPTED
+    assert stale is not None and stale.decision_status == RESEARCH_ONLY
+    assert "DRIFT_FRESH_DIRECTIONAL_FLOW_REQUIRED" in stale.reason_codes
 
     rejected = drift_flow_spread_13m_decision(
         _row(
-            spread_cents=2.001,
-            spot_depth_status="stale",
-            spot_depth_snapshot_age_seconds=99.0,
-            spot_depth_age_seconds=99.0,
-            spot_depth_trade_age_seconds=99.0,
-            spot_depth_trade_net_notional_60s=100.0,
+            spread_cents=1.0,
+            spot_depth_status="ok",
+            spot_depth_trade_net_notional_60s=-1.0,
         )
     )
-    assert _not_accepted(rejected)
+    assert rejected is not None and rejected.decision_status != ACCEPTED
+    assert rejected.threshold_profile["gate_path"] == "FLOW_NONPOSITIVE"
+    assert "DRIFT_SPREAD_EXECUTION_ONLY_NOT_DIRECTIONAL" in rejected.reason_codes
 
 
 @pytest.mark.parametrize("asset", ["BNB", "ADA"])
@@ -260,7 +260,7 @@ def test_spread4_shadow_widens_only_spread_and_is_never_accepted():
     )
     assert core_overlap is not None
     assert core_overlap.decision_status == RESEARCH_ONLY
-    assert core_overlap.threshold_profile["incremental_to_core"] is False
+    assert core_overlap.threshold_profile["incremental_to_core"] is True
 
     outside_spread = drift_flow_spread_shadow_spread4_decision(
         _row(

@@ -62,9 +62,36 @@ class MarketLeadFeatureEngine:
                 timestamp = _num(public.get("fetched_at"))
             if price is None or price <= 0 or timestamp is None:
                 continue
+            if timestamp > now + max(0.0, self.config.source_future_tolerance_seconds):
+                continue
             age = max(0.0, now - timestamp)
             if age > max(0.0, self.config.source_stale_seconds):
                 continue
+            transport = str(source.get("transport") or "rest_public")
+            best_bid = _num(source.get("best_bid"))
+            best_ask = _num(source.get("best_ask"))
+            spread_bps = _num(source.get("spread_bps"))
+            if transport.startswith("websocket_"):
+                message_age = _num(source.get("transport_message_age_seconds"))
+                if not source.get("transport_connected"):
+                    continue
+                if (
+                    message_age is None
+                    or message_age > max(0.0, self.config.transport_stale_seconds)
+                ):
+                    continue
+                if (
+                    best_bid is None
+                    or best_ask is None
+                    or best_bid <= 0
+                    or best_ask <= best_bid
+                ):
+                    continue
+                if spread_bps is None:
+                    mid = (best_bid + best_ask) / 2.0
+                    spread_bps = (best_ask - best_bid) / mid * 10_000.0
+                if spread_bps > max(0.0, self.config.max_source_spread_bps):
+                    continue
             key = (asset, str(name))
             history = self._venue_history[key]
             if not history or timestamp > history[-1][0]:
@@ -78,11 +105,50 @@ class MarketLeadFeatureEngine:
                 "timestamp": timestamp,
                 "age_seconds": age,
                 "quality": _num(source.get("quality")) or 0.5,
+                "transport": transport,
+                "instrument": source.get("instrument"),
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread_bps": spread_bps,
+                "sequence": source.get("sequence"),
+                "transport_connected": source.get("transport_connected"),
+                "transport_message_age_seconds": _num(
+                    source.get("transport_message_age_seconds")
+                ),
+                "book_update_timestamp": _num(source.get("book_update_timestamp")),
+                "book_update_age_seconds": _num(
+                    source.get("book_update_age_seconds")
+                ),
                 "flow": _num(_mapping(source.get("flow")).get("imbalance")),
                 "book": _num(_mapping(source.get("book")).get("imbalance")),
                 "microprice_bps": _num(_mapping(source.get("book")).get("microprice_bps")),
             })
         return fresh
+
+    @staticmethod
+    def _synchronized_cluster(
+        sources: list[dict[str, Any]], tolerance_seconds: float
+    ) -> list[dict[str, Any]]:
+        """Choose the largest all-pairs time-aligned cluster, newest on ties."""
+        ordered = sorted(sources, key=lambda row: float(row["timestamp"]))
+        best: list[dict[str, Any]] = []
+        best_score: tuple[int, float, float] = (-1, -1.0, -1.0)
+        tolerance = max(0.0, tolerance_seconds)
+        for start, first in enumerate(ordered):
+            cluster = [
+                row
+                for row in ordered[start:]
+                if float(row["timestamp"]) - float(first["timestamp"]) <= tolerance
+            ]
+            score = (
+                len(cluster),
+                sum(float(row["quality"]) for row in cluster),
+                max(float(row["timestamp"]) for row in cluster),
+            )
+            if score > best_score:
+                best = cluster
+                best_score = score
+        return best
 
     def _return_bps(self, asset: str, source: str, now: float, horizon: int) -> float | None:
         history = self._venue_history.get((asset, source))
@@ -114,31 +180,60 @@ class MarketLeadFeatureEngine:
         now: float,
         official_index: Mapping[str, Any] | None,
         kalshi: Mapping[str, Any] | None,
+        live_sources: Mapping[str, Any] | None = None,
+        seconds_remaining: float | None = None,
     ) -> dict[str, Any]:
         asset = str(asset).upper()
         public = _mapping(getattr(canonical, "public", {}))
-        sources = self._update_sources(asset, public, now)
-        source_times = [float(row["timestamp"]) for row in sources]
-        synchronized = (
-            bool(source_times)
-            and max(source_times) - min(source_times) <= self.config.sync_tolerance_seconds
+        live = _mapping(live_sources)
+        merged_raw_sources = dict(_mapping(public.get("sources")))
+        live_names: list[str] = []
+        for name, source in _mapping(live.get("sources")).items():
+            if not isinstance(source, Mapping):
+                continue
+            normalized_name = str(name).lower()
+            merged_raw_sources[normalized_name] = dict(source)
+            live_names.append(normalized_name)
+        merged_public = {**dict(public), "sources": merged_raw_sources}
+        fresh_sources = self._update_sources(asset, merged_public, now)
+        venue_sources = self._synchronized_cluster(
+            fresh_sources, self.config.sync_tolerance_seconds
         )
-        proxy_sources = [
-            row for row in sources if str(row["name"]).lower() in self.config.proxy_sources
+        synchronized = len(venue_sources) >= self.config.min_venue_sources
+        proxy_candidates = [
+            row
+            for row in fresh_sources
+            if str(row["name"]).lower() in self.config.proxy_sources
+            and (
+                not self.config.require_live_proxy_sources
+                or str(row["transport"]).startswith("websocket_")
+            )
         ]
-        proxy_times = [float(row["timestamp"]) for row in proxy_sources]
-        proxy_synchronized = (
-            bool(proxy_times)
-            and max(proxy_times) - min(proxy_times) <= self.config.sync_tolerance_seconds
+        proxy_sources = self._synchronized_cluster(
+            proxy_candidates, self.config.sync_tolerance_seconds
         )
-        proxy = self._weighted_proxy(proxy_sources) if proxy_synchronized else None
+        proxy_synchronized = len(proxy_sources) >= self.config.min_proxy_sources
+        proxy_candidate_price = (
+            self._weighted_proxy(proxy_sources) if proxy_synchronized else None
+        )
         prices = [float(row["price"]) for row in proxy_sources]
         dispersion_bps = None
-        if proxy is not None and proxy > 0 and len(prices) >= 2:
-            dispersion_bps = (max(prices) - min(prices)) / proxy * 10_000.0
+        if (
+            proxy_candidate_price is not None
+            and proxy_candidate_price > 0
+            and len(prices) >= 2
+        ):
+            dispersion_bps = (
+                (max(prices) - min(prices)) / proxy_candidate_price * 10_000.0
+            )
+        dispersion_ok = (
+            dispersion_bps is None
+            or dispersion_bps <= max(0.0, self.config.max_proxy_dispersion_bps)
+        )
+        proxy = proxy_candidate_price if dispersion_ok else None
 
         venue_rows: list[dict[str, Any]] = []
-        for source in sources:
+        for source in venue_sources:
             returns = {
                 horizon: self._return_bps(asset, source["name"], now, horizon)
                 for horizon in (5, 15, 30)
@@ -234,6 +329,8 @@ class MarketLeadFeatureEngine:
         missing: list[str] = []
         if proxy is None or len(proxy_sources) < self.config.min_proxy_sources:
             missing.append("RTI_PROXY_INCOMPLETE")
+        if proxy_synchronized and not dispersion_ok:
+            missing.append("RTI_PROXY_DISPERSION_HIGH")
         if venue_impulse is None or not synchronized:
             missing.append("VENUE_IMPULSE_INCOMPLETE")
         if not kalshi_available or kalshi_pressure_side is None:
@@ -259,6 +356,7 @@ class MarketLeadFeatureEngine:
                 "synchronized": proxy_synchronized,
                 "configured_sources": sorted(self.config.proxy_sources),
                 "used_sources": [row["name"] for row in proxy_sources],
+                "require_live_sources": self.config.require_live_proxy_sources,
             },
             "venue": {
                 "impulse": venue_impulse,
@@ -267,6 +365,21 @@ class MarketLeadFeatureEngine:
                 "leader": leader,
                 "leader_persistence": leader_persistence,
                 "sources": venue_rows,
+            },
+            "source_selection": {
+                "live_sources_received": sorted(live_names),
+                "live_diagnostics": _mapping(live.get("diagnostics")),
+                "fresh_sources": [row["name"] for row in fresh_sources],
+                "venue_cluster": [row["name"] for row in venue_sources],
+                "proxy_candidates": [row["name"] for row in proxy_candidates],
+                "source_stale_seconds": self.config.source_stale_seconds,
+                "transport_stale_seconds": self.config.transport_stale_seconds,
+                "source_future_tolerance_seconds": (
+                    self.config.source_future_tolerance_seconds
+                ),
+                "max_source_spread_bps": self.config.max_source_spread_bps,
+                "sync_tolerance_seconds": self.config.sync_tolerance_seconds,
+                "max_proxy_dispersion_bps": self.config.max_proxy_dispersion_bps,
             },
             "kalshi": kalshi_row,
         }
@@ -278,7 +391,11 @@ class MarketLeadFeatureEngine:
             "mark_seconds": self.config.mark_seconds,
             "observed_at": now,
             "close_time": _num(getattr(canonical, "settlement_time", None)),
-            "seconds_remaining": _num(getattr(canonical, "seconds_remaining", None)),
+            "seconds_remaining": (
+                _num(seconds_remaining)
+                if seconds_remaining is not None
+                else _num(getattr(canonical, "seconds_remaining", None))
+            ),
             "predicted_side": predicted_side or None,
             "entry_ask_cents": entry_ask,
             "spread_cents": _num(quote.get("spread_cents")),
@@ -293,7 +410,7 @@ class MarketLeadFeatureEngine:
             "rti_proxy_sources_json": json.dumps(
                 [row["name"] for row in proxy_sources], separators=(",", ":")
             ),
-            "venue_source_count": len(sources),
+            "venue_source_count": len(venue_sources),
             "venue_dispersion_bps": dispersion_bps,
             "venue_impulse": venue_impulse,
             "venue_impulse_side": venue_impulse_side,
@@ -334,9 +451,19 @@ class MarketLeadFeatureEngine:
                 config={
                     "mark_seconds": self.config.mark_seconds,
                     "min_proxy_sources": self.config.min_proxy_sources,
+                    "min_venue_sources": self.config.min_venue_sources,
                     "proxy_sources": sorted(self.config.proxy_sources),
+                    "require_live_proxy_sources": (
+                        self.config.require_live_proxy_sources
+                    ),
                     "source_stale_seconds": self.config.source_stale_seconds,
+                    "transport_stale_seconds": self.config.transport_stale_seconds,
+                    "source_future_tolerance_seconds": (
+                        self.config.source_future_tolerance_seconds
+                    ),
+                    "max_source_spread_bps": self.config.max_source_spread_bps,
                     "sync_tolerance_seconds": self.config.sync_tolerance_seconds,
+                    "max_proxy_dispersion_bps": self.config.max_proxy_dispersion_bps,
                     "paper_limit_cents": self.config.paper_limit_cents,
                 },
             ),

@@ -35,6 +35,7 @@ BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15 = "drift_flow_spread_shadow_flow15"
 BOT_DRIFT_ASYMMETRIC_VOLUME = "drift_asymmetric_volume_shadow"
 BOT_DRIFT_BALANCED_V95 = "drift_balanced_v95_shadow"
 BOT_DRIFT_ACCURACY_V91 = "drift_accuracy_v91_shadow"
+BOT_DRIFT_CONSENSUS_FALLBACK = "drift_consensus_fallback_shadow"
 BOT_DRIFT_ADDON = "drift_addon_requal"
 BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
 BOT_DRIFT_NO_MIRROR = "drift_no_mirror"
@@ -71,6 +72,8 @@ DRIFT_ASYMMETRIC_HIGH_ASK_MIN_CENTS = 65.0
 DRIFT_ASYMMETRIC_DISTANCE_SIGMA_MAX = 1e-4
 DRIFT_V91_FULL_PATH_YES_FRACTION_MIN = 0.75
 DRIFT_EVIDENCE_POLICY_VERSION = "drift-evidence-policy-v1"
+DRIFT_CORE_RULE_VERSION = "drift-flow-spread-13m-fresh60-v3"
+DRIFT_CONSENSUS_FALLBACK_POLICY_VERSION = "drift-consensus-fallback-v1"
 
 SPOT_DEPTH_KEYS = (
     "spot_depth_status",
@@ -820,6 +823,7 @@ def _drift_candidate_status(
     *,
     spread_max_cents: float,
     allow_flow15: bool,
+    allow_spread_only: bool,
 ) -> tuple[str, str, list[str], dict[str, Any]]:
     """Evaluate a Drift candidate without applying asset or shadow policy."""
     distance = _num(row.get("distance_sigma"))
@@ -857,7 +861,7 @@ def _drift_candidate_status(
         status = REJECTED
         gate_path = "STRUCTURE_OUTSIDE_FROZEN_CORE"
         reasons.extend(("DRIFT_FLOW_SPREAD_REJECTED", "DRIFT_STRUCTURE_OUTSIDE_FROZEN_CORE"))
-    elif flow60_pass or flow15_pass or spread_pass:
+    elif flow60_pass or flow15_pass:
         status = ACCEPTED
         if flow15_pass and not flow60_pass and not spread_pass:
             gate_path = "FLOW_15S_POSITIVE"
@@ -868,20 +872,35 @@ def _drift_candidate_status(
         elif flow15_pass and spread_pass:
             gate_path = "FLOW_15S_AND_SPREAD"
         else:
-            gate_path = f"SPREAD_LTE_{int(spread_max_cents)}"
+            gate_path = "FLOW_15S_POSITIVE"
         reasons.append("DRIFT_FLOW_SPREAD_CONFIRMED")
+    elif allow_spread_only and spread_pass:
+        status = ACCEPTED
+        gate_path = f"SPREAD_LTE_{int(spread_max_cents)}"
+        reasons.extend((
+            "DRIFT_FLOW_SPREAD_CONFIRMED",
+            "DRIFT_SPREAD_ONLY_COUNTERFACTUAL",
+        ))
     elif not flow60_is_fresh and not (allow_flow15 and flow15_is_fresh):
         status = RESEARCH_ONLY
         gate_path = "FLOW_MISSING_OR_STALE"
-        reasons.extend(("DRIFT_FLOW_SPREAD_INCONCLUSIVE", "DRIFT_SPOT_FLOW_MISSING_OR_STALE"))
+        reasons.extend((
+            "DRIFT_FLOW_SPREAD_INCONCLUSIVE",
+            "DRIFT_SPOT_FLOW_MISSING_OR_STALE",
+            "DRIFT_FRESH_DIRECTIONAL_FLOW_REQUIRED",
+        ))
     else:
         status = REJECTED
-        gate_path = f"FLOW_NONPOSITIVE_AND_SPREAD_GT_{int(spread_max_cents)}"
+        gate_path = "FLOW_NONPOSITIVE"
         reasons.extend((
             "DRIFT_FLOW_SPREAD_REJECTED",
             "DRIFT_SPOT_FLOW_60S_NONPOSITIVE",
-            f"DRIFT_KALSHI_SPREAD_GT_{int(spread_max_cents)}",
+            "DRIFT_FRESH_DIRECTIONAL_FLOW_REQUIRED",
         ))
+        if spread_pass:
+            reasons.append("DRIFT_SPREAD_EXECUTION_ONLY_NOT_DIRECTIONAL")
+        else:
+            reasons.append(f"DRIFT_KALSHI_SPREAD_GT_{int(spread_max_cents)}")
 
     if flow60_pass:
         reasons.append("DRIFT_SPOT_FLOW_60S_POSITIVE")
@@ -901,6 +920,8 @@ def _drift_candidate_status(
         "flow60_pass": flow60_pass,
         "flow15_pass": flow15_pass,
         "spread_pass": spread_pass,
+        "allow_spread_only": allow_spread_only,
+        "requires_fresh_directional_flow": not allow_spread_only,
     }
     return status, gate_path, reasons, context
 
@@ -911,6 +932,7 @@ def _drift_flow_spread_decision(
     bot_name: str,
     spread_max_cents: float,
     allow_flow15: bool,
+    allow_spread_only: bool,
     shadow_variant: str | None,
 ) -> BotDecision | None:
     if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
@@ -935,11 +957,13 @@ def _drift_flow_spread_decision(
         row,
         spread_max_cents=spread_max_cents,
         allow_flow15=allow_flow15,
+        allow_spread_only=allow_spread_only,
     )
     core_status, _, _, _ = _drift_candidate_status(
         row,
         spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
         allow_flow15=False,
+        allow_spread_only=False,
     )
     reasons = ["V3_DRIFT_FLOW_SPREAD_13M", "NEAR_STRIKE_YES_BOOK", *gate_reasons]
     status = candidate_status
@@ -957,7 +981,11 @@ def _drift_flow_spread_decision(
     profile: dict[str, Any] = {
         "paper_only": True,
         "not_a_live_order": True,
-        "rule_version": "drift-flow-spread-13m-frozen-v2",
+        "rule_version": (
+            DRIFT_CORE_RULE_VERSION
+            if shadow_variant is None
+            else "drift-flow-spread-counterfactual-or-v2"
+        ),
         "policy_frozen": True,
         "manual_review_only": True,
         "automatic_threshold_changes": False,
@@ -975,6 +1003,8 @@ def _drift_flow_spread_decision(
         "gate_path": gate_path,
         "spot_flow_60s_min_exclusive": 0.0,
         "spread_max_cents": spread_max_cents,
+        "requires_fresh_positive_60s_flow": shadow_variant is None,
+        "spread_only_eligible": allow_spread_only,
         "spot_depth_status": context["spot_depth_status"],
         "spot_depth_missing_reason": row.get("spot_depth_missing_reason"),
         "spot_depth_snapshot_age_seconds": _num(row.get("spot_depth_snapshot_age_seconds")),
@@ -1034,6 +1064,7 @@ def drift_flow_spread_13m_decision(row: Mapping[str, Any]) -> BotDecision | None
         bot_name=BOT_DRIFT_FLOW_SPREAD,
         spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
         allow_flow15=False,
+        allow_spread_only=False,
         shadow_variant=None,
     )
 
@@ -1049,6 +1080,7 @@ def drift_flow_spread_shadow_spread4_decision(
         bot_name=BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
         spread_max_cents=4.0,
         allow_flow15=False,
+        allow_spread_only=True,
         shadow_variant="spread4",
     )
 
@@ -1064,6 +1096,7 @@ def drift_flow_spread_shadow_flow15_decision(
         bot_name=BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
         spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
         allow_flow15=True,
+        allow_spread_only=True,
         shadow_variant="flow15",
     )
 
@@ -1159,6 +1192,7 @@ def _drift_confirmed_asymmetric_context(
         confirmation_row,
         spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
         allow_flow15=False,
+        allow_spread_only=True,
     )
     if status != ACCEPTED:
         return None
@@ -1576,6 +1610,108 @@ def drift_accuracy_v91_shadow_decision(
     )
 
 
+def _drift_consensus_availability(
+    row: Mapping[str, Any], source: str
+) -> Mapping[str, Any] | None:
+    availability = row.get("drift_evidence_availability")
+    if not isinstance(availability, Mapping):
+        evidence = row.get("drift_evidence")
+        availability = (
+            evidence.get("availability")
+            if isinstance(evidence, Mapping)
+            else None
+        )
+    if not isinstance(availability, Mapping):
+        return None
+    source_state = availability.get(source)
+    return source_state if isinstance(source_state, Mapping) else None
+
+
+def drift_consensus_fallback_shadow_decision(
+    row: Mapping[str, Any],
+) -> BotDecision | None:
+    """Silent 2-of-3 confirmation for the retired tight-spread fallback.
+
+    This cohort is deliberately limited to the original frozen structure and
+    exact spread-only path. Missing or stale sources abstain; a displayed side
+    without canonical point-in-time availability never counts as a vote.
+    """
+    if not _drift_flow_spread_enabled():
+        return None
+    context = _drift_confirmed_asymmetric_context(row)
+    if (
+        context is None
+        or bool(context.get("incremental_to_core"))
+        or context.get("confirmation_gate_path") != "SPREAD_LTE_2"
+    ):
+        return None
+
+    candidate_side = source_side(row)
+    if candidate_side not in {"YES", "NO"}:
+        return None
+    source_keys = {
+        "interval_15m": "drift_interval_15m_side",
+        "v95_15m": "drift_v95_15m_side",
+        "btc_15m": "drift_btc_15m_side",
+    }
+    source_sides: dict[str, str | None] = {}
+    source_statuses: dict[str, str | None] = {}
+    agreeing: list[str] = []
+    disagreeing: list[str] = []
+    abstaining: list[str] = []
+    for source, key in source_keys.items():
+        state = _drift_consensus_availability(row, source)
+        status = str((state or {}).get("status") or "").lower() or None
+        available = (state or {}).get("available") is True and status == "ok"
+        side = _side(_drift_evidence_value(row, key)) if available else None
+        source_sides[source] = side
+        source_statuses[source] = status
+        if side is None:
+            abstaining.append(source)
+        elif side == candidate_side:
+            agreeing.append(source)
+        else:
+            disagreeing.append(source)
+    if len(agreeing) < 2:
+        return None
+
+    consensus_context = dict(context)
+    consensus_context["incremental_to_core"] = True
+    evidence = {
+        "policy_version": DRIFT_CONSENSUS_FALLBACK_POLICY_VERSION,
+        "candidate_side": candidate_side,
+        "required_agreements": 2,
+        "available_vote_count": len(agreeing) + len(disagreeing),
+        "consensus_quorum_met": True,
+        "evidence_complete": (
+            len(agreeing) + len(disagreeing) == len(source_keys)
+        ),
+        "agreement_count": len(agreeing),
+        "disagreement_count": len(disagreeing),
+        "source_sides": source_sides,
+        "source_statuses": source_statuses,
+        "agreeing_sources": agreeing,
+        "disagreeing_sources": disagreeing,
+        "abstaining_sources": abstaining,
+        "fallback_only": True,
+        "subset_of_frozen_core": True,
+    }
+    return _drift_evidence_decision(
+        row,
+        consensus_context,
+        bot_name=BOT_DRIFT_CONSENSUS_FALLBACK,
+        build="CONSENSUS",
+        stat_prefix="consensus_fallback",
+        gate_path="CONSENSUS_2_OF_3_TIGHT_SPREAD_SHADOW",
+        reason_codes=(
+            "V3_DRIFT_CONSENSUS_FALLBACK_SHADOW",
+            "DRIFT_TIGHT_SPREAD_FALLBACK",
+            "DRIFT_CONSENSUS_2_OF_3",
+        ),
+        evidence=evidence,
+    )
+
+
 def _drift_track_profile(
     row: Mapping[str, Any],
     *,
@@ -1751,7 +1887,7 @@ def drift_no_mirror_decision(row: Mapping[str, Any]) -> BotDecision | None:
 
 
 def drift_no_expansion_decision(row: Mapping[str, Any]) -> BotDecision | None:
-    """Asset-specific NO expansion confirmed by sell flow or a tight spread."""
+    """Asset-specific NO expansion retained as silent counterfactual research."""
     if not _drift_no_expansion_enabled():
         return None
     if str(row.get("record_kind") or "") != "DRIFT_NO_EXPANSION":
@@ -1817,13 +1953,25 @@ def drift_no_expansion_decision(row: Mapping[str, Any]) -> BotDecision | None:
             "DRIFT_NO_KALSHI_SPREAD_GT_2",
         ))
 
+    counterfactual_status = status
+    status = RESEARCH_ONLY
+    reasons.extend((
+        "DRIFT_NO_EXPANSION_RESEARCH_ONLY",
+        "DRIFT_NO_EXPANSION_TELEGRAM_QUARANTINED",
+    ))
     n_resolved = int(_num(row.get("drift_no_expansion_resolved_n")) or 0)
     profile = {
         "paper_only": True,
         "not_a_live_order": True,
-        "rule_version": "drift-no-expansion-13m-v1",
-        "passed": status == ACCEPTED,
+        "research_only": True,
+        "never_notify": True,
+        "notification_eligible": False,
+        "policy_frozen": True,
+        "rule_version": "drift-no-expansion-13m-shadow-v2",
+        "passed": False,
         "gate_path": gate_path,
+        "counterfactual_status": counterfactual_status,
+        "would_accept_variant": counterfactual_status == ACCEPTED,
         "asset_entry_band_cents": list(band),
         "distance_sigma_max": 3e-5,
         "flip_probability_max": 30.0,
@@ -1844,8 +1992,8 @@ def drift_no_expansion_decision(row: Mapping[str, Any]) -> BotDecision | None:
         "entry_ask_cents": ask,
         "spread_cents": spread,
         "depth_contracts": _num(row.get("depth_contracts")),
-        "counts_as_independent_pick": True,
-        "exposure_class": "INDEPENDENT_NO_EXPANSION",
+        "counts_as_independent_pick": False,
+        "exposure_class": "COUNTERFACTUAL_RESEARCH",
         "track_n_resolved": n_resolved,
         "track_wins": _num(row.get("drift_no_expansion_correct")),
         "track_total_pnl_cents": _num(row.get("drift_no_expansion_net_pnl_cents")),

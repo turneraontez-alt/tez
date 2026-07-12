@@ -1260,6 +1260,25 @@ def test_drift_no_expansion_runner_adapter_groups_window():
     runner = object.__new__(IntervalResearchRunner)
     runner.config = SimpleNamespace(model_version="interval-research-v1")
 
+    class Ledger:
+        @staticmethod
+        def captures_for_window(model_version, interval, window_key):
+            assert (model_version, interval, window_key) == (
+                "interval-research-v1", "13M", 55,
+            )
+            return [{
+                "ticker": "KXDOGE-NO",
+                "seconds_remaining": 779.0,
+                "build_sha": "source-build",
+                "config_hash": "source-config",
+                "feature_schema_version": "interval-capture-v2",
+                "kalshi_depth_status": "ok",
+                "index_status": "missing",
+                "index_missing_reason": "alt_index_unavailable",
+            }]
+
+    runner.ledger = Ledger()
+
     class Recorder:
         def no_mirror_rows_recorded_at(self, model_version, window_key, now):
             assert (model_version, window_key, now) == ("interval-research-v1", 55, 1000.0)
@@ -1286,3 +1305,10 @@ def test_drift_no_expansion_runner_adapter_groups_window():
     assert payload[0]["entry_ask_cents"] == 67.0
     assert payload[0]["record_kind"] == "DRIFT_NO_EXPANSION"
     assert payload[0]["distance_sigma"] == 1e-5
+    assert payload[0]["seconds_remaining"] == 779.0
+    assert payload[0]["source_build_sha"] == "source-build"
+    assert payload[0]["source_config_hash"] == "source-config"
+    assert payload[0]["source_features_version"] == "interval-capture-v2"
+    assert payload[0]["kalshi_depth_status"] == "ok"
+    assert payload[0]["index_missing_reason"] == "alt_index_unavailable"
+    assert payload[0]["drift_candidate_lane"] == "NO_EXPANSION_RESEARCH_SOURCE"

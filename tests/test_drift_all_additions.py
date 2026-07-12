@@ -11,6 +11,7 @@ from q15_upgrade.strategy_bots.rules import (
     BOT_DRIFT_ACCURACY_V91,
     BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_BALANCED_V95,
+    BOT_DRIFT_CONSENSUS_FALLBACK,
     BOT_DRIFT_FLOW_SPREAD,
     REJECTED,
     RESEARCH_ONLY,
@@ -27,6 +28,7 @@ def _full_evidence(row):
         "drift_v91_yes_fraction_directional": 1.0,
         "drift_v91_observation_count": 10,
         "drift_v95_15m_side": "YES",
+        "drift_interval_15m_side": "YES",
         "drift_v95_15m_flow_score": 0.25,
         "drift_v95_15m_age_seconds": 120.0,
         "drift_btc_15m_side": "YES",
@@ -134,6 +136,41 @@ def test_incremental_distance_never_widens_live_delivery(tmp_path, monkeypatch):
     assert by_bot[BOT_DRIFT_ASYMMETRIC_VOLUME]["decision_status"] == RESEARCH_ONLY
     assert by_bot[BOT_DRIFT_BALANCED_V95]["decision_status"] == RESEARCH_ONLY
     assert by_bot[BOT_DRIFT_ACCURACY_V91]["decision_status"] == RESEARCH_ONLY
+    build_sha.cache_clear()
+
+
+def test_consensus_fallback_records_spread_only_without_live_telegram(
+    tmp_path, monkeypatch
+):
+    telegram = _configure(tmp_path, monkeypatch)
+    row = _row(
+        ticker="CONSENSUS",
+        window_key=99,
+        distance_sigma=2e-5,
+        spot_depth_status="stale",
+        spot_depth_snapshot_age_seconds=20.0,
+        spot_depth_age_seconds=20.0,
+        spot_depth_trade_age_seconds=20.0,
+        spot_depth_trade_net_notional_60s=-1.0,
+        spread_cents=1.0,
+    )
+    assert runtime.record_drift_pick_row(row) is not None
+    assert telegram.sent == []
+    rows = runtime.get_ledger().rows(STRATEGY_VERSION)
+    by_bot = {item["bot_name"]: item for item in rows}
+    assert by_bot[BOT_DRIFT_FLOW_SPREAD]["decision_status"] == RESEARCH_ONLY
+    shadow = by_bot[BOT_DRIFT_CONSENSUS_FALLBACK]
+    assert shadow["decision_status"] == RESEARCH_ONLY
+    assert shadow["notification_status"] is None
+    profile = json.loads(shadow["threshold_json"])
+    assert profile["agreement_count"] == 3
+    assert profile["never_notify"] is True
+    scoreboard = runtime.get_ledger().scoreboard(STRATEGY_VERSION, min_n=1)
+    consensus = scoreboard["drift_system"]["counterfactual_research"][
+        "consensus_fallback"
+    ]["full"]
+    assert consensus["overall"]["rows"] == 1
+    assert scoreboard["all_exposure"]["rows"] == 1
     build_sha.cache_clear()
 
 

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
 import pytest
 
+import coinbase_adv_l2
+import kraken_l3
+import q15_upgrade.marketlead.runner as marketlead_runner_module
+from coinbase_adv_l2 import CoinbaseAdvancedL2Collector
+from kraken_l3 import KrakenL3Collector
 from q15_upgrade.marketlead.config import MarketLeadConfig
 from q15_upgrade.marketlead.features import MarketLeadFeatureEngine
+from q15_upgrade.marketlead.live_sources import live_market_sources
 from q15_upgrade.marketlead.runner import MarketLeadRunner
 from q15_upgrade.ws_client import KalshiWebSocketFeed
 from tools.q15_marketlead_report import build_report
@@ -28,6 +35,8 @@ def _source(price, timestamp, flow=0.5, microprice_bps=1.0):
         "price": price,
         "timestamp": timestamp,
         "quality": 1.0,
+        "transport_connected": True,
+        "transport_message_age_seconds": 0.0,
         "flow": {"imbalance": flow},
         "book": {"imbalance": flow / 2.0, "microprice_bps": microprice_bps},
     }
@@ -78,8 +87,14 @@ def _config(path, **kwargs):
         crossing_max_seconds=90.0,
         crossing_max_offset_seconds=45.0,
         min_proxy_sources=2,
+        min_venue_sources=2,
         source_stale_seconds=20.0,
+        transport_stale_seconds=10.0,
+        source_future_tolerance_seconds=0.5,
+        max_source_spread_bps=50.0,
         sync_tolerance_seconds=10.0,
+        max_proxy_dispersion_bps=25.0,
+        require_live_proxy_sources=False,
         history_seconds=300.0,
     )
     values.update(kwargs)
@@ -178,6 +193,252 @@ def test_feature_engine_fails_closed_with_missing_lanes(tmp_path):
     assert "KALSHI_EVENTS_INCOMPLETE" in row["missing_reasons_json"]
 
 
+def test_feature_engine_prefers_fresh_live_cluster_and_drops_rest_outlier(tmp_path):
+    config = _config(
+        str(tmp_path / "marketlead.sqlite3"),
+        source_stale_seconds=3.0,
+        sync_tolerance_seconds=2.0,
+        require_live_proxy_sources=True,
+    )
+    engine = MarketLeadFeatureEngine(config)
+
+    def live(now, coinbase, kraken):
+        return {
+            "sources": {
+                "coinbase": {
+                    **_source(coinbase, now, flow=0.4),
+                    "transport": "websocket_l2",
+                    "book_update_age_seconds": 30.0,
+                    "best_bid": coinbase - 0.01,
+                    "best_ask": coinbase + 0.01,
+                },
+                "kraken": {
+                    **_source(kraken, now - 0.4, flow=0.3),
+                    "transport": "websocket_l3",
+                    "book_update_age_seconds": 20.0,
+                    "best_bid": kraken - 0.01,
+                    "best_ask": kraken + 0.01,
+                },
+            },
+            "diagnostics": {"coinbase": {"status": "ok"}, "kraken": {"status": "ok"}},
+        }
+
+    engine.build(
+        asset="BNB",
+        analysis=_analysis(),
+        canonical=_Canonical(public={"sources": {"okx": _source(99.0, 97.2)}}),
+        now=100.0,
+        official_index={"index_px": 100.0},
+        kalshi=_kalshi(),
+        live_sources=live(100.0, 100.0, 100.05),
+    )
+    row = engine.build(
+        asset="BNB",
+        analysis=_analysis(),
+        canonical=_Canonical(public={"sources": {"okx": _source(99.0, 112.2)}}),
+        now=115.0,
+        official_index={"index_px": 100.1},
+        kalshi=_kalshi(),
+        live_sources=live(115.0, 100.3, 100.35),
+    )
+    payload = json.loads(row["features_json"])
+
+    assert row["evidence_status"] == "READY"
+    assert row["rti_proxy_source_count"] == 2
+    assert payload["source_selection"]["venue_cluster"] == ["kraken", "coinbase"]
+    assert "okx" not in payload["source_selection"]["venue_cluster"]
+    assert all(
+        source["transport"].startswith("websocket_")
+        for source in payload["venue"]["sources"]
+    )
+
+
+def test_feature_engine_rejects_stale_or_dispersed_live_proxy(tmp_path):
+    config = _config(
+        str(tmp_path / "marketlead.sqlite3"),
+        source_stale_seconds=3.0,
+        sync_tolerance_seconds=2.0,
+        max_proxy_dispersion_bps=25.0,
+        require_live_proxy_sources=True,
+    )
+    engine = MarketLeadFeatureEngine(config)
+    base = {
+        "coinbase": {
+            **_source(100.0, 100.0),
+            "transport": "websocket_l2",
+            "best_bid": 99.99,
+            "best_ask": 100.01,
+        },
+        "kraken": {
+            **_source(100.1, 96.0),
+            "transport": "websocket_l3",
+            "best_bid": 100.09,
+            "best_ask": 100.11,
+        },
+    }
+    stale = engine.build(
+        asset="XRP",
+        analysis=_analysis(),
+        canonical=_Canonical(public={}),
+        now=100.0,
+        official_index={"index_px": 100.0},
+        kalshi=_kalshi(),
+        live_sources={"sources": base},
+    )
+    dispersed_sources = {
+        "coinbase": {
+            **_source(100.0, 115.0),
+            "transport": "websocket_l2",
+            "best_bid": 99.99,
+            "best_ask": 100.01,
+        },
+        "kraken": {
+            **_source(101.0, 114.8),
+            "transport": "websocket_l3",
+            "best_bid": 100.99,
+            "best_ask": 101.01,
+        },
+    }
+    dispersed = engine.build(
+        asset="XRP",
+        analysis=_analysis(),
+        canonical=_Canonical(public={}),
+        now=115.0,
+        official_index={"index_px": 100.0},
+        kalshi=_kalshi(),
+        live_sources={"sources": dispersed_sources},
+    )
+
+    assert stale["evidence_status"] == "PARTIAL"
+    assert stale["rti_proxy_source_count"] == 1
+    assert "RTI_PROXY_INCOMPLETE" in stale["missing_reasons_json"]
+    assert dispersed["evidence_status"] == "PARTIAL"
+    assert dispersed["rti_proxy_price"] is None
+    assert "RTI_PROXY_DISPERSION_HIGH" in dispersed["missing_reasons_json"]
+
+
+def test_feature_engine_rejects_future_or_wide_live_books(tmp_path):
+    config = _config(
+        str(tmp_path / "marketlead.sqlite3"),
+        source_stale_seconds=3.0,
+        source_future_tolerance_seconds=0.5,
+        max_source_spread_bps=50.0,
+        require_live_proxy_sources=True,
+    )
+    engine = MarketLeadFeatureEngine(config)
+    sources = {
+        "coinbase": {
+            **_source(100.0, 101.0),
+            "transport": "websocket_l2",
+            "best_bid": 99.99,
+            "best_ask": 100.01,
+        },
+        "kraken": {
+            **_source(100.0, 100.0),
+            "transport": "websocket_l3",
+            "best_bid": 99.0,
+            "best_ask": 101.0,
+        },
+    }
+
+    row = engine.build(
+        asset="HYPE",
+        analysis=_analysis(),
+        canonical=_Canonical(public={}),
+        now=100.0,
+        official_index={"index_px": 100.0},
+        kalshi=_kalshi(),
+        live_sources={"sources": sources},
+    )
+    payload = json.loads(row["features_json"])
+
+    assert row["evidence_status"] == "PARTIAL"
+    assert row["rti_proxy_source_count"] == 0
+    assert payload["source_selection"]["fresh_sources"] == []
+
+
+def test_feature_engine_rejects_live_transport_beyond_silence_ceiling(tmp_path):
+    config = _config(
+        str(tmp_path / "marketlead.sqlite3"),
+        source_stale_seconds=3.0,
+        transport_stale_seconds=10.0,
+        require_live_proxy_sources=True,
+    )
+    sources = {
+        "coinbase": {
+            **_source(100.0, 100.0),
+            "transport": "websocket_l2",
+            "transport_message_age_seconds": 10.1,
+            "best_bid": 99.99,
+            "best_ask": 100.01,
+        },
+        "kraken": {
+            **_source(100.05, 100.0),
+            "transport": "websocket_l3",
+            "best_bid": 100.04,
+            "best_ask": 100.06,
+        },
+    }
+
+    row = MarketLeadFeatureEngine(config).build(
+        asset="BTC",
+        analysis=_analysis(),
+        canonical=_Canonical(public={}),
+        now=100.0,
+        official_index={"index_px": 100.0},
+        kalshi=_kalshi(),
+        live_sources={"sources": sources},
+    )
+
+    assert row["evidence_status"] == "PARTIAL"
+    assert row["rti_proxy_source_count"] == 1
+
+
+def test_live_source_bridge_reads_bnb_from_running_singletons(tmp_path, monkeypatch):
+    coinbase = CoinbaseAdvancedL2Collector(
+        products=["BNB-USD"], db_path=str(tmp_path / "coinbase.sqlite3")
+    )
+    coinbase._connected = True
+    coinbase.handle_message(json.dumps({
+        "channel": "l2_data",
+        "sequence_num": 7,
+        "events": [{
+            "type": "snapshot",
+            "product_id": "BNB-USD",
+            "updates": [
+                {"side": "bid", "price_level": "574.0", "new_quantity": "4"},
+                {"side": "offer", "price_level": "574.2", "new_quantity": "2"},
+            ],
+        }],
+    }))
+    kraken = KrakenL3Collector(
+        symbols=["BNB/USD"], db_path=str(tmp_path / "kraken.sqlite3")
+    )
+    kraken._connected = True
+    kraken.handle_message(json.dumps({
+        "channel": "level3",
+        "type": "snapshot",
+        "data": [{
+            "symbol": "BNB/USD",
+            "checksum": 9,
+            "bids": [{"order_id": "bid", "limit_price": 574.05, "order_qty": 3}],
+            "asks": [{"order_id": "ask", "limit_price": 574.25, "order_qty": 2}],
+        }],
+    }))
+    monkeypatch.setattr(coinbase_adv_l2, "_feed", coinbase)
+    monkeypatch.setattr(kraken_l3, "_feed", kraken)
+
+    result = live_market_sources(
+        "BNB", now=max(coinbase._book_ts["BNB-USD"], kraken._book_ts["BNB/USD"])
+    )
+
+    assert set(result["sources"]) == {"coinbase", "kraken"}
+    assert result["sources"]["coinbase"]["transport"] == "websocket_l2"
+    assert result["sources"]["kraken"]["transport"] == "websocket_l3"
+    assert result["sources"]["coinbase"]["book"]["microprice_bps"] is not None
+    assert result["diagnostics"]["kraken"]["status"] == "ok"
+
+
 def test_proxy_direction_remains_usable_when_official_gap_is_unavailable(tmp_path):
     config = _config(str(tmp_path / "marketlead.sqlite3"))
     engine = MarketLeadFeatureEngine(config)
@@ -239,6 +500,147 @@ def test_runner_records_once_and_resolves_without_delivery_surface(tmp_path):
     assert report["target_status"] == "COLLECTING"
     assert report["coverage"]["observations"] == 1
     assert report["candidate_overall"]["resolved"] == 1
+
+
+def test_runner_exposes_live_source_freshness_status(tmp_path):
+    def market_sources(asset, now):
+        assert asset == "BTC"
+        return {
+            "sources": {
+                "coinbase": {
+                    **_source(100.0, now),
+                    "transport": "websocket_l2",
+                    "best_bid": 99.99,
+                    "best_ask": 100.01,
+                    "spread_bps": 2.0,
+                },
+                "kraken": {
+                    **_source(100.05, now - 0.2),
+                    "transport": "websocket_l3",
+                    "best_bid": 100.04,
+                    "best_ask": 100.06,
+                    "spread_bps": 2.0,
+                },
+            },
+            "diagnostics": {"coinbase": {"status": "ok"}, "kraken": {"status": "ok"}},
+        }
+
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            require_live_proxy_sources=True,
+            source_stale_seconds=3.0,
+            sync_tolerance_seconds=2.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=market_sources,
+    )
+    runner.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={"BTC": _Canonical(public={})},
+        now=100.0,
+    )
+
+    status = runner.status()
+    assert status["source_requirements"]["stale_seconds"] == 3.0
+    assert (
+        status["source_status"]["BTC"]["sources"]["coinbase"]["age_seconds"]
+        == 0.0
+    )
+    assert status["source_status"]["BTC"]["sources"]["kraken"][
+        "age_seconds"
+    ] == pytest.approx(0.2)
+    assert status["source_status"]["BTC"]["proxy_ready"] is True
+    assert status["source_status"]["BTC"]["timestamp_spread_seconds"] == pytest.approx(0.2)
+    assert runner.ledger.rows()[0]["evidence_status"] == "READY"
+
+
+def test_runner_health_refreshes_default_sources_outside_capture_band(
+    tmp_path, monkeypatch
+):
+    def market_sources(asset, now):
+        return {
+            "sources": {
+                "coinbase": {
+                    **_source(100.0, now),
+                    "transport": "websocket_l2",
+                    "best_bid": 99.99,
+                    "best_ask": 100.01,
+                }
+            },
+            "diagnostics": {"coinbase": {"status": "ok", "asset": asset}},
+        }
+
+    monkeypatch.setattr(
+        MarketLeadRunner, "_default_market_sources", staticmethod(market_sources)
+    )
+    runner = MarketLeadRunner(_config(str(tmp_path / "marketlead.sqlite3")))
+
+    status = runner.status()
+
+    assert set(status["source_status"]) == {
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "DOGE",
+        "BNB",
+        "HYPE",
+    }
+    assert status["source_status"]["HYPE"]["sources"]["coinbase"][
+        "transport"
+    ] == "websocket_l2"
+
+
+def test_runner_uses_post_read_wall_time_for_production_mark(tmp_path, monkeypatch):
+    base = 1_900_000_000.0
+
+    def market_sources(asset, now):
+        return {
+            "sources": {
+                "coinbase": {
+                    **_source(100.0, now - 0.1),
+                    "transport": "websocket_l2",
+                    "best_bid": 99.99,
+                    "best_ask": 100.01,
+                },
+                "kraken": {
+                    **_source(100.05, now - 0.2),
+                    "transport": "websocket_l3",
+                    "best_bid": 100.04,
+                    "best_ask": 100.06,
+                },
+            }
+        }
+
+    monkeypatch.setattr(
+        MarketLeadRunner, "_default_market_sources", staticmethod(market_sources)
+    )
+    monkeypatch.setattr(marketlead_runner_module.time, "time", lambda: base + 2.5)
+    canonical = _Canonical(seconds=782.5, public={})
+    canonical.settlement_time = base + 782.5
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            require_live_proxy_sources=True,
+            source_stale_seconds=3.0,
+            sync_tolerance_seconds=2.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+    )
+
+    runner.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={"BTC": canonical},
+        now=base,
+    )
+
+    row = runner.ledger.rows()[0]
+    assert row["observed_at"] == base + 2.5
+    assert row["seconds_remaining"] == pytest.approx(780.0)
+    assert row["evidence_status"] == "READY"
 
 
 def test_runner_captures_nearest_endpoint_on_fresh_crossing(tmp_path):

@@ -296,6 +296,7 @@ class CoinbaseAdvancedL2Collector:
             p: {"bid": {}, "ask": {}} for p in self.products
         }
         self._snapshot_loaded: dict[str, bool] = {p: False for p in self.products}
+        self._book_ts: dict[str, float] = {}
         self._sequence_num: dict[str, int] = {}
         self._updates: dict[str, deque[dict[str, Any]]] = {p: deque() for p in self.products}
         self._last_message_at: float | None = None
@@ -348,6 +349,11 @@ class CoinbaseAdvancedL2Collector:
                 "db_path": self.db_path,
                 "connected": self._connected,
                 "snapshot_loaded": dict(self._snapshot_loaded),
+                "book_age_seconds": {
+                    product: round(now - timestamp, 3)
+                    for product, timestamp in self._book_ts.items()
+                    if timestamp
+                },
                 "sequence_num": dict(self._sequence_num),
                 "last_message_age_seconds": (
                     round(now - self._last_message_at, 3) if self._last_message_at else None
@@ -453,6 +459,7 @@ class CoinbaseAdvancedL2Collector:
                     "removed": removed,
                 })
                 self._updates_seen += 1
+            self._book_ts[product_id] = now
             cutoff = now - 120.0
             while history and float(history[0].get("created_at") or 0.0) < cutoff:
                 history.popleft()
@@ -483,6 +490,68 @@ class CoinbaseAdvancedL2Collector:
             self._last_record_at = now
         return len(rows)
 
+    def latest_snapshot(
+        self, product_id: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Return a lock-consistent in-memory book without network or database I/O."""
+        observed_at = time.time() if now is None else float(now)
+        product = str(product_id or "").upper()
+        with self._lock:
+            row = self._snapshot_locked(product, observed_at)
+            book_timestamp = self._book_ts.get(product)
+            if row is None or book_timestamp is None:
+                return None
+            row["book_timestamp"] = book_timestamp
+            row["book_age_seconds"] = max(0.0, observed_at - book_timestamp)
+            return row
+
+    def latest_top_snapshot(
+        self, product_id: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Return only top-of-book fields so live consumers never stall ingestion."""
+        observed_at = time.time() if now is None else float(now)
+        product = str(product_id or "").upper()
+        with self._lock:
+            if not self._snapshot_loaded.get(product):
+                return None
+            book = self._books.get(product) or {}
+            bids = book.get("bid") or {}
+            asks = book.get("ask") or {}
+            book_timestamp = self._book_ts.get(product)
+            if not bids or not asks or book_timestamp is None:
+                return None
+            best_bid = max(bids)
+            best_ask = min(asks)
+            if best_bid >= best_ask:
+                self._last_error[f"{product}_crossed_book"] = f"{best_bid}>={best_ask}"
+                return None
+            bid_size = float(bids[best_bid])
+            ask_size = float(asks[best_ask])
+            depth = bid_size + ask_size
+            mid = (best_bid + best_ask) / 2.0
+            return {
+                "product_id": product,
+                "sequence_num": self._sequence_num.get(product),
+                "sample_timestamp": observed_at,
+                "book_timestamp": book_timestamp,
+                "book_age_seconds": max(0.0, observed_at - book_timestamp),
+                "transport_connected": self._connected,
+                "last_message_age_seconds": (
+                    max(0.0, observed_at - self._last_message_at)
+                    if self._last_message_at is not None
+                    else None
+                ),
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "mid": mid,
+                "spread_bps": (best_ask - best_bid) / mid * 10_000.0,
+                "bid_depth_top": bid_size,
+                "ask_depth_top": ask_size,
+                "depth_imbalance": (
+                    (bid_size - ask_size) / depth if depth > 0 else None
+                ),
+            }
+
     def _snapshot_locked(self, product_id: str, now: float) -> dict[str, Any] | None:
         if not self._snapshot_loaded.get(product_id):
             return None
@@ -493,6 +562,9 @@ class CoinbaseAdvancedL2Collector:
             return None
         best_bid = bids[0][0]
         best_ask = asks[0][0]
+        if best_bid >= best_ask:
+            self._last_error[f"{product_id}_crossed_book"] = f"{best_bid}>={best_ask}"
+            return None
         mid = (best_bid + best_ask) / 2.0
         bid_depth = sum(row[1] for row in bids)
         ask_depth = sum(row[1] for row in asks)
@@ -687,6 +759,11 @@ class CoinbaseAdvancedL2Collector:
 
 _feed: CoinbaseAdvancedL2Collector | None = None
 _feed_lock = threading.Lock()
+
+
+def peek_coinbase_adv_l2_feed() -> CoinbaseAdvancedL2Collector | None:
+    """Return the running singleton without starting a collector."""
+    return _feed
 
 
 def get_coinbase_adv_l2_feed() -> CoinbaseAdvancedL2Collector:

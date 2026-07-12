@@ -10,11 +10,13 @@ from q15_upgrade.strategy_bots.rules import (
     BOT_DRIFT_ACCURACY_V91,
     BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_BALANCED_V95,
+    BOT_DRIFT_CONSENSUS_FALLBACK,
     BOT_DRIFT_FLOW_SPREAD,
     RESEARCH_ONLY,
     drift_accuracy_v91_shadow_decision,
     drift_asymmetric_volume_shadow_decision,
     drift_balanced_v95_shadow_decision,
+    drift_consensus_fallback_shadow_decision,
     drift_flow_spread_13m_decision,
 )
 from q15_upgrade.strategy_bots.telegram import build_drift_pick_alert
@@ -228,6 +230,82 @@ def test_new_cohort_does_not_widen_the_frozen_live_decision(monkeypatch):
 
     assert shadow is not None and shadow.decision_status == RESEARCH_ONLY
     assert live is not None and live.decision_status != ACCEPTED
+
+
+def _consensus_row(**over):
+    row = _row(
+        distance_sigma=2e-5,
+        spread_cents=2.0,
+        spot_depth_status="stale",
+        spot_depth_snapshot_age_seconds=99.0,
+        spot_depth_age_seconds=99.0,
+        spot_depth_trade_age_seconds=99.0,
+        drift_interval_15m_side="YES",
+        drift_v95_15m_side="YES",
+        drift_btc_15m_side="NO",
+        drift_evidence_availability={
+            source: {"available": True, "status": "ok", "missing_reason": None}
+            for source in ("interval_15m", "v95_15m", "btc_15m")
+        },
+    )
+    row.update(over)
+    return row
+
+
+def test_consensus_fallback_is_strict_silent_two_of_three():
+    decision = drift_consensus_fallback_shadow_decision(_consensus_row())
+    assert decision is not None
+    assert decision.bot_name == BOT_DRIFT_CONSENSUS_FALLBACK
+    assert decision.decision_status == RESEARCH_ONLY
+    profile = decision.threshold_profile
+    assert profile["agreement_count"] == 2
+    assert profile["disagreement_count"] == 1
+    assert profile["required_agreements"] == 2
+    assert profile["consensus_quorum_met"] is True
+    assert profile["evidence_complete"] is True
+    assert profile["never_notify"] is True
+    assert profile["notification_eligible"] is False
+    assert profile["incremental_to_core"] is True
+
+    availability = dict(_consensus_row()["drift_evidence_availability"])
+    availability["btc_15m"] = {
+        "available": False, "status": "missing", "missing_reason": "missing",
+    }
+    two_of_two = drift_consensus_fallback_shadow_decision(
+        _consensus_row(drift_evidence_availability=availability)
+    )
+    assert two_of_two is not None
+    assert two_of_two.threshold_profile["available_vote_count"] == 2
+    assert two_of_two.threshold_profile["consensus_quorum_met"] is True
+    assert two_of_two.threshold_profile["evidence_complete"] is False
+
+
+def test_consensus_fallback_fails_closed_and_is_fallback_only():
+    assert drift_consensus_fallback_shadow_decision(
+        _consensus_row(
+            drift_interval_15m_side="NO",
+            drift_v95_15m_side="YES",
+            drift_btc_15m_side="NO",
+        )
+    ) is None
+    assert drift_consensus_fallback_shadow_decision(
+        _consensus_row(drift_evidence_availability={})
+    ) is None
+    assert drift_consensus_fallback_shadow_decision(
+        _consensus_row(spread_cents=2.01)
+    ) is None
+    assert drift_consensus_fallback_shadow_decision(
+        _consensus_row(
+            spot_depth_status="ok",
+            spot_depth_snapshot_age_seconds=1.0,
+            spot_depth_age_seconds=1.0,
+            spot_depth_trade_age_seconds=1.0,
+            spot_depth_trade_net_notional_60s=1.0,
+        )
+    ) is None
+    assert drift_consensus_fallback_shadow_decision(
+        _consensus_row(distance_sigma=3.01e-5)
+    ) is None
 
 
 def _telegram_row(decision, source):

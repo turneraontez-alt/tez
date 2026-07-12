@@ -56,6 +56,11 @@ def test_l2_snapshot_update_and_record(tmp_path):
         }],
     }))
 
+    snapshot = feed.latest_snapshot("BTC-USD", now=time.time())
+    assert snapshot is not None
+    assert snapshot["book_timestamp"] > 0
+    assert snapshot["book_age_seconds"] < 1.0
+    assert snapshot["best_bid"] == 100.25
     assert feed.record_once() == 1
 
     conn = sqlite3.connect(db)

@@ -632,6 +632,73 @@ class KrakenL3Collector:
             self._last_record_at = now
         return len(rows)
 
+    def latest_snapshot(
+        self, symbol: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Return a lock-consistent in-memory book without network or database I/O."""
+        observed_at = time.time() if now is None else float(now)
+        normalized = str(symbol or "").upper().replace("-", "/")
+        with self._lock:
+            row = self._summary_locked(normalized, observed_at)
+            book_timestamp = self._book_ts.get(normalized)
+            if row is None or book_timestamp is None:
+                return None
+            row["book_timestamp"] = book_timestamp
+            row["book_age_seconds"] = max(0.0, observed_at - book_timestamp)
+            return row
+
+    def latest_top_snapshot(
+        self, symbol: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Return only top-of-book fields so live consumers never stall ingestion."""
+        observed_at = time.time() if now is None else float(now)
+        normalized = str(symbol or "").upper().replace("-", "/")
+        with self._lock:
+            if not self._snapshot_loaded.get(normalized):
+                return None
+            levels = self._levels.get(normalized) or {}
+            bids = levels.get("buy") or {}
+            asks = levels.get("sell") or {}
+            book_timestamp = self._book_ts.get(normalized)
+            if not bids or not asks or book_timestamp is None:
+                return None
+            best_bid = max(bids)
+            best_ask = min(asks)
+            if best_bid >= best_ask:
+                self._crossed_book_drops += 1
+                self._resync_requested = True
+                self._snapshot_loaded[normalized] = False
+                self._last_error[f"{normalized}_crossed_book"] = (
+                    f"{best_bid}>={best_ask}"
+                )
+                return None
+            bid_size = float(bids[best_bid][0])
+            ask_size = float(asks[best_ask][0])
+            depth = bid_size + ask_size
+            mid = (best_bid + best_ask) / 2.0
+            return {
+                "symbol": normalized,
+                "checksum": self._checksum.get(normalized),
+                "sample_timestamp": observed_at,
+                "book_timestamp": book_timestamp,
+                "book_age_seconds": max(0.0, observed_at - book_timestamp),
+                "transport_connected": self._connected,
+                "last_message_age_seconds": (
+                    max(0.0, observed_at - self._last_message_at)
+                    if self._last_message_at is not None
+                    else None
+                ),
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "mid": mid,
+                "spread_bps": (best_ask - best_bid) / mid * 10_000.0,
+                "bid_depth_top": bid_size,
+                "ask_depth_top": ask_size,
+                "depth_imbalance": (
+                    (bid_size - ask_size) / depth if depth > 0 else None
+                ),
+            }
+
     def _summary_locked(self, symbol: str, now: float) -> dict[str, Any] | None:
         if not self._snapshot_loaded.get(symbol):
             return None
@@ -868,6 +935,11 @@ class KrakenL3Collector:
 
 _feed: KrakenL3Collector | None = None
 _feed_lock = threading.Lock()
+
+
+def peek_kraken_l3_feed() -> KrakenL3Collector | None:
+    """Return the running singleton without starting a collector."""
+    return _feed
 
 
 def get_kraken_l3_feed() -> KrakenL3Collector:

@@ -721,7 +721,7 @@ class IntervalResearchRunner:
     def _alert_drift_no_expansion(
         self, rec: Any, wk: int, now: float, *, replay_all: bool = False
     ) -> None:
-        """Forward the NO candidate envelope for flow/spread confirmation."""
+        """Forward the NO envelope to its silent, evidence-rich research lane."""
         try:
             if replay_all and hasattr(rec, "no_mirror_rows_for_window"):
                 rows = rec.no_mirror_rows_for_window(self.config.model_version, wk)
@@ -732,12 +732,22 @@ class IntervalResearchRunner:
             if not rows:
                 return
             from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+            ledger = getattr(self, "ledger", None)
+            capture_rows = (
+                ledger.captures_for_window(self.config.model_version, "13M", wk)
+                if ledger is not None and hasattr(ledger, "captures_for_window")
+                else []
+            )
+            captures = {
+                str(item.get("ticker") or ""): item for item in capture_rows
+            }
             payloads = []
             for row in rows:
+                capture = captures.get(str(row.get("ticker") or ""), {})
                 source_at = _num(row.get("created_at"))
                 if source_at is None:
                     source_at = now
-                payloads.append({
+                payload = {
                     "created_at": source_at,
                     "model_version": self.config.model_version,
                     "record_kind": "DRIFT_NO_EXPANSION",
@@ -750,7 +760,7 @@ class IntervalResearchRunner:
                     "interval": "13M",
                     "window_key": wk,
                     "close_time": row.get("close_time"),
-                    "seconds_remaining": (
+                    "seconds_remaining": capture.get("seconds_remaining") if capture else (
                         float(row["close_time"]) - source_at
                         if row.get("close_time") is not None and source_at is not None
                         else None
@@ -762,7 +772,24 @@ class IntervalResearchRunner:
                     "distance_sigma": row.get("distance_sigma"),
                     "flip_probability": row.get("flip_probability"),
                     "drift_btc_side_at_capture": row.get("btc_side"),
-                })
+                    "drift_candidate_lane": "NO_EXPANSION_RESEARCH_SOURCE",
+                    "source_build_sha": capture.get("build_sha"),
+                    "source_config_hash": capture.get("config_hash"),
+                    "source_features_version": capture.get("feature_schema_version"),
+                }
+                for key in (
+                    "quote_age_seconds", "yes_bid_depth_contracts",
+                    "yes_ask_depth_contracts", "no_bid_depth_contracts",
+                    "no_ask_depth_contracts", "kalshi_depth_status",
+                    "kalshi_depth_missing_reason", "kalshi_depth_retry_used",
+                    "kalshi_taker_yes_volume_15s",
+                    "kalshi_taker_no_volume_15s",
+                    "kalshi_taker_net_yes_volume_15s", "index_px",
+                    "basis_cents", "index_age_s", "index_status",
+                    "index_missing_reason", "index_id", "index_source_ts",
+                ):
+                    payload[key] = capture.get(key)
+                payloads.append(payload)
             strategy_bots_runtime.record_drift_no_expansion_window(payloads)
         except Exception:  # noqa: BLE001 - research alert must never break capture
             logger.debug("drift NO expansion alert failed (ignored)", exc_info=True)

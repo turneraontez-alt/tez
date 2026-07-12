@@ -19,6 +19,7 @@ from .rules import (
     BOT_DRIFT_ACCURACY_V91,
     BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_BALANCED_V95,
+    BOT_DRIFT_CONSENSUS_FALLBACK,
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
@@ -28,6 +29,7 @@ from .rules import (
     BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
     DRIFT_REVIEW_BARS,
+    DRIFT_CORE_RULE_VERSION,
     BTC_REGIME_KEYS,
     COINBASE_L2_KEYS,
     KALSHI_DEPTH_KEYS,
@@ -1143,9 +1145,16 @@ class StrategyBotLedger:
             BOT_DRIFT_ASYMMETRIC_VOLUME,
             BOT_DRIFT_BALANCED_V95,
             BOT_DRIFT_ACCURACY_V91,
+            BOT_DRIFT_CONSENSUS_FALLBACK,
         }
         exposure_rows = [
-            r for r in rows if r.get("bot_name") not in counterfactual_bots
+            r for r in rows
+            if r.get("bot_name") not in counterfactual_bots
+            and not (
+                r.get("bot_name") == BOT_DRIFT_NO_EXPANSION
+                and self._threshold_value(r, "rule_version")
+                == "drift-no-expansion-13m-shadow-v2"
+            )
         ]
         independent_rows = [
             r for r in exposure_rows if r.get("bot_name") != BOT_DRIFT_ADDON
@@ -1447,6 +1456,9 @@ class StrategyBotLedger:
         accuracy_v91 = [
             r for r in rows if r.get("bot_name") == BOT_DRIFT_ACCURACY_V91
         ]
+        consensus_fallback = [
+            r for r in rows if r.get("bot_name") == BOT_DRIFT_CONSENSUS_FALLBACK
+        ]
         spread4_qualifiers = [
             r for r in spread4 if cls._threshold_flag(r, "would_accept_variant")
         ]
@@ -1464,7 +1476,7 @@ class StrategyBotLedger:
         frozen_core_candidates = [
             r for r in core_candidates
             if cls._threshold_value(r, "rule_version")
-            == "drift-flow-spread-13m-frozen-v2"
+            == DRIFT_CORE_RULE_VERSION
         ]
         frozen_core = [
             r for r in frozen_core_candidates
@@ -1494,6 +1506,10 @@ class StrategyBotLedger:
         ]
         no_expansion_accepted = [
             r for r in no_expansion if r.get("decision_status") == ACCEPTED
+        ]
+        no_expansion_qualifiers = [
+            r for r in no_expansion
+            if cls._threshold_flag(r, "would_accept_variant")
         ]
         independent = core + latequal
         independent_candidates = core_candidates + latequal_candidates
@@ -1552,6 +1568,13 @@ class StrategyBotLedger:
                         min_n,
                     ),
                 },
+                "consensus_fallback": {
+                    "full": cls._cohort_view(consensus_fallback, min_n),
+                },
+                "no_expansion": {
+                    "funnel": cls._cohort_view(no_expansion, min_n),
+                    "qualifiers": cls._cohort_view(no_expansion_qualifiers, min_n),
+                },
             },
             "independent_candidates": cls._agg(independent_candidates, min_n),
             "base_13m_all_candidates": cls._agg(core_candidates, min_n),
@@ -1591,9 +1614,9 @@ class StrategyBotLedger:
                 "candidate/status views retain rejected and inconclusive rows. "
                 "drift_flow_spread_13m owns base Telegram delivery; "
                 "drift_addon_requal is correlated exposure; drift_no_mirror is the "
-                "legacy NO shadow; drift_no_expansion owns accepted grouped NO "
-                "Telegram delivery. spread4, flow15, asymmetric-volume, balanced-V95, "
-                "and accuracy-V91 are silent counterfactual research and never count "
+                "legacy NO shadow; drift_no_expansion is quarantined silent research. "
+                "spread4, flow15, asymmetric-volume, balanced-V95, accuracy-V91, and "
+                "consensus-fallback are silent counterfactual research and never count "
                 "as independent or total exposure"
             ),
         }

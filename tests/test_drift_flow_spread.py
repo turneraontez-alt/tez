@@ -8,6 +8,7 @@ from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
     BOT_DRIFT_13M,
     BOT_DRIFT_FLOW_SPREAD,
+    DRIFT_CORE_RULE_VERSION,
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
@@ -198,8 +199,9 @@ def test_drift_flow_spread_decision_paths(monkeypatch):
             spot_depth_trade_net_notional_60s=-500.0,
         )
     )
-    assert spread is not None and spread.decision_status == ACCEPTED
-    assert spread.threshold_profile["gate_path"] == "SPREAD_LTE_2"
+    assert spread is not None and spread.decision_status == REJECTED
+    assert spread.threshold_profile["gate_path"] == "FLOW_NONPOSITIVE"
+    assert "DRIFT_SPREAD_EXECUTION_ONLY_NOT_DIRECTIONAL" in spread.reason_codes
 
     rejected = drift_flow_spread_13m_decision(
         _row(
@@ -256,16 +258,15 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
     ]
     ids = [runtime.record_drift_pick_row(row) for row in rows]
     assert all(row_id is not None for row_id in ids)
-    assert len(telegram.sent) == 2
+    assert len(telegram.sent) == 1
     assert "DRIFT FLOW CONFIRMED 13M" in telegram.sent[0]
     assert "Confirmed: 60s spot flow" in telegram.sent[0]
-    assert "Confirmed: Kalshi spread 2c" in telegram.sent[1]
 
     ledger = runtime.get_ledger()
     recorded = ledger.rows(STRATEGY_VERSION)
     confirmed = [r for r in recorded if r["bot_name"] == BOT_DRIFT_FLOW_SPREAD]
     assert [r["decision_status"] for r in confirmed] == [
-        ACCEPTED, ACCEPTED, REJECTED, RESEARCH_ONLY,
+        ACCEPTED, REJECTED, REJECTED, RESEARCH_ONLY,
     ]
     assert not [r for r in recorded if r["bot_name"] == BOT_DRIFT_13M]
     assert confirmed[0]["spot_depth_trade_net_notional_60s"] == 100.0
@@ -285,18 +286,18 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
 
     scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
     drift = scoreboard["drift_system"]
-    assert drift["flow_spread_13m"]["rows"] == 2
-    assert drift["flow_spread_13m"]["resolved"] == 2
+    assert drift["flow_spread_13m"]["rows"] == 1
+    assert drift["flow_spread_13m"]["resolved"] == 1
     assert drift["flow_spread_13m"]["accuracy"] == 1.0
-    assert drift["base_13m"]["rows"] == 2
-    assert drift["independent_picks"]["rows"] == 2
+    assert drift["base_13m"]["rows"] == 1
+    assert drift["independent_picks"]["rows"] == 1
 
     assert drift["flow_spread_13m_all_candidates"]["rows"] == 4
     assert drift["flow_spread_13m_all_candidates"]["resolved"] == 4
     assert drift["flow_spread_13m_all_candidates"]["accuracy"] == 0.5
     assert drift["independent_candidates"]["rows"] == 4
-    assert drift["flow_spread_13m_by_status"][ACCEPTED]["rows"] == 2
-    assert drift["flow_spread_13m_by_status"][REJECTED]["rows"] == 1
+    assert drift["flow_spread_13m_by_status"][ACCEPTED]["rows"] == 1
+    assert drift["flow_spread_13m_by_status"][REJECTED]["rows"] == 2
     assert drift["flow_spread_13m_by_status"][RESEARCH_ONLY]["rows"] == 1
     assert drift["raw_13m_legacy_shadow"]["rows"] == 0
     assert scoreboard["total_rows"] == 14
@@ -304,10 +305,10 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
     assert scoreboard["counterfactual_research_rows"] == 10
     shadows = drift["counterfactual_research"]
     assert shadows["spread4"]["full"]["overall"]["rows"] == 4
-    assert shadows["spread4"]["incremental"]["overall"]["rows"] == 2
+    assert shadows["spread4"]["incremental"]["overall"]["rows"] == 3
     assert shadows["flow15"]["funnel"]["overall"]["rows"] == 4
     assert shadows["flow15"]["full"]["overall"]["rows"] == 2
-    assert shadows["flow15"]["incremental"]["overall"]["rows"] == 0
+    assert shadows["flow15"]["incremental"]["overall"]["rows"] == 1
     assert shadows["spread4"]["full"]["review"]["stage"] == "ACCRUING_TO_30"
     assert shadows["spread4"]["full"]["review"]["automatic_promotion"] is False
 
@@ -364,7 +365,10 @@ def test_frozen_review_cohort_excludes_pre_policy_rows(tmp_path, monkeypatch):
     assert ledger.record_decision(
         legacy, legacy_source, source_system="drift_shadow"
     ) is not None
-    frozen_source = _row(ticker="FROZEN", window_key=2, spread_cents=2.0)
+    frozen_source = _row(
+        ticker="FROZEN", window_key=2, spread_cents=2.0,
+        spot_depth_status="ok", spot_depth_trade_net_notional_60s=1.0,
+    )
     frozen = drift_flow_spread_13m_decision(frozen_source)
     assert frozen is not None and frozen.decision_status == ACCEPTED
     assert ledger.record_decision(
@@ -392,6 +396,6 @@ def test_frozen_review_cohort_excludes_pre_policy_rows(tmp_path, monkeypatch):
     )["n"] == 2
     assert ledger.bot_accepted_resolved_stats(
         bot_name=BOT_DRIFT_FLOW_SPREAD,
-        threshold_rule_version="drift-flow-spread-13m-frozen-v2",
+        threshold_rule_version=DRIFT_CORE_RULE_VERSION,
     )["n"] == 1
     ledger.close()

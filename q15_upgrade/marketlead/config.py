@@ -54,16 +54,38 @@ class MarketLeadConfig:
     min_proxy_sources: int = field(
         default_factory=lambda: _int("Q15_MARKETLEAD_MIN_PROXY_SOURCES", 2)
     )
+    min_venue_sources: int = field(
+        default_factory=lambda: _int("Q15_MARKETLEAD_MIN_VENUE_SOURCES", 2)
+    )
     proxy_sources_csv: str = field(
         default_factory=lambda: os.environ.get(
             "Q15_MARKETLEAD_PROXY_SOURCES", "coinbase,kraken"
         )
     )
     source_stale_seconds: float = field(
-        default_factory=lambda: _float("Q15_MARKETLEAD_SOURCE_STALE_SECONDS", 20.0)
+        default_factory=lambda: _float("Q15_MARKETLEAD_SOURCE_STALE_SECONDS", 3.0)
+    )
+    transport_stale_seconds: float = field(
+        default_factory=lambda: _float("Q15_MARKETLEAD_TRANSPORT_STALE_SECONDS", 10.0)
+    )
+    source_future_tolerance_seconds: float = field(
+        default_factory=lambda: _float(
+            "Q15_MARKETLEAD_SOURCE_FUTURE_TOLERANCE_SECONDS", 0.5
+        )
+    )
+    max_source_spread_bps: float = field(
+        default_factory=lambda: _float("Q15_MARKETLEAD_MAX_SOURCE_SPREAD_BPS", 50.0)
     )
     sync_tolerance_seconds: float = field(
-        default_factory=lambda: _float("Q15_MARKETLEAD_SYNC_TOLERANCE_SECONDS", 10.0)
+        default_factory=lambda: _float("Q15_MARKETLEAD_SYNC_TOLERANCE_SECONDS", 2.0)
+    )
+    max_proxy_dispersion_bps: float = field(
+        default_factory=lambda: _float(
+            "Q15_MARKETLEAD_MAX_PROXY_DISPERSION_BPS", 25.0
+        )
+    )
+    require_live_proxy_sources: bool = field(
+        default_factory=lambda: _bool("Q15_MARKETLEAD_REQUIRE_LIVE_PROXY_SOURCES", True)
     )
     history_seconds: float = field(
         default_factory=lambda: _float("Q15_MARKETLEAD_HISTORY_SECONDS", 300.0)

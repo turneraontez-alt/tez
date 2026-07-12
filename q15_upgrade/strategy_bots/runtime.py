@@ -32,6 +32,7 @@ from .rules import (
     BOT_DRIFT_ACCURACY_V91,
     BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_BALANCED_V95,
+    BOT_DRIFT_CONSENSUS_FALLBACK,
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
@@ -43,6 +44,7 @@ from .rules import (
     BOT_WARN_FLIP,
     REJECTED,
     RESEARCH_ONLY,
+    DRIFT_CORE_RULE_VERSION,
     STRATEGY_VERSION,
     BotDecision,
     decisions_for_row,
@@ -50,6 +52,7 @@ from .rules import (
     drift_accuracy_v91_shadow_decision,
     drift_asymmetric_volume_shadow_decision,
     drift_balanced_v95_shadow_decision,
+    drift_consensus_fallback_shadow_decision,
     drift_flow_spread_13m_decision,
     drift_flow_spread_shadow_flow15_decision,
     drift_flow_spread_shadow_spread4_decision,
@@ -63,7 +66,6 @@ from .rules import (
 )
 from .telegram import (
     V3Telegram,
-    build_drift_no_expansion_group_alert,
     build_drift_no_mirror_group_alert,
     build_v3_alert,
     build_v3_auto_mute_alert,
@@ -79,7 +81,7 @@ _drift_reconcile_lock = threading.Lock()
 _thirteen_m_stats_warning_logged = False
 _thirteen_m_flow_warning_logged = False
 
-DRIFT_DECISION_FEATURE_SCHEMA_VERSION = "drift-decision-evidence-v1"
+DRIFT_DECISION_FEATURE_SCHEMA_VERSION = "drift-decision-evidence-v2"
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -100,6 +102,10 @@ def _drift_lineage_config() -> dict[str, Any]:
         "asymmetric_distance_ask_min": 65.0,
         "flip_max": 30.0,
         "spread_max_cents": 2.0,
+        "live_requires_fresh_positive_60s_flow": True,
+        "live_spread_only_eligible": False,
+        "consensus_fallback_sources": ["interval_15m", "v95_15m", "btc_15m"],
+        "consensus_fallback_required_agreements": 2,
         "v91_full_path_yes_fraction_min": 0.75,
         "v95_required_side": "YES",
         "review_bars": [30, 60, 150],
@@ -112,6 +118,24 @@ def _drift_lineage_config() -> dict[str, Any]:
         "spot_trade_max_age_seconds": os.environ.get(
             "Q15_V3_DRIFT_SPOT_TRADE_MAX_AGE_SECONDS", "15"
         ),
+    }
+
+
+def _drift_no_expansion_lineage_config() -> dict[str, Any]:
+    return {
+        "accepted_side": "NO",
+        "asset_entry_bands_cents": {
+            "XRP": [60.0, 69.0],
+            "HYPE": [60.0, 64.0],
+            "DOGE": [65.0, 69.0],
+        },
+        "distance_max": 3e-5,
+        "flip_max": 30.0,
+        "legacy_flow_max_exclusive": 0.0,
+        "legacy_spread_max_cents": 2.0,
+        "research_only": True,
+        "notification_eligible": False,
+        "review_bars": [30, 60, 150],
     }
 
 
@@ -132,12 +156,22 @@ def _drift_num(value: Any) -> float | None:
         return None
 
 
-def _with_drift_lineage_and_grade(row: Mapping[str, Any]) -> dict[str, Any]:
+def _with_drift_lineage_and_grade(
+    row: Mapping[str, Any],
+    *,
+    expected_side: str | None = None,
+    lineage_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Stamp one point-in-time Drift row without manufacturing missing evidence."""
     out = dict(row)
+    candidate_side = str(expected_side or source_side(out) or "YES").upper()
+    if candidate_side not in {"YES", "NO"}:
+        candidate_side = "YES"
+    config = dict(lineage_config or _drift_lineage_config())
+    config["evidence_expected_side"] = candidate_side
     stamp = lineage_stamp(
         feature_schema_version=DRIFT_DECISION_FEATURE_SCHEMA_VERSION,
-        config=_drift_lineage_config(),
+        config=config,
     )
     out.update(stamp)
     out.setdefault("source_captured_at", out.get("created_at"))
@@ -223,19 +257,42 @@ def _with_drift_lineage_and_grade(row: Mapping[str, Any]) -> dict[str, Any]:
         grade = "INCOMPLETE"
         reasons.append("DRIFT_FULL_FEATURES_INCOMPLETE")
     else:
-        v91_pass = bool(v91 is not None and v91 >= 0.75)
-        v95_pass = v95_side == "YES"
-        btc_contradicts = str(out.get("asset") or "").upper() in {"SOL", "XRP"} and btc_side == "NO"
+        v91_pass = bool(
+            v91 is not None
+            and (v91 >= 0.75 if candidate_side == "YES" else v91 <= 0.25)
+        )
+        v95_pass = v95_side == candidate_side
+        btc_contradicts = (
+            str(out.get("asset") or "").upper() in {"SOL", "XRP"}
+            and btc_side in {"YES", "NO"}
+            and btc_side != candidate_side
+        )
         if v91_pass:
-            reasons.append("DRIFT_V91_FULL_PATH_PASS")
+            reasons.append(
+                "DRIFT_V91_FULL_PATH_PASS"
+                if candidate_side == "YES"
+                else "DRIFT_V91_FULL_PATH_AGREES_NO"
+            )
         else:
-            reasons.append("DRIFT_V91_FULL_PATH_LOW")
+            reasons.append(
+                "DRIFT_V91_FULL_PATH_LOW"
+                if candidate_side == "YES"
+                else "DRIFT_V91_FULL_PATH_CONTRADICTS_NO"
+            )
         if v95_pass:
-            reasons.append("DRIFT_V95_15M_AGREES")
+            reasons.append(
+                "DRIFT_V95_15M_AGREES"
+                if candidate_side == "YES"
+                else "DRIFT_V95_15M_AGREES_NO"
+            )
         else:
-            reasons.append("DRIFT_V95_15M_CONTRADICTS")
+            reasons.append(
+                "DRIFT_V95_15M_CONTRADICTS"
+                if candidate_side == "YES"
+                else "DRIFT_V95_15M_CONTRADICTS_NO"
+            )
         if btc_contradicts:
-            reasons.append("DRIFT_BTC_15M_CONTRADICTS")
+            reasons.append(f"DRIFT_BTC_15M_CONTRADICTS_{candidate_side}")
         grade = "A" if v91_pass and v95_pass and not btc_contradicts else (
             "B" if (v91_pass or v95_pass) and not btc_contradicts else "C"
         )
@@ -243,6 +300,7 @@ def _with_drift_lineage_and_grade(row: Mapping[str, Any]) -> dict[str, Any]:
     out["evidence_reason_codes"] = ",".join(reasons)
     evidence_bundle = {
         "as_of": out.get("evidence_as_of"),
+        "expected_side": candidate_side,
         "availability": dict(availability),
         "ages": dict(ages),
         "grade": grade,
@@ -334,7 +392,9 @@ def drift_no_mirror_notify_enabled() -> bool:
 
 
 def drift_no_expansion_notify_enabled() -> bool:
-    return _bool("Q15_V3_DRIFT_NO_EXPANSION_NOTIFY", True)
+    # Hard quarantine: retained for compatibility with callers/config audits,
+    # but no environment value can make this provisional lane notify.
+    return False
 
 
 def suppress_owned_source_notifications() -> bool:
@@ -1108,12 +1168,13 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             enriched,
             bot_name=BOT_DRIFT_FLOW_SPREAD,
             prefix="drift_flow_spread",
-            threshold_rule_version="drift-flow-spread-13m-frozen-v2",
+            threshold_rule_version=DRIFT_CORE_RULE_VERSION,
         )
         for shadow_bot, prefix in (
             (BOT_DRIFT_ASYMMETRIC_VOLUME, "asymmetric_volume"),
             (BOT_DRIFT_BALANCED_V95, "balanced_v95"),
             (BOT_DRIFT_ACCURACY_V91, "accuracy_v91"),
+            (BOT_DRIFT_CONSENSUS_FALLBACK, "consensus_fallback"),
         ):
             enriched = _with_book_stats_context(
                 ledger,
@@ -1138,6 +1199,7 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             drift_asymmetric_volume_shadow_decision,
             drift_balanced_v95_shadow_decision,
             drift_accuracy_v91_shadow_decision,
+            drift_consensus_fallback_shadow_decision,
         ):
             try:
                 shadow_decision = shadow_decision_fn(enriched)
@@ -1368,14 +1430,12 @@ def record_drift_no_mirror_window(rows: Sequence[Mapping[str, Any]]) -> list[int
 
 
 def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[int]:
-    """Record every NO-expansion decision and group only accepted alerts."""
+    """Record NO-expansion rows as silent, settlement-scored research only."""
     try:
         ledger = get_ledger()
         if ledger is None:
             return []
         row_ids: list[int] = []
-        accepted: list[dict[str, Any]] = []
-        seen_accepted_ids: set[int] = set()
         window_key: int | None = None
         for row in rows:
             wk = row.get("window_key")
@@ -1392,59 +1452,28 @@ def record_drift_no_expansion_window(rows: Sequence[Mapping[str, Any]]) -> list[
             source.setdefault("delivery_status", "PAPER_DRIFT_NO_EXPANSION")
             enriched = enrich_spot_depth(source)
             enriched = _enrich_source_row(enriched)
+            enriched = enrich_drift_evidence(enriched)
+            enriched = _with_drift_lineage_and_grade(
+                enriched,
+                expected_side="NO",
+                lineage_config=_drift_no_expansion_lineage_config(),
+            )
             enriched = _with_book_stats_context(
                 ledger,
                 enriched,
                 bot_name=BOT_DRIFT_NO_EXPANSION,
                 prefix="drift_no_expansion",
+                threshold_rule_version="drift-no-expansion-13m-shadow-v2",
+                decision_status=RESEARCH_ONLY,
             )
             decision = drift_no_expansion_decision(enriched)
             if decision is None:
                 continue
-            row_id, recorded = _stored_decision(
+            row_id, _recorded = _stored_decision(
                 ledger, decision, enriched, source_system="drift_shadow",
             )
             if row_id is not None:
                 row_ids.append(row_id)
-            if recorded is None or recorded.get("decision_status") != ACCEPTED:
-                continue
-            if int(recorded["id"]) not in seen_accepted_ids:
-                seen_accepted_ids.add(int(recorded["id"]))
-                accepted.append(recorded)
-
-        if (
-            not accepted
-            or window_key is None
-            or not drift_no_expansion_notify_enabled()
-        ):
-            return row_ids
-        delivery_key = _drift_delivery_key(
-            BOT_DRIFT_NO_EXPANSION, window_key, grouped=True,
-        )
-        pending_rows = [
-            row
-            for row in accepted
-            if _notification_needs_delivery(
-                ledger, row, idempotency_key=delivery_key,
-            )
-        ]
-        if not pending_rows:
-            return row_ids
-        stamped = [_with_feed_degraded_stamp(row) for row in pending_rows]
-        payload = build_drift_no_expansion_group_alert(stamped)
-        result = _send_drift_notification(
-            payload,
-            idempotency_key=delivery_key,
-            expires_at=_group_expiry(pending_rows),
-        )
-        status, mid, error = _delivery_fields(result)
-        for recorded in pending_rows:
-            ledger.mark_notification(
-                int(recorded["id"]),
-                status=status,
-                message_id=mid,
-                error=error,
-            )
         return row_ids
     except Exception:  # noqa: BLE001 - research expansion must never break capture
         logger.warning("v3 drift NO expansion record failed (ignored)", exc_info=True)

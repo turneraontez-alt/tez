@@ -97,6 +97,11 @@ def test_kraken_l3_snapshot_update_and_summary(tmp_path, monkeypatch):
         }],
     }))
 
+    snapshot = feed.latest_snapshot("XBT-USD", now=time.time())
+    assert snapshot is not None
+    assert snapshot["book_timestamp"] > 0
+    assert snapshot["book_age_seconds"] < 1.0
+    assert snapshot["best_bid"] == 100.5
     assert feed.record_once() == 1
 
     conn = sqlite3.connect(db)

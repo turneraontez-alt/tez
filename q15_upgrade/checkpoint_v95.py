@@ -4288,6 +4288,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         ledger = copy.deepcopy(ledger_status) if ledger_status is not None else self.ledger.status()
         grading = copy.deepcopy(grading_status) if grading_status is not None else self.ledger.reconcile_backlog_status()
         market_data = copy.deepcopy(public_market_data) if public_market_data is not None else self.market_data.health()
+        try:
+            from q15_upgrade.marketlead.runner import get_runner as _marketlead_runner
+
+            marketlead_runner = _marketlead_runner()
+            marketlead = marketlead_runner.status() if marketlead_runner is not None else {"enabled": False}
+        except Exception as exc:
+            marketlead = {"available": False, "error": f"{type(exc).__name__}: {exc}"}
         return {
             "version": VERSION, "enabled": self.v95_enabled, "read_only": True,
             "cycles": self._cycles, "errors": self._errors, "last_error": self._last_error,
@@ -4311,6 +4318,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             "ledger": ledger,
             "grading": grading,
             "public_market_data": market_data,
+            "marketlead": marketlead,
         }
 
     def health(self) -> dict[str, Any]:
