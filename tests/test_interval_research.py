@@ -270,6 +270,51 @@ class CaptureResolveTest(unittest.TestCase):
             {"KXSOL", "KXDOGE", "KXXRP"},
         )
 
+    def test_precision13_shadow_records_without_drift_or_delivery(self):
+        assets = ("BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP")
+        analyses = {asset: _analysis(side="YES") for asset in assets}
+        for analysis in analyses.values():
+            analysis["yes_probability"] = 0.65
+        close_time = 1900.0
+        with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "false"}):
+            with patch("q15_upgrade.drift_shadow.get_recorder", return_value=None):
+                self.r.observe(
+                    analyses=analyses,
+                    canonicals={
+                        asset: _Canon(f"KX{asset}-P13", 900, close_time)
+                        for asset in assets
+                    },
+                    now=1000.0,
+                )
+                self.r.observe(
+                    analyses=analyses,
+                    canonicals={
+                        asset: _Canon(f"KX{asset}-P13", 780, close_time)
+                        for asset in assets
+                    },
+                    now=1120.0,
+                )
+
+        rows = self.r.ledger.precision13_rows()
+        self.assertEqual(len(rows), 7)
+        self.assertEqual({row["decision"] for row in rows}, {"YES"})
+        self.assertEqual({row["policy_version"] for row in rows}, {
+            "q15-13m-selective-precision-v2",
+        })
+
+        # Replaying the same complete window remains insert-only.
+        self.r._record_precision13_shadow(
+            self.r.ledger.captures_for_window("ir-test", "13M", 2), 2, 1120.0
+        )
+        self.assertEqual(len(self.r.ledger.precision13_rows()), 7)
+
+        self.r.resolve_settled(
+            [{"ticker": f"KX{asset}-P13", "result": "YES"} for asset in assets],
+            now=2000.0,
+        )
+        resolved = self.r.ledger.precision13_rows()
+        self.assertEqual({row["correct"] for row in resolved}, {1})
+
     def test_13m_staggered_crossing_defers_until_every_mapped_asset_crosses(self):
         rec = _DriftRecorder()
         analyses = {

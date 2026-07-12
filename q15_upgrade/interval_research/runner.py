@@ -425,6 +425,7 @@ class IntervalResearchRunner:
                 self._pending_drift_13m.pop(wk, None)
                 self._drift_13m_done[wk] = now
                 continue
+            self._record_precision13_shadow(slate, wk, pending.fallback_at)
             if rec is None:
                 continue
             close_time = self._slate_close_time(slate, pending.fallback_close)
@@ -447,6 +448,74 @@ class IntervalResearchRunner:
             )
             self._pending_drift_13m.pop(wk, None)
             self._drift_13m_done[wk] = now
+
+    def _record_precision13_shadow(
+        self, slate: Sequence[Mapping[str, Any]], wk: int, now: float
+    ) -> None:
+        """Persist the selective policy's prospective output; never deliver it."""
+        try:
+            from .precision13 import (
+                NOTIFICATION_RECORD_KIND,
+                POLICY_VERSION,
+                evaluate_slate,
+                sizing_components,
+            )
+
+            prior_rows = self.ledger.captures_for_window(
+                self.config.model_version, "15M", wk
+            )
+            prior = {
+                str(row.get("ticker") or ""): row
+                for row in prior_rows
+                if row.get("ticker")
+            }
+            captures = {str(row.get("ticker") or ""): row for row in slate}
+            for decision in evaluate_slate(slate, prior):
+                source = captures.get(str(decision.get("ticker") or ""), {})
+                sizing = sizing_components(
+                    side=str(decision.get("decision") or ""),
+                    probability_13m=decision.get("probability_13m"),
+                    entry_ask_cents=source.get("entry_ask_cents"),
+                    spread_cents=source.get("spread_cents"),
+                    captured_at=source.get("captured_at", now),
+                    distance_from_strike=source.get("distance_from_strike"),
+                )
+                precision_row = {
+                    **decision,
+                    **sizing,
+                    "policy_version": POLICY_VERSION,
+                    "model_version": self.config.model_version,
+                    "window_key": wk,
+                    "created_at": source.get("captured_at", now),
+                    "close_time": source.get("close_time"),
+                    "entry_ask_cents": source.get("entry_ask_cents"),
+                    "spread_cents": source.get("spread_cents"),
+                    "distance_from_strike": source.get("distance_from_strike"),
+                }
+                self.ledger.record_precision13(precision_row)
+                if decision.get("decision") not in {"YES", "NO"}:
+                    continue
+                try:
+                    from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+                    strategy_bots_runtime.record_precision13_row({
+                        **precision_row,
+                        "record_kind": NOTIFICATION_RECORD_KIND,
+                        "delivery_status": "PAPER_PRECISION_13M_SIZED",
+                        "asset": source.get("asset"),
+                        "ticker": source.get("ticker"),
+                        "interval": "13M",
+                        "predicted_side": decision.get("decision"),
+                        "calibrated_yes_probability": decision.get("probability_13m"),
+                        "yes_bid_cents": source.get("yes_bid_cents"),
+                        "yes_ask_cents": source.get("yes_ask_cents"),
+                        "depth_contracts": source.get("depth_contracts"),
+                        "flip_probability": source.get("flip_probability"),
+                    })
+                except Exception:  # noqa: BLE001 - V3 delivery cannot block capture
+                    logger.debug("precision13 V3 notification failed (ignored)", exc_info=True)
+        except Exception:  # noqa: BLE001 - shadow research must not break the live loop
+            logger.debug("precision13 shadow record failed (ignored)", exc_info=True)
 
     def _alert_drift_picks(
         self, rec: Any, wk: int, now: float, *, replay_all: bool = False
@@ -1069,6 +1138,14 @@ class IntervalResearchRunner:
                         "resolved_at": now,
                     })
             strategy_bots_runtime.reconcile_drift_settlements(current_events)
+            for event in current_events:
+                strategy_bots_runtime.resolve(
+                    source_system="precision13_shadow",
+                    source_model_version=str(event["model_version"]),
+                    ticker=str(event["ticker"]),
+                    official_result=str(event["official_result"]),
+                    now=event.get("resolved_at"),
+                )
             if (
                 not self._drift_strategy_reconciled
                 and rec is not None

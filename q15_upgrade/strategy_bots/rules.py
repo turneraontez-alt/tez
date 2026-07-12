@@ -27,6 +27,7 @@ BOT_THIRTEEN_M_SNIPER = "thirteen_m_sniper"
 BOT_WARN_FLIP = "warn_flip_entry"
 BOT_FAV_10M = "fav_10m"
 BOT_TOP_PICK_13M = "top_pick_13m"
+BOT_PRECISION_13M = "precision_13m_sized"
 BOT_DRIFT_13M = "drift_13m"
 BOT_DRIFT_FLOW_SPREAD = "drift_flow_spread_13m"
 BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4 = "drift_flow_spread_shadow_spread4"
@@ -658,6 +659,66 @@ def _top_pick_13m_enabled() -> bool:
 
 
 TOP_PICK_13M_PRIOR_ACCURACY = 0.744  # backtest: top-1 by market extremity, n=970 windows
+
+
+def _precision_13m_enabled() -> bool:
+    return _env_bool("Q15_V3_PRECISION_13M", True)
+
+
+def precision13_sized_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Dedicated V3 card for an already-qualified precision shadow decision."""
+    if not _precision_13m_enabled():
+        return None
+    if str(row.get("record_kind") or "") != "PRECISION_13M_SIZED_V2":
+        return None
+    if str(row.get("policy_version") or "") != "q15-13m-selective-precision-v2":
+        return None
+    side = source_side(row)
+    ask = _entry_ask(row)
+    size_weight = _num(row.get("recommended_size_weight"))
+    if side not in {"YES", "NO"} or ask is None or size_weight is None:
+        return None
+    profile = {
+        "paper_only": True,
+        "rule_version": "q15-13m-selective-precision-v2-sized-v1",
+        "policy_version": row.get("policy_version"),
+        "probability_13m": _num(row.get("probability_13m")),
+        "probability_15m": _num(row.get("probability_15m")),
+        "probability_change": _num(row.get("probability_change")),
+        "window_mean_probability": _num(row.get("window_mean_probability")),
+        "yes_breadth": row.get("yes_breadth"),
+        "btc_probability": _num(row.get("btc_probability")),
+        "side_probability": _num(row.get("side_probability")),
+        "entry_ask_cents": ask,
+        "spread_cents": _num(row.get("spread_cents")),
+        "distance_from_strike": _num(row.get("distance_from_strike")),
+        "near_strike_quality": bool(row.get("near_strike_quality")),
+        "disagreement": _num(row.get("disagreement")),
+        "disagreement_weight": _num(row.get("disagreement_weight")),
+        "spread_weight": _num(row.get("spread_weight")),
+        "session_weight": _num(row.get("session_weight")),
+        "stack_weight": _num(row.get("stack_weight")),
+        "recommended_size_weight": size_weight,
+        "historical_accuracy": 0.8604,
+        "latest_50_accuracy": 0.9130,
+        "historical_coverage": 0.0922,
+        "counts_as_independent_pick": True,
+        "exposure_class": "PRECISION_13M_BASE_PICK",
+    }
+    reason = (
+        "SYNCHRONIZED_YES_REGIME"
+        if side == "YES"
+        else "CONFIRMED_NO_EXPANSION"
+    )
+    return BotDecision(
+        BOT_PRECISION_13M,
+        ACCEPTED,
+        ("V3_PRECISION_13M_SIZED", reason),
+        threshold_profile={**profile, "passed": True},
+        side_override=side,
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
 
 
 # -- Drift pick 13M: the Drift Shadow base-book pick as a paper card ----------

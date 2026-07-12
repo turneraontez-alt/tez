@@ -93,6 +93,41 @@ CREATE TABLE IF NOT EXISTS interval_captures (
 );
 CREATE INDEX IF NOT EXISTS idx_ir_resolved ON interval_captures(interval, official_result);
 CREATE INDEX IF NOT EXISTS idx_ir_ticker ON interval_captures(ticker);
+
+CREATE TABLE IF NOT EXISTS precision13_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_version TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    asset TEXT,
+    window_key INTEGER NOT NULL,
+    created_at REAL,
+    close_time REAL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    probability_13m REAL,
+    probability_15m REAL,
+    probability_change REAL,
+    window_mean_probability REAL,
+    yes_breadth INTEGER,
+    btc_probability REAL,
+    entry_ask_cents REAL,
+    spread_cents REAL,
+    distance_from_strike REAL,
+    disagreement REAL,
+    disagreement_weight REAL,
+    spread_weight REAL,
+    session_weight REAL,
+    stack_weight REAL,
+    recommended_size_weight REAL,
+    near_strike_quality INTEGER,
+    official_result TEXT,
+    resolved_at REAL,
+    correct INTEGER,
+    UNIQUE(policy_version, model_version, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_precision13_resolved
+ON precision13_decisions(policy_version, official_result);
 """
 
 _CAPTURE_COLUMNS = (
@@ -177,6 +212,26 @@ class IntervalResearchLedger:
         ):
             if name not in existing:
                 conn.execute(f"ALTER TABLE interval_captures ADD COLUMN {name} {decl}")
+        precision_existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(precision13_decisions)")
+        }
+        for name, decl in (
+            ("entry_ask_cents", "REAL"),
+            ("spread_cents", "REAL"),
+            ("distance_from_strike", "REAL"),
+            ("disagreement", "REAL"),
+            ("disagreement_weight", "REAL"),
+            ("spread_weight", "REAL"),
+            ("session_weight", "REAL"),
+            ("stack_weight", "REAL"),
+            ("recommended_size_weight", "REAL"),
+            ("near_strike_quality", "INTEGER"),
+        ):
+            if name not in precision_existing:
+                conn.execute(
+                    f"ALTER TABLE precision13_decisions ADD COLUMN {name} {decl}"
+                )
 
     @property
     def available(self) -> bool:
@@ -266,6 +321,43 @@ class IntervalResearchLedger:
             conn.commit()
             return cur.rowcount > 0
 
+    def record_precision13(self, row: Mapping[str, Any]) -> bool:
+        """Insert one shadow-only precision decision, idempotently."""
+        if not self._available:
+            return False
+        columns = (
+            "policy_version", "model_version", "ticker", "asset", "window_key",
+            "created_at", "close_time", "decision", "reason",
+            "probability_13m", "probability_15m", "probability_change",
+            "window_mean_probability", "yes_breadth", "btc_probability",
+            "entry_ask_cents", "spread_cents", "distance_from_strike",
+            "disagreement", "disagreement_weight", "spread_weight",
+            "session_weight", "stack_weight", "recommended_size_weight",
+            "near_strike_quality",
+        )
+        values = [row.get(column) for column in columns]
+        with self._lock, closing(self._connect()) as conn:
+            cursor = conn.execute(
+                f"INSERT OR IGNORE INTO precision13_decisions "
+                f"({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                values,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def precision13_rows(self, policy_version: str | None = None) -> list[dict[str, Any]]:
+        """Read the prospective precision shadow ledger for reporting/tests."""
+        if not self._available:
+            return []
+        query = "SELECT * FROM precision13_decisions"
+        args: list[Any] = []
+        if policy_version is not None:
+            query += " WHERE policy_version=?"
+            args.append(policy_version)
+        query += " ORDER BY window_key, asset"
+        with self._lock, closing(self._connect()) as conn:
+            return [dict(row) for row in conn.execute(query, args).fetchall()]
+
     def resolve(self, model_version: str, ticker: str, official_result: str,
                 resolved_at: float) -> int:
         """Attach the settled outcome to every captured row for this contract.
@@ -299,6 +391,12 @@ class IntervalResearchLedger:
                     (official_result, resolved_at, correct, pnl, r["id"]),
                 )
                 n += 1
+            conn.execute(
+                "UPDATE precision13_decisions SET official_result=?, resolved_at=?, "
+                "correct=CASE WHEN decision IN ('YES','NO') THEN decision=? ELSE NULL END "
+                "WHERE model_version=? AND ticker=? AND official_result IS NULL",
+                (official_result, resolved_at, official_result, model_version, str(ticker)),
+            )
             conn.commit()
             return n
 

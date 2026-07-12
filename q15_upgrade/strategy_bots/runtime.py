@@ -38,6 +38,7 @@ from .rules import (
     BOT_DRIFT_NO_EXPANSION,
     BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
+    BOT_PRECISION_13M,
     BOT_TOP_PICK_13M,
     BOT_WARN_FLIP,
     REJECTED,
@@ -55,6 +56,7 @@ from .rules import (
     drift_latequal_decision,
     drift_no_expansion_decision,
     drift_no_mirror_decision,
+    precision13_sized_decision,
     source_side,
     top_pick_13m_decision,
     warn_flip_entry_decision,
@@ -303,6 +305,10 @@ def fav_10m_notify_enabled() -> bool:
 
 def top_pick_notify_enabled() -> bool:
     return _bool("Q15_V3_TOP_PICK_13M_NOTIFY", True)
+
+
+def precision13_notify_enabled() -> bool:
+    return _bool("Q15_V3_PRECISION_13M_NOTIFY", True)
 
 
 def drift_notify_enabled() -> bool:
@@ -1171,6 +1177,57 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         return row_id
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 drift-pick record failed (ignored)", exc_info=True)
+        return None
+
+
+def record_precision13_row(row: Mapping[str, Any]) -> int | None:
+    """Record and notify one independently deduplicated precision 13M signal."""
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return None
+        wk = row.get("window_key")
+        ticker = str(row.get("ticker") or "")
+        if wk is None or not ticker:
+            return None
+        decision = precision13_sized_decision(row)
+        if decision is None:
+            return None
+        row_id, recorded = _stored_decision(
+            ledger, decision, row, source_system="precision13_shadow",
+        )
+        if (
+            recorded is None
+            or decision.decision_status != ACCEPTED
+            or not precision13_notify_enabled()
+        ):
+            return row_id
+        delivery_key = (
+            f"{STRATEGY_VERSION}:precision13:{BOT_PRECISION_13M}:"
+            f"row:{int(wk)}:{ticker}"
+        )
+        if not _notification_needs_delivery(
+            ledger, recorded, idempotency_key=delivery_key,
+        ):
+            return row_id
+        result = get_telegram().send(
+            build_v3_alert(_with_feed_degraded_stamp(recorded))
+        )
+        if result.get("delivered"):
+            status, message_id = "SENT", result.get("message_id")
+        elif result.get("muted"):
+            status, message_id = "MUTED", None
+        else:
+            status, message_id = "DELIVERY_FAILED", None
+        ledger.mark_notification(
+            int(recorded["id"]),
+            status=status,
+            message_id=message_id,
+            error=result.get("error"),
+        )
+        return row_id
+    except Exception:  # noqa: BLE001 - precision delivery cannot break capture
+        logger.warning("v3 precision13 notification failed (ignored)", exc_info=True)
         return None
 
 

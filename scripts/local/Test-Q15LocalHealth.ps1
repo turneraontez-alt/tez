@@ -1,4 +1,7 @@
-param([string]$EnvFile = "")
+param(
+    [string]$EnvFile = "",
+    [int]$ScoreboardTimeoutSec = 60
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "Q15Local.psm1") -Force
@@ -13,7 +16,8 @@ $urls = @(
 )
 foreach ($url in $urls) {
     try {
-        $res = Invoke-RestMethod -Uri $url -TimeoutSec 12
+        $timeoutSec = if ($url -like "*/api/health") { 12 } else { $ScoreboardTimeoutSec }
+        $res = Invoke-RestMethod -Uri $url -TimeoutSec $timeoutSec
         Write-Host "OK $url"
         if ($url -like "*/api/health") {
             Write-Host "  status=$($res.status) persistence=$($res.persistence) mode=$($res.mode)"

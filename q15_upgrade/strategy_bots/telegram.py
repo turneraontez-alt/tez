@@ -371,6 +371,69 @@ def _is_top_pick(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "top_pick_13m"
 
 
+def _is_precision13(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "precision_13m_sized"
+
+
+def build_precision13_alert(row: Mapping[str, Any]) -> str:
+    """Independent precision card; never reuses or replaces a Drift card."""
+    thresholds = _thresholds(row)
+    asset = str(row.get("asset") or "")
+    side = str(row.get("side") or "").upper()
+    ask = row.get("entry_ask_cents")
+    size = thresholds.get("recommended_size_weight")
+    probability = thresholds.get("probability_13m")
+    probability_15m = thresholds.get("probability_15m")
+    probability_change = thresholds.get("probability_change")
+    window_mean = thresholds.get("window_mean_probability")
+    breadth = thresholds.get("yes_breadth")
+    btc_probability = thresholds.get("btc_probability")
+    disagreement = thresholds.get("disagreement")
+    near = bool(thresholds.get("near_strike_quality"))
+    try:
+        change_text = f"{float(probability_change) * 100.0:+.1f}pp"
+    except (TypeError, ValueError):
+        change_text = "n/a"
+    try:
+        gross_edge = float(thresholds.get("historical_accuracy")) * 100.0 - float(ask)
+        edge_text = f"{gross_edge:+.1f}pp"
+    except (TypeError, ValueError):
+        edge_text = "n/a"
+    header = f"<b>V3 PRECISION 13M | {html.escape(asset)} {html.escape(side)}</b>"
+    body = [
+        "PAPER SIGNAL - separate precision book; existing Drift alerts are unchanged.",
+        "",
+        f"WATCH {side} @ {_plain_whole(ask)}c | gross break-even {_plain_whole(ask)}%",
+        (
+            f"Probability 15M/13M: {_drift_fraction(probability_15m)} / "
+            f"{_drift_fraction(probability)} ({change_text})"
+        ),
+        (
+            f"Window mean {_drift_fraction(window_mean)} | YES breadth "
+            f"{_drift_plain(breadth, digits=0)}/7 | BTC {_drift_fraction(btc_probability)}"
+        ),
+        (
+            f"Sizing: {_drift_plain(size, 'x')} = disagreement "
+            f"{_drift_plain(thresholds.get('disagreement_weight'), 'x')} x stack "
+            f"{_drift_plain(thresholds.get('stack_weight'), 'x')}"
+        ),
+        (
+            f"Components: spread {_drift_plain(thresholds.get('spread_weight'), 'x')} | "
+            f"session {_drift_plain(thresholds.get('session_weight'), 'x')} | "
+            f"disagreement {_drift_signed(disagreement)}"
+        ),
+        f"Near-strike quality: {'YES (tag only)' if near else 'NO'}",
+        (
+            f"Research tape: {_pct(thresholds.get('historical_accuracy'))} accuracy | "
+            f"latest-50 {_pct(thresholds.get('latest_50_accuracy'))} | "
+            f"gross accuracy-minus-entry {edge_text}"
+        ),
+        f"Ticker: {str(row.get('ticker') or '')}",
+        "Sizing is advisory research weight only | no order placed",
+    ]
+    return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
+
+
 def build_top_pick_alert(row: Mapping[str, Any]) -> str:
     """Best-trade card — the one pick per 15m window, ranked by measured profit.
 
@@ -1100,6 +1163,8 @@ def build_v3_alert(row: Mapping[str, Any]) -> str:
         return build_fav_10m_alert(row)
     if _is_top_pick(row):
         return build_top_pick_alert(row)
+    if _is_precision13(row):
+        return build_precision13_alert(row)
     if _is_drift_addon(row):
         return build_drift_addon_alert(row)
     if _is_drift_latequal(row):
