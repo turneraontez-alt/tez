@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS marketlead_observations (
     rti_proxy_price REAL,
     proxy_gap_bps REAL,
     proxy_lead_side_bps REAL,
+    proxy_distance_side_bps REAL,
+    rti_proxy_source_count INTEGER,
+    rti_proxy_sources_json TEXT,
     venue_source_count INTEGER,
     venue_dispersion_bps REAL,
     venue_impulse REAL,
@@ -47,9 +50,19 @@ CREATE TABLE IF NOT EXISTS marketlead_observations (
     kalshi_pressure_yes_30s REAL,
     kalshi_trade_imbalance_yes_15s REAL,
     kalshi_pressure_side REAL,
+    paper_limit_cents REAL,
+    paper_queue_ahead_contracts REAL,
+    paper_limit_touched INTEGER NOT NULL DEFAULT 0,
+    paper_limit_touch_at REAL,
+    paper_touch_price_cents REAL,
+    execution_status TEXT NOT NULL DEFAULT 'WAITING_TOUCH',
+    markout_side_5s_cents REAL,
+    markout_side_15s_cents REAL,
+    markout_side_30s_cents REAL,
     joint_alignment INTEGER NOT NULL DEFAULT 0,
     evidence_status TEXT NOT NULL,
     missing_reasons_json TEXT NOT NULL,
+    limitations_json TEXT NOT NULL DEFAULT '[]',
     features_json TEXT NOT NULL,
     build_sha TEXT,
     config_hash TEXT,
@@ -71,7 +84,9 @@ _COLUMNS = (
     "observed_at", "close_time", "seconds_remaining", "predicted_side",
     "entry_ask_cents", "spread_cents", "spot_price", "strike_price",
     "official_index_price", "rti_proxy_price", "proxy_gap_bps",
-    "proxy_lead_side_bps", "venue_source_count", "venue_dispersion_bps",
+    "proxy_lead_side_bps", "proxy_distance_side_bps", "rti_proxy_source_count",
+    "rti_proxy_sources_json",
+    "venue_source_count", "venue_dispersion_bps",
     "venue_impulse", "venue_impulse_side", "venue_aligned_fraction",
     "venue_leader", "venue_leader_persistence", "kalshi_available",
     "kalshi_book_age_seconds", "kalshi_event_age_seconds",
@@ -79,8 +94,11 @@ _COLUMNS = (
     "kalshi_microprice_yes_cents", "kalshi_microprice_edge_yes_cents",
     "kalshi_pressure_yes_5s", "kalshi_pressure_yes_15s",
     "kalshi_pressure_yes_30s", "kalshi_trade_imbalance_yes_15s",
-    "kalshi_pressure_side", "joint_alignment", "evidence_status",
-    "missing_reasons_json", "features_json", "build_sha", "config_hash",
+    "kalshi_pressure_side", "paper_limit_cents", "paper_queue_ahead_contracts",
+    "paper_limit_touched", "paper_limit_touch_at", "paper_touch_price_cents",
+    "execution_status",
+    "joint_alignment", "evidence_status",
+    "missing_reasons_json", "limitations_json", "features_json", "build_sha", "config_hash",
     "feature_schema_version",
 )
 
@@ -96,6 +114,7 @@ class MarketLeadLedger:
                 os.makedirs(self.path.parent, exist_ok=True)
             with self._connect() as connection:
                 connection.executescript(_SCHEMA)
+                self._migrate(connection)
                 connection.commit()
             self._available = True
         except sqlite3.Error as exc:
@@ -107,6 +126,34 @@ class MarketLeadLedger:
         connection.execute("PRAGMA busy_timeout=3000")
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        existing = {
+            str(row[1]) for row in connection.execute(
+                "PRAGMA table_info(marketlead_observations)"
+            )
+        }
+        additions = {
+            "rti_proxy_source_count": "INTEGER",
+            "rti_proxy_sources_json": "TEXT",
+            "proxy_distance_side_bps": "REAL",
+            "limitations_json": "TEXT NOT NULL DEFAULT '[]'",
+            "paper_limit_cents": "REAL",
+            "paper_queue_ahead_contracts": "REAL",
+            "paper_limit_touched": "INTEGER NOT NULL DEFAULT 0",
+            "paper_limit_touch_at": "REAL",
+            "paper_touch_price_cents": "REAL",
+            "execution_status": "TEXT NOT NULL DEFAULT 'WAITING_TOUCH'",
+            "markout_side_5s_cents": "REAL",
+            "markout_side_15s_cents": "REAL",
+            "markout_side_30s_cents": "REAL",
+        }
+        for column, declaration in additions.items():
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE marketlead_observations ADD COLUMN {column} {declaration}"
+                )
 
     @property
     def available(self) -> bool:
@@ -159,6 +206,83 @@ class MarketLeadLedger:
         except sqlite3.Error as exc:
             self._last_error = f"marketlead resolve failed: {exc}"
             return 0
+
+    def record_touch(
+        self,
+        system_version: str,
+        ticker: str,
+        *,
+        touched_at: float,
+        price_cents: float,
+    ) -> bool:
+        if not self._available:
+            return False
+        try:
+            with self._lock, self._connect() as connection:
+                cursor = connection.execute(
+                    "UPDATE marketlead_observations SET paper_limit_touched=1,"
+                    "paper_limit_touch_at=?,paper_touch_price_cents=?,execution_status='TOUCHED' "
+                    "WHERE system_version=? AND ticker=? AND paper_limit_touched=0",
+                    (touched_at, price_cents, system_version, ticker),
+                )
+                connection.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            self._last_error = f"marketlead touch failed: {exc}"
+            return False
+
+    def set_execution_status(
+        self, system_version: str, ticker: str, status: str
+    ) -> bool:
+        normalized = str(status or "").upper()
+        if normalized not in {"WAITING_TOUCH", "TOUCHED", "COMPLETE", "EXPIRED"}:
+            return False
+        try:
+            with self._lock, self._connect() as connection:
+                cursor = connection.execute(
+                    "UPDATE marketlead_observations SET execution_status=? "
+                    "WHERE system_version=? AND ticker=?",
+                    (normalized, system_version, ticker),
+                )
+                connection.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            self._last_error = f"marketlead execution status failed: {exc}"
+            return False
+
+    def record_markout(
+        self,
+        system_version: str,
+        ticker: str,
+        horizon_seconds: int,
+        markout_cents: float,
+    ) -> bool:
+        if horizon_seconds not in {5, 15, 30} or not self._available:
+            return False
+        column = f"markout_side_{horizon_seconds}s_cents"
+        try:
+            with self._lock, self._connect() as connection:
+                cursor = connection.execute(
+                    f"UPDATE marketlead_observations SET {column}=? "
+                    f"WHERE system_version=? AND ticker=? AND {column} IS NULL",
+                    (markout_cents, system_version, ticker),
+                )
+                connection.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            self._last_error = f"marketlead markout failed: {exc}"
+            return False
+
+    def pending_execution_rows(self) -> list[dict[str, Any]]:
+        if not self._available:
+            return []
+        with self._lock, self._connect() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT ticker,predicted_side,observed_at,paper_limit_cents,"
+                "paper_limit_touched,paper_limit_touch_at,paper_touch_price_cents,"
+                "markout_side_5s_cents,markout_side_15s_cents,markout_side_30s_cents "
+                "FROM marketlead_observations WHERE execution_status IN ('WAITING_TOUCH','TOUCHED')"
+            )]
 
     def rows(self) -> list[dict[str, Any]]:
         if not self._available:

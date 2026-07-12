@@ -54,6 +54,11 @@ class MarketLeadConfig:
     min_proxy_sources: int = field(
         default_factory=lambda: _int("Q15_MARKETLEAD_MIN_PROXY_SOURCES", 2)
     )
+    proxy_sources_csv: str = field(
+        default_factory=lambda: os.environ.get(
+            "Q15_MARKETLEAD_PROXY_SOURCES", "coinbase,kraken"
+        )
+    )
     source_stale_seconds: float = field(
         default_factory=lambda: _float("Q15_MARKETLEAD_SOURCE_STALE_SECONDS", 20.0)
     )
@@ -63,6 +68,17 @@ class MarketLeadConfig:
     history_seconds: float = field(
         default_factory=lambda: _float("Q15_MARKETLEAD_HISTORY_SECONDS", 300.0)
     )
+    paper_limit_cents: float = field(
+        default_factory=lambda: _float("Q15_MARKETLEAD_PAPER_LIMIT_CENTS", 69.0)
+    )
+
+    @property
+    def proxy_sources(self) -> frozenset[str]:
+        return frozenset(
+            value.strip().lower()
+            for value in self.proxy_sources_csv.split(",")
+            if value.strip()
+        )
 
     @classmethod
     def from_env(cls) -> "MarketLeadConfig":

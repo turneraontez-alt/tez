@@ -30,6 +30,21 @@ class _Candidate:
     row: dict[str, Any]
 
 
+@dataclass
+class _PendingExecution:
+    ticker: str
+    side: str
+    signal_at: float
+    limit_cents: float
+    touch_at: float | None = None
+    touch_price_cents: float | None = None
+    completed: set[int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.completed is None:
+            self.completed = set()
+
+
 class MarketLeadRunner:
     """Collect prospective 13M evidence without making a trade decision."""
 
@@ -45,14 +60,33 @@ class MarketLeadRunner:
         self.engine = MarketLeadFeatureEngine(self.config)
         self._lock = threading.Lock()
         self._last: dict[str, _Candidate] = {}
+        self._pending: dict[str, _PendingExecution] = {}
         self._microstructure_provider = microstructure_provider
         self._index_provider = index_provider
+        self._restore_pending()
 
-    @staticmethod
-    def _default_microstructure(ticker: str, now: float) -> Mapping[str, Any]:
+    def _restore_pending(self) -> None:
+        for row in self.ledger.pending_execution_rows():
+            completed = {
+                horizon for horizon in (5, 15, 30)
+                if row.get(f"markout_side_{horizon}s_cents") is not None
+            }
+            self._pending[str(row["ticker"])] = _PendingExecution(
+                ticker=str(row["ticker"]),
+                side=str(row.get("predicted_side") or "").upper(),
+                signal_at=float(row.get("observed_at") or 0.0),
+                limit_cents=float(row.get("paper_limit_cents") or self.config.paper_limit_cents),
+                touch_at=_num(row.get("paper_limit_touch_at")),
+                touch_price_cents=_num(row.get("paper_touch_price_cents")),
+                completed=completed,
+            )
+
+    def _default_microstructure(self, ticker: str, now: float) -> Mapping[str, Any]:
         from ..ws_client import get_feed
 
-        return get_feed().get_microstructure(ticker, now=now)
+        return get_feed().get_microstructure(
+            ticker, now=now, paper_limit_cents=self.config.paper_limit_cents
+        )
 
     @staticmethod
     def _default_index(asset: str, spot: float | None, now: float) -> Mapping[str, Any]:
@@ -78,6 +112,63 @@ class MarketLeadRunner:
                 "index_missing_reason": f"provider_error:{type(exc).__name__}",
             }
         return official, kalshi
+
+    @staticmethod
+    def _side_quote(kalshi: Mapping[str, Any], side: str) -> tuple[float | None, float | None]:
+        yes_ask = _num(kalshi.get("yes_ask_cents"))
+        no_ask = _num(kalshi.get("no_ask_cents"))
+        yes_mid = _num(kalshi.get("yes_mid_cents"))
+        if side == "YES":
+            return yes_ask, yes_mid
+        return no_ask, None if yes_mid is None else 100.0 - yes_mid
+
+    def _track_execution(self, ticker: str, kalshi: Mapping[str, Any], now: float) -> None:
+        pending = self._pending.get(ticker)
+        if pending is None or not kalshi.get("available"):
+            return
+        ask, side_mid = self._side_quote(kalshi, pending.side)
+        if pending.touch_at is None and ask is not None and ask <= pending.limit_cents:
+            if self.ledger.record_touch(
+                self.config.system_version,
+                ticker,
+                touched_at=now,
+                price_cents=ask,
+            ):
+                pending.touch_at = now
+                pending.touch_price_cents = ask
+        if pending.touch_at is not None and pending.touch_price_cents is not None:
+            elapsed = now - pending.touch_at
+            for horizon in (5, 15, 30):
+                if horizon in pending.completed or elapsed < horizon or side_mid is None:
+                    continue
+                if self.ledger.record_markout(
+                    self.config.system_version,
+                    ticker,
+                    horizon,
+                    side_mid - pending.touch_price_cents,
+                ):
+                    pending.completed.add(horizon)
+            if pending.completed == {5, 15, 30}:
+                self.ledger.set_execution_status(
+                    self.config.system_version, ticker, "COMPLETE"
+                )
+                self._pending.pop(ticker, None)
+        elif now - pending.signal_at > 60.0:
+            self.ledger.set_execution_status(
+                self.config.system_version, ticker, "EXPIRED"
+            )
+            self._pending.pop(ticker, None)
+
+    def _expire_stale_pending(self, now: float) -> None:
+        for ticker, pending in list(self._pending.items()):
+            basis = pending.touch_at if pending.touch_at is not None else pending.signal_at
+            maximum_age = 120.0 if pending.touch_at is not None else 60.0
+            if now - basis <= maximum_age:
+                continue
+            self.ledger.set_execution_status(
+                self.config.system_version, ticker, "EXPIRED"
+            )
+            self._pending.pop(ticker, None)
 
     def _select(self, asset: str, current: _Candidate) -> _Candidate | None:
         previous = self._last.get(asset)
@@ -116,6 +207,7 @@ class MarketLeadRunner:
             return
         try:
             with self._lock:
+                self._expire_stale_pending(now)
                 for asset, canonical in (canonicals or {}).items():
                     ticker = str(getattr(canonical, "ticker", "") or "")
                     seconds = _num(getattr(canonical, "seconds_remaining", None))
@@ -140,6 +232,7 @@ class MarketLeadRunner:
                     )
                     if near_mark:
                         official, kalshi = self._providers(str(asset), ticker, spot, now)
+                        self._track_execution(ticker, kalshi, now)
                     else:
                         official = {"index_px": None, "index_status": "not_sampled"}
                         kalshi = {"available": False, "reason": "not_sampled"}
@@ -156,7 +249,20 @@ class MarketLeadRunner:
                         continue
                     selected = self._select(str(asset), candidate)
                     if selected is not None:
-                        self.ledger.record(selected.row)
+                        if self.ledger.record(selected.row):
+                            touched = bool(selected.row.get("paper_limit_touched"))
+                            self._pending[ticker] = _PendingExecution(
+                                ticker=ticker,
+                                side=str(selected.row.get("predicted_side") or "").upper(),
+                                signal_at=float(selected.row["observed_at"]),
+                                limit_cents=float(selected.row.get("paper_limit_cents") or self.config.paper_limit_cents),
+                                touch_at=(
+                                    _num(selected.row.get("paper_limit_touch_at")) if touched else None
+                                ),
+                                touch_price_cents=(
+                                    _num(selected.row.get("paper_touch_price_cents")) if touched else None
+                                ),
+                            )
         except Exception:
             logger.debug("marketlead observe failed (ignored)", exc_info=True)
 

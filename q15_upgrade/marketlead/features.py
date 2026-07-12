@@ -123,8 +123,16 @@ class MarketLeadFeatureEngine:
             bool(source_times)
             and max(source_times) - min(source_times) <= self.config.sync_tolerance_seconds
         )
-        proxy = self._weighted_proxy(sources) if synchronized else None
-        prices = [float(row["price"]) for row in sources]
+        proxy_sources = [
+            row for row in sources if str(row["name"]).lower() in self.config.proxy_sources
+        ]
+        proxy_times = [float(row["timestamp"]) for row in proxy_sources]
+        proxy_synchronized = (
+            bool(proxy_times)
+            and max(proxy_times) - min(proxy_times) <= self.config.sync_tolerance_seconds
+        )
+        proxy = self._weighted_proxy(proxy_sources) if proxy_synchronized else None
+        prices = [float(row["price"]) for row in proxy_sources]
         dispersion_bps = None
         if proxy is not None and proxy > 0 and len(prices) >= 2:
             dispersion_bps = (max(prices) - min(prices)) / proxy * 10_000.0
@@ -187,6 +195,11 @@ class MarketLeadFeatureEngine:
         proxy_lead_side_bps = (
             None if proxy_gap_bps is None else proxy_gap_bps * orientation * side_sign
         )
+        strike_price = _num(getattr(canonical, "threshold", None))
+        proxy_distance_side_bps = (
+            None if proxy is None or strike_price is None or strike_price <= 0
+            else math.log(proxy / strike_price) * 10_000.0 * orientation * side_sign
+        )
         venue_impulse_side = _side_value(
             None if venue_impulse is None else venue_impulse * orientation,
             predicted_side,
@@ -211,20 +224,27 @@ class MarketLeadFeatureEngine:
             None if kalshi_pressure_yes is None else kalshi_pressure_yes * orientation,
             predicted_side,
         )
+        selected_ask = _num(
+            kalshi_row.get("yes_ask_cents" if predicted_side == "YES" else "no_ask_cents")
+        )
+        touched = bool(
+            selected_ask is not None and selected_ask <= self.config.paper_limit_cents
+        )
 
         missing: list[str] = []
-        if proxy is None or len(sources) < self.config.min_proxy_sources:
+        if proxy is None or len(proxy_sources) < self.config.min_proxy_sources:
             missing.append("RTI_PROXY_INCOMPLETE")
         if venue_impulse is None or not synchronized:
             missing.append("VENUE_IMPULSE_INCOMPLETE")
         if not kalshi_available or kalshi_pressure_side is None:
             missing.append("KALSHI_EVENTS_INCOMPLETE")
+        limitations: list[str] = []
         if index_price is None:
-            missing.append("OFFICIAL_INDEX_MISSING")
+            limitations.append("OFFICIAL_INDEX_GAP_UNAVAILABLE")
         evidence_status = "READY" if not missing else "PARTIAL"
         joint_alignment = bool(
             evidence_status == "READY"
-            and proxy_lead_side_bps is not None and proxy_lead_side_bps > 0
+            and proxy_distance_side_bps is not None and proxy_distance_side_bps > 0
             and venue_impulse_side is not None and venue_impulse_side > 0
             and kalshi_pressure_side is not None and kalshi_pressure_side > 0
         )
@@ -234,9 +254,11 @@ class MarketLeadFeatureEngine:
                 "official_index": index_price,
                 "gap_bps": proxy_gap_bps,
                 "lead_side_bps": proxy_lead_side_bps,
+                "distance_side_bps": proxy_distance_side_bps,
                 "dispersion_bps": dispersion_bps,
-                "synchronized": synchronized,
-                "sources": venue_rows,
+                "synchronized": proxy_synchronized,
+                "configured_sources": sorted(self.config.proxy_sources),
+                "used_sources": [row["name"] for row in proxy_sources],
             },
             "venue": {
                 "impulse": venue_impulse,
@@ -244,6 +266,7 @@ class MarketLeadFeatureEngine:
                 "aligned_fraction": aligned_fraction,
                 "leader": leader,
                 "leader_persistence": leader_persistence,
+                "sources": venue_rows,
             },
             "kalshi": kalshi_row,
         }
@@ -265,6 +288,11 @@ class MarketLeadFeatureEngine:
             "rti_proxy_price": proxy,
             "proxy_gap_bps": proxy_gap_bps,
             "proxy_lead_side_bps": proxy_lead_side_bps,
+            "proxy_distance_side_bps": proxy_distance_side_bps,
+            "rti_proxy_source_count": len(proxy_sources),
+            "rti_proxy_sources_json": json.dumps(
+                [row["name"] for row in proxy_sources], separators=(",", ":")
+            ),
             "venue_source_count": len(sources),
             "venue_dispersion_bps": dispersion_bps,
             "venue_impulse": venue_impulse,
@@ -284,17 +312,32 @@ class MarketLeadFeatureEngine:
             "kalshi_pressure_yes_30s": _num(kalshi_row.get("book_delta_pressure_yes_30s")),
             "kalshi_trade_imbalance_yes_15s": trade_yes,
             "kalshi_pressure_side": kalshi_pressure_side,
+            "paper_limit_cents": self.config.paper_limit_cents,
+            "paper_queue_ahead_contracts": _num(
+                kalshi_row.get(
+                    "yes_bid_queue_at_or_above_limit"
+                    if predicted_side == "YES"
+                    else "no_bid_queue_at_or_above_limit"
+                )
+            ),
+            "paper_limit_touched": 1 if touched else 0,
+            "paper_limit_touch_at": now if touched else None,
+            "paper_touch_price_cents": selected_ask if touched else None,
+            "execution_status": "TOUCHED" if touched else "WAITING_TOUCH",
             "joint_alignment": 1 if joint_alignment else 0,
             "evidence_status": evidence_status,
             "missing_reasons_json": json.dumps(missing, separators=(",", ":")),
+            "limitations_json": json.dumps(limitations, separators=(",", ":")),
             "features_json": json.dumps(feature_payload, sort_keys=True, separators=(",", ":")),
             **lineage_stamp(
                 feature_schema_version=FEATURE_SCHEMA_VERSION,
                 config={
                     "mark_seconds": self.config.mark_seconds,
                     "min_proxy_sources": self.config.min_proxy_sources,
+                    "proxy_sources": sorted(self.config.proxy_sources),
                     "source_stale_seconds": self.config.source_stale_seconds,
                     "sync_tolerance_seconds": self.config.sync_tolerance_seconds,
+                    "paper_limit_cents": self.config.paper_limit_cents,
                 },
             ),
         }

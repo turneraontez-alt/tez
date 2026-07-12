@@ -175,6 +175,7 @@ class KalshiWebSocketFeed:
         now: float | None = None,
         horizons: tuple[int, ...] = (5, 15, 30, 60),
         max_book_age: float = 5.0,
+        paper_limit_cents: float = 69.0,
     ) -> dict:
         """Return bounded event-level book and trade evidence for research.
 
@@ -232,6 +233,13 @@ class KalshiWebSocketFeed:
             "yes_microprice_cents": yes_microprice,
             "yes_microprice_edge_cents": (
                 None if yes_mid is None or yes_microprice is None else yes_microprice - yes_mid
+            ),
+            "paper_limit_cents": float(paper_limit_cents),
+            "yes_bid_queue_at_or_above_limit": sum(
+                qty for price, qty in yes_levels if price >= float(paper_limit_cents)
+            ),
+            "no_bid_queue_at_or_above_limit": sum(
+                qty for price, qty in no_levels if price >= float(paper_limit_cents)
             ),
             "event_age_seconds": (
                 None if not events else max(0.0, now - float(events[-1].get("ts", now)))
