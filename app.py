@@ -994,6 +994,17 @@ def refresh_loop(max_cycles=None):
             except Exception:
                 logger.debug("high_vol_flip reconcile skipped", exc_info=True)
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
+                try:
+                    from q15_upgrade.strategy_bots.runtime import (
+                        reconcile_drift_delivery_statuses,
+                    )
+                    ct.safe(
+                        "drift_delivery_reconcile",
+                        reconcile_drift_delivery_statuses,
+                        100,
+                    )
+                except Exception:
+                    logger.debug("Drift delivery reconciliation skipped", exc_info=True)
                 ct.safe("perf", perf.reconcile, now)
                 ct.safe("learning_reconcile", learner.reconcile, now, market_cache)
                 ct.safe("learner", learner.recompute, now)

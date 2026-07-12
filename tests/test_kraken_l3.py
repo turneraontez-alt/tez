@@ -140,6 +140,49 @@ def test_kraken_l3_drops_crossed_book_and_requests_resync(tmp_path):
     assert feed._take_resync_requested() is False
 
 
+def test_kraken_l3_truncates_levels_pushed_out_of_subscription_depth(tmp_path):
+    feed = KrakenL3Collector(
+        symbols=["BTC/USD"], db_path=str(tmp_path / "kraken_l3.sqlite3")
+    )
+    feed.depth = 2
+    feed.summary_levels = 2
+    feed.handle_message(json.dumps({
+        "channel": "level3",
+        "type": "snapshot",
+        "data": [{
+            "symbol": "BTC/USD",
+            "checksum": 1,
+            "bids": [
+                {"order_id": "bid100", "limit_price": 100.0, "order_qty": 1.0},
+                {"order_id": "bid99", "limit_price": 99.0, "order_qty": 1.0},
+            ],
+            "asks": [
+                {"order_id": "ask101", "limit_price": 101.0, "order_qty": 1.0},
+                {"order_id": "ask102", "limit_price": 102.0, "order_qty": 1.0},
+            ],
+        }],
+    }))
+    feed.handle_message(json.dumps({
+        "channel": "level3",
+        "type": "update",
+        "data": [{
+            "symbol": "BTC/USD",
+            "checksum": 2,
+            "bids": [
+                {"event": "add", "order_id": "bid1005", "limit_price": 100.5, "order_qty": 1.0},
+            ],
+            "asks": [],
+        }],
+    }))
+
+    assert "bid99" not in feed._orders["BTC/USD"]
+    assert set(feed._levels["BTC/USD"]["buy"]) == {100.0, 100.5}
+    assert feed.record_once() == 1
+    health = feed.health()
+    assert health["depth_truncations"] == 1
+    assert health["crossed_book_drops"] == 0
+
+
 def test_kraken_l3_retention_prunes_old_summary_and_event_rows(tmp_path, monkeypatch):
     db = str(tmp_path / "kraken_l3.sqlite3")
     monkeypatch.setenv("Q15_KRAKEN_L3_RAW_EVENTS_ENABLED", "true")

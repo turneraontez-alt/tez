@@ -582,6 +582,75 @@ class StrategyBotLedger:
             )
             self._conn.commit()
 
+    def drift_notifications_to_reconcile(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded batch of paper Drift rows awaiting outbox truth.
+
+        Delivery reconciliation deliberately starts from the strategy ledger,
+        rather than walking the whole outbox.  This keeps each live-loop pass
+        bounded and also finds an old pending decision even when the outbox has
+        accumulated many newer messages.
+        """
+        bounded = max(1, min(int(limit), 500))
+        drift_bots = (
+            BOT_DRIFT_13M,
+            BOT_DRIFT_FLOW_SPREAD,
+            BOT_DRIFT_ADDON,
+            BOT_DRIFT_LATEQUAL,
+            BOT_DRIFT_NO_EXPANSION,
+            BOT_DRIFT_NO_MIRROR,
+        )
+        placeholders = ",".join("?" for _ in drift_bots)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, strategy_version, bot_name, window_key, ticker, "
+                "notification_status FROM strategy_bot_decisions "
+                "WHERE source_system='drift_shadow' AND paper_only=1 "
+                "AND notification_status='QUEUED_RETRY' "
+                f"AND bot_name IN ({placeholders}) "
+                "ORDER BY COALESCE(notified_at, created_at) ASC, id ASC LIMIT ?",
+                (*drift_bots, bounded),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reconcile_drift_notification_terminals(
+        self,
+        updates: Sequence[tuple[int, str, str | None]],
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Atomically apply terminal outbox states to queued Drift decisions.
+
+        The ``QUEUED_RETRY`` predicate prevents a stale reconciliation read from
+        overwriting a newer decision state.  All updates share one transaction,
+        so a grouped card does not require one commit per constituent row.
+        """
+        allowed = {"SENT", "EXPIRED", "DEAD_LETTER"}
+        clean: list[tuple[str, str | None, float, int]] = []
+        ts = time.time() if now is None else float(now)
+        for row_id, status, error in updates:
+            terminal = str(status).upper()
+            if terminal not in allowed:
+                continue
+            clean.append((terminal, error, ts, int(row_id)))
+        if not clean:
+            return 0
+        changed = 0
+        with self._lock:
+            for terminal, error, reconciled_at, row_id in clean:
+                cur = self._conn.execute(
+                    "UPDATE strategy_bot_decisions SET notification_status=?, "
+                    "notification_message_id=NULL, notification_error=?, notified_at=? "
+                    "WHERE id=? AND notification_status='QUEUED_RETRY'",
+                    (terminal, error, reconciled_at, row_id),
+                )
+                changed += max(0, int(cur.rowcount))
+            self._conn.commit()
+        return changed
+
     def row_by_id(self, row_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(

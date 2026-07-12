@@ -140,7 +140,9 @@ class LiquidationFeed:
         self._ws_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._connected = False
+        self._connected_at: float | None = None
         self._last_message_at: float | None = None
+        self._messages_seen = 0
         self._last_error: str | None = None
         self._rows_written = 0
         self._dropped_rows = 0
@@ -181,8 +183,14 @@ class LiquidationFeed:
             self._last_error = str(exc)[:200]
 
     def _ws_url(self) -> str:
-        streams = "/".join(f"{symbol.lower()}@forceOrder" for symbol in sorted(set(self.symbols.values())))
-        return os.environ.get("Q15_FEED_LIQ_WS_URL") or f"wss://fstream.binance.com/stream?streams={streams}"
+        # Binance's current USD-M contract exposes market streams under
+        # /market/{ws,stream}.  The all-market liquidation snapshot avoids a
+        # dead combined subscription when one configured research symbol is not
+        # listed on Binance; handle_message still filters to our asset map.
+        return (
+            os.environ.get("Q15_FEED_LIQ_WS_URL")
+            or "wss://fstream.binance.com/market/stream?streams=!forceOrder@arr"
+        )
 
     async def _run_forever(self) -> None:
         backoff = 1.0
@@ -196,6 +204,7 @@ class LiquidationFeed:
                     max_queue=1000,
                 ) as socket:
                     self._connected = True
+                    self._connected_at = time.time()
                     self._last_error = None
                     backoff = 1.0
                     while not self._stop.is_set():
@@ -251,6 +260,7 @@ class LiquidationFeed:
             self._events[asset].append(row)
             self._latest_by_asset[asset] = now
             self._last_message_at = now
+            self._messages_seen += 1
             self._prune_locked(now)
         try:
             self._queue.put_nowait(row)
@@ -348,7 +358,18 @@ class LiquidationFeed:
                 for asset, ts in self._latest_by_asset.items()
             }
             last_message_at = self._last_message_at
+            connected_at = self._connected_at
         latest_age = min(ages.values()) if ages else None
+        if not self.enabled:
+            status = "disabled"
+        elif not self._connected:
+            status = "starting_or_disconnected"
+        elif last_message_at is None:
+            # The force-order stream is event-driven; silence can legitimately
+            # mean no liquidation, so do not call an open socket "fresh data".
+            status = "connected_waiting_for_first_liquidation"
+        else:
+            status = "connected"
         return {
             "enabled": self.enabled,
             "read_only": True,
@@ -359,12 +380,15 @@ class LiquidationFeed:
             "latest_age_seconds": latest_age,
             "age_by_asset_seconds": ages,
             "last_message_age_seconds": None if last_message_at is None else round(max(0.0, now - last_message_at), 3),
+            "connected_age_seconds": None if connected_at is None else round(max(0.0, now - connected_at), 3),
+            "messages_seen": self._messages_seen,
+            "stream_scope": "all_market_filtered",
             "rows_written": self._rows_written,
             "dropped_rows": self._dropped_rows,
             "queue_size": self._queue.qsize(),
             "last_error": self._last_error,
             "stale_seconds": self.stale_seconds,
-            "status": "disabled" if not self.enabled else ("connected" if self._connected else "starting_or_disconnected"),
+            "status": status,
         }
 
 

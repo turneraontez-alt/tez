@@ -320,6 +320,7 @@ class KrakenL3Collector:
         self._connected = False
         self._records_written = 0
         self._events_seen = 0
+        self._depth_truncations = 0
         self._crossed_book_drops = 0
         self._resync_requested = False
         self._last_prune_at = 0.0
@@ -368,6 +369,7 @@ class KrakenL3Collector:
                 ),
                 "records_written": self._records_written,
                 "events_seen": self._events_seen,
+                "depth_truncations": self._depth_truncations,
                 "depth": self.depth,
                 "summary_levels": self.summary_levels,
                 "snapshot_reconnect_seconds": self.snapshot_reconnect_seconds,
@@ -465,6 +467,30 @@ class KrakenL3Collector:
             self._adjust_level_map(self._levels[symbol][order.side], order.price, -order.size, -1)
         return order
 
+    def _truncate_book_locked(self, symbol: str) -> None:
+        """Drop orders at price levels that have fallen outside subscribed depth.
+
+        Kraken does not emit deletes for levels pushed out of scope. Retaining
+        those orders creates a stale, eventually crossed local book and forces
+        repeated full reconnects. The feed contract requires truncation after
+        every update.
+        """
+        levels = self._levels.get(symbol) or {}
+        keep_by_side: dict[str, set[float]] = {}
+        for side, reverse in (("buy", True), ("sell", False)):
+            side_levels = levels.get(side) or {}
+            keep_by_side[side] = set(
+                sorted(side_levels, reverse=reverse)[: self.depth]
+            )
+        stale_ids = [
+            order_id
+            for order_id, order in self._orders.get(symbol, {}).items()
+            if order.price not in keep_by_side.get(order.side, set())
+        ]
+        for order_id in stale_ids:
+            self._remove_order_locked(symbol, order_id)
+        self._depth_truncations += len(stale_ids)
+
     # --- message parsing -------------------------------------------------
     def handle_message(self, raw: str) -> None:
         try:
@@ -515,6 +541,7 @@ class KrakenL3Collector:
                     event = self._apply_order_update_locked(symbol, side, row, now, checksum)
                     if event:
                         produced.append(event)
+            self._truncate_book_locked(symbol)
             events = self._events.setdefault(symbol, deque())
             for event in produced:
                 self._events_seen += 1

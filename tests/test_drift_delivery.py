@@ -146,6 +146,25 @@ def _enable_outbox(tmp_path: Path, monkeypatch) -> Path:
     return path
 
 
+def _force_outbox_terminal(outbox, row: dict, terminal: str) -> None:
+    if terminal == "SENT":
+        outbox.network_disabled = False
+        assert outbox._attempt(row["id"]) is True
+    elif terminal == "EXPIRED":
+        outbox.backend.expire(row["id"])
+    elif terminal == "DEAD_LETTER":
+        outbox.backend.complete(
+            row["id"],
+            success=False,
+            error="forced terminal failure",
+            next_attempt=None,
+            dead=True,
+        )
+    else:  # pragma: no cover - test helper contract
+        raise AssertionError(terminal)
+    assert outbox.status_by_key(row["idempotency_key"]) == terminal
+
+
 def test_v3_telegram_exposes_rich_send_adapter():
     expected = {
         "ok": False,
@@ -222,8 +241,16 @@ def test_drift_outbox_queues_exact_payload_and_retries_once(tmp_path, monkeypatc
     assert telegram.sent == [frozen_payload]
     assert outbox.rows()[0]["status"] == "SENT"
 
-    # Replaying the source reconciles the ledger with the worker's terminal
-    # outbox status without creating a second message.
+    # The periodic local reconciliation credits the background-worker outcome
+    # without needing a new source event and without performing another send.
+    summary = runtime.reconcile_drift_delivery_statuses()
+    assert summary["updated"] == 1
+    assert summary["sent"] == 1
+    assert runtime.get_ledger().row_by_id(row_id)["notification_status"] == "SENT"
+    assert runtime.reconcile_drift_delivery_statuses()["updated"] == 0
+    assert telegram.sent == [frozen_payload]
+
+    # Replaying the source remains idempotent after reconciliation.
     assert runtime.record_drift_pick_row(_flow_row()) is None
     assert runtime.get_ledger().row_by_id(row_id)["notification_status"] == "SENT"
 
@@ -231,6 +258,36 @@ def test_drift_outbox_queues_exact_payload_and_retries_once(tmp_path, monkeypatc
     assert runtime.record_drift_pick_row(_flow_row(entry_ask_cents=66.0)) is None
     assert len(outbox.rows()) == 1
     assert telegram.sent == [frozen_payload]
+
+
+@pytest.mark.parametrize("terminal", ["EXPIRED", "DEAD_LETTER"])
+def test_periodic_reconciliation_preserves_per_row_terminal_status(
+    tmp_path, monkeypatch, terminal
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    _enable_outbox(tmp_path, monkeypatch)
+
+    row_id = runtime.record_drift_pick_row(_flow_row())
+    assert row_id is not None
+    outbox = runtime.get_drift_outbox()
+    queued = outbox.rows()[0]
+    _force_outbox_terminal(outbox, queued, terminal)
+
+    summary = runtime.reconcile_drift_delivery_statuses()
+    assert summary["scanned"] == 1
+    assert summary["keys_checked"] == 1
+    assert summary["updated"] == 1
+    assert summary[terminal.lower()] == 1
+    recorded = runtime.get_ledger().row_by_id(row_id)
+    assert recorded["notification_status"] == terminal
+    assert recorded["notification_error"] == f"outbox:{terminal}"
+
+    # A terminal key is never re-enqueued or sent on later maintenance/replay.
+    assert runtime.reconcile_drift_delivery_statuses()["updated"] == 0
+    assert runtime.record_drift_pick_row(_flow_row()) is None
+    assert len(outbox.rows()) == 1
+    assert telegram.sent == []
 
 
 def test_no_expansion_group_uses_one_deterministic_outbox_message(
@@ -263,6 +320,48 @@ def test_no_expansion_group_uses_one_deterministic_outbox_message(
     ledger_rows = runtime.get_ledger().rows(STRATEGY_VERSION)
     assert {row["notification_status"] for row in ledger_rows} == {"QUEUED_RETRY"}
     assert queued[0]["expires_at"] == 4_102_444_800.0
+
+
+@pytest.mark.parametrize("terminal", ["SENT", "EXPIRED", "DEAD_LETTER"])
+def test_periodic_reconciliation_updates_every_grouped_row_once(
+    tmp_path, monkeypatch, terminal
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    _enable_outbox(tmp_path, monkeypatch)
+    rows = [
+        _no_row(),
+        _no_row(
+            asset="HYPE",
+            ticker="KXHYPE15M-NO-EXP",
+            entry_ask_cents=63.0,
+            spread_cents=2.0,
+        ),
+    ]
+
+    row_ids = runtime.record_drift_no_expansion_window(rows)
+    assert len(row_ids) == 2
+    outbox = runtime.get_drift_outbox()
+    queued = outbox.rows()[0]
+    frozen_payload = queued["payload"]
+    _force_outbox_terminal(outbox, queued, terminal)
+
+    summary = runtime.reconcile_drift_delivery_statuses()
+    assert summary["scanned"] == 2
+    assert summary["keys_checked"] == 1
+    assert summary["updated"] == 2
+    assert summary[terminal.lower()] == 2
+    recorded = [runtime.get_ledger().row_by_id(row_id) for row_id in row_ids]
+    assert {row["notification_status"] for row in recorded} == {terminal}
+    expected_error = None if terminal == "SENT" else f"outbox:{terminal}"
+    assert {row["notification_error"] for row in recorded} == {expected_error}
+
+    sent_before = list(telegram.sent)
+    assert sent_before == ([frozen_payload] if terminal == "SENT" else [])
+    assert runtime.reconcile_drift_delivery_statuses()["updated"] == 0
+    assert runtime.record_drift_no_expansion_window(rows) == []
+    assert len(outbox.rows()) == 1
+    assert telegram.sent == sent_before
 
 
 @pytest.mark.parametrize("persisted_status", [None, "DELIVERY_FAILED"])
@@ -378,6 +477,30 @@ def test_startup_initialization_retries_pending_without_new_alert(
         time.sleep(0.05)
     assert telegram.sent == ["persisted before restart"]
     assert runtime.get_drift_outbox().status_by_key("startup:pending") == "SENT"
+
+
+def test_startup_initialization_reconciles_previously_sent_strategy_row(
+    tmp_path, monkeypatch
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    _enable_outbox(tmp_path, monkeypatch)
+
+    row_id = runtime.record_drift_pick_row(_flow_row())
+    assert row_id is not None
+    outbox = runtime.get_drift_outbox()
+    queued = outbox.rows()[0]
+    _force_outbox_terminal(outbox, queued, "SENT")
+    assert runtime.get_ledger().row_by_id(row_id)["notification_status"] == "QUEUED_RETRY"
+
+    # A restart reconstructs the dedicated outbox and immediately copies its
+    # durable SENT truth to the strategy ledger.  No source replay or second
+    # Telegram call is involved.
+    runtime.reset_drift_outbox()
+    monkeypatch.setenv("Q15_V9_DISABLE_NETWORK", "true")
+    assert runtime.initialize_drift_outbox() is True
+    assert runtime.get_ledger().row_by_id(row_id)["notification_status"] == "SENT"
+    assert telegram.sent == [queued["payload"]]
 
 
 def test_startup_initialization_respects_strategy_and_muted_gates(

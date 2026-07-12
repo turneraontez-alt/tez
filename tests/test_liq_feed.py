@@ -102,3 +102,17 @@ def test_ultoim_v2_liq_columns_migrate_and_record(tmp_path):
         "SELECT liq_notional_60s,liq_side,liq_age_s FROM ultoim_v2_predictions"
     ).fetchone()
     assert tuple(stored) == (200.0, "SELL", 1.0)
+
+
+def test_liq_feed_uses_current_all_market_stream(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_FEED_LIQ", "true")
+    feed = LiquidationFeed(
+        db_path=str(tmp_path / "liq.sqlite3"),
+        symbols={"BTC": "BTCUSDT", "HYPE": "HYPEUSDT"},
+    )
+    assert feed._ws_url() == (
+        "wss://fstream.binance.com/market/stream?streams=!forceOrder@arr"
+    )
+    health = feed.health()
+    assert health["stream_scope"] == "all_market_filtered"
+    assert health["messages_seen"] == 0

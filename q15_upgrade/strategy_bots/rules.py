@@ -29,6 +29,8 @@ BOT_FAV_10M = "fav_10m"
 BOT_TOP_PICK_13M = "top_pick_13m"
 BOT_DRIFT_13M = "drift_13m"
 BOT_DRIFT_FLOW_SPREAD = "drift_flow_spread_13m"
+BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4 = "drift_flow_spread_shadow_spread4"
+BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15 = "drift_flow_spread_shadow_flow15"
 BOT_DRIFT_ADDON = "drift_addon_requal"
 BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
 BOT_DRIFT_NO_MIRROR = "drift_no_mirror"
@@ -45,6 +47,17 @@ TIER_NONE = "NONE"
 ACCEPTED = "ACCEPTED"
 REJECTED = "REJECTED"
 RESEARCH_ONLY = "RESEARCH_ONLY"
+
+# Accepted Drift policy is deliberately frozen.  Environment variables may
+# enable/disable capture and delivery, but they cannot widen these thresholds.
+DRIFT_CORE_ASSETS = frozenset({"DOGE", "HYPE", "SOL", "XRP"})
+DRIFT_CORE_ASK_MIN_CENTS = 60.0
+DRIFT_CORE_ASK_MAX_CENTS = 73.0
+DRIFT_CORE_DISTANCE_SIGMA_MAX = 3e-5
+DRIFT_CORE_FLIP_PROBABILITY_MAX = 30.0
+DRIFT_CORE_SPREAD_MAX_CENTS = 2.0
+DRIFT_CORE_EFFECTIVE_AGE_MAX_SECONDS = 15.0
+DRIFT_REVIEW_BARS = (30, 60, 150)
 
 SPOT_DEPTH_KEYS = (
     "spot_depth_status",
@@ -707,80 +720,195 @@ def drift_pick_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
     )
 
 
-def drift_flow_spread_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
-    """Confirmed Drift delivery gate; the raw Drift recorder remains shadow-only.
+def _drift_review_stage(n_resolved: int) -> str:
+    if n_resolved < DRIFT_REVIEW_BARS[0]:
+        return "ACCRUING_TO_30"
+    if n_resolved < DRIFT_REVIEW_BARS[1]:
+        return "DIAGNOSTIC_REVIEW_30"
+    if n_resolved < DRIFT_REVIEW_BARS[2]:
+        return "KEEP_KILL_REVIEW_60"
+    return "PROMOTION_REVIEW_150"
 
-    The matched rule is deliberately simple: accept when fresh corrected 60s
-    spot flow is positive OR the executable Kalshi spread is at most 2 cents.
-    Missing flow is inconclusive unless the tight-spread fallback passes.
-    """
-    if not _drift_flow_spread_enabled():
-        return None
-    if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
-        return None
-    ask = _entry_ask(row)
-    if ask is None or not 60.0 <= ask <= 73.0 or str(source_side(row)) != "YES":
-        return None
 
-    spread_max = _env_float("Q15_V3_DRIFT_FLOW_SPREAD_MAX_CENTS", 2.0, 0.0)
+def _drift_effective_ages_fresh(row: Mapping[str, Any]) -> bool:
+    ages = (
+        _num(row.get("spot_depth_snapshot_age_seconds")),
+        _num(row.get("spot_depth_age_seconds")),
+        _num(row.get("spot_depth_trade_age_seconds")),
+    )
+    return all(
+        age is not None and 0.0 <= age <= DRIFT_CORE_EFFECTIVE_AGE_MAX_SECONDS
+        for age in ages
+    )
+
+
+def _drift_candidate_status(
+    row: Mapping[str, Any],
+    *,
+    spread_max_cents: float,
+    allow_flow15: bool,
+) -> tuple[str, str, list[str], dict[str, Any]]:
+    """Evaluate a Drift candidate without applying asset or shadow policy."""
+    distance = _num(row.get("distance_sigma"))
+    flip = _num(row.get("flip_probability"))
     spread = _num(row.get("spread_cents"))
-    spot_status = str(row.get("spot_depth_status") or "").lower()
     flow60 = _num(row.get("spot_depth_trade_net_notional_60s"))
-    flow_is_fresh = spot_status == "ok" and flow60 is not None
-    flow_pass = flow_is_fresh and flow60 > 0.0
-    spread_pass = spread is not None and spread <= spread_max
+    flow15 = _num(row.get("spot_depth_trade_net_notional_15s"))
+    spot_status = str(row.get("spot_depth_status") or "").lower()
+    ages_fresh = _drift_effective_ages_fresh(row)
+    structural_missing = distance is None or flip is None
+    structural_pass = (
+        not structural_missing
+        and 0.0 <= distance <= DRIFT_CORE_DISTANCE_SIGMA_MAX
+        and 0.0 <= flip <= DRIFT_CORE_FLIP_PROBABILITY_MAX
+    )
+    flow60_is_fresh = ages_fresh and spot_status == "ok" and flow60 is not None
+    # A missing status caused solely by absent 60s flow may still provide a
+    # valid fresh 15s counterfactual. Explicit age checks keep this fail-closed.
+    flow15_is_fresh = (
+        ages_fresh
+        and spot_status in {"ok", "missing"}
+        and flow15 is not None
+    )
+    flow60_pass = flow60_is_fresh and flow60 > 0.0
+    flow15_pass = allow_flow15 and flow15_is_fresh and flow15 > 0.0
+    spread_pass = spread is not None and spread <= spread_max_cents
+    reasons: list[str] = []
 
-    reasons = ["V3_DRIFT_FLOW_SPREAD_13M", "NEAR_STRIKE_YES_BOOK"]
-    if flow_pass:
-        reasons.append("DRIFT_SPOT_FLOW_60S_POSITIVE")
-    if spread_pass:
-        reasons.append("DRIFT_KALSHI_SPREAD_LTE_2")
-
-    if flow_pass or spread_pass:
+    if structural_missing:
+        status = RESEARCH_ONLY
+        gate_path = "STRUCTURE_MISSING"
+        reasons.extend(("DRIFT_FLOW_SPREAD_INCONCLUSIVE", "DRIFT_STRUCTURE_FIELDS_MISSING"))
+    elif not structural_pass:
+        status = REJECTED
+        gate_path = "STRUCTURE_OUTSIDE_FROZEN_CORE"
+        reasons.extend(("DRIFT_FLOW_SPREAD_REJECTED", "DRIFT_STRUCTURE_OUTSIDE_FROZEN_CORE"))
+    elif flow60_pass or flow15_pass or spread_pass:
         status = ACCEPTED
-        gate_path = "FLOW_AND_SPREAD" if flow_pass and spread_pass else (
-            "FLOW_60S_POSITIVE" if flow_pass else "SPREAD_LTE_2"
-        )
+        if flow15_pass and not flow60_pass and not spread_pass:
+            gate_path = "FLOW_15S_POSITIVE"
+        elif flow60_pass and spread_pass:
+            gate_path = "FLOW_AND_SPREAD"
+        elif flow60_pass:
+            gate_path = "FLOW_60S_POSITIVE"
+        elif flow15_pass and spread_pass:
+            gate_path = "FLOW_15S_AND_SPREAD"
+        else:
+            gate_path = f"SPREAD_LTE_{int(spread_max_cents)}"
         reasons.append("DRIFT_FLOW_SPREAD_CONFIRMED")
-    elif not flow_is_fresh:
+    elif not flow60_is_fresh and not (allow_flow15 and flow15_is_fresh):
         status = RESEARCH_ONLY
         gate_path = "FLOW_MISSING_OR_STALE"
-        reasons.extend((
-            "DRIFT_FLOW_SPREAD_INCONCLUSIVE",
-            "DRIFT_SPOT_FLOW_MISSING_OR_STALE",
-        ))
+        reasons.extend(("DRIFT_FLOW_SPREAD_INCONCLUSIVE", "DRIFT_SPOT_FLOW_MISSING_OR_STALE"))
     else:
         status = REJECTED
-        gate_path = "FLOW_NONPOSITIVE_AND_SPREAD_GT_2"
+        gate_path = f"FLOW_NONPOSITIVE_AND_SPREAD_GT_{int(spread_max_cents)}"
         reasons.extend((
             "DRIFT_FLOW_SPREAD_REJECTED",
             "DRIFT_SPOT_FLOW_60S_NONPOSITIVE",
-            "DRIFT_KALSHI_SPREAD_GT_2",
+            f"DRIFT_KALSHI_SPREAD_GT_{int(spread_max_cents)}",
         ))
+
+    if flow60_pass:
+        reasons.append("DRIFT_SPOT_FLOW_60S_POSITIVE")
+    if flow15_pass:
+        reasons.append("DRIFT_SPOT_FLOW_15S_POSITIVE")
+    if spread_pass:
+        reasons.append(f"DRIFT_KALSHI_SPREAD_LTE_{int(spread_max_cents)}")
+    context = {
+        "distance_sigma": distance,
+        "flip_probability": flip,
+        "spot_depth_status": spot_status or None,
+        "spot_ages_fresh": ages_fresh,
+        "spot_depth_trade_net_notional_60s": flow60,
+        "spot_depth_trade_net_notional_15s": flow15,
+        "flow60_is_fresh": flow60_is_fresh,
+        "flow15_is_fresh": flow15_is_fresh,
+        "flow60_pass": flow60_pass,
+        "flow15_pass": flow15_pass,
+        "spread_pass": spread_pass,
+    }
+    return status, gate_path, reasons, context
+
+
+def _drift_flow_spread_decision(
+    row: Mapping[str, Any],
+    *,
+    bot_name: str,
+    spread_max_cents: float,
+    allow_flow15: bool,
+    shadow_variant: str | None,
+) -> BotDecision | None:
+    if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
+        return None
+    ask = _entry_ask(row)
+    if (
+        ask is None
+        or not DRIFT_CORE_ASK_MIN_CENTS <= ask <= DRIFT_CORE_ASK_MAX_CENTS
+        or source_side(row) != "YES"
+    ):
+        return None
+
+    asset = _asset(row)
+    # Counterfactual cohorts are intentionally clean: quarantined and unknown
+    # assets remain in their dedicated core funnel and never enter shadows.
+    if shadow_variant is not None and asset not in DRIFT_CORE_ASSETS:
+        return None
+
+    candidate_status, gate_path, gate_reasons, context = _drift_candidate_status(
+        row,
+        spread_max_cents=spread_max_cents,
+        allow_flow15=allow_flow15,
+    )
+    core_status, _, _, _ = _drift_candidate_status(
+        row,
+        spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
+        allow_flow15=False,
+    )
+    reasons = ["V3_DRIFT_FLOW_SPREAD_13M", "NEAR_STRIKE_YES_BOOK", *gate_reasons]
+    status = candidate_status
+    if shadow_variant is not None:
+        status = RESEARCH_ONLY
+        reasons.extend(("DRIFT_COUNTERFACTUAL_SHADOW", f"DRIFT_SHADOW_{shadow_variant.upper()}"))
+    elif asset == "BNB":
+        status = RESEARCH_ONLY
+        reasons.extend(("DRIFT_BNB_QUARANTINED", "DRIFT_ASSET_QUARANTINE"))
+    elif asset not in DRIFT_CORE_ASSETS:
+        status = RESEARCH_ONLY
+        reasons.extend(("DRIFT_ASSET_NOT_IN_FROZEN_CORE", "DRIFT_ASSET_QUARANTINE"))
 
     n_resolved = int(_num(row.get("drift_flow_spread_resolved_n")) or 0)
     profile: dict[str, Any] = {
         "paper_only": True,
         "not_a_live_order": True,
-        "rule_version": "drift-flow-spread-13m-v1",
+        "rule_version": "drift-flow-spread-13m-frozen-v2",
+        "policy_frozen": True,
+        "manual_review_only": True,
+        "automatic_threshold_changes": False,
+        "automatic_promotion": False,
+        "review_bars": list(DRIFT_REVIEW_BARS),
+        "review_stage": _drift_review_stage(n_resolved),
+        "accepted_assets": sorted(DRIFT_CORE_ASSETS),
+        "accepted_side": "YES",
+        "ask_min_cents": DRIFT_CORE_ASK_MIN_CENTS,
+        "ask_max_cents": DRIFT_CORE_ASK_MAX_CENTS,
+        "distance_sigma_max": DRIFT_CORE_DISTANCE_SIGMA_MAX,
+        "flip_probability_max": DRIFT_CORE_FLIP_PROBABILITY_MAX,
+        "effective_age_max_seconds": DRIFT_CORE_EFFECTIVE_AGE_MAX_SECONDS,
         "passed": status == ACCEPTED,
         "gate_path": gate_path,
         "spot_flow_60s_min_exclusive": 0.0,
-        "spread_max_cents": spread_max,
-        "spot_depth_status": spot_status or None,
+        "spread_max_cents": spread_max_cents,
+        "spot_depth_status": context["spot_depth_status"],
         "spot_depth_missing_reason": row.get("spot_depth_missing_reason"),
-        "spot_depth_snapshot_age_seconds": _num(
-            row.get("spot_depth_snapshot_age_seconds")
-        ),
-        "spot_depth_raw_book_age_seconds": _num(
-            row.get("spot_depth_raw_book_age_seconds")
-        ),
-        "spot_depth_raw_trade_age_seconds": _num(
-            row.get("spot_depth_raw_trade_age_seconds")
-        ),
-        "spot_depth_trade_net_notional_60s": flow60,
+        "spot_depth_snapshot_age_seconds": _num(row.get("spot_depth_snapshot_age_seconds")),
+        "spot_depth_age_seconds": _num(row.get("spot_depth_age_seconds")),
+        "spot_depth_trade_age_seconds": _num(row.get("spot_depth_trade_age_seconds")),
+        "spot_depth_raw_book_age_seconds": _num(row.get("spot_depth_raw_book_age_seconds")),
+        "spot_depth_raw_trade_age_seconds": _num(row.get("spot_depth_raw_trade_age_seconds")),
+        **context,
         "pick_ask_cents": ask,
-        "spread_cents": spread,
+        "spread_cents": _num(row.get("spread_cents")),
         "depth_contracts": _num(row.get("depth_contracts")),
         "spread_weight": _num(row.get("drift_spread_weight")),
         "session_weight": _num(row.get("drift_session_weight")),
@@ -793,18 +921,74 @@ def drift_flow_spread_13m_decision(row: Mapping[str, Any]) -> BotDecision | None
         "book_total_pnl_cents": _num(row.get("drift_flow_spread_net_pnl_cents")),
         "book_status": "PROVISIONAL" if n_resolved < 60 else "EVALUATE",
         "book_verdict_n": 60,
-        "counts_as_independent_pick": True,
-        "exposure_class": "INDEPENDENT_FLOW_SPREAD_PICK",
+        "promotion_review_n": 150,
+        "counts_as_independent_pick": shadow_variant is None,
+        "exposure_class": (
+            "COUNTERFACTUAL_RESEARCH" if shadow_variant is not None
+            else "INDEPENDENT_FLOW_SPREAD_PICK"
+        ),
         "raw_drift_remains_shadow": True,
+        "counterfactual_status": candidate_status,
+        "would_accept_core": core_status == ACCEPTED,
+        "would_accept_variant": candidate_status == ACCEPTED,
+        "shadow_variant": shadow_variant,
+        "incremental_to_core": (
+            shadow_variant is not None
+            and candidate_status == ACCEPTED
+            and core_status != ACCEPTED
+        ),
     }
     return BotDecision(
-        BOT_DRIFT_FLOW_SPREAD,
+        bot_name,
         status,
         tuple(reasons),
         threshold_profile=profile,
         side_override="YES",
         entry_ask_cents=ask,
         use_entry_ask_override=True,
+    )
+
+
+def drift_flow_spread_13m_decision(row: Mapping[str, Any]) -> BotDecision | None:
+    """Frozen accepted Drift gate; environment values cannot widen it."""
+    if not _drift_flow_spread_enabled():
+        return None
+    return _drift_flow_spread_decision(
+        row,
+        bot_name=BOT_DRIFT_FLOW_SPREAD,
+        spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
+        allow_flow15=False,
+        shadow_variant=None,
+    )
+
+
+def drift_flow_spread_shadow_spread4_decision(
+    row: Mapping[str, Any],
+) -> BotDecision | None:
+    """Silent shadow that widens only the spread fallback from 2c to 4c."""
+    if not _drift_flow_spread_enabled():
+        return None
+    return _drift_flow_spread_decision(
+        row,
+        bot_name=BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
+        spread_max_cents=4.0,
+        allow_flow15=False,
+        shadow_variant="spread4",
+    )
+
+
+def drift_flow_spread_shadow_flow15_decision(
+    row: Mapping[str, Any],
+) -> BotDecision | None:
+    """Silent shadow that adds fresh positive 15s flow to the frozen gate."""
+    if not _drift_flow_spread_enabled():
+        return None
+    return _drift_flow_spread_decision(
+        row,
+        bot_name=BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+        spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
+        allow_flow15=True,
+        shadow_variant="flow15",
     )
 
 
@@ -854,15 +1038,23 @@ def drift_addon_requal_decision(row: Mapping[str, Any]) -> BotDecision | None:
         independent=False,
         exposure_class="CORRELATED_REQUAL_ADDON",
     )
+    quarantined = interval == "11M"
     profile.update({
         "max_addon_weight": 0.5,
         "window_risk_cap_units": 1.5,
-        "passed": True,
+        "passed": not quarantined,
+        "quarantined_interval": "11M" if quarantined else None,
+        "counterfactual_status": ACCEPTED,
+        "would_accept_without_quarantine": True,
     })
     return BotDecision(
         BOT_DRIFT_ADDON,
-        ACCEPTED,
-        ("V3_DRIFT_ADDON_REQUAL", "CORRELATED_EXPOSURE_NOT_INDEPENDENT"),
+        RESEARCH_ONLY if quarantined else ACCEPTED,
+        (
+            "V3_DRIFT_ADDON_REQUAL",
+            "CORRELATED_EXPOSURE_NOT_INDEPENDENT",
+            *("DRIFT_11M_ADDON_QUARANTINED",) if quarantined else (),
+        ),
         threshold_profile=profile,
         side_override="YES",
         entry_ask_cents=ask,

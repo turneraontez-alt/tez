@@ -5,6 +5,7 @@ from dataclasses import replace
 import logging
 import math
 import os
+import threading
 import time
 from typing import Any, Mapping, Sequence
 
@@ -26,6 +27,8 @@ from .rules import (
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     BOT_DRIFT_FLOW_SPREAD,
+    BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+    BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
     BOT_DRIFT_NO_EXPANSION,
@@ -40,6 +43,8 @@ from .rules import (
     decisions_for_row,
     drift_addon_requal_decision,
     drift_flow_spread_13m_decision,
+    drift_flow_spread_shadow_flow15_decision,
+    drift_flow_spread_shadow_spread4_decision,
     drift_latequal_decision,
     drift_no_expansion_decision,
     drift_no_mirror_decision,
@@ -61,6 +66,7 @@ _ledger: StrategyBotLedger | None = None
 _telegram: V3Telegram | None = None
 _drift_outbox: Any | None = None
 _drift_outbox_identity: tuple[int, str] | None = None
+_drift_reconcile_lock = threading.Lock()
 _thirteen_m_stats_warning_logged = False
 _thirteen_m_flow_warning_logged = False
 
@@ -270,7 +276,18 @@ def initialize_drift_outbox() -> bool:
     telegram = get_telegram()
     if not bool(getattr(telegram, "enabled", False)):
         return False
-    return get_drift_outbox() is not None
+    if get_drift_outbox() is None:
+        return False
+    # Credit terminal outcomes left by the previous process immediately.  The
+    # worker may also finish a pending attempt concurrently; the periodic pass
+    # in the live loop will pick up that transition without a source replay.
+    summary = reconcile_drift_delivery_statuses()
+    if summary["updated"]:
+        logger.info(
+            "reconciled %s Drift delivery outcomes at startup",
+            summary["updated"],
+        )
+    return True
 
 
 def _drift_delivery_key(
@@ -279,12 +296,87 @@ def _drift_delivery_key(
     ticker: str | None = None,
     *,
     grouped: bool = False,
+    strategy_version: str = STRATEGY_VERSION,
 ) -> str:
     scope = "group" if grouped else "row"
-    parts = [STRATEGY_VERSION, "drift", str(bot_name), scope, str(int(window_key))]
+    parts = [str(strategy_version), "drift", str(bot_name), scope, str(int(window_key))]
     if ticker:
         parts.append(str(ticker))
     return ":".join(parts)
+
+
+def _stored_drift_delivery_key(row: Mapping[str, Any]) -> str | None:
+    """Rebuild the deterministic outbox key from one persisted decision."""
+    bot_name = str(row.get("bot_name") or "")
+    try:
+        window_key = int(row.get("window_key"))
+    except (TypeError, ValueError):
+        return None
+    grouped = bot_name in {BOT_DRIFT_NO_EXPANSION, BOT_DRIFT_NO_MIRROR}
+    ticker = None if grouped else str(row.get("ticker") or "")
+    if not bot_name or (not grouped and not ticker):
+        return None
+    return _drift_delivery_key(
+        bot_name,
+        window_key,
+        ticker,
+        grouped=grouped,
+        strategy_version=str(row.get("strategy_version") or STRATEGY_VERSION),
+    )
+
+
+def reconcile_drift_delivery_statuses(limit: int = 100) -> dict[str, int]:
+    """Copy terminal dedicated-outbox states into the strategy ledger.
+
+    This is intentionally a local, read-mostly maintenance pass: it never
+    creates an outbox, enqueues a payload, or calls Telegram.  Work is bounded
+    by ``limit`` and terminal updates are committed as one ledger transaction,
+    making the callable safe for startup, the live loop, or a health poll.
+    """
+    summary = {
+        "scanned": 0,
+        "keys_checked": 0,
+        "updated": 0,
+        "sent": 0,
+        "expired": 0,
+        "dead_letter": 0,
+        "busy": 0,
+    }
+    if not _drift_reconcile_lock.acquire(blocking=False):
+        summary["busy"] = 1
+        return summary
+    try:
+        # Do not call get_drift_outbox() here: constructing it can start its
+        # network worker.  Reconciliation only observes an already-initialized
+        # outbox and therefore cannot itself send anything.
+        outbox = _drift_outbox
+        ledger = get_ledger()
+        if outbox is None or ledger is None:
+            return summary
+        rows = ledger.drift_notifications_to_reconcile(limit=limit)
+        summary["scanned"] = len(rows)
+        status_cache: dict[str, str | None] = {}
+        updates: list[tuple[int, str, str | None]] = []
+        for row in rows:
+            key = _stored_drift_delivery_key(row)
+            if key is None:
+                continue
+            if key not in status_cache:
+                status_cache[key] = outbox.status_by_key(key)
+            terminal = str(status_cache[key] or "").upper()
+            if terminal not in {"SENT", "EXPIRED", "DEAD_LETTER"}:
+                continue
+            error = None if terminal == "SENT" else f"outbox:{terminal}"
+            updates.append((int(row["id"]), terminal, error))
+            summary[terminal.lower()] += 1
+        summary["keys_checked"] = len(status_cache)
+        summary["updated"] = ledger.reconcile_drift_notification_terminals(updates)
+        return summary
+    except Exception:  # noqa: BLE001 - maintenance must never block the live loop
+        logger.warning("v3 Drift delivery reconciliation failed (ignored)", exc_info=True)
+        return summary
+    finally:
+        _drift_reconcile_lock.release()
 
 
 def _normalize_delivery_result(result: Any) -> dict[str, Any]:
@@ -397,6 +489,9 @@ def _delivery_fields(result: Mapping[str, Any]) -> tuple[str, int | None, str | 
         return "MUTED", None, result.get("error")
     if result.get("outbox_status") in {"PENDING", "SENDING", "FAILED_RETRYABLE"}:
         return "QUEUED_RETRY", None, result.get("error")
+    if result.get("outbox_status") in {"EXPIRED", "DEAD_LETTER"}:
+        terminal = str(result["outbox_status"])
+        return terminal, None, result.get("error") or f"outbox:{terminal}"
     return "DELIVERY_FAILED", None, result.get("error")
 
 
@@ -440,7 +535,7 @@ def _notification_needs_delivery(
         elif outbox_status in {"DEAD_LETTER", "EXPIRED"}:
             ledger.mark_notification(
                 int(row["id"]),
-                status="DELIVERY_FAILED",
+                status=outbox_status,
                 message_id=None,
                 error=f"outbox:{outbox_status}",
             )
@@ -809,6 +904,21 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         row_id, recorded = _stored_decision(
             ledger, decision, enriched, source_system="drift_shadow",
         )
+        # These cohorts deliberately reuse the exact same point-in-time
+        # enrichment and can never notify. They measure more research volume
+        # without changing accepted exposure or the returned core identity.
+        for shadow_decision_fn in (
+            drift_flow_spread_shadow_spread4_decision,
+            drift_flow_spread_shadow_flow15_decision,
+        ):
+            shadow_decision = shadow_decision_fn(enriched)
+            if shadow_decision is not None:
+                _stored_decision(
+                    ledger,
+                    shadow_decision,
+                    enriched,
+                    source_system="drift_shadow",
+                )
         if (
             recorded is None
             or recorded.get("decision_status") != ACCEPTED
@@ -866,7 +976,11 @@ def record_drift_checkpoint_row(row: Mapping[str, Any]) -> int | None:
         row_id, recorded = _stored_decision(
             ledger, decision, enriched, source_system="drift_shadow",
         )
-        if recorded is None or not notify:
+        if (
+            recorded is None
+            or recorded.get("decision_status") != ACCEPTED
+            or not notify
+        ):
             return row_id
         delivery_key = _drift_delivery_key(bot_name, int(wk), ticker)
         if not _notification_needs_delivery(
