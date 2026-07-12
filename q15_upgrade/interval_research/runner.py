@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -135,6 +136,10 @@ class IntervalResearchRunner:
                     "index_px": None,
                     "basis_cents": None,
                     "index_age_s": None,
+                    "index_status": "error",
+                    "index_missing_reason": "settlement_index_context_error",
+                    "index_id": None,
+                    "index_source_ts": None,
                 }
             row = build_capture_row(
                 model_version=self.config.model_version,
@@ -434,6 +439,9 @@ class IntervalResearchRunner:
             # crash after Drift commit but before the strategy adapter is then
             # repaired safely by the downstream durable claims.
             self._alert_drift_picks(rec, wk, pending.fallback_at, replay_all=True)
+            self._alert_drift_asymmetric_candidates(
+                rec, slate, wk, pending.fallback_at
+            )
             self._alert_drift_no_expansion(
                 rec, wk, pending.fallback_at, replay_all=True
             )
@@ -457,12 +465,22 @@ class IntervalResearchRunner:
             if not picks:
                 return
             book = (rec.scoreboard() or {}).get("book_volume_60_73_all", {})
+            ledger = getattr(self, "ledger", None)
+            capture_rows = (
+                ledger.captures_for_window(self.config.model_version, "13M", wk)
+                if ledger is not None and hasattr(ledger, "captures_for_window")
+                else []
+            )
+            captures = {
+                str(item.get("ticker") or ""): item for item in capture_rows
+            }
             wins = None
             if book.get("n_resolved") and book.get("win_rate") is not None:
                 wins = round(float(book["win_rate"]) * int(book["n_resolved"]))
             from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
             for p in picks:
-                strategy_bots_runtime.record_drift_pick_row({
+                capture = captures.get(str(p.get("ticker") or ""), {})
+                source = {
                     "created_at": (
                         p.get("created_at")
                         if p.get("created_at") is not None else now
@@ -491,9 +509,145 @@ class IntervalResearchRunner:
                     "drift_book_total_pnl_cents": book.get("total_pnl_cents"),
                     "drift_book_status": book.get("status"),
                     "drift_book_verdict_n": 60,
-                })
+                    "drift_candidate_lane": "FROZEN_CORE_SOURCE",
+                    "source_build_sha": capture.get("build_sha"),
+                    "source_config_hash": capture.get("config_hash"),
+                    "source_features_version": (
+                        capture.get("feature_schema_version")
+                        or p.get("features_version")
+                    ),
+                }
+                for key in (
+                    "seconds_remaining", "quote_age_seconds",
+                    "yes_bid_depth_contracts", "yes_ask_depth_contracts",
+                    "no_bid_depth_contracts", "no_ask_depth_contracts",
+                    "kalshi_depth_status", "kalshi_depth_missing_reason",
+                    "kalshi_depth_retry_used", "kalshi_taker_yes_volume_15s",
+                    "kalshi_taker_no_volume_15s",
+                    "kalshi_taker_net_yes_volume_15s", "index_px",
+                    "basis_cents", "index_age_s", "index_status",
+                    "index_missing_reason", "index_id", "index_source_ts",
+                ):
+                    source[key] = capture.get(key)
+                strategy_bots_runtime.record_drift_pick_row(source)
         except Exception:  # noqa: BLE001 - alerting must never break the loop
             logger.debug("drift pick alert failed (ignored)", exc_info=True)
+
+    @staticmethod
+    def _drift_num(value: Any) -> float | None:
+        try:
+            if value is None or isinstance(value, bool):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _alert_drift_asymmetric_candidates(
+        self,
+        rec: Any,
+        slate: Sequence[Mapping[str, Any]],
+        wk: int,
+        now: float,
+    ) -> None:
+        """Forward the incremental ask-conditioned distance envelope.
+
+        The frozen recorder remains untouched.  Only 65--73c candidates in the
+        incremental ``3e-5 < distance <= 1e-4`` slice are forwarded here; core
+        rows already reach the same shadow policies through ``_alert_drift_picks``.
+        All downstream variants are RESEARCH_ONLY and notification-disabled.
+        """
+        try:
+            eligible: list[dict[str, Any]] = []
+            for raw in slate or ():
+                row = dict(raw)
+                asset = str(row.get("asset") or "").upper()
+                side = str(row.get("predicted_side") or "").upper()
+                ask = self._drift_num(row.get("yes_ask_cents"))
+                distance = self._drift_num(row.get("distance_from_strike"))
+                flip = self._drift_num(row.get("flip_probability"))
+                if (
+                    asset not in {"DOGE", "HYPE", "SOL", "XRP"}
+                    or side != "YES"
+                    or ask is None
+                    or not 65.0 <= ask <= 73.0
+                    or distance is None
+                    or not 3e-5 < distance <= 1e-4
+                    or flip is None
+                    or not 0.0 <= flip <= 30.0
+                ):
+                    continue
+                cal = self._drift_num(row.get("calibrated_yes_probability"))
+                row["_drift_disagreement"] = (
+                    cal - ask / 100.0 if cal is not None else -9.0
+                )
+                eligible.append(row)
+            if not eligible:
+                return
+            eligible.sort(
+                key=lambda row: float(row.get("_drift_disagreement") or -9.0),
+                reverse=True,
+            )
+            book = (rec.scoreboard() or {}).get("book_volume_60_73_all", {})
+            wins = None
+            if book.get("n_resolved") and book.get("win_rate") is not None:
+                wins = round(float(book["win_rate"]) * int(book["n_resolved"]))
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+            for rank, row in enumerate(eligible, start=1):
+                captured_at = self._drift_num(row.get("captured_at"))
+                spread = self._drift_num(row.get("spread_cents"))
+                hour = time.gmtime(captured_at or now).tm_hour
+                spread_weight = rec.spread_weight(spread) if hasattr(rec, "spread_weight") else 1.0
+                session_weight = rec.session_weight(hour) if hasattr(rec, "session_weight") else 1.0
+                stack_weight = rec.stack_weight(spread, hour) if hasattr(rec, "stack_weight") else 1.0
+                source = {
+                    "created_at": captured_at if captured_at is not None else now,
+                    "model_version": self.config.model_version,
+                    "record_kind": "DRIFT_PICK_13M",
+                    "delivery_status": "PAPER_DRIFT_ASYMMETRIC_SOURCE",
+                    "asset": row.get("asset"),
+                    "ticker": row.get("ticker"),
+                    "interval": "13M",
+                    "window_key": wk,
+                    "close_time": row.get("close_time"),
+                    "seconds_remaining": row.get("seconds_remaining"),
+                    "predicted_side": "YES",
+                    "distance_sigma": row.get("distance_from_strike"),
+                    "flip_probability": row.get("flip_probability"),
+                    "entry_ask_cents": row.get("yes_ask_cents"),
+                    "spread_cents": row.get("spread_cents"),
+                    "depth_contracts": row.get("depth_contracts"),
+                    "drift_spread_weight": spread_weight,
+                    "drift_session_weight": session_weight,
+                    "drift_stack_weight": stack_weight,
+                    "drift_disagreement": row.get("_drift_disagreement"),
+                    "drift_pick_rank": rank,
+                    "drift_slate_n": len(eligible),
+                    "drift_book_n_resolved": book.get("n_resolved"),
+                    "drift_book_wins": wins,
+                    "drift_book_total_pnl_cents": book.get("total_pnl_cents"),
+                    "drift_book_status": book.get("status"),
+                    "drift_book_verdict_n": 60,
+                    "drift_candidate_lane": "ASYMMETRIC_INCREMENTAL_SOURCE",
+                    "source_build_sha": row.get("build_sha"),
+                    "source_config_hash": row.get("config_hash"),
+                    "source_features_version": row.get("feature_schema_version"),
+                }
+                for key in (
+                    "quote_age_seconds", "yes_bid_depth_contracts",
+                    "yes_ask_depth_contracts", "no_bid_depth_contracts",
+                    "no_ask_depth_contracts", "kalshi_depth_status",
+                    "kalshi_depth_missing_reason", "kalshi_depth_retry_used",
+                    "kalshi_taker_yes_volume_15s",
+                    "kalshi_taker_no_volume_15s",
+                    "kalshi_taker_net_yes_volume_15s", "index_px",
+                    "basis_cents", "index_age_s", "index_status",
+                    "index_missing_reason", "index_id", "index_source_ts",
+                ):
+                    source[key] = row.get(key)
+                strategy_bots_runtime.record_drift_pick_row(source)
+        except Exception:  # noqa: BLE001 - shadow capture cannot break the loop
+            logger.debug("drift asymmetric shadow feed failed (ignored)", exc_info=True)
 
     def _alert_drift_no_expansion(
         self, rec: Any, wk: int, now: float, *, replay_all: bool = False

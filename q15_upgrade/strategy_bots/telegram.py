@@ -51,6 +51,9 @@ def _bot_label(name: str) -> str:
         "top_pick_13m": "Top Pick 13M",
         "drift_13m": "Drift Pick 13M",
         "drift_flow_spread_13m": "Drift Flow/Spread 13M",
+        "drift_asymmetric_volume_shadow": "Drift Asymmetric Volume Shadow",
+        "drift_balanced_v95_shadow": "Drift Balanced V95 Shadow",
+        "drift_accuracy_v91_shadow": "Drift Accuracy V91 Shadow",
         "drift_addon_requal": "Drift Requalification Add-On",
         "drift_latequal_12m_11m": "Drift Late Qualifier",
         "drift_no_mirror": "Drift NO Mirror",
@@ -443,6 +446,9 @@ def _is_drift_pick(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") in {
         "drift_13m",
         "drift_flow_spread_13m",
+        "drift_asymmetric_volume_shadow",
+        "drift_balanced_v95_shadow",
+        "drift_accuracy_v91_shadow",
     }
 
 
@@ -501,7 +507,11 @@ def _drift_sizing_reason(sp: Any, sess_w: Any) -> str:
 
 
 def _drift_confirmation_line(thresholds: Mapping[str, Any]) -> str | None:
-    path = str(thresholds.get("gate_path") or "")
+    path = str(
+        thresholds.get("confirmation_gate_path")
+        or thresholds.get("gate_path")
+        or ""
+    )
     flow = thresholds.get("spot_depth_trade_net_notional_60s")
     spread = thresholds.get("spread_cents")
     try:
@@ -518,7 +528,268 @@ def _drift_confirmation_line(thresholds: Mapping[str, Any]) -> str | None:
         return f"Confirmed: 60s spot flow {flow_text} (positive)"
     if path == "SPREAD_LTE_2":
         return f"Confirmed: Kalshi spread {spread_text} (<=2c fallback)"
+    if path == "FLOW_15S_POSITIVE":
+        return "Research gate: fresh positive 15s flow only"
+    if path == "FLOW_15S_AND_SPREAD":
+        return f"Research gate: fresh positive 15s flow + spread {spread_text}"
+    if path == "FLOW_MISSING_OR_STALE":
+        return f"Gate: research only - flow missing/stale; spread {spread_text}"
+    if path == "STRUCTURE_MISSING":
+        return "Gate: research only - structural evidence missing"
+    if path == "STRUCTURE_OUTSIDE_FROZEN_CORE":
+        return "Gate: rejected - outside frozen structure"
+    if path.startswith("FLOW_NONPOSITIVE_AND_SPREAD_GT_"):
+        return f"Gate: rejected - nonpositive flow; spread {spread_text}"
+    if path == "ASYMMETRIC_VOLUME_SHADOW":
+        return "Research cohort: asymmetric price-distance volume"
+    if path == "BALANCED_V95_15M_YES_SHADOW":
+        return "Research cohort: asymmetric + V95 15M YES agreement"
+    if path == "ACCURACY_V91_FULL_PATH_75_SHADOW":
+        return "Research cohort: asymmetric + V91 YES/all >=75%"
     return None
+
+
+def _drift_value(
+    row: Mapping[str, Any], thresholds: Mapping[str, Any], *keys: str
+) -> Any:
+    for source in (thresholds, row):
+        for key in keys:
+            if key in source and source.get(key) is not None:
+                return source.get(key)
+    return None
+
+
+def _drift_plain(value: Any, suffix: str = "", digits: int = 1) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return "n/a"
+    text = f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return text + suffix
+
+
+def _drift_fraction(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        return "n/a"
+    return f"{number * 100.0:.1f}%".replace(".0%", "%")
+
+
+def _drift_bool(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return "n/a"
+
+
+def _drift_signed(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not math.isfinite(number):
+        return "n/a"
+    return f"{number:+,.0f}"
+
+
+def _drift_short_sha(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    text = str(value).strip()
+    return text[:8] if text else "n/a"
+
+
+def _drift_feed_status(status: Any, missing_reason: Any) -> str:
+    status_text = str(status) if status is not None else "n/a"
+    if missing_reason is None:
+        return status_text
+    reason_text = str(missing_reason).strip()
+    return f"{status_text} ({reason_text})" if reason_text else status_text
+
+
+def _drift_evidence_lines(
+    row: Mapping[str, Any], thresholds: Mapping[str, Any]
+) -> list[str]:
+    """Compact, honest evidence block shared by live and research Drift cards."""
+    grade = _drift_value(
+        row,
+        thresholds,
+        "drift_evidence_grade",
+        "evidence_grade",
+        "v95_15m_grade",
+        "confidence_grade",
+    )
+    snapshot_age = _drift_value(row, thresholds, "spot_depth_snapshot_age_seconds")
+    book_age = _drift_value(row, thresholds, "spot_depth_age_seconds")
+    trade_age = _drift_value(row, thresholds, "spot_depth_trade_age_seconds")
+    spot_status_raw = _drift_value(row, thresholds, "spot_depth_status")
+    spot_status = str(spot_status_raw).lower() if spot_status_raw is not None else "n/a"
+    if spot_status == "ok":
+        spot_status = "fresh"
+
+    v91_fraction = _drift_value(
+        row, thresholds, "v91_full_path_yes_fraction", "drift_v91_yes_fraction_all"
+    )
+    v91_directional = _drift_value(
+        row,
+        thresholds,
+        "v91_full_path_directional_fraction",
+        "drift_v91_yes_fraction_directional",
+    )
+    v91_observations = _drift_value(
+        row, thresholds, "v91_observation_count", "drift_v91_observation_count"
+    )
+    v91_yes = _drift_value(row, thresholds, "v91_full_path_yes_count")
+    v91_all = _drift_value(row, thresholds, "v91_full_path_all_count")
+    v91_counts = (
+        f"{_drift_plain(v91_yes, digits=0)}/{_drift_plain(v91_all, digits=0)}"
+        if v91_yes is not None or v91_all is not None else "n/a"
+    )
+
+    v95_side = _drift_value(
+        row,
+        thresholds,
+        "v95_15m_side",
+        "v95_15m_predicted_side",
+        "drift_v95_15m_side",
+    )
+    v95_flow_score = _drift_value(
+        row, thresholds, "v95_15m_flow_score", "drift_v95_15m_flow_score"
+    )
+    v95_flow = _drift_value(
+        row, thresholds, "v95_15m_flow_60s", "v95_15m_spot_flow_60s"
+    )
+    v95_age = _drift_value(
+        row, thresholds, "v95_15m_age_seconds", "drift_v95_15m_age_seconds"
+    )
+    v95_status = _drift_value(row, thresholds, "v95_15m_status")
+    v95_status_text = str(v95_status) if v95_status is not None else "n/a"
+
+    btc_side = _drift_value(
+        row,
+        thresholds,
+        "btc_side",
+        "drift_btc_15m_side",
+        "btc_dominant_side",
+        "btc_model_predicted_side",
+        "btc_v95_predicted_side",
+    )
+    btc_grade = _drift_value(row, thresholds, "btc_grade", "btc_v95_grade")
+    btc_age = _drift_value(
+        row, thresholds, "drift_btc_15m_age_seconds", "btc_15m_age_seconds"
+    )
+    core_breadth = _drift_value(
+        row,
+        thresholds,
+        "drift_core_breadth",
+        "core_breadth",
+    )
+    asymmetric_breadth = _drift_value(
+        row,
+        thresholds,
+        "drift_asymmetric_breadth",
+        "asymmetric_breadth",
+    )
+    flow_1m = _drift_value(row, thresholds, "drift_flow_1m", "drift_flow_60s")
+    flow_3m = _drift_value(row, thresholds, "drift_flow_3m")
+    flow_5m = _drift_value(row, thresholds, "drift_flow_5m")
+    flow_13m = _drift_value(row, thresholds, "drift_flow_13m")
+    flow_coverage = _drift_value(row, thresholds, "drift_flow_coverage")
+    cohort = _drift_value(row, thresholds, "cohort", "cohort_name")
+    feature_cohort = _drift_value(row, thresholds, "feature_cohort")
+    policy_build = _drift_value(row, thresholds, "build", "rule_version")
+    build_sha = _drift_value(row, thresholds, "build_sha", "decision_build_sha")
+    incremental = _drift_value(row, thresholds, "incremental_to_core")
+    review = _drift_value(row, thresholds, "review_stage")
+    index_status = _drift_value(row, thresholds, "index_status")
+    index_missing = _drift_value(row, thresholds, "index_missing_reason")
+    kalshi_status = _drift_value(row, thresholds, "kalshi_depth_status")
+    kalshi_missing = _drift_value(row, thresholds, "kalshi_depth_missing_reason")
+
+    if v95_flow_score is not None:
+        v95_flow_text = f"score {_drift_plain(v95_flow_score)}"
+    else:
+        try:
+            v95_flow_text = f"${float(v95_flow):+,.0f}" if v95_flow is not None else "n/a"
+        except (TypeError, ValueError):
+            v95_flow_text = "n/a"
+    return [
+        (
+            f"Evidence: grade {str(grade) if grade is not None else 'n/a'} | "
+            f"ages snap/book/trade "
+            f"{_drift_plain(snapshot_age, 's')}/"
+            f"{_drift_plain(book_age, 's')}/"
+            f"{_drift_plain(trade_age, 's')} ({spot_status})"
+        ),
+        (
+            f"V91: YES/all {_drift_fraction(v91_fraction)} ({v91_counts}) "
+            f"dir {_drift_fraction(v91_directional)} n {_drift_plain(v91_observations, digits=0)} | "
+            f"V95 15M: {str(v95_side) if v95_side is not None else 'n/a'} "
+            f"flow {v95_flow_text} age {_drift_plain(v95_age, 's')} ({v95_status_text})"
+        ),
+        (
+            f"BTC: {str(btc_side) if btc_side is not None else 'n/a'} "
+            f"grade {str(btc_grade) if btc_grade is not None else 'n/a'} "
+            f"age {_drift_plain(btc_age, 's')} | "
+            f"breadth core/asym "
+            f"{_drift_plain(core_breadth, digits=0)}/"
+            f"{_drift_plain(asymmetric_breadth, digits=0)}"
+        ),
+        (
+            f"Flow 1/3/5/13m: {_drift_signed(flow_1m)}/"
+            f"{_drift_signed(flow_3m)}/{_drift_signed(flow_5m)}/"
+            f"{_drift_signed(flow_13m)} | coverage {_drift_fraction(flow_coverage)}"
+        ),
+        (
+            f"Cohort: feature {str(feature_cohort) if feature_cohort is not None else 'n/a'} "
+            f"| policy {str(cohort) if cohort is not None else 'n/a'} | "
+            f"build {_drift_short_sha(build_sha)}/"
+            f"{str(policy_build) if policy_build is not None else 'n/a'} | "
+            f"incremental {_drift_bool(incremental)} | "
+            f"review {str(review) if review is not None else 'n/a'}"
+        ),
+        (
+            f"Feeds: index {_drift_feed_status(index_status, index_missing)} | "
+            f"Kalshi {_drift_feed_status(kalshi_status, kalshi_missing)}"
+        ),
+    ]
+
+
+def _drift_header(
+    row: Mapping[str, Any], thresholds: Mapping[str, Any], banner: str
+) -> str:
+    bot_name = str(row.get("bot_name") or "")
+    status = str(row.get("decision_status") or "").upper()
+    path = str(thresholds.get("gate_path") or "")
+    cohort_labels = {
+        "drift_asymmetric_volume_shadow": "ASYMMETRIC VOLUME",
+        "drift_balanced_v95_shadow": "BALANCED V95",
+        "drift_accuracy_v91_shadow": "ACCURACY V91",
+    }
+    if bot_name in cohort_labels or status == "RESEARCH_ONLY":
+        label = cohort_labels.get(bot_name) or "FLOW/SPREAD"
+        return f"🧪 <b>DRIFT RESEARCH 13M · {label}</b>"
+    if status == "REJECTED":
+        return "⛔ <b>DRIFT REJECTED 13M</b>"
+    if bot_name == "drift_flow_spread_13m" and status in {"", "ACCEPTED"}:
+        title = {
+            "FLOW_AND_SPREAD": "DRIFT FLOW + SPREAD CONFIRMED 13M",
+            "FLOW_60S_POSITIVE": "DRIFT FLOW CONFIRMED 13M",
+            "SPREAD_LTE_2": "DRIFT TIGHT-SPREAD FALLBACK 13M",
+        }.get(path)
+        if title:
+            return f"🌊 <b>{title} · {html.escape(banner)}</b>"
+    return f"🌊 <b>DRIFT PICK 13M · {html.escape(banner)}</b>"
 
 
 def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
@@ -541,10 +812,22 @@ def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
         f"{(float(ask) + fee):.0f}%" if fee is not None else "n/a"
     )
     banner = _drift_size_banner(thresholds.get("stack_weight"))
-    n = int(float(thresholds.get("book_n_resolved") or 0))
+    n = int(float(
+        thresholds.get("book_n_resolved")
+        or thresholds.get("cohort_n_resolved")
+        or 0
+    ))
     wins = thresholds.get("book_wins")
+    if wins is None:
+        wins = thresholds.get("cohort_wins")
     pnl = thresholds.get("book_total_pnl_cents")
-    verdict_n = int(float(thresholds.get("book_verdict_n") or 60))
+    if pnl is None:
+        pnl = thresholds.get("cohort_total_pnl_cents")
+    verdict_n = int(float(
+        thresholds.get("book_verdict_n")
+        or thresholds.get("cohort_verdict_n")
+        or 60
+    ))
     review_bars = thresholds.get("review_bars")
     if isinstance(review_bars, (list, tuple)) and len(review_bars) >= 3:
         review_text = (
@@ -561,23 +844,44 @@ def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
         )
     else:
         book_line = f"Book: no resolved picks yet · {review_text}"
-    header = f"🌊 <b>DRIFT PICK 13M · {html.escape(banner)}</b>"
-    body = [
-        "PAPER SIGNAL — record-only book; you trade it manually or not at all.",
-        "",
-        f"BUY YES — {asset} @ {_plain_whole(ask)}¢ · breakeven {breakeven}",
-        f"Sizing: {_drift_sizing_reason(thresholds.get('spread_cents'), thresholds.get('session_weight'))}",
+    header = _drift_header(row, thresholds, banner)
+    bot_name = str(row.get("bot_name") or "")
+    status = str(row.get("decision_status") or "").upper()
+    is_research = status == "RESEARCH_ONLY" or bot_name in {
+        "drift_asymmetric_volume_shadow",
+        "drift_balanced_v95_shadow",
+        "drift_accuracy_v91_shadow",
+    }
+    if is_research:
+        mode_line = "RESEARCH ONLY — counterfactual cohort; never notification eligible."
+        action = "TRACK YES"
+    elif status == "REJECTED":
+        mode_line = "REJECTED — diagnostic record only; no order or notification."
+        action = "TRACK YES"
+    else:
+        mode_line = "PAPER SIGNAL — record-only book; you trade it manually or not at all."
+        action = "BUY YES"
+    sizing_reason = _drift_sizing_reason(
+        thresholds.get("spread_cents"), thresholds.get("session_weight")
+    ) or "n/a"
+    confirmation = _drift_confirmation_line(thresholds)
+    if is_research and confirmation and confirmation.startswith("Confirmed:"):
+        confirmation = confirmation.replace(
+            "Confirmed:", "Counterfactual confirmation:", 1
+        )
+    body = [mode_line, ""]
+    if confirmation:
+        body.append(confirmation)
+    body.extend([
+        f"{action} — {asset} @ {_plain_whole(ask)}¢ · breakeven {breakeven}",
+        *_drift_evidence_lines(row, thresholds),
+        f"Sizing: {sizing_reason}",
         _drift_fill_line_plain(thresholds.get("depth_contracts"), ask),
         "Size guide: 25–50 contracts comfort · ~100 max",
         book_line,
         f"Ticker: {str(row.get('ticker') or '')}",
         "Drift Shadow · paper/research · no orders placed",
-    ]
-    confirmation = _drift_confirmation_line(thresholds)
-    if confirmation:
-        if str(row.get("bot_name") or "") == "drift_flow_spread_13m":
-            header = header.replace("DRIFT PICK 13M", "DRIFT FLOW CONFIRMED 13M")
-        body.insert(2, confirmation)
+    ])
     return header + "\n<pre>" + "\n".join(html.escape(part) for part in body) + "</pre>"
 
 

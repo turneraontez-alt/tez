@@ -270,18 +270,18 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
     assert not [r for r in recorded if r["bot_name"] == BOT_DRIFT_13M]
     assert confirmed[0]["spot_depth_trade_net_notional_60s"] == 100.0
 
-    for ticker, result in (
-        ("FLOW", "YES"),
-        ("SPREAD", "YES"),
-        ("REJECT", "NO"),
-        ("STALE", "NO"),
+    for ticker, result, expected_rows in (
+        ("FLOW", "YES", 4),
+        ("SPREAD", "YES", 4),
+        ("REJECT", "NO", 3),
+        ("STALE", "NO", 3),
     ):
         assert ledger.resolve(
             source_system="drift_shadow",
             source_model_version="interval-research-v1",
             ticker=ticker,
             official_result=result,
-        ) == 3
+        ) == expected_rows
 
     scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
     drift = scoreboard["drift_system"]
@@ -299,9 +299,9 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
     assert drift["flow_spread_13m_by_status"][REJECTED]["rows"] == 1
     assert drift["flow_spread_13m_by_status"][RESEARCH_ONLY]["rows"] == 1
     assert drift["raw_13m_legacy_shadow"]["rows"] == 0
-    assert scoreboard["total_rows"] == 12
+    assert scoreboard["total_rows"] == 14
     assert scoreboard["all_exposure"]["rows"] == 4
-    assert scoreboard["counterfactual_research_rows"] == 8
+    assert scoreboard["counterfactual_research_rows"] == 10
     shadows = drift["counterfactual_research"]
     assert shadows["spread4"]["full"]["overall"]["rows"] == 4
     assert shadows["spread4"]["incremental"]["overall"]["rows"] == 2

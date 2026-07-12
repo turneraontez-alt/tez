@@ -54,20 +54,18 @@ def test_settlement_index_stale_context_is_null(tmp_path, monkeypatch):
     feed = SettlementIndexCollector(db_path=str(tmp_path / "settle.sqlite3"), index_ids={"BTC": "BRTI"})
     feed._handle_message(_cf_message(source_ms=1_710_000_000_000))
 
-    assert feed.context("BTC", spot_px=68001.0, now=1_710_000_100.0) == {
-        "index_px": None,
-        "basis_cents": None,
-        "index_age_s": None,
-    }
+    stale = feed.context("BTC", spot_px=68001.0, now=1_710_000_100.0)
+    assert stale["index_px"] is None
+    assert stale["index_status"] == "stale"
+    assert stale["index_missing_reason"] == "settlement_index_tick_stale"
 
 
 def test_global_context_is_null_when_collector_disabled(monkeypatch):
     monkeypatch.setenv("Q15_FEED_SETTLE_INDEX", "false")
-    assert settlement_index_context("BTC", spot_px=1.0) == {
-        "index_px": None,
-        "basis_cents": None,
-        "index_age_s": None,
-    }
+    context = settlement_index_context("BTC", spot_px=1.0)
+    assert context["index_px"] is None
+    assert context["index_status"] == "disabled"
+    assert context["index_missing_reason"] == "settlement_index_disabled"
 
 
 def test_ultoim_v2_settlement_index_columns_migrate_and_record(tmp_path):

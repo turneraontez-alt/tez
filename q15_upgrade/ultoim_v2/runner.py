@@ -293,7 +293,13 @@ class UltoimV2Runner:
                 now=now,
             )
         except Exception:  # noqa: BLE001 - record-only context must never block extraction
-            settlement_index = {"index_px": None, "basis_cents": None, "index_age_s": None}
+            settlement_index = {
+                "index_px": None,
+                "basis_cents": None,
+                "index_age_s": None,
+                "index_status": "error",
+                "index_missing_reason": "settlement_index_context_error",
+            }
         try:
             from market_activity import market_activity_context
 

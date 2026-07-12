@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import logging
 import math
 import os
@@ -11,7 +12,9 @@ from typing import Any, Mapping, Sequence
 
 import cycle_watchdog
 
+from ..lineage import lineage_stamp
 from .btc_regime import enrich_btc_regime
+from .drift_evidence import enrich_drift_evidence
 from .kraken_l3_depth import enrich_kraken_l3
 from .l2_depth import enrich_coinbase_l2
 from .spot_depth import enrich_spot_depth
@@ -26,6 +29,9 @@ from .rules import (
     BOT_FAV_10M,
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
+    BOT_DRIFT_ACCURACY_V91,
+    BOT_DRIFT_ASYMMETRIC_VOLUME,
+    BOT_DRIFT_BALANCED_V95,
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
@@ -40,6 +46,9 @@ from .rules import (
     BotDecision,
     decisions_for_row,
     drift_addon_requal_decision,
+    drift_accuracy_v91_shadow_decision,
+    drift_asymmetric_volume_shadow_decision,
+    drift_balanced_v95_shadow_decision,
     drift_flow_spread_13m_decision,
     drift_flow_spread_shadow_flow15_decision,
     drift_flow_spread_shadow_spread4_decision,
@@ -68,12 +77,194 @@ _drift_reconcile_lock = threading.Lock()
 _thirteen_m_stats_warning_logged = False
 _thirteen_m_flow_warning_logged = False
 
+DRIFT_DECISION_FEATURE_SCHEMA_VERSION = "drift-decision-evidence-v1"
+
 
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _drift_lineage_config() -> dict[str, Any]:
+    """Allow-listed policy/config inputs only; never hash credentials."""
+    return {
+        "accepted_assets": ["DOGE", "HYPE", "SOL", "XRP"],
+        "ask_min_cents": 60.0,
+        "ask_max_cents": 73.0,
+        "core_distance_max": 3e-5,
+        "asymmetric_distance_max": 1e-4,
+        "asymmetric_distance_ask_min": 65.0,
+        "flip_max": 30.0,
+        "spread_max_cents": 2.0,
+        "v91_full_path_yes_fraction_min": 0.75,
+        "v95_required_side": "YES",
+        "review_bars": [30, 60, 150],
+        "spot_snapshot_max_age_seconds": os.environ.get(
+            "Q15_V3_DRIFT_SPOT_SNAPSHOT_MAX_AGE_SECONDS", "15"
+        ),
+        "spot_book_max_age_seconds": os.environ.get(
+            "Q15_V3_DRIFT_SPOT_BOOK_MAX_AGE_SECONDS", "15"
+        ),
+        "spot_trade_max_age_seconds": os.environ.get(
+            "Q15_V3_DRIFT_SPOT_TRADE_MAX_AGE_SECONDS", "15"
+        ),
+    }
+
+
+def _drift_json(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _drift_num(value: Any) -> float | None:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _with_drift_lineage_and_grade(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Stamp one point-in-time Drift row without manufacturing missing evidence."""
+    out = dict(row)
+    stamp = lineage_stamp(
+        feature_schema_version=DRIFT_DECISION_FEATURE_SCHEMA_VERSION,
+        config=_drift_lineage_config(),
+    )
+    out.update(stamp)
+    out.setdefault("source_captured_at", out.get("created_at"))
+    out["evidence_as_of"] = out.get("created_at")
+
+    availability = out.get("drift_evidence_availability")
+    if not isinstance(availability, Mapping):
+        availability = {}
+    availability = {str(key): value for key, value in availability.items()}
+    ages = out.get("drift_evidence_ages")
+    if not isinstance(ages, Mapping):
+        ages = {}
+    ages = {str(key): value for key, value in ages.items()}
+    index_status = str(out.get("index_status") or "missing").lower()
+    availability["settlement_index"] = {
+        "available": index_status == "ok",
+        "status": index_status,
+        "missing_reason": out.get("index_missing_reason"),
+        "index_id": out.get("index_id"),
+        "source_at": out.get("index_source_ts"),
+    }
+    ages["settlement_index"] = out.get("index_age_s")
+    kalshi_status = str(out.get("kalshi_depth_status") or "missing").lower()
+    availability["kalshi_13m"] = {
+        "available": kalshi_status == "ok",
+        "status": kalshi_status,
+        "missing_reason": out.get("kalshi_depth_missing_reason"),
+        "retry_used": out.get("kalshi_depth_retry_used"),
+    }
+    ages["kalshi_quote"] = out.get("quote_age_seconds")
+    spot_status = str(out.get("spot_depth_status") or "missing").lower()
+    availability["spot_current"] = {
+        "available": spot_status == "ok",
+        "status": spot_status,
+        "missing_reason": out.get("spot_depth_missing_reason"),
+    }
+    ages["spot_snapshot"] = out.get("spot_depth_snapshot_age_seconds")
+    ages["spot_book"] = out.get("spot_depth_age_seconds")
+    ages["spot_trade"] = out.get("spot_depth_trade_age_seconds")
+    out["drift_evidence_availability"] = availability
+    out["drift_evidence_ages"] = ages
+    out["feature_availability_json"] = _drift_json(availability)
+    out["feature_age_json"] = _drift_json(ages)
+
+    ask = _drift_num(out.get("entry_ask_cents"))
+    distance = _drift_num(out.get("distance_sigma"))
+    flip = _drift_num(out.get("flip_probability"))
+    spread = _drift_num(out.get("spread_cents"))
+    core_complete = all(value is not None for value in (ask, distance, flip, spread))
+    out["data_complete"] = bool(core_complete)
+
+    v91 = _drift_num(out.get("drift_v91_yes_fraction_all"))
+    v95_side = str(out.get("drift_v95_15m_side") or "").upper()
+    v95_flow = _drift_num(out.get("drift_v95_15m_flow_score"))
+    btc_side = str(out.get("drift_btc_15m_side") or "").upper()
+    breadth = out.get("drift_asymmetric_breadth")
+    flow_coverage = _drift_num(out.get("drift_flow_coverage"))
+    full_complete = (
+        core_complete
+        and bool(out.get("drift_evidence_complete"))
+        and v91 is not None
+        and v95_side in {"YES", "NO"}
+        and v95_flow is not None
+        and btc_side in {"YES", "NO"}
+        and breadth is not None
+        and flow_coverage is not None
+        and flow_coverage >= 1.0
+    )
+    out["full_feature_complete"] = bool(full_complete)
+    spot_available = spot_status in {
+        "ok", "stale", "missing"
+    }
+    if full_complete:
+        cohort = "FULL_FEATURE"
+    elif spot_available:
+        cohort = "FLOW_ENABLED"
+    else:
+        cohort = "CORE_ONLY"
+    out["feature_cohort"] = cohort
+
+    reasons: list[str] = []
+    if not full_complete:
+        grade = "INCOMPLETE"
+        reasons.append("DRIFT_FULL_FEATURES_INCOMPLETE")
+    else:
+        v91_pass = bool(v91 is not None and v91 >= 0.75)
+        v95_pass = v95_side == "YES"
+        btc_contradicts = str(out.get("asset") or "").upper() in {"SOL", "XRP"} and btc_side == "NO"
+        if v91_pass:
+            reasons.append("DRIFT_V91_FULL_PATH_PASS")
+        else:
+            reasons.append("DRIFT_V91_FULL_PATH_LOW")
+        if v95_pass:
+            reasons.append("DRIFT_V95_15M_AGREES")
+        else:
+            reasons.append("DRIFT_V95_15M_CONTRADICTS")
+        if btc_contradicts:
+            reasons.append("DRIFT_BTC_15M_CONTRADICTS")
+        grade = "A" if v91_pass and v95_pass and not btc_contradicts else (
+            "B" if (v91_pass or v95_pass) and not btc_contradicts else "C"
+        )
+    out["evidence_grade"] = grade
+    out["evidence_reason_codes"] = ",".join(reasons)
+    evidence_bundle = {
+        "as_of": out.get("evidence_as_of"),
+        "availability": dict(availability),
+        "ages": dict(ages),
+        "grade": grade,
+        "reason_codes": reasons,
+        "v91_yes_fraction_all": v91,
+        "v95_15m_side": v95_side or None,
+        "v95_15m_flow_score": v95_flow,
+        "btc_15m_side": btc_side or None,
+        "core_breadth": out.get("drift_core_breadth"),
+        "asymmetric_breadth": breadth,
+        "flow": {
+            "1m": out.get("drift_flow_1m"),
+            "3m": out.get("drift_flow_3m"),
+            "5m": out.get("drift_flow_5m"),
+            "13m": out.get("drift_flow_13m"),
+            "positive_bucket_fraction": out.get("drift_flow_positive_bucket_fraction"),
+            "sign_flips": out.get("drift_flow_sign_flips"),
+            "persistence": out.get("drift_flow_persistence"),
+            "coverage": flow_coverage,
+        },
+    }
+    out["drift_evidence"] = evidence_bundle
+    out["drift_evidence_json"] = _drift_json(evidence_bundle)
+    return out
 
 
 def enabled() -> bool:
@@ -601,20 +792,30 @@ def _with_book_stats_context(
     bot_name: str,
     prefix: str,
     threshold_rule_version: str | None = None,
+    decision_status: str = ACCEPTED,
 ) -> Mapping[str, Any]:
     """Inject a bot's resolved ACCEPTED stats so its rules can self-govern
     (empirical EV + auto-mute), mirroring the 13M sniper convention."""
     out = dict(row)
     try:
-        stats = ledger.bot_accepted_resolved_stats(
-            bot_name=bot_name,
-            threshold_rule_version=threshold_rule_version,
-        )
+        if decision_status == ACCEPTED:
+            stats = ledger.bot_accepted_resolved_stats(
+                bot_name=bot_name,
+                threshold_rule_version=threshold_rule_version,
+            )
+        else:
+            stats = ledger.bot_resolved_stats(
+                bot_name=bot_name,
+                decision_status=decision_status,
+                threshold_rule_version=threshold_rule_version,
+            )
         out.setdefault(f"{prefix}_resolved_n", stats.get("n"))
         out.setdefault(f"{prefix}_correct", stats.get("correct"))
         out.setdefault(f"{prefix}_accuracy", stats.get("accuracy"))
         out.setdefault(f"{prefix}_wilson_lb", stats.get("wilson_lb"))
         out.setdefault(f"{prefix}_net_pnl_cents", stats.get("net_pnl_cents"))
+        out.setdefault(f"{prefix}_wins", stats.get("correct"))
+        out.setdefault(f"{prefix}_total_pnl_cents", stats.get("net_pnl_cents"))
     except Exception:  # noqa: BLE001 - stats are advisory; recording must continue
         if bot_name not in _book_stats_warning_logged:
             logger.warning("v3 %s stats unavailable", bot_name, exc_info=True)
@@ -894,6 +1095,8 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         source.setdefault("delivery_status", "PAPER_DRIFT_FLOW_SPREAD")
         enriched = enrich_spot_depth(source)
         enriched = _enrich_source_row(enriched)
+        enriched = enrich_drift_evidence(enriched)
+        enriched = _with_drift_lineage_and_grade(enriched)
         enriched = _with_book_stats_context(
             ledger,
             enriched,
@@ -901,6 +1104,19 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             prefix="drift_flow_spread",
             threshold_rule_version="drift-flow-spread-13m-frozen-v2",
         )
+        for shadow_bot, prefix in (
+            (BOT_DRIFT_ASYMMETRIC_VOLUME, "asymmetric_volume"),
+            (BOT_DRIFT_BALANCED_V95, "balanced_v95"),
+            (BOT_DRIFT_ACCURACY_V91, "accuracy_v91"),
+        ):
+            enriched = _with_book_stats_context(
+                ledger,
+                enriched,
+                bot_name=shadow_bot,
+                prefix=prefix,
+                threshold_rule_version="drift-evidence-policy-v1",
+                decision_status=RESEARCH_ONLY,
+            )
         decision = drift_flow_spread_13m_decision(enriched)
         if decision is None:
             return None
@@ -913,6 +1129,9 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
         for shadow_decision_fn in (
             drift_flow_spread_shadow_spread4_decision,
             drift_flow_spread_shadow_flow15_decision,
+            drift_asymmetric_volume_shadow_decision,
+            drift_balanced_v95_shadow_decision,
+            drift_accuracy_v91_shadow_decision,
         ):
             try:
                 shadow_decision = shadow_decision_fn(enriched)

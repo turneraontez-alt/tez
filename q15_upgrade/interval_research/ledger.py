@@ -62,6 +62,26 @@ CREATE TABLE IF NOT EXISTS interval_captures (
     index_px REAL,
     basis_cents REAL,
     index_age_s REAL,
+    index_status TEXT,
+    index_missing_reason TEXT,
+    index_id TEXT,
+    index_source_ts REAL,
+    -- point-in-time Kalshi execution evidence used by downstream Drift research
+    quote_age_seconds REAL,
+    yes_bid_depth_contracts REAL,
+    yes_ask_depth_contracts REAL,
+    no_bid_depth_contracts REAL,
+    no_ask_depth_contracts REAL,
+    kalshi_depth_status TEXT,
+    kalshi_depth_missing_reason TEXT,
+    kalshi_depth_retry_used INTEGER,
+    kalshi_taker_yes_volume_15s REAL,
+    kalshi_taker_no_volume_15s REAL,
+    kalshi_taker_net_yes_volume_15s REAL,
+    -- source lineage is immutable even when this row is replayed by a newer build
+    build_sha TEXT,
+    config_hash TEXT,
+    feature_schema_version TEXT,
     -- missing-capture accounting
     missing_reason TEXT,
     -- settlement
@@ -85,7 +105,14 @@ _CAPTURE_COLUMNS = (
     "yes_bid_cents", "yes_ask_cents", "spread_cents", "depth_contracts",
     "entry_ask_cents", "net_edge_cents", "fee_cents", "slippage_cents",
     "total_cost_cents", "trade_decision", "entry_recommended", "entry_reject_reason",
-    "index_px", "basis_cents", "index_age_s",
+    "index_px", "basis_cents", "index_age_s", "index_status",
+    "index_missing_reason", "index_id", "index_source_ts",
+    "quote_age_seconds", "yes_bid_depth_contracts", "yes_ask_depth_contracts",
+    "no_bid_depth_contracts", "no_ask_depth_contracts", "kalshi_depth_status",
+    "kalshi_depth_missing_reason", "kalshi_depth_retry_used",
+    "kalshi_taker_yes_volume_15s", "kalshi_taker_no_volume_15s",
+    "kalshi_taker_net_yes_volume_15s", "build_sha", "config_hash",
+    "feature_schema_version",
     "missing_reason",
 )
 
@@ -129,6 +156,24 @@ class IntervalResearchLedger:
             ("index_px", "REAL"),
             ("basis_cents", "REAL"),
             ("index_age_s", "REAL"),
+            ("index_status", "TEXT"),
+            ("index_missing_reason", "TEXT"),
+            ("index_id", "TEXT"),
+            ("index_source_ts", "REAL"),
+            ("quote_age_seconds", "REAL"),
+            ("yes_bid_depth_contracts", "REAL"),
+            ("yes_ask_depth_contracts", "REAL"),
+            ("no_bid_depth_contracts", "REAL"),
+            ("no_ask_depth_contracts", "REAL"),
+            ("kalshi_depth_status", "TEXT"),
+            ("kalshi_depth_missing_reason", "TEXT"),
+            ("kalshi_depth_retry_used", "INTEGER"),
+            ("kalshi_taker_yes_volume_15s", "REAL"),
+            ("kalshi_taker_no_volume_15s", "REAL"),
+            ("kalshi_taker_net_yes_volume_15s", "REAL"),
+            ("build_sha", "TEXT"),
+            ("config_hash", "TEXT"),
+            ("feature_schema_version", "TEXT"),
         ):
             if name not in existing:
                 conn.execute(f"ALTER TABLE interval_captures ADD COLUMN {name} {decl}")
@@ -172,6 +217,13 @@ class IntervalResearchLedger:
                 "SELECT ticker, asset, close_time, predicted_side, "
                 "calibrated_yes_probability, yes_ask_cents, yes_bid_cents, "
                 "entry_ask_cents, spread_cents, depth_contracts, "
+                "quote_age_seconds, yes_bid_depth_contracts, yes_ask_depth_contracts, "
+                "no_bid_depth_contracts, no_ask_depth_contracts, kalshi_depth_status, "
+                "kalshi_depth_missing_reason, kalshi_depth_retry_used, "
+                "kalshi_taker_yes_volume_15s, kalshi_taker_no_volume_15s, "
+                "kalshi_taker_net_yes_volume_15s, index_px, basis_cents, index_age_s, "
+                "index_status, index_missing_reason, index_id, index_source_ts, "
+                "build_sha, config_hash, feature_schema_version, "
                 "captured_at, seconds_remaining, "
                 "flip_probability, distance_from_strike "
                 "FROM interval_captures WHERE model_version=? AND interval=? "

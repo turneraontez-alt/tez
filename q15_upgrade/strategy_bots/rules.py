@@ -31,6 +31,9 @@ BOT_DRIFT_13M = "drift_13m"
 BOT_DRIFT_FLOW_SPREAD = "drift_flow_spread_13m"
 BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4 = "drift_flow_spread_shadow_spread4"
 BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15 = "drift_flow_spread_shadow_flow15"
+BOT_DRIFT_ASYMMETRIC_VOLUME = "drift_asymmetric_volume_shadow"
+BOT_DRIFT_BALANCED_V95 = "drift_balanced_v95_shadow"
+BOT_DRIFT_ACCURACY_V91 = "drift_accuracy_v91_shadow"
 BOT_DRIFT_ADDON = "drift_addon_requal"
 BOT_DRIFT_LATEQUAL = "drift_latequal_12m_11m"
 BOT_DRIFT_NO_MIRROR = "drift_no_mirror"
@@ -58,6 +61,15 @@ DRIFT_CORE_FLIP_PROBABILITY_MAX = 30.0
 DRIFT_CORE_SPREAD_MAX_CENTS = 2.0
 DRIFT_CORE_EFFECTIVE_AGE_MAX_SECONDS = 15.0
 DRIFT_REVIEW_BARS = (30, 60, 150)
+
+# Evidence-policy cohorts are deliberately separate from the frozen accepted
+# policy above.  They may describe a row as a counterfactual cohort member, but
+# they always return RESEARCH_ONLY and have no delivery path of their own.
+DRIFT_ASYMMETRIC_LOW_ASK_MAX_CENTS = 64.0
+DRIFT_ASYMMETRIC_HIGH_ASK_MIN_CENTS = 65.0
+DRIFT_ASYMMETRIC_DISTANCE_SIGMA_MAX = 1e-4
+DRIFT_V91_FULL_PATH_YES_FRACTION_MIN = 0.75
+DRIFT_EVIDENCE_POLICY_VERSION = "drift-evidence-policy-v1"
 
 SPOT_DEPTH_KEYS = (
     "spot_depth_status",
@@ -992,6 +1004,514 @@ def drift_flow_spread_shadow_flow15_decision(
         spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
         allow_flow15=True,
         shadow_variant="flow15",
+    )
+
+
+def _drift_evidence_value(row: Mapping[str, Any], *keys: str) -> Any:
+    """Read one evidence value from the flat source row or a compact evidence map.
+
+    Producers are expected to use the canonical keys persisted in the returned
+    threshold profile.  The two nested-map fallbacks keep the pure rules usable
+    while upstream point-in-time evidence is being integrated.  No truthy/default
+    value is manufactured: missing evidence remains ``None`` and therefore cannot
+    satisfy an evidence gate.
+    """
+    containers: list[Mapping[str, Any]] = [row]
+    for name in ("drift_evidence", "evidence"):
+        nested = row.get(name)
+        if isinstance(nested, Mapping):
+            containers.append(nested)
+    for container in containers:
+        for key in keys:
+            if key in container and container.get(key) is not None:
+                return container.get(key)
+    return None
+
+
+def _drift_asymmetric_context(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return normalized asymmetric price-distance inputs, fail-closed.
+
+    The 64c/65c split is intentional.  A fractional ask strictly between those
+    values belongs to neither preregistered band and is not silently rounded.
+    """
+    if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
+        return None
+    if str(row.get("interval") or "").upper() != "13M":
+        return None
+    asset = _asset(row)
+    ask = _entry_ask(row)
+    distance = _num(row.get("distance_sigma"))
+    if distance is None:
+        distance = _num(row.get("distance_from_strike"))
+    flip = _num(row.get("flip_probability"))
+    if (
+        asset not in DRIFT_CORE_ASSETS
+        or source_side(row) != "YES"
+        or ask is None
+        or distance is None
+        or flip is None
+        or distance < 0.0
+        or not 0.0 <= flip <= DRIFT_CORE_FLIP_PROBABILITY_MAX
+    ):
+        return None
+    if DRIFT_CORE_ASK_MIN_CENTS <= ask <= DRIFT_ASYMMETRIC_LOW_ASK_MAX_CENTS:
+        distance_limit = DRIFT_CORE_DISTANCE_SIGMA_MAX
+        price_band = "ASK_60_64"
+    elif DRIFT_ASYMMETRIC_HIGH_ASK_MIN_CENTS <= ask <= DRIFT_CORE_ASK_MAX_CENTS:
+        distance_limit = DRIFT_ASYMMETRIC_DISTANCE_SIGMA_MAX
+        price_band = "ASK_65_73"
+    else:
+        return None
+    if distance > distance_limit:
+        return None
+    return {
+        "asset": asset,
+        "ask": ask,
+        "distance_sigma": distance,
+        "distance_sigma_max": distance_limit,
+        "flip_probability": flip,
+        "price_distance_band": price_band,
+        "incremental_to_core": distance > DRIFT_CORE_DISTANCE_SIGMA_MAX,
+    }
+
+
+def _drift_confirmed_asymmetric_context(
+    row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Apply asymmetric structure, then the exact frozen confirmation logic.
+
+    ``_drift_candidate_status`` owns the point-in-time flow freshness and tight-
+    spread OR semantics.  Its structural ceiling is intentionally frozen at
+    3e-5, so a shallow proxy carries the already-validated counterfactual
+    distance through that helper solely to evaluate confirmation.  No flow,
+    freshness, or spread input is altered or defaulted.
+    """
+    context = _drift_asymmetric_context(row)
+    if context is None:
+        return None
+    confirmation_row = dict(row)
+    confirmation_row["distance_sigma"] = min(
+        float(context["distance_sigma"]), DRIFT_CORE_DISTANCE_SIGMA_MAX
+    )
+    confirmation_row["flip_probability"] = context["flip_probability"]
+    status, gate_path, reasons, confirmation = _drift_candidate_status(
+        confirmation_row,
+        spread_max_cents=DRIFT_CORE_SPREAD_MAX_CENTS,
+        allow_flow15=False,
+    )
+    if status != ACCEPTED:
+        return None
+    out = dict(context)
+    out.update({
+        "confirmation_status": status,
+        "confirmation_gate_path": gate_path,
+        "confirmation_reason_codes": tuple(reasons),
+        **confirmation,
+    })
+    # Restore the actual counterfactual distance after the helper's confirmation
+    # proxy so persistence and Telegram never display the clamped value.
+    out["distance_sigma"] = context["distance_sigma"]
+    out["distance_sigma_max"] = context["distance_sigma_max"]
+    return out
+
+
+def _drift_v95_15m_yes_evidence(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize an explicitly point-in-time V95 15M YES agreement.
+
+    A key whose name includes ``15m`` is interval-specific by construction.  A
+    generic V95 side is accepted only alongside an explicit 15M checkpoint.
+    """
+    side_raw = _drift_evidence_value(
+        row,
+        "v95_15m_side",
+        "v95_15m_predicted_side",
+        "v95_15m_prediction_side",
+        "drift_v95_15m_side",
+        "q15_v95_15m_side",
+        "q15_v95_15m_predicted_side",
+    )
+    checkpoint = _drift_evidence_value(
+        row, "v95_15m_checkpoint", "q15_v95_15m_checkpoint"
+    )
+    if side_raw is None:
+        side_raw = _drift_evidence_value(row, "v95_side", "v95_predicted_side")
+        checkpoint = _drift_evidence_value(row, "v95_checkpoint")
+        if str(checkpoint or "").upper() != "15M":
+            return None
+    elif checkpoint is not None and str(checkpoint).upper() != "15M":
+        return None
+    side = _side(side_raw)
+    if side != "YES":
+        return None
+    fresh_raw = _drift_evidence_value(
+        row, "drift_v95_15m_fresh", "v95_15m_fresh", "v95_fresh"
+    )
+    status = _drift_evidence_value(
+        row, "drift_v95_15m_status", "v95_15m_status", "v95_status"
+    )
+    if isinstance(fresh_raw, bool):
+        status = "fresh" if fresh_raw else "stale"
+    return {
+        "v95_15m_checkpoint": "15M",
+        "v95_15m_side": side,
+        "v95_15m_grade": _drift_evidence_value(
+            row,
+            "drift_v95_15m_grade",
+            "v95_15m_grade",
+            "v95_grade",
+            "confidence_grade",
+        ),
+        "v95_15m_age_seconds": _num(_drift_evidence_value(
+            row,
+            "drift_v95_15m_age_seconds",
+            "v95_15m_age_seconds",
+            "v95_age_seconds",
+        )),
+        "v95_15m_flow_score": _num(_drift_evidence_value(
+            row, "drift_v95_15m_flow_score", "v95_15m_flow_score"
+        )),
+        "v95_15m_flow_60s": _num(_drift_evidence_value(
+            row,
+            "v95_15m_flow_60s",
+            "v95_15m_spot_flow_60s",
+            "v95_15m_spot_trade_net_notional_60s",
+            "v95_flow_60s",
+        )),
+        "v95_15m_status": str(status) if status is not None else None,
+        "v95_15m_yes_agreement": True,
+    }
+
+
+def _drift_v91_full_path_evidence(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize V91 full-path YES/all breadth, rejecting incomplete evidence."""
+    fraction = _num(_drift_evidence_value(
+        row,
+        "drift_v91_yes_fraction_all",
+        "v91_yes_fraction_all",
+        "v91_full_path_yes_fraction",
+        "v91_full_path_yes_all_fraction",
+        "q15_v91_full_path_yes_fraction",
+        "v91_yes_fraction",
+    ))
+    yes_count = _num(_drift_evidence_value(
+        row,
+        "v91_full_path_yes_count",
+        "v91_full_path_yes_votes",
+        "v91_full_path_yes",
+        "drift_v91_yes_count",
+    ))
+    all_count = _num(_drift_evidence_value(
+        row,
+        "v91_full_path_all_count",
+        "v91_full_path_total_count",
+        "v91_full_path_all",
+        "v91_full_path_total",
+    ))
+    observation_count = _num(_drift_evidence_value(
+        row, "drift_v91_observation_count", "v91_observation_count"
+    ))
+    # The canonical producer always supplies an observation count, even when
+    # it does not supply the optional YES count.  Use it as the denominator
+    # only when a numerator is also present; otherwise the canonical fraction
+    # remains the complete gate input.
+    if yes_count is not None and all_count is None:
+        all_count = observation_count
+    if (yes_count is None) != (all_count is None):
+        return None
+    computed = None
+    if yes_count is not None and all_count is not None:
+        if yes_count < 0.0 or all_count <= 0.0 or yes_count > all_count:
+            return None
+        computed = yes_count / all_count
+    if fraction is None:
+        fraction = computed
+    elif not 0.0 <= fraction <= 1.0:
+        return None
+    elif computed is not None and not math.isclose(fraction, computed, abs_tol=1e-9):
+        return None
+    if fraction is None or fraction < DRIFT_V91_FULL_PATH_YES_FRACTION_MIN:
+        return None
+    return {
+        "v91_full_path_yes_fraction": fraction,
+        "v91_full_path_directional_fraction": _num(_drift_evidence_value(
+            row, "drift_v91_yes_fraction_directional"
+        )),
+        "v91_observation_count": observation_count,
+        "v91_full_path_yes_count": yes_count,
+        "v91_full_path_all_count": all_count,
+        "v91_full_path_threshold": DRIFT_V91_FULL_PATH_YES_FRACTION_MIN,
+        "v91_full_path_pass": True,
+    }
+
+
+def _drift_cohort_stat(
+    row: Mapping[str, Any], prefix: str, name: str
+) -> float | None:
+    return _num(_drift_evidence_value(
+        row, f"{prefix}_{name}", f"drift_{prefix}_{name}", f"cohort_{name}"
+    ))
+
+
+def _drift_evidence_profile(
+    row: Mapping[str, Any],
+    context: Mapping[str, Any],
+    *,
+    cohort: str,
+    build: str,
+    stat_prefix: str,
+    gate_path: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    n_resolved = int(max(0.0, _drift_cohort_stat(row, stat_prefix, "resolved_n") or 0.0))
+    wins = _drift_cohort_stat(row, stat_prefix, "wins")
+    pnl = _drift_cohort_stat(row, stat_prefix, "total_pnl_cents")
+    grade = _drift_evidence_value(
+        row, "drift_evidence_grade", "evidence_grade", "confidence_grade"
+    )
+    profile: dict[str, Any] = {
+        "paper_only": True,
+        "not_a_live_order": True,
+        "research_only": True,
+        "never_notify": True,
+        "notification_eligible": False,
+        "policy_frozen": True,
+        "rule_version": DRIFT_EVIDENCE_POLICY_VERSION,
+        "cohort": cohort,
+        "cohort_name": cohort,
+        "build": build,
+        "gate_path": context.get("confirmation_gate_path"),
+        "cohort_gate_path": gate_path,
+        "confirmation_status": context.get("confirmation_status"),
+        "passed": False,
+        "cohort_member": True,
+        "evidence_complete": True,
+        "would_accept_variant": True,
+        "counterfactual_status": ACCEPTED,
+        "incremental_to_core": bool(context.get("incremental_to_core")),
+        "counts_as_independent_pick": False,
+        "exposure_class": "COUNTERFACTUAL_RESEARCH",
+        "review_bars": list(DRIFT_REVIEW_BARS),
+        "review_stage": _drift_review_stage(n_resolved),
+        "cohort_n_resolved": n_resolved,
+        "cohort_wins": wins,
+        "cohort_total_pnl_cents": pnl,
+        "cohort_status": "PROVISIONAL" if n_resolved < DRIFT_REVIEW_BARS[1] else "EVALUATE",
+        "cohort_verdict_n": DRIFT_REVIEW_BARS[1],
+        "promotion_review_n": DRIFT_REVIEW_BARS[2],
+        "accepted_assets": sorted(DRIFT_CORE_ASSETS),
+        "accepted_side": "YES",
+        "ask_min_cents": DRIFT_CORE_ASK_MIN_CENTS,
+        "ask_max_cents": DRIFT_CORE_ASK_MAX_CENTS,
+        "low_ask_max_cents": DRIFT_ASYMMETRIC_LOW_ASK_MAX_CENTS,
+        "high_ask_min_cents": DRIFT_ASYMMETRIC_HIGH_ASK_MIN_CENTS,
+        "low_ask_distance_sigma_max": DRIFT_CORE_DISTANCE_SIGMA_MAX,
+        "high_ask_distance_sigma_max": DRIFT_ASYMMETRIC_DISTANCE_SIGMA_MAX,
+        "flip_probability_max": DRIFT_CORE_FLIP_PROBABILITY_MAX,
+        "pick_ask_cents": context.get("ask"),
+        "distance_sigma": context.get("distance_sigma"),
+        "distance_sigma_max": context.get("distance_sigma_max"),
+        "flip_probability": context.get("flip_probability"),
+        "price_distance_band": context.get("price_distance_band"),
+        "flow60_is_fresh": context.get("flow60_is_fresh"),
+        "flow60_pass": context.get("flow60_pass"),
+        "spread_pass": context.get("spread_pass"),
+        "evidence_grade": grade,
+        "spot_depth_status": _drift_evidence_value(row, "spot_depth_status"),
+        "spot_depth_snapshot_age_seconds": _num(_drift_evidence_value(
+            row, "spot_depth_snapshot_age_seconds"
+        )),
+        "spot_depth_age_seconds": _num(_drift_evidence_value(
+            row, "spot_depth_age_seconds"
+        )),
+        "spot_depth_trade_age_seconds": _num(_drift_evidence_value(
+            row, "spot_depth_trade_age_seconds"
+        )),
+        "btc_side": _side(_drift_evidence_value(
+            row,
+            "drift_btc_15m_side",
+            "btc_15m_side",
+            "btc_side",
+            "btc_dominant_side",
+            "btc_model_predicted_side",
+        )),
+        "btc_grade": _drift_evidence_value(row, "btc_grade", "btc_v95_grade"),
+        "breadth_yes_fraction": _num(_drift_evidence_value(
+            row,
+            "drift_breadth_yes_fraction",
+            "drift_market_breadth_yes_fraction",
+            "breadth_yes_fraction",
+            "market_breadth_yes_fraction",
+        )),
+        "flow_score": _num(_drift_evidence_value(
+            row, "drift_flow_score", "flow_score"
+        )),
+        "drift_v91_yes_fraction_all": _num(_drift_evidence_value(
+            row, "drift_v91_yes_fraction_all", "v91_yes_fraction_all"
+        )),
+        "drift_v91_yes_fraction_directional": _num(_drift_evidence_value(
+            row, "drift_v91_yes_fraction_directional"
+        )),
+        "drift_v91_observation_count": _num(_drift_evidence_value(
+            row, "drift_v91_observation_count", "v91_observation_count"
+        )),
+        "drift_v95_15m_side": _side(_drift_evidence_value(
+            row, "drift_v95_15m_side", "v95_15m_side"
+        )),
+        "drift_v95_15m_flow_score": _num(_drift_evidence_value(
+            row, "drift_v95_15m_flow_score", "v95_15m_flow_score"
+        )),
+        "drift_v95_15m_age_seconds": _num(_drift_evidence_value(
+            row, "drift_v95_15m_age_seconds", "v95_15m_age_seconds"
+        )),
+        "drift_btc_15m_side": _side(_drift_evidence_value(
+            row, "drift_btc_15m_side", "btc_15m_side"
+        )),
+        "drift_btc_15m_age_seconds": _num(_drift_evidence_value(
+            row, "drift_btc_15m_age_seconds", "btc_15m_age_seconds"
+        )),
+        # Preserve the producer's canonical evidence/lineage fields alongside
+        # the normalized gate fields.  Telegram and ledger consumers can then
+        # render the decision truthfully even when only the profile is present.
+        "feature_cohort": _drift_evidence_value(row, "feature_cohort"),
+        "build_sha": _drift_evidence_value(row, "build_sha", "decision_build_sha"),
+        "drift_core_breadth": _drift_evidence_value(
+            row, "drift_core_breadth", "core_breadth"
+        ),
+        "drift_asymmetric_breadth": _drift_evidence_value(
+            row, "drift_asymmetric_breadth", "asymmetric_breadth"
+        ),
+        "drift_flow_1m": _num(_drift_evidence_value(
+            row, "drift_flow_1m", "drift_flow_60s"
+        )),
+        "drift_flow_3m": _num(_drift_evidence_value(row, "drift_flow_3m")),
+        "drift_flow_5m": _num(_drift_evidence_value(row, "drift_flow_5m")),
+        "drift_flow_13m": _num(_drift_evidence_value(row, "drift_flow_13m")),
+        "drift_flow_coverage": _num(_drift_evidence_value(
+            row, "drift_flow_coverage"
+        )),
+        "index_status": _drift_evidence_value(row, "index_status"),
+        "index_missing_reason": _drift_evidence_value(row, "index_missing_reason"),
+        "kalshi_depth_status": _drift_evidence_value(row, "kalshi_depth_status"),
+        "kalshi_depth_missing_reason": _drift_evidence_value(
+            row, "kalshi_depth_missing_reason"
+        ),
+    }
+    if evidence:
+        profile.update(evidence)
+        if profile.get("evidence_grade") is None and evidence.get("v95_15m_grade") is not None:
+            profile["evidence_grade"] = evidence.get("v95_15m_grade")
+    return profile
+
+
+def _drift_evidence_decision(
+    row: Mapping[str, Any],
+    context: Mapping[str, Any],
+    *,
+    bot_name: str,
+    build: str,
+    stat_prefix: str,
+    gate_path: str,
+    reason_codes: tuple[str, ...],
+    evidence: Mapping[str, Any] | None = None,
+) -> BotDecision:
+    reasons = [
+        *reason_codes,
+        *tuple(context.get("confirmation_reason_codes") or ()),
+        "DRIFT_COUNTERFACTUAL_SHADOW",
+        "DRIFT_RESEARCH_ONLY",
+    ]
+    if context.get("incremental_to_core"):
+        reasons.append("DRIFT_INCREMENTAL_TO_FROZEN_CORE")
+    return BotDecision(
+        bot_name,
+        RESEARCH_ONLY,
+        tuple(reasons),
+        threshold_profile=_drift_evidence_profile(
+            row,
+            context,
+            cohort=bot_name,
+            build=build,
+            stat_prefix=stat_prefix,
+            gate_path=gate_path,
+            evidence=evidence,
+        ),
+        side_override="YES",
+        original_source_side=source_side(row),
+        entry_ask_cents=context.get("ask"),
+        use_entry_ask_override=True,
+    )
+
+
+def drift_asymmetric_volume_shadow_decision(
+    row: Mapping[str, Any],
+) -> BotDecision | None:
+    """Asymmetric price-distance volume cohort; never an accepted/live row."""
+    context = _drift_confirmed_asymmetric_context(row)
+    if context is None:
+        return None
+    return _drift_evidence_decision(
+        row,
+        context,
+        bot_name=BOT_DRIFT_ASYMMETRIC_VOLUME,
+        build="VOLUME",
+        stat_prefix="asymmetric_volume",
+        gate_path="ASYMMETRIC_VOLUME_SHADOW",
+        reason_codes=(
+            "V3_DRIFT_ASYMMETRIC_VOLUME_SHADOW",
+            "DRIFT_ASYMMETRIC_PRICE_DISTANCE",
+        ),
+    )
+
+
+def drift_balanced_v95_shadow_decision(
+    row: Mapping[str, Any],
+) -> BotDecision | None:
+    """Asymmetric cohort requiring explicit V95 15M YES agreement."""
+    context = _drift_confirmed_asymmetric_context(row)
+    if context is None:
+        return None
+    evidence = _drift_v95_15m_yes_evidence(row)
+    if evidence is None:
+        return None
+    return _drift_evidence_decision(
+        row,
+        context,
+        bot_name=BOT_DRIFT_BALANCED_V95,
+        build="BALANCED",
+        stat_prefix="balanced_v95",
+        gate_path="BALANCED_V95_15M_YES_SHADOW",
+        reason_codes=(
+            "V3_DRIFT_BALANCED_V95_SHADOW",
+            "DRIFT_ASYMMETRIC_PRICE_DISTANCE",
+            "DRIFT_V95_15M_YES_AGREEMENT",
+        ),
+        evidence=evidence,
+    )
+
+
+def drift_accuracy_v91_shadow_decision(
+    row: Mapping[str, Any],
+) -> BotDecision | None:
+    """Asymmetric cohort requiring V91 full-path YES/all breadth >= 0.75."""
+    context = _drift_confirmed_asymmetric_context(row)
+    if context is None:
+        return None
+    evidence = _drift_v91_full_path_evidence(row)
+    if evidence is None:
+        return None
+    return _drift_evidence_decision(
+        row,
+        context,
+        bot_name=BOT_DRIFT_ACCURACY_V91,
+        build="ACCURACY",
+        stat_prefix="accuracy_v91",
+        gate_path="ACCURACY_V91_FULL_PATH_75_SHADOW",
+        reason_codes=(
+            "V3_DRIFT_ACCURACY_V91_SHADOW",
+            "DRIFT_ASYMMETRIC_PRICE_DISTANCE",
+            "DRIFT_V91_FULL_PATH_YES_FRACTION_GTE_75",
+        ),
+        evidence=evidence,
     )
 
 

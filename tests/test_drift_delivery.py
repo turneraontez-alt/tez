@@ -10,6 +10,7 @@ from q15_upgrade.strategy_bots import runtime
 from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
     BOT_DRIFT_ADDON,
+    BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
@@ -226,6 +227,7 @@ def test_disabled_rule_does_not_burn_drift_row_identity(tmp_path, monkeypatch):
         BOT_DRIFT_FLOW_SPREAD,
         BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
         BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+        BOT_DRIFT_ASYMMETRIC_VOLUME,
     ]
 
 

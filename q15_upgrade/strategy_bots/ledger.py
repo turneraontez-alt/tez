@@ -16,6 +16,9 @@ from .rules import (
     BOT_CONFIDENCE_TIER,
     BOT_BASELINE,
     BOT_DRIFT_13M,
+    BOT_DRIFT_ACCURACY_V91,
+    BOT_DRIFT_ASYMMETRIC_VOLUME,
+    BOT_DRIFT_BALANCED_V95,
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
@@ -61,6 +64,39 @@ CREATE TABLE IF NOT EXISTS strategy_bot_decisions (
     source_rule TEXT,
     source_rule_name TEXT,
     source_reason_codes TEXT,
+    build_sha TEXT,
+    config_hash TEXT,
+    source_build_sha TEXT,
+    source_config_hash TEXT,
+    feature_schema_version TEXT,
+    source_features_version TEXT,
+    feature_cohort TEXT,
+    feature_availability_json TEXT,
+    feature_age_json TEXT,
+    evidence_grade TEXT,
+    evidence_reason_codes TEXT,
+    drift_candidate_lane TEXT,
+    data_complete INTEGER,
+    full_feature_complete INTEGER,
+    source_created_at REAL,
+    source_captured_at REAL,
+    evidence_as_of REAL,
+    drift_evidence_json TEXT,
+    drift_v91_yes_fraction_all REAL,
+    drift_v91_yes_fraction_directional REAL,
+    drift_v91_observation_count INTEGER,
+    drift_v95_15m_side TEXT,
+    drift_v95_15m_flow_score REAL,
+    drift_btc_15m_side TEXT,
+    drift_core_breadth INTEGER,
+    drift_asymmetric_breadth INTEGER,
+    drift_flow_1m REAL,
+    drift_flow_3m REAL,
+    drift_flow_5m REAL,
+    drift_flow_13m REAL,
+    drift_flow_positive_bucket_fraction REAL,
+    drift_flow_sign_flips INTEGER,
+    drift_flow_coverage REAL,
     record_kind TEXT,
     delivery_status TEXT,
     asset TEXT,
@@ -202,6 +238,39 @@ _COLS = (
     "source_rule",
     "source_rule_name",
     "source_reason_codes",
+    "build_sha",
+    "config_hash",
+    "source_build_sha",
+    "source_config_hash",
+    "feature_schema_version",
+    "source_features_version",
+    "feature_cohort",
+    "feature_availability_json",
+    "feature_age_json",
+    "evidence_grade",
+    "evidence_reason_codes",
+    "drift_candidate_lane",
+    "data_complete",
+    "full_feature_complete",
+    "source_created_at",
+    "source_captured_at",
+    "evidence_as_of",
+    "drift_evidence_json",
+    "drift_v91_yes_fraction_all",
+    "drift_v91_yes_fraction_directional",
+    "drift_v91_observation_count",
+    "drift_v95_15m_side",
+    "drift_v95_15m_flow_score",
+    "drift_btc_15m_side",
+    "drift_core_breadth",
+    "drift_asymmetric_breadth",
+    "drift_flow_1m",
+    "drift_flow_3m",
+    "drift_flow_5m",
+    "drift_flow_13m",
+    "drift_flow_positive_bucket_fraction",
+    "drift_flow_sign_flips",
+    "drift_flow_coverage",
     "record_kind",
     "delivery_status",
     "asset",
@@ -304,6 +373,219 @@ def _source_model(row: Mapping[str, Any]) -> str | None:
     return str(row.get("model_version")) if row.get("model_version") is not None else None
 
 
+_LINEAGE_COLUMN_TYPES: dict[str, str] = {
+    "build_sha": "TEXT",
+    "config_hash": "TEXT",
+    "source_build_sha": "TEXT",
+    "source_config_hash": "TEXT",
+    "feature_schema_version": "TEXT",
+    "source_features_version": "TEXT",
+    "feature_cohort": "TEXT",
+    "feature_availability_json": "TEXT",
+    "feature_age_json": "TEXT",
+    "evidence_grade": "TEXT",
+    "evidence_reason_codes": "TEXT",
+    "drift_candidate_lane": "TEXT",
+    "data_complete": "INTEGER",
+    "full_feature_complete": "INTEGER",
+    "source_created_at": "REAL",
+    "source_captured_at": "REAL",
+    "evidence_as_of": "REAL",
+    "drift_evidence_json": "TEXT",
+    "drift_v91_yes_fraction_all": "REAL",
+    "drift_v91_yes_fraction_directional": "REAL",
+    "drift_v91_observation_count": "INTEGER",
+    "drift_v95_15m_side": "TEXT",
+    "drift_v95_15m_flow_score": "REAL",
+    "drift_btc_15m_side": "TEXT",
+    "drift_core_breadth": "INTEGER",
+    "drift_asymmetric_breadth": "INTEGER",
+    "drift_flow_1m": "REAL",
+    "drift_flow_3m": "REAL",
+    "drift_flow_5m": "REAL",
+    "drift_flow_13m": "REAL",
+    "drift_flow_positive_bucket_fraction": "REAL",
+    "drift_flow_sign_flips": "INTEGER",
+    "drift_flow_coverage": "REAL",
+}
+
+
+def _mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+    return None
+
+
+def _evidence_sources(
+    row: Mapping[str, Any], threshold: Mapping[str, Any]
+) -> tuple[Mapping[str, Any], ...]:
+    """Return only explicitly supplied lineage/evidence mappings.
+
+    The recorder must not manufacture completeness, grades, or lineage.  Nested
+    JSON/mappings are accepted so upstream enrichers can keep one canonical
+    evidence bundle while the policy inputs below remain first-class columns.
+    """
+    sources: list[Mapping[str, Any]] = [row, threshold]
+    for parent in (row, threshold):
+        for key in (
+            "drift_evidence", "drift_evidence_json", "evidence",
+            "lineage", "lineage_json", "feature_identity",
+        ):
+            nested = _mapping(parent.get(key))
+            if nested is not None:
+                sources.append(nested)
+    return tuple(sources)
+
+
+def _explicit(sources: Sequence[Mapping[str, Any]], *keys: str) -> Any:
+    for source in sources:
+        for key in keys:
+            if key in source and source.get(key) is not None:
+                return source.get(key)
+    return None
+
+
+def _text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _json_payload(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return _json(value)
+
+
+def _explicit_flag(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = _num(value)
+        return None if number is None else (1 if number != 0.0 else 0)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return 1
+    if text in {"0", "false", "no", "off"}:
+        return 0
+    return None
+
+
+def _explicit_int(value: Any) -> int | None:
+    number = _num(value)
+    return int(number) if number is not None and number.is_integer() else None
+
+
+def _evidence_reason_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return _csv([str(item) for item in value])
+    return str(value)
+
+
+def _lineage_record(
+    row: Mapping[str, Any], threshold: Mapping[str, Any]
+) -> dict[str, Any]:
+    sources = _evidence_sources(row, threshold)
+    decision_sources = (threshold, row, *sources[2:])
+    source_created_at = _num(row.get("source_created_at"))
+    if source_created_at is None:
+        source_created_at = _num(row.get("created_at"))
+    return {
+        # Decision lineage and source lineage intentionally remain separate.
+        # A missing source hash must not inherit the process/decision hash.
+        "build_sha": _text(_explicit(decision_sources, "build_sha", "decision_build_sha")),
+        "config_hash": _text(_explicit(decision_sources, "config_hash", "decision_config_hash")),
+        "source_build_sha": _text(_explicit(sources, "source_build_sha")),
+        "source_config_hash": _text(_explicit(sources, "source_config_hash")),
+        "feature_schema_version": _text(_explicit(sources, "feature_schema_version")),
+        "source_features_version": _text(_explicit(
+            sources, "source_features_version", "features_version"
+        )),
+        "feature_cohort": _text(_explicit(
+            sources, "feature_cohort", "cohort", "cohort_name"
+        )),
+        "feature_availability_json": _json_payload(_explicit(
+            sources, "feature_availability_json", "feature_availability"
+        )),
+        "feature_age_json": _json_payload(_explicit(
+            sources, "feature_age_json", "feature_ages"
+        )),
+        "evidence_grade": _text(_explicit(sources, "evidence_grade")),
+        "evidence_reason_codes": _evidence_reason_text(_explicit(
+            sources, "evidence_reason_codes"
+        )),
+        "drift_candidate_lane": _text(_explicit(sources, "drift_candidate_lane")),
+        "data_complete": _explicit_flag(_explicit(sources, "data_complete")),
+        "full_feature_complete": _explicit_flag(_explicit(
+            sources, "full_feature_complete"
+        )),
+        "source_created_at": source_created_at,
+        "source_captured_at": _num(_explicit(
+            sources, "source_captured_at", "captured_at", "capture_timestamp"
+        )),
+        "evidence_as_of": _num(_explicit(
+            sources, "evidence_as_of", "evidence_timestamp", "feature_captured_at"
+        )),
+        "drift_evidence_json": _json_payload(_explicit(
+            (row, threshold), "drift_evidence_json", "drift_evidence", "evidence_json"
+        )),
+        "drift_v91_yes_fraction_all": _num(_explicit(
+            sources, "drift_v91_yes_fraction_all", "v91_full_path_yes_fraction"
+        )),
+        "drift_v91_yes_fraction_directional": _num(_explicit(
+            sources,
+            "drift_v91_yes_fraction_directional",
+            "v91_full_path_yes_fraction_directional",
+        )),
+        "drift_v91_observation_count": _explicit_int(_explicit(
+            sources,
+            "drift_v91_observation_count",
+            "v91_full_path_all_count",
+        )),
+        "drift_v95_15m_side": _text(_explicit(
+            sources, "drift_v95_15m_side", "v95_15m_side"
+        )),
+        "drift_v95_15m_flow_score": _num(_explicit(
+            sources, "drift_v95_15m_flow_score", "v95_15m_flow_score"
+        )),
+        "drift_btc_15m_side": _text(_explicit(
+            sources, "drift_btc_15m_side", "btc_15m_side"
+        )),
+        "drift_core_breadth": _explicit_int(_explicit(
+            sources, "drift_core_breadth", "core_breadth"
+        )),
+        "drift_asymmetric_breadth": _explicit_int(_explicit(
+            sources, "drift_asymmetric_breadth", "asymmetric_breadth"
+        )),
+        "drift_flow_1m": _num(_explicit(sources, "drift_flow_1m", "drift_flow_60s")),
+        "drift_flow_3m": _num(_explicit(sources, "drift_flow_3m")),
+        "drift_flow_5m": _num(_explicit(sources, "drift_flow_5m")),
+        "drift_flow_13m": _num(_explicit(sources, "drift_flow_13m")),
+        "drift_flow_positive_bucket_fraction": _num(_explicit(
+            sources, "drift_flow_positive_bucket_fraction"
+        )),
+        "drift_flow_sign_flips": _explicit_int(_explicit(
+            sources, "drift_flow_sign_flips"
+        )),
+        "drift_flow_coverage": _num(_explicit(sources, "drift_flow_coverage")),
+    }
+
+
 def _feature_column_type(name: str) -> str:
     text_names = {
         "coinbase_l2_status",
@@ -336,6 +618,8 @@ def _build_record(
     row: Mapping[str, Any],
     source_system: str,
 ) -> dict[str, Any]:
+    threshold = dict(decision.threshold_profile or {})
+    lineage = _lineage_record(row, threshold)
     btc = dict(decision.btc_context or {})
     if not btc:
         btc_keys = (
@@ -361,12 +645,13 @@ def _build_record(
         "paper_only": 1,
         "reason_codes": _csv(decision.reason_codes),
         "reason_json": _json(list(decision.reason_codes)),
-        "threshold_json": _json(decision.threshold_profile),
+        "threshold_json": _json(threshold),
         "source_system": source_system,
         "source_model_version": _source_model(row),
         "source_rule": source_rule(row),
         "source_rule_name": row.get("rule_name"),
         "source_reason_codes": row.get("reason_codes"),
+        **lineage,
         "record_kind": row.get("record_kind"),
         "delivery_status": row.get("delivery_status"),
         "asset": row.get("asset"),
@@ -494,6 +779,7 @@ class StrategyBotLedger:
             "notification_message_id": "INTEGER",
             "notification_error": "TEXT",
             "notified_at": "REAL",
+            **_LINEAGE_COLUMN_TYPES,
         }
         for key in COINBASE_L2_KEYS:
             added.setdefault(key, _feature_column_type(key))
@@ -703,6 +989,22 @@ class StrategyBotLedger:
         *,
         threshold_rule_version: str | None = None,
     ) -> dict[str, Any]:
+        return self.bot_resolved_stats(
+            bot_name=bot_name,
+            strategy_version=strategy_version,
+            decision_status=ACCEPTED,
+            threshold_rule_version=threshold_rule_version,
+        )
+
+    def bot_resolved_stats(
+        self,
+        bot_name: str,
+        strategy_version: str = STRATEGY_VERSION,
+        *,
+        decision_status: str,
+        threshold_rule_version: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolved economics for one explicit decision-status cohort."""
         if threshold_rule_version is None:
             with self._lock:
                 row = self._conn.execute(
@@ -711,7 +1013,7 @@ class StrategyBotLedger:
                     "FROM strategy_bot_decisions "
                     "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
                     "AND official_result IS NOT NULL",
-                    (strategy_version, bot_name, ACCEPTED),
+                    (strategy_version, bot_name, decision_status),
                 ).fetchone()
             n = int(row["n"] or 0) if row is not None else 0
             correct = int(row["correct"] or 0) if row is not None else 0
@@ -723,7 +1025,7 @@ class StrategyBotLedger:
                     "FROM strategy_bot_decisions "
                     "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
                     "AND official_result IS NOT NULL",
-                    (strategy_version, bot_name, ACCEPTED),
+                    (strategy_version, bot_name, decision_status),
                 ).fetchall()
             matched = [
                 row for row in candidates
@@ -838,6 +1140,9 @@ class StrategyBotLedger:
         counterfactual_bots = {
             BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
             BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+            BOT_DRIFT_ASYMMETRIC_VOLUME,
+            BOT_DRIFT_BALANCED_V95,
+            BOT_DRIFT_ACCURACY_V91,
         }
         exposure_rows = [
             r for r in rows if r.get("bot_name") not in counterfactual_bots
@@ -882,6 +1187,26 @@ class StrategyBotLedger:
             "by_bot_rule": self._group(rows, ("bot_name", "source_rule"), min_n),
             "by_bot_interval": self._group(rows, ("bot_name", "interval"), min_n),
             "by_bot_delivery_status": self._group(rows, ("bot_name", "delivery_status"), min_n),
+            "by_drift_candidate_lane": self._group(
+                [r for r in rows if r.get("drift_candidate_lane") is not None],
+                ("drift_candidate_lane",),
+                min_n,
+            ),
+            "by_feature_cohort": self._group(
+                [r for r in rows if r.get("feature_cohort") is not None],
+                ("feature_cohort",),
+                min_n,
+            ),
+            "by_evidence_grade": self._group(
+                [r for r in rows if r.get("evidence_grade") is not None],
+                ("evidence_grade",),
+                min_n,
+            ),
+            "by_full_feature_complete": self._group(
+                [r for r in rows if r.get("full_feature_complete") is not None],
+                ("full_feature_complete",),
+                min_n,
+            ),
             "by_tier_source_asset_side_rule": self._group(
                 [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER],
                 ("tier", "source_system", "asset", "side", "source_rule"),
@@ -1113,6 +1438,15 @@ class StrategyBotLedger:
             r for r in rows
             if r.get("bot_name") == BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15
         ]
+        asymmetric_volume = [
+            r for r in rows if r.get("bot_name") == BOT_DRIFT_ASYMMETRIC_VOLUME
+        ]
+        balanced_v95 = [
+            r for r in rows if r.get("bot_name") == BOT_DRIFT_BALANCED_V95
+        ]
+        accuracy_v91 = [
+            r for r in rows if r.get("bot_name") == BOT_DRIFT_ACCURACY_V91
+        ]
         spread4_qualifiers = [
             r for r in spread4 if cls._threshold_flag(r, "would_accept_variant")
         ]
@@ -1188,6 +1522,36 @@ class StrategyBotLedger:
                     "full": cls._cohort_view(flow15_qualifiers, min_n),
                     "incremental": cls._cohort_view(flow15_incremental, min_n),
                 },
+                "asymmetric_volume": {
+                    "full": cls._cohort_view(asymmetric_volume, min_n),
+                    "incremental": cls._cohort_view(
+                        [
+                            r for r in asymmetric_volume
+                            if cls._threshold_flag(r, "incremental_to_core")
+                        ],
+                        min_n,
+                    ),
+                },
+                "balanced_v95": {
+                    "full": cls._cohort_view(balanced_v95, min_n),
+                    "incremental": cls._cohort_view(
+                        [
+                            r for r in balanced_v95
+                            if cls._threshold_flag(r, "incremental_to_core")
+                        ],
+                        min_n,
+                    ),
+                },
+                "accuracy_v91": {
+                    "full": cls._cohort_view(accuracy_v91, min_n),
+                    "incremental": cls._cohort_view(
+                        [
+                            r for r in accuracy_v91
+                            if cls._threshold_flag(r, "incremental_to_core")
+                        ],
+                        min_n,
+                    ),
+                },
             },
             "independent_candidates": cls._agg(independent_candidates, min_n),
             "base_13m_all_candidates": cls._agg(core_candidates, min_n),
@@ -1228,8 +1592,9 @@ class StrategyBotLedger:
                 "drift_flow_spread_13m owns base Telegram delivery; "
                 "drift_addon_requal is correlated exposure; drift_no_mirror is the "
                 "legacy NO shadow; drift_no_expansion owns accepted grouped NO "
-                "Telegram delivery. spread4 and flow15 are silent counterfactual "
-                "research and never count as independent or total exposure"
+                "Telegram delivery. spread4, flow15, asymmetric-volume, balanced-V95, "
+                "and accuracy-V91 are silent counterfactual research and never count "
+                "as independent or total exposure"
             ),
         }
 

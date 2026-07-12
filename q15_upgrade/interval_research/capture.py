@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from ..lineage import lineage_stamp
 from .config import INTERVAL_ROLES
+
+
+CAPTURE_FEATURE_SCHEMA_VERSION = "interval-capture-v2-drift-evidence"
 
 
 def _num(value: Any) -> float | None:
@@ -77,6 +81,10 @@ def build_capture_row(*, model_version: str, interval: str, mark_seconds: int,
     if depth is None:
         depth = _num(quote.get("depth_contracts"))
 
+    lineage = lineage_stamp(
+        feature_schema_version=CAPTURE_FEATURE_SCHEMA_VERSION,
+        config={"interval": interval, "mark_seconds": int(mark_seconds)},
+    )
     return {
         "model_version": model_version,
         "ticker": str(canonical.ticker),
@@ -106,6 +114,19 @@ def build_capture_row(*, model_version: str, interval: str, mark_seconds: int,
         "yes_ask_cents": _num(quote.get("ask_cents")),
         "spread_cents": _num(quote.get("spread_cents")),
         "depth_contracts": depth,
+        "quote_age_seconds": _num(quote.get("quote_age_seconds")),
+        "yes_bid_depth_contracts": _num(quote.get("yes_bid_depth_contracts")),
+        "yes_ask_depth_contracts": _num(quote.get("yes_ask_depth_contracts")),
+        "no_bid_depth_contracts": _num(quote.get("no_bid_depth_contracts")),
+        "no_ask_depth_contracts": _num(quote.get("no_ask_depth_contracts")),
+        "kalshi_depth_status": quote.get("kalshi_depth_status"),
+        "kalshi_depth_missing_reason": quote.get("kalshi_depth_missing_reason"),
+        "kalshi_depth_retry_used": 1 if quote.get("kalshi_depth_retry_used") else 0,
+        "kalshi_taker_yes_volume_15s": _num(quote.get("kalshi_taker_yes_volume_15s")),
+        "kalshi_taker_no_volume_15s": _num(quote.get("kalshi_taker_no_volume_15s")),
+        "kalshi_taker_net_yes_volume_15s": _num(
+            quote.get("kalshi_taker_net_yes_volume_15s")
+        ),
         "entry_ask_cents": entry_ask,
         "net_edge_cents": _num(analysis.get("net_edge_cents")),
         "fee_cents": _num(costs.get("fee_cents")),
@@ -118,5 +139,10 @@ def build_capture_row(*, model_version: str, interval: str, mark_seconds: int,
         "index_px": _num(settlement_index.get("index_px")),
         "basis_cents": _num(settlement_index.get("basis_cents")),
         "index_age_s": _num(settlement_index.get("index_age_s")),
+        "index_status": settlement_index.get("index_status"),
+        "index_missing_reason": settlement_index.get("index_missing_reason"),
+        "index_id": settlement_index.get("index_id"),
+        "index_source_ts": _num(settlement_index.get("index_source_ts")),
+        **lineage,
         "missing_reason": None,
     }

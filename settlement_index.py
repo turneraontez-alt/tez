@@ -414,9 +414,38 @@ class SettlementIndexCollector:
         return row
 
     def context(self, asset: str, *, spot_px: float | None = None, now: float | None = None) -> dict[str, Any]:
-        row = self.latest(asset, now=now)
-        if row is None:
-            return {"index_px": None, "basis_cents": None, "index_age_s": None}
+        asset_key = str(asset).upper()
+        current = time.time() if now is None else float(now)
+        with self._latest_lock:
+            raw = dict(self._latest.get(asset_key) or {})
+        base = {
+            "index_px": None,
+            "basis_cents": None,
+            "index_age_s": None,
+            "index_status": "missing",
+            "index_missing_reason": None,
+            "index_id": self.index_ids.get(asset_key),
+            "index_source_ts": None,
+        }
+        if not self.enabled:
+            return {**base, "index_status": "disabled", "index_missing_reason": "settlement_index_disabled"}
+        if asset_key not in self.index_ids:
+            return {**base, "index_missing_reason": "settlement_index_asset_unconfigured"}
+        if not raw:
+            return {**base, "index_missing_reason": "settlement_index_tick_missing"}
+        source_ts = _num(raw.get("ts"))
+        age = None if source_ts is None else max(0.0, current - source_ts)
+        if age is None or age > self.stale_seconds:
+            return {
+                **base,
+                "index_age_s": age,
+                "index_status": "stale",
+                "index_missing_reason": "settlement_index_tick_stale",
+                "index_id": raw.get("index_id") or base["index_id"],
+                "index_source_ts": source_ts,
+            }
+        row = dict(raw)
+        row["index_age_s"] = age
         index_px = _num(row.get("index_px"))
         spot = _num(spot_px)
         basis = None if index_px is None or spot is None else (spot - index_px) * 100.0
@@ -424,6 +453,10 @@ class SettlementIndexCollector:
             "index_px": index_px,
             "basis_cents": basis,
             "index_age_s": row.get("index_age_s"),
+            "index_status": "ok" if index_px is not None else "missing",
+            "index_missing_reason": None if index_px is not None else "settlement_index_value_missing",
+            "index_id": row.get("index_id") or base["index_id"],
+            "index_source_ts": source_ts,
         }
 
     def health(self) -> dict[str, Any]:
@@ -478,11 +511,19 @@ def settlement_index_context(asset: str, *, spot_px: float | None = None, now: f
     try:
         feed = get_settlement_index_feed()
         if not feed.enabled:
-            return {"index_px": None, "basis_cents": None, "index_age_s": None}
+            return {
+                "index_px": None, "basis_cents": None, "index_age_s": None,
+                "index_status": "disabled", "index_missing_reason": "settlement_index_disabled",
+                "index_id": None, "index_source_ts": None,
+            }
         return feed.context(asset, spot_px=spot_px, now=now)
     except Exception:
         logger.debug("settlement index context unavailable", exc_info=True)
-        return {"index_px": None, "basis_cents": None, "index_age_s": None}
+        return {
+            "index_px": None, "basis_cents": None, "index_age_s": None,
+            "index_status": "error", "index_missing_reason": "settlement_index_context_error",
+            "index_id": None, "index_source_ts": None,
+        }
 
 
 def settlement_index_health() -> dict[str, Any]:
