@@ -29,11 +29,15 @@ function Stop-Q15ProcessById {
 if (Test-Path -LiteralPath $PidDir) {
     Get-ChildItem -LiteralPath $PidDir -Filter "*.pid" | ForEach-Object {
         $name = $_.BaseName
-        $pidValue = (Get-Content -LiteralPath $_.FullName -Raw).Trim()
-        if ($pidValue) {
-            Stop-Q15ProcessById -ProcessId ([int]$pidValue) -Name $name
+        if (Test-Path -LiteralPath $_.FullName) {
+            $pidValue = (Get-Content -LiteralPath $_.FullName -Raw).Trim()
+            if ($pidValue) {
+                Stop-Q15ProcessById -ProcessId ([int]$pidValue) -Name $name
+            }
         }
-        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $_.FullName) {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
