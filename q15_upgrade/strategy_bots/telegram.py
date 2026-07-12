@@ -390,12 +390,23 @@ def build_precision13_alert(row: Mapping[str, Any]) -> str:
     btc_probability = thresholds.get("btc_probability")
     disagreement = thresholds.get("disagreement")
     near = bool(thresholds.get("near_strike_quality"))
+    fee = None
+    net_breakeven = None
+    try:
+        ask_probability = float(ask) / 100.0
+        fee = math.ceil(7.0 * ask_probability * (1.0 - ask_probability))
+        net_breakeven = float(ask) + fee
+    except (TypeError, ValueError):
+        pass
     try:
         change_text = f"{float(probability_change) * 100.0:+.1f}pp"
     except (TypeError, ValueError):
         change_text = "n/a"
     try:
-        gross_edge = float(thresholds.get("historical_accuracy")) * 100.0 - float(ask)
+        gross_edge = (
+            float(thresholds.get("historical_accuracy")) * 100.0
+            - float(net_breakeven)
+        )
         edge_text = f"{gross_edge:+.1f}pp"
     except (TypeError, ValueError):
         edge_text = "n/a"
@@ -403,7 +414,10 @@ def build_precision13_alert(row: Mapping[str, Any]) -> str:
     body = [
         "PAPER SIGNAL - separate precision book; existing Drift alerts are unchanged.",
         "",
-        f"WATCH {side} @ {_plain_whole(ask)}c | gross break-even {_plain_whole(ask)}%",
+        (
+            f"WATCH {side} @ {_plain_whole(ask)}c | fee ~{_plain_whole(fee)}c | "
+            f"net break-even {_plain_whole(net_breakeven)}%"
+        ),
         (
             f"Probability 15M/13M: {_drift_fraction(probability_15m)} / "
             f"{_drift_fraction(probability)} ({change_text})"
@@ -413,20 +427,20 @@ def build_precision13_alert(row: Mapping[str, Any]) -> str:
             f"{_drift_plain(breadth, digits=0)}/7 | BTC {_drift_fraction(btc_probability)}"
         ),
         (
-            f"Sizing: {_drift_plain(size, 'x')} = disagreement "
-            f"{_drift_plain(thresholds.get('disagreement_weight'), 'x')} x stack "
-            f"{_drift_plain(thresholds.get('stack_weight'), 'x')}"
+            f"Sizing: {_drift_plain(size, 'x', digits=2)} = disagreement "
+            f"{_drift_plain(thresholds.get('disagreement_weight'), 'x', digits=2)} x stack "
+            f"{_drift_plain(thresholds.get('stack_weight'), 'x', digits=2)}"
         ),
         (
-            f"Components: spread {_drift_plain(thresholds.get('spread_weight'), 'x')} | "
-            f"session {_drift_plain(thresholds.get('session_weight'), 'x')} | "
+            f"Components: spread {_drift_plain(thresholds.get('spread_weight'), 'x', digits=2)} | "
+            f"session {_drift_plain(thresholds.get('session_weight'), 'x', digits=2)} | "
             f"disagreement {_drift_signed(disagreement)}"
         ),
         f"Near-strike quality: {'YES (tag only)' if near else 'NO'}",
         (
             f"Research tape: {_pct(thresholds.get('historical_accuracy'))} accuracy | "
             f"latest-50 {_pct(thresholds.get('latest_50_accuracy'))} | "
-            f"gross accuracy-minus-entry {edge_text}"
+            f"accuracy-minus-net-break-even {edge_text}"
         ),
         f"Ticker: {str(row.get('ticker') or '')}",
         "Sizing is advisory research weight only | no order placed",

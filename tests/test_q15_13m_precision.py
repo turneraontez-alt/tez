@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from q15_upgrade.interval_research.precision13 import EXPECTED_ASSETS, evaluate_slate
+from q15_upgrade.interval_research.precision13 import (
+    EXPECTED_ASSETS,
+    evaluate_slate,
+    sizing_components,
+)
 
 
 def _slate(probabilities):
@@ -72,6 +76,38 @@ class Precision13PolicyTest(unittest.TestCase):
         decisions = evaluate_slate(rows, _prior(current))
         self.assertEqual({row["decision"] for row in decisions}, {"ABSTAIN"})
         self.assertEqual({row["reason"] for row in decisions}, {"INCOMPLETE_13M_SLATE"})
+
+    def test_sizing_combines_disagreement_spread_and_session(self):
+        sizing = sizing_components(
+            side="YES",
+            probability_13m=0.70,
+            entry_ask_cents=60.0,
+            spread_cents=3.0,
+            captured_at=18 * 3600,
+            distance_from_strike=1e-5,
+        )
+        self.assertEqual(sizing["disagreement_weight"], 1.5)
+        self.assertEqual(sizing["spread_weight"], 1.5)
+        self.assertEqual(sizing["session_weight"], 1.33)
+        self.assertEqual(sizing["stack_weight"], 1.5)
+        self.assertEqual(sizing["recommended_size_weight"], 2.25)
+        self.assertTrue(sizing["near_strike_quality"])
+
+    def test_sizing_downweights_poor_disagreement_and_wide_spread(self):
+        sizing = sizing_components(
+            side="YES",
+            probability_13m=0.60,
+            entry_ask_cents=95.0,
+            spread_cents=6.0,
+            captured_at=10 * 3600,
+            distance_from_strike=0.01,
+        )
+        self.assertEqual(sizing["disagreement_weight"], 0.5)
+        self.assertEqual(sizing["spread_weight"], 0.5)
+        self.assertEqual(sizing["session_weight"], 0.75)
+        self.assertEqual(sizing["stack_weight"], 0.5)
+        self.assertEqual(sizing["recommended_size_weight"], 0.25)
+        self.assertFalse(sizing["near_strike_quality"])
 
 
 if __name__ == "__main__":

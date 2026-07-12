@@ -278,22 +278,31 @@ class CaptureResolveTest(unittest.TestCase):
         close_time = 1900.0
         with patch.dict(os.environ, {"Q15_V3_TOP_PICK_13M": "false"}):
             with patch("q15_upgrade.drift_shadow.get_recorder", return_value=None):
-                self.r.observe(
-                    analyses=analyses,
-                    canonicals={
-                        asset: _Canon(f"KX{asset}-P13", 900, close_time)
-                        for asset in assets
-                    },
-                    now=1000.0,
-                )
-                self.r.observe(
-                    analyses=analyses,
-                    canonicals={
-                        asset: _Canon(f"KX{asset}-P13", 780, close_time)
-                        for asset in assets
-                    },
-                    now=1120.0,
-                )
+                with patch(
+                    "q15_upgrade.strategy_bots.runtime.record_precision13_row"
+                ) as notify:
+                    self.r.observe(
+                        analyses=analyses,
+                        canonicals={
+                            asset: _Canon(f"KX{asset}-P13", 900, close_time)
+                            for asset in assets
+                        },
+                        now=1000.0,
+                    )
+                    self.r.observe(
+                        analyses=analyses,
+                        canonicals={
+                            asset: _Canon(f"KX{asset}-P13", 780, close_time)
+                            for asset in assets
+                        },
+                        now=1120.0,
+                    )
+
+        self.assertEqual(notify.call_count, 7)
+        self.assertEqual(
+            {call.args[0]["record_kind"] for call in notify.call_args_list},
+            {"PRECISION_13M_SIZED_V2"},
+        )
 
         rows = self.r.ledger.precision13_rows()
         self.assertEqual(len(rows), 7)

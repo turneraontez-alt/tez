@@ -2826,6 +2826,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             except Exception:
                 logger.debug("interval-research resolve skipped", exc_info=True)
             try:
+                from q15_upgrade.marketlead.runner import get_runner as _marketlead_runner
+                _marketlead = _marketlead_runner()
+                if _marketlead is not None:
+                    _marketlead.resolve_settled(result_events, now)
+            except Exception:
+                logger.debug("marketlead resolve skipped", exc_info=True)
+            try:
                 from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
                 _hvf = _hvf_runner()
                 if _hvf is not None:
@@ -3298,6 +3305,16 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
     def _dispatch_research_overlays(self, analyses: dict[str, dict[str, Any]],
                                     canonicals: dict[str, Any], now: float) -> None:
         """Feed the read-only research overlays (pure extraction from run_cycle)."""
+        # Q15 MarketLead prospective evidence collector. It derives synchronized
+        # venue/index/Kalshi microstructure evidence into a separate DB. It has
+        # no notification, policy, or execution surface.
+        try:
+            from q15_upgrade.marketlead.runner import get_runner as _marketlead_runner
+            _marketlead = _marketlead_runner()
+            if _marketlead is not None:
+                _marketlead.observe(analyses=analyses, canonicals=canonicals, now=now)
+        except Exception:
+            logger.debug("marketlead observe skipped", exc_info=True)
         # Read-only Ultoim Build research overlay (default-OFF; SEPARATE DB +
         # Telegram channel; never affects production). Reuses the champion's
         # frozen per-asset analyses (with shadow_signals + flip_risk attached

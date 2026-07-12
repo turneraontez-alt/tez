@@ -70,6 +70,7 @@ class KalshiWebSocketFeed:
         self._desired: Set[str] = set()
         self._subscribed: Set[str] = set()
         self._books: Dict[str, dict] = {}
+        self._book_events: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5000))
         self._trades: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5000))
         self._market_status: Dict[str, dict] = {}
         self._connected = False
@@ -110,7 +111,7 @@ class KalshiWebSocketFeed:
             # desired set (never age) so an active book is never dropped; these
             # structures are read fresh-or-None, so dropping non-desired tickers
             # loses nothing.
-            for cache in (self._books, self._trades, self._market_status):
+            for cache in (self._books, self._book_events, self._trades, self._market_status):
                 for ticker in [t for t in cache if t not in wanted]:
                     del cache[ticker]
         if changed:
@@ -165,6 +166,122 @@ class KalshiWebSocketFeed:
             if now - row["ts"] > max_age and min_ts is None:
                 continue
             out.append(dict(row))
+        return out
+
+    def get_microstructure(
+        self,
+        ticker: str,
+        *,
+        now: float | None = None,
+        horizons: tuple[int, ...] = (5, 15, 30, 60),
+        max_book_age: float = 5.0,
+    ) -> dict:
+        """Return bounded event-level book and trade evidence for research.
+
+        The output is descriptive only. A negative book delta can be a cancel
+        or execution, so it is deliberately named ``book_delta_pressure`` and
+        is never represented as identified order intent.
+        """
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            book = deepcopy(self._books.get(ticker))
+            events = [dict(row) for row in self._book_events.get(ticker, ())]
+            trades = [dict(row) for row in self._trades.get(ticker, ())]
+        if not book:
+            return {"available": False, "reason": "book_missing"}
+        book_age = max(0.0, now - float(book.get("updated_at", 0.0)))
+        if book_age > max(0.0, float(max_book_age)):
+            return {
+                "available": False,
+                "reason": "book_stale",
+                "book_age_seconds": book_age,
+            }
+
+        yes = book.get("yes") if isinstance(book.get("yes"), dict) else {}
+        no = book.get("no") if isinstance(book.get("no"), dict) else {}
+        yes_levels = [(float(price), float(qty)) for price, qty in yes.items() if float(qty) > 0]
+        no_levels = [(float(price), float(qty)) for price, qty in no.items() if float(qty) > 0]
+        yes_best = max(yes_levels, default=(None, None), key=lambda row: row[0])
+        no_best = max(no_levels, default=(None, None), key=lambda row: row[0])
+        yes_bid, yes_bid_qty = yes_best
+        no_bid, no_bid_qty = no_best
+        yes_ask = None if no_bid is None else 100.0 - no_bid
+        no_ask = None if yes_bid is None else 100.0 - yes_bid
+        yes_mid = None
+        yes_microprice = None
+        if yes_bid is not None and yes_ask is not None:
+            yes_mid = (yes_bid + yes_ask) / 2.0
+            total_top = float(yes_bid_qty or 0.0) + float(no_bid_qty or 0.0)
+            if total_top > 0:
+                yes_microprice = (
+                    yes_ask * float(yes_bid_qty or 0.0)
+                    + yes_bid * float(no_bid_qty or 0.0)
+                ) / total_top
+
+        out = {
+            "available": yes_bid is not None and no_bid is not None,
+            "reason": None if yes_bid is not None and no_bid is not None else "two_sided_book_missing",
+            "book_age_seconds": book_age,
+            "yes_bid_cents": yes_bid,
+            "yes_ask_cents": yes_ask,
+            "no_bid_cents": no_bid,
+            "no_ask_cents": no_ask,
+            "yes_bid_qty": yes_bid_qty,
+            "yes_ask_qty": no_bid_qty,
+            "yes_mid_cents": yes_mid,
+            "yes_microprice_cents": yes_microprice,
+            "yes_microprice_edge_cents": (
+                None if yes_mid is None or yes_microprice is None else yes_microprice - yes_mid
+            ),
+            "event_age_seconds": (
+                None if not events else max(0.0, now - float(events[-1].get("ts", now)))
+            ),
+        }
+        for horizon in sorted({max(1, int(value)) for value in horizons}):
+            cutoff = now - horizon
+            selected_events = [row for row in events if float(row.get("ts", 0.0)) >= cutoff]
+            selected_trades = [row for row in trades if float(row.get("ts", 0.0)) >= cutoff]
+            signed_delta = 0.0
+            absolute_delta = 0.0
+            yes_depletion = no_depletion = 0.0
+            yes_refill = no_refill = 0.0
+            for row in selected_events:
+                delta = float(row.get("delta", 0.0) or 0.0)
+                side_sign = 1.0 if row.get("side") == "yes" else -1.0
+                signed_delta += side_sign * delta
+                absolute_delta += abs(delta)
+                if row.get("at_best_before") and delta < 0:
+                    if row.get("side") == "yes":
+                        yes_depletion += -delta
+                    else:
+                        no_depletion += -delta
+                if row.get("at_best_after") and delta > 0:
+                    if row.get("side") == "yes":
+                        yes_refill += delta
+                    else:
+                        no_refill += delta
+            yes_taker = no_taker = 0.0
+            for row in selected_trades:
+                count = max(0.0, float(row.get("count", 0.0) or 0.0))
+                side = str(row.get("taker_side") or "").upper()
+                if side == "YES":
+                    yes_taker += count
+                elif side == "NO":
+                    no_taker += count
+            total_taker = yes_taker + no_taker
+            suffix = f"_{horizon}s"
+            out[f"event_count{suffix}"] = len(selected_events)
+            out[f"trade_count{suffix}"] = len(selected_trades)
+            out[f"book_delta_pressure_yes{suffix}"] = (
+                None if absolute_delta <= 0 else signed_delta / absolute_delta
+            )
+            out[f"trade_imbalance_yes{suffix}"] = (
+                None if total_taker <= 0 else (yes_taker - no_taker) / total_taker
+            )
+            out[f"yes_best_depletion{suffix}"] = yes_depletion
+            out[f"no_best_depletion{suffix}"] = no_depletion
+            out[f"yes_best_refill{suffix}"] = yes_refill
+            out[f"no_best_refill{suffix}"] = no_refill
         return out
 
     def _headers(self) -> dict:
@@ -301,6 +418,7 @@ class KalshiWebSocketFeed:
         no = self._level_map(no_levels)
         with self._lock:
             self._books[ticker] = {"yes": yes, "no": no, "updated_at": now}
+            self._book_events[ticker].clear()
             self._last_orderbook_at = now
 
     def _handle_book_delta(self, message: dict, now: float) -> None:
@@ -314,14 +432,30 @@ class KalshiWebSocketFeed:
         if not ticker or side not in {"yes", "no"} or price is None:
             return
         price = round(float(price), 4)
+        event_ts = parse_ts(message.get("ts_ms")) or parse_ts(message.get("ts")) or now
         with self._lock:
             book = self._books.setdefault(ticker, {"yes": {}, "no": {}, "updated_at": now})
-            new_qty = float(book[side].get(price, 0.0)) + delta
+            side_book = book[side]
+            previous_qty = float(side_book.get(price, 0.0))
+            best_before = max(side_book, default=None)
+            new_qty = previous_qty + delta
             if new_qty <= 0:
-                book[side].pop(price, None)
+                side_book.pop(price, None)
             else:
-                book[side][price] = new_qty
+                side_book[price] = new_qty
+            best_after = max(side_book, default=None)
             book["updated_at"] = now
+            self._book_events[ticker].append({
+                "ts": float(event_ts),
+                "received_at": now,
+                "side": side,
+                "price_cents": price,
+                "delta": delta,
+                "quantity_before": previous_qty,
+                "quantity_after": max(0.0, new_qty),
+                "at_best_before": best_before is not None and price == best_before,
+                "at_best_after": best_after is not None and price == best_after,
+            })
             self._last_orderbook_at = now
 
     def _handle_trade(self, message: dict, now: float) -> None:

@@ -452,7 +452,7 @@ class IntervalResearchRunner:
     def _record_precision13_shadow(
         self, slate: Sequence[Mapping[str, Any]], wk: int, now: float
     ) -> None:
-        """Persist the selective policy's prospective output; never deliver it."""
+        """Persist the policy and hand emitted rows to its separate V3 bot."""
         try:
             from .precision13 import (
                 NOTIFICATION_RECORD_KIND,
