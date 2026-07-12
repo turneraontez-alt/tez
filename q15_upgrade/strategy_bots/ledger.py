@@ -17,11 +17,14 @@ from .rules import (
     BOT_BASELINE,
     BOT_DRIFT_13M,
     BOT_DRIFT_FLOW_SPREAD,
+    BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+    BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
     BOT_DRIFT_NO_EXPANSION,
     BOT_DRIFT_NO_MIRROR,
     BOT_THIRTEEN_M_SNIPER,
+    DRIFT_REVIEW_BARS,
     BTC_REGIME_KEYS,
     COINBASE_L2_KEYS,
     KALSHI_DEPTH_KEYS,
@@ -697,19 +700,41 @@ class StrategyBotLedger:
         self,
         bot_name: str = BOT_THIRTEEN_M_SNIPER,
         strategy_version: str = STRATEGY_VERSION,
+        *,
+        threshold_rule_version: str | None = None,
     ) -> dict[str, Any]:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(correct), 0) AS correct, "
-                "COALESCE(SUM(hypothetical_pnl_cents), 0) AS net_pnl_cents "
-                "FROM strategy_bot_decisions "
-                "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
-                "AND official_result IS NOT NULL",
-                (strategy_version, bot_name, ACCEPTED),
-            ).fetchone()
-        n = int(row["n"] or 0) if row is not None else 0
-        correct = int(row["correct"] or 0) if row is not None else 0
-        net_pnl = float(row["net_pnl_cents"] or 0.0) if row is not None else 0.0
+        if threshold_rule_version is None:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n, COALESCE(SUM(correct), 0) AS correct, "
+                    "COALESCE(SUM(hypothetical_pnl_cents), 0) AS net_pnl_cents "
+                    "FROM strategy_bot_decisions "
+                    "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
+                    "AND official_result IS NOT NULL",
+                    (strategy_version, bot_name, ACCEPTED),
+                ).fetchone()
+            n = int(row["n"] or 0) if row is not None else 0
+            correct = int(row["correct"] or 0) if row is not None else 0
+            net_pnl = float(row["net_pnl_cents"] or 0.0) if row is not None else 0.0
+        else:
+            with self._lock:
+                candidates = self._conn.execute(
+                    "SELECT correct, hypothetical_pnl_cents, threshold_json "
+                    "FROM strategy_bot_decisions "
+                    "WHERE strategy_version=? AND bot_name=? AND decision_status=? "
+                    "AND official_result IS NOT NULL",
+                    (strategy_version, bot_name, ACCEPTED),
+                ).fetchall()
+            matched = [
+                row for row in candidates
+                if self._threshold_value(dict(row), "rule_version")
+                == threshold_rule_version
+            ]
+            n = len(matched)
+            correct = sum(int(row["correct"] or 0) for row in matched)
+            net_pnl = sum(
+                float(row["hypothetical_pnl_cents"] or 0.0) for row in matched
+            )
         accuracy = None if n <= 0 else correct / n
         return {
             "n": n,
@@ -810,7 +835,16 @@ class StrategyBotLedger:
         min_n: int = 30,
     ) -> dict[str, Any]:
         rows = self.rows(strategy_version)
-        independent_rows = [r for r in rows if r.get("bot_name") != BOT_DRIFT_ADDON]
+        counterfactual_bots = {
+            BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
+            BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+        }
+        exposure_rows = [
+            r for r in rows if r.get("bot_name") not in counterfactual_bots
+        ]
+        independent_rows = [
+            r for r in exposure_rows if r.get("bot_name") != BOT_DRIFT_ADDON
+        ]
         return {
             "available": True,
             "strategy_version": strategy_version,
@@ -818,7 +852,8 @@ class StrategyBotLedger:
             "min_n": int(min_n),
             "total_rows": len(rows),
             "independent_rows": len(independent_rows),
-            "correlated_exposure_rows": len(rows) - len(independent_rows),
+            "correlated_exposure_rows": len(exposure_rows) - len(independent_rows),
+            "counterfactual_research_rows": len(rows) - len(exposure_rows),
             "resolved": sum(
                 1 for r in independent_rows if r.get("official_result") is not None
             ),
@@ -829,7 +864,7 @@ class StrategyBotLedger:
                 [r for r in independent_rows if r.get("decision_status") == RESEARCH_ONLY], min_n
             ),
             "all": self._agg(independent_rows, min_n),
-            "all_exposure": self._agg(rows, min_n),
+            "all_exposure": self._agg(exposure_rows, min_n),
             "by_bot": self._group(rows, ("bot_name",), min_n),
             "by_tier": self._group(
                 [r for r in rows if r.get("bot_name") == BOT_CONFIDENCE_TIER],
@@ -864,7 +899,9 @@ class StrategyBotLedger:
             "bnb_system": self._bnb_system(rows, min_n),
             "drift_system": self._drift_system(rows, min_n),
             "tier_confirmation_system": self._tier_confirmation_system(rows, min_n),
-            "data_coverage": self._data_coverage(rows),
+            # Counterfactuals reuse the same point-in-time enrichment, so
+            # counting them here would triple-weight identical feed coverage.
+            "data_coverage": self._data_coverage(exposure_rows),
         }
 
     @classmethod
@@ -891,15 +928,116 @@ class StrategyBotLedger:
             if r.get("hypothetical_pnl_cents") is not None
         ]
         n = len(settled)
+        wilson_low: float | None = None
+        wilson_high: float | None = None
+        if n > 0:
+            z = 1.959963984540054
+            p = right / n
+            denominator = 1.0 + (z * z / n)
+            center = (p + (z * z / (2.0 * n))) / denominator
+            margin = (
+                z
+                * math.sqrt((p * (1.0 - p) / n) + (z * z / (4.0 * n * n)))
+                / denominator
+            )
+            wilson_low = max(0.0, center - margin)
+            wilson_high = min(1.0, center + margin)
+
+        ordered_pnls: list[float] = []
+        for row in sorted(
+            settled,
+            key=lambda r: (
+                float(
+                    r.get("close_time")
+                    if r.get("close_time") is not None
+                    else r.get("created_at") or 0.0
+                ),
+                int(r.get("id") or 0),
+            ),
+        ):
+            pnl = _num(row.get("hypothetical_pnl_cents"))
+            if pnl is not None:
+                ordered_pnls.append(pnl)
+        equity = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for pnl in ordered_pnls:
+            equity += pnl
+            peak = max(peak, equity)
+            max_drawdown = max(max_drawdown, peak - equity)
+
+        breakevens: list[float] = []
+        for row in settled:
+            ask = _num(row.get("entry_ask_cents"))
+            fee = kalshi_fee_cents(ask)
+            if ask is not None and fee is not None:
+                breakevens.append((ask + float(fee)) / 100.0)
+        avg_pnl = None if not pnls else sum(pnls) / len(pnls)
+        net_pnl = None if not pnls else sum(pnls)
         return {
             "rows": len(all_rows),
             "resolved": n,
             "correct": right,
             "accuracy": None if n <= 0 else right / n,
-            "avg_pnl_cents": None if not pnls else sum(pnls) / len(pnls),
-            "net_pnl_cents": None if not pnls else sum(pnls),
+            "accuracy_wilson_95_low": wilson_low,
+            "accuracy_wilson_95_high": wilson_high,
+            "wilson_95_low": wilson_low,
+            "wilson_95_high": wilson_high,
+            "avg_pnl_cents": avg_pnl,
+            "net_pnl_cents": net_pnl,
+            "fee_adjusted_ev_cents": avg_pnl,
+            "fee_adjusted_net_pnl_cents": net_pnl,
+            "max_cumulative_drawdown_cents": max_drawdown if ordered_pnls else None,
+            "avg_fee_adjusted_breakeven_rate": (
+                None if not breakevens else sum(breakevens) / len(breakevens)
+            ),
             "provisional": n < int(min_n),
         }
+
+    @classmethod
+    def _cohort_view(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        min_n: int,
+    ) -> dict[str, Any]:
+        materialized = list(rows)
+        overall = cls._agg(materialized, min_n)
+        resolved = int(overall["resolved"])
+        if resolved < DRIFT_REVIEW_BARS[0]:
+            stage = "ACCRUING_TO_30"
+        elif resolved < DRIFT_REVIEW_BARS[1]:
+            stage = "DIAGNOSTIC_REVIEW_30"
+        elif resolved < DRIFT_REVIEW_BARS[2]:
+            stage = "KEEP_KILL_REVIEW_60"
+        else:
+            stage = "PROMOTION_REVIEW_150"
+        return {
+            "overall": overall,
+            "by_asset": cls._group(materialized, ("asset",), min_n),
+            "by_status": cls._group(materialized, ("decision_status",), min_n),
+            "review": {
+                "stage": stage,
+                "bars": list(DRIFT_REVIEW_BARS),
+                "manual_only": True,
+                "automatic_threshold_changes": False,
+                "automatic_promotion": False,
+            },
+        }
+
+    @staticmethod
+    def _threshold_value(row: Mapping[str, Any], key: str) -> Any:
+        raw = row.get("threshold_json")
+        if not raw:
+            return None
+        try:
+            data = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return data.get(key) if isinstance(data, Mapping) else None
+
+    @classmethod
+    def _threshold_flag(cls, row: Mapping[str, Any], key: str) -> bool:
+        return bool(cls._threshold_value(row, key))
 
     @classmethod
     def _positive_ev_gate(
@@ -967,6 +1105,37 @@ class StrategyBotLedger:
         ]
         no_mirror = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_MIRROR]
         no_expansion = [r for r in rows if r.get("bot_name") == BOT_DRIFT_NO_EXPANSION]
+        spread4 = [
+            r for r in rows
+            if r.get("bot_name") == BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4
+        ]
+        flow15 = [
+            r for r in rows
+            if r.get("bot_name") == BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15
+        ]
+        spread4_qualifiers = [
+            r for r in spread4 if cls._threshold_flag(r, "would_accept_variant")
+        ]
+        flow15_qualifiers = [
+            r for r in flow15 if cls._threshold_flag(r, "would_accept_variant")
+        ]
+        spread4_incremental = [
+            r for r in spread4_qualifiers
+            if cls._threshold_flag(r, "incremental_to_core")
+        ]
+        flow15_incremental = [
+            r for r in flow15_qualifiers
+            if cls._threshold_flag(r, "incremental_to_core")
+        ]
+        frozen_core_candidates = [
+            r for r in core_candidates
+            if cls._threshold_value(r, "rule_version")
+            == "drift-flow-spread-13m-frozen-v2"
+        ]
+        frozen_core = [
+            r for r in frozen_core_candidates
+            if r.get("decision_status") == ACCEPTED
+        ]
         core = [
             r for r in core_candidates if r.get("decision_status") == ACCEPTED
         ]
@@ -975,6 +1144,19 @@ class StrategyBotLedger:
         ]
         latequal = [
             r for r in latequal_candidates if r.get("decision_status") == ACCEPTED
+        ]
+        bnb_quarantine_funnel = [
+            r for r in frozen_core_candidates
+            if str(r.get("asset") or "").upper() == "BNB"
+        ]
+        bnb_quarantine = [
+            r for r in bnb_quarantine_funnel
+            if cls._threshold_flag(r, "would_accept_core")
+        ]
+        addon_11m_quarantine = [
+            r for r in addon_candidates
+            if str(r.get("interval") or "").upper() == "11M"
+            and cls._threshold_value(r, "quarantined_interval") == "11M"
         ]
         no_expansion_accepted = [
             r for r in no_expansion if r.get("decision_status") == ACCEPTED
@@ -987,6 +1169,26 @@ class StrategyBotLedger:
             "independent_picks": cls._agg(independent, min_n),
             "base_13m": cls._agg(core, min_n),
             "flow_spread_13m": cls._agg(core, min_n),
+            "frozen_core_accepted": cls._cohort_view(frozen_core, min_n),
+            "core_funnel": cls._cohort_view(frozen_core_candidates, min_n),
+            "bnb_quarantine": cls._cohort_view(bnb_quarantine, min_n),
+            "bnb_quarantine_funnel": cls._cohort_view(
+                bnb_quarantine_funnel, min_n
+            ),
+            "addon_11m_quarantine": cls._cohort_view(addon_11m_quarantine, min_n),
+            "latequal_research": cls._cohort_view(latequal_candidates, min_n),
+            "counterfactual_research": {
+                "spread4": {
+                    "funnel": cls._cohort_view(spread4, min_n),
+                    "full": cls._cohort_view(spread4_qualifiers, min_n),
+                    "incremental": cls._cohort_view(spread4_incremental, min_n),
+                },
+                "flow15": {
+                    "funnel": cls._cohort_view(flow15, min_n),
+                    "full": cls._cohort_view(flow15_qualifiers, min_n),
+                    "incremental": cls._cohort_view(flow15_incremental, min_n),
+                },
+            },
             "independent_candidates": cls._agg(independent_candidates, min_n),
             "base_13m_all_candidates": cls._agg(core_candidates, min_n),
             "flow_spread_13m_all_candidates": cls._agg(core_candidates, min_n),
@@ -1026,7 +1228,8 @@ class StrategyBotLedger:
                 "drift_flow_spread_13m owns base Telegram delivery; "
                 "drift_addon_requal is correlated exposure; drift_no_mirror is the "
                 "legacy NO shadow; drift_no_expansion owns accepted grouped NO "
-                "Telegram delivery"
+                "Telegram delivery. spread4 and flow15 are silent counterfactual "
+                "research and never count as independent or total exposure"
             ),
         }
 

@@ -8,9 +8,14 @@ import pytest
 from notifications.outbox_v9 import ReliableTelegramOutbox
 from q15_upgrade.strategy_bots import runtime
 from q15_upgrade.strategy_bots.rules import (
+    ACCEPTED,
+    BOT_DRIFT_ADDON,
     BOT_DRIFT_FLOW_SPREAD,
+    BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+    BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
     BOT_DRIFT_NO_EXPANSION,
     STRATEGY_VERSION,
+    BotDecision,
 )
 from q15_upgrade.strategy_bots.telegram import V3Telegram
 
@@ -80,6 +85,11 @@ def _flow_row(**over):
         "entry_ask_cents": 65.0,
         "spread_cents": 3.0,
         "depth_contracts": 100.0,
+        "distance_sigma": 1e-5,
+        "flip_probability": 20.0,
+        "spot_depth_snapshot_age_seconds": 1.0,
+        "spot_depth_age_seconds": 2.0,
+        "spot_depth_trade_age_seconds": 2.0,
         "drift_spread_weight": 1.5,
         "drift_session_weight": 1.0,
         "drift_stack_weight": 1.5,
@@ -212,7 +222,11 @@ def test_disabled_rule_does_not_burn_drift_row_identity(tmp_path, monkeypatch):
     assert runtime.record_drift_pick_row(_flow_row()) is not None
 
     rows = runtime.get_ledger().rows(STRATEGY_VERSION)
-    assert [row["bot_name"] for row in rows] == [BOT_DRIFT_FLOW_SPREAD]
+    assert [row["bot_name"] for row in rows] == [
+        BOT_DRIFT_FLOW_SPREAD,
+        BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
+        BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
+    ]
 
 
 def test_drift_outbox_queues_exact_payload_and_retries_once(tmp_path, monkeypatch):
@@ -559,3 +573,69 @@ def test_missing_drift_expiry_records_but_never_enqueues(tmp_path, monkeypatch):
     assert recorded["notification_status"] == "DELIVERY_FAILED"
     assert recorded["notification_error"] == "drift_expiry_missing"
     assert telegram.sent == []
+
+
+def test_legacy_accepted_bnb_duplicate_cannot_bypass_new_quarantine(
+    tmp_path, monkeypatch
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    monkeypatch.setenv("Q15_V3_DRIFT_OUTBOX_ENABLED", "false")
+    source = _flow_row(asset="BNB", ticker="KXBNB15M-LEGACY")
+    legacy = BotDecision(
+        BOT_DRIFT_FLOW_SPREAD,
+        ACCEPTED,
+        ("LEGACY_PRE_QUARANTINE",),
+        side_override="YES",
+        entry_ask_cents=65.0,
+        use_entry_ask_override=True,
+    )
+    ledger = runtime.get_ledger()
+    legacy_id = ledger.record_decision(
+        legacy, source, source_system="drift_shadow",
+    )
+    assert legacy_id is not None
+
+    assert runtime.record_drift_pick_row(source) is None
+    assert telegram.sent == []
+    assert ledger.row_by_id(legacy_id)["notification_status"] is None
+
+
+def test_legacy_accepted_11m_addon_duplicate_cannot_bypass_new_quarantine(
+    tmp_path, monkeypatch
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    monkeypatch.setenv("Q15_V3_DRIFT_OUTBOX_ENABLED", "false")
+    monkeypatch.setenv("Q15_V3_DRIFT_ADDON", "true")
+    monkeypatch.setenv("Q15_V3_DRIFT_ADDON_NOTIFY", "true")
+    source = {
+        "created_at": 200.0,
+        "model_version": "interval-research-v1",
+        "record_kind": "DRIFT_ADDON_REQUAL",
+        "asset": "XRP",
+        "ticker": "KXXRP15M-LEGACY-11M",
+        "interval": "11M",
+        "window_key": 88,
+        "close_time": 1_000.0,
+        "predicted_side": "YES",
+        "entry_ask_cents": 66.0,
+        "spread_cents": 2.0,
+    }
+    legacy = BotDecision(
+        BOT_DRIFT_ADDON,
+        ACCEPTED,
+        ("LEGACY_PRE_QUARANTINE",),
+        side_override="YES",
+        entry_ask_cents=66.0,
+        use_entry_ask_override=True,
+    )
+    ledger = runtime.get_ledger()
+    legacy_id = ledger.record_decision(
+        legacy, source, source_system="drift_shadow",
+    )
+    assert legacy_id is not None
+
+    assert runtime.record_drift_checkpoint_row(source) is None
+    assert telegram.sent == []
+    assert ledger.row_by_id(legacy_id)["notification_status"] is None

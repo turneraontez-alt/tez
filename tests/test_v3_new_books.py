@@ -842,6 +842,11 @@ def _drift_row(**over):
         "entry_ask_cents": 60.0,
         "spread_cents": 3.0,
         "depth_contracts": 250.0,
+        "distance_sigma": 1e-5,
+        "flip_probability": 20.0,
+        "spot_depth_snapshot_age_seconds": 1.0,
+        "spot_depth_age_seconds": 2.0,
+        "spot_depth_trade_age_seconds": 2.0,
         "drift_spread_weight": 1.5,
         "drift_session_weight": 1.33,
         "drift_stack_weight": 1.5,
@@ -935,7 +940,8 @@ def test_record_drift_pick_dedup_per_window_ticker_and_card(tmp_path, monkeypatc
     assert "Confirmed: 60s spot flow" in text
     assert "BUY YES — XRP @ 60¢" in text and "breakeven 62%" in text
     assert "rest at 60¢" in text
-    assert "no resolved picks yet" in text and "verdict at n=60" in text
+    assert "no resolved picks yet" in text
+    assert "reviews n=30/60" in text and "promotion n=150" in text
     assert "<pre>" in text  # v2-channel panel grammar: header outside, body inside
     for marker in ("ENTRY RECOMMENDED", "NO ENTRY YET", "V9.5 CHECK",
                    "Hourly Report", "TOP 3 PICKS"):
@@ -1033,11 +1039,9 @@ def test_drift_checkpoint_cards_accounting_and_settlement(tmp_path, monkeypatch)
     assert runtime.record_drift_checkpoint_row(addon_row) is not None
     assert runtime.record_drift_checkpoint_row(addon_row) is None
     assert runtime.record_drift_checkpoint_row(late_row) is not None
-    assert len(tg.sent) == 2
+    assert len(tg.sent) == 1
     assert "DRIFT ADD-ON 12M" in tg.sent[0]
     assert "NOT an independent accuracy sample" in tg.sent[0]
-    assert "DRIFT LATE QUAL 12M" in tg.sent[1]
-    assert "RESEARCH ONLY" in tg.sent[1]
 
     assert runtime.reconcile_drift_settlements([
         {"model_version": "interval-research-v1", "ticker": addon_row["ticker"],
@@ -1098,6 +1102,43 @@ def test_drift_checkpoint_runner_adapter_forwards_new_rows():
     assert row["drift_rule_version"] == "drift-latequal-12m-11m-v1"
     assert row["drift_independent_pick"] is True
     assert row["drift_track_wins"] == 6
+
+
+def test_drift_pick_runner_forwards_source_side_distance_and_flip():
+    from types import SimpleNamespace
+    from q15_upgrade.interval_research.runner import IntervalResearchRunner
+
+    runner = object.__new__(IntervalResearchRunner)
+    runner.config = SimpleNamespace(model_version="interval-research-v1")
+
+    class Recorder:
+        def picks_recorded_at(self, model_version, window_key, now):
+            assert (model_version, window_key, now) == (
+                "interval-research-v1", 45, 1300.0,
+            )
+            return [{
+                "created_at": 1300.0,
+                "asset": "SOL",
+                "ticker": "KXSOL-STRUCTURE",
+                "close_time": 1900.0,
+                "side": "NO",
+                "ask_cents": 64.0,
+                "distance_sigma": 2e-5,
+                "flip_probability": 29.0,
+                "spread_cents": 2.0,
+                "depth_contracts": 90.0,
+            }]
+
+        def scoreboard(self):
+            return {"book_volume_60_73_all": {}}
+
+    with patch("q15_upgrade.strategy_bots.runtime.record_drift_pick_row") as record:
+        runner._alert_drift_picks(Recorder(), 45, 1300.0)
+    record.assert_called_once()
+    row = record.call_args.args[0]
+    assert row["predicted_side"] == "NO"
+    assert row["distance_sigma"] == 2e-5
+    assert row["flip_probability"] == 29.0
 
 
 # -- Drift NO mirror: filtered positive cohorts, one grouped research card ----

@@ -27,8 +27,6 @@ from .rules import (
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
     BOT_DRIFT_FLOW_SPREAD,
-    BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
-    BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_LATEQUAL,
     BOT_DRIFT_NO_EXPANSION,
@@ -602,12 +600,16 @@ def _with_book_stats_context(
     *,
     bot_name: str,
     prefix: str,
+    threshold_rule_version: str | None = None,
 ) -> Mapping[str, Any]:
     """Inject a bot's resolved ACCEPTED stats so its rules can self-govern
     (empirical EV + auto-mute), mirroring the 13M sniper convention."""
     out = dict(row)
     try:
-        stats = ledger.bot_accepted_resolved_stats(bot_name=bot_name)
+        stats = ledger.bot_accepted_resolved_stats(
+            bot_name=bot_name,
+            threshold_rule_version=threshold_rule_version,
+        )
         out.setdefault(f"{prefix}_resolved_n", stats.get("n"))
         out.setdefault(f"{prefix}_correct", stats.get("correct"))
         out.setdefault(f"{prefix}_accuracy", stats.get("accuracy"))
@@ -897,6 +899,7 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             enriched,
             bot_name=BOT_DRIFT_FLOW_SPREAD,
             prefix="drift_flow_spread",
+            threshold_rule_version="drift-flow-spread-13m-frozen-v2",
         )
         decision = drift_flow_spread_13m_decision(enriched)
         if decision is None:
@@ -911,16 +914,20 @@ def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
             drift_flow_spread_shadow_spread4_decision,
             drift_flow_spread_shadow_flow15_decision,
         ):
-            shadow_decision = shadow_decision_fn(enriched)
-            if shadow_decision is not None:
-                _stored_decision(
-                    ledger,
-                    shadow_decision,
-                    enriched,
-                    source_system="drift_shadow",
-                )
+            try:
+                shadow_decision = shadow_decision_fn(enriched)
+                if shadow_decision is not None:
+                    _stored_decision(
+                        ledger,
+                        shadow_decision,
+                        enriched,
+                        source_system="drift_shadow",
+                    )
+            except Exception:  # noqa: BLE001 - shadows cannot block core delivery
+                logger.warning("v3 Drift counterfactual record failed (ignored)", exc_info=True)
         if (
             recorded is None
+            or decision.decision_status != ACCEPTED
             or recorded.get("decision_status") != ACCEPTED
             or not drift_flow_spread_notify_enabled()
         ):
@@ -978,6 +985,7 @@ def record_drift_checkpoint_row(row: Mapping[str, Any]) -> int | None:
         )
         if (
             recorded is None
+            or decision.decision_status != ACCEPTED
             or recorded.get("decision_status") != ACCEPTED
             or not notify
         ):

@@ -474,7 +474,9 @@ class IntervalResearchRunner:
                     "interval": "13M",
                     "window_key": wk,
                     "close_time": p.get("close_time"),
-                    "predicted_side": "YES",
+                    "predicted_side": p.get("side"),
+                    "distance_sigma": p.get("distance_sigma"),
+                    "flip_probability": p.get("flip_probability"),
                     "entry_ask_cents": p.get("ask_cents"),
                     "spread_cents": p.get("spread_cents"),
                     "depth_contracts": p.get("depth_contracts"),
@@ -672,9 +674,7 @@ class IntervalResearchRunner:
                         float(row["close_time"]) - source_at
                         if row.get("close_time") is not None else None
                     ),
-                    "predicted_side": p.get("side"),
-                    "distance_sigma": p.get("distance_sigma"),
-                    "flip_probability": p.get("flip_probability"),
+                    "predicted_side": row.get("side") or "YES",
                     "entry_ask_cents": row.get("ask_cents"),
                     "spread_cents": row.get("spread_cents"),
                     "depth_contracts": row.get("depth_contracts"),

@@ -759,6 +759,7 @@ def _drift_candidate_status(
     structural_missing = distance is None or flip is None
     structural_pass = (
         not structural_missing
+        and (spread is None or spread >= 0.0)
         and 0.0 <= distance <= DRIFT_CORE_DISTANCE_SIGMA_MAX
         and 0.0 <= flip <= DRIFT_CORE_FLIP_PROBABILITY_MAX
     )
@@ -840,6 +841,8 @@ def _drift_flow_spread_decision(
     shadow_variant: str | None,
 ) -> BotDecision | None:
     if str(row.get("record_kind") or "") != "DRIFT_PICK_13M":
+        return None
+    if str(row.get("interval") or "").upper() != "13M":
         return None
     ask = _entry_ask(row)
     if (
@@ -1053,7 +1056,7 @@ def drift_addon_requal_decision(row: Mapping[str, Any]) -> BotDecision | None:
         (
             "V3_DRIFT_ADDON_REQUAL",
             "CORRELATED_EXPOSURE_NOT_INDEPENDENT",
-            *("DRIFT_11M_ADDON_QUARANTINED",) if quarantined else (),
+            *(("DRIFT_11M_ADDON_QUARANTINED",) if quarantined else ()),
         ),
         threshold_profile=profile,
         side_override="YES",

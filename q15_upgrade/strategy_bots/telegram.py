@@ -545,14 +545,22 @@ def build_drift_pick_alert(row: Mapping[str, Any]) -> str:
     wins = thresholds.get("book_wins")
     pnl = thresholds.get("book_total_pnl_cents")
     verdict_n = int(float(thresholds.get("book_verdict_n") or 60))
+    review_bars = thresholds.get("review_bars")
+    if isinstance(review_bars, (list, tuple)) and len(review_bars) >= 3:
+        review_text = (
+            f"reviews n={int(review_bars[0])}/{int(review_bars[1])} "
+            f"· promotion n={int(review_bars[2])}"
+        )
+    else:
+        review_text = f"verdict at n={verdict_n}"
     if n > 0 and wins is not None:
         w = int(float(wins))
         book_line = (
-            f"Book: {w}W-{n - w}L · {float(pnl):+.0f}¢ · verdict at n={verdict_n}"
-            if pnl is not None else f"Book: {w}W-{n - w}L · verdict at n={verdict_n}"
+            f"Book: {w}W-{n - w}L · {float(pnl):+.0f}¢ · {review_text}"
+            if pnl is not None else f"Book: {w}W-{n - w}L · {review_text}"
         )
     else:
-        book_line = f"Book: no resolved picks yet · verdict at n={verdict_n}"
+        book_line = f"Book: no resolved picks yet · {review_text}"
     header = f"🌊 <b>DRIFT PICK 13M · {html.escape(banner)}</b>"
     body = [
         "PAPER SIGNAL — record-only book; you trade it manually or not at all.",

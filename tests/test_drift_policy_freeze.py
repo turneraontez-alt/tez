@@ -132,6 +132,8 @@ def test_frozen_core_accepts_only_whitelisted_assets_at_exact_boundaries(asset):
         {"predicted_side": "NO"},
         {"entry_ask_cents": 59.999},
         {"entry_ask_cents": 73.001},
+        {"interval": "12M"},
+        {"spread_cents": -0.001},
         {"distance_sigma": 3.0001e-5, "distance_from_strike": 3.0001e-5},
         {"flip_probability": 30.001},
     ],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from q15_upgrade.strategy_bots import runtime
+from q15_upgrade.strategy_bots.ledger import StrategyBotLedger, kalshi_fee_cents
 from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
     BOT_DRIFT_13M,
@@ -10,6 +11,7 @@ from q15_upgrade.strategy_bots.rules import (
     REJECTED,
     RESEARCH_ONLY,
     STRATEGY_VERSION,
+    BotDecision,
     drift_flow_spread_13m_decision,
 )
 from q15_upgrade.strategy_bots.spot_depth import enrich_spot_depth
@@ -29,6 +31,11 @@ def _row(**over):
         "entry_ask_cents": 65.0,
         "spread_cents": 3.0,
         "depth_contracts": 100.0,
+        "distance_sigma": 1e-5,
+        "flip_probability": 20.0,
+        "spot_depth_snapshot_age_seconds": 1.0,
+        "spot_depth_age_seconds": 2.0,
+        "spot_depth_trade_age_seconds": 2.0,
         "drift_spread_weight": 1.5,
         "drift_session_weight": 1.0,
         "drift_stack_weight": 1.5,
@@ -274,7 +281,7 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
             source_model_version="interval-research-v1",
             ticker=ticker,
             official_result=result,
-        ) == 1
+        ) == 3
 
     scoreboard = ledger.scoreboard(STRATEGY_VERSION, min_n=1)
     drift = scoreboard["drift_system"]
@@ -292,3 +299,99 @@ def test_runtime_records_every_gate_path_but_notifies_only_accepted(
     assert drift["flow_spread_13m_by_status"][REJECTED]["rows"] == 1
     assert drift["flow_spread_13m_by_status"][RESEARCH_ONLY]["rows"] == 1
     assert drift["raw_13m_legacy_shadow"]["rows"] == 0
+    assert scoreboard["total_rows"] == 12
+    assert scoreboard["all_exposure"]["rows"] == 4
+    assert scoreboard["counterfactual_research_rows"] == 8
+    shadows = drift["counterfactual_research"]
+    assert shadows["spread4"]["full"]["overall"]["rows"] == 4
+    assert shadows["spread4"]["incremental"]["overall"]["rows"] == 2
+    assert shadows["flow15"]["funnel"]["overall"]["rows"] == 4
+    assert shadows["flow15"]["full"]["overall"]["rows"] == 2
+    assert shadows["flow15"]["incremental"]["overall"]["rows"] == 0
+    assert shadows["spread4"]["full"]["review"]["stage"] == "ACCRUING_TO_30"
+    assert shadows["spread4"]["full"]["review"]["automatic_promotion"] is False
+
+
+def test_drift_cohort_metrics_are_fee_adjusted_and_drawdown_aware():
+    rows = [
+        {
+            "id": 1, "created_at": 1.0, "close_time": 10.0,
+            "asset": "XRP", "official_result": "YES", "correct": 1,
+            "entry_ask_cents": 60.0, "hypothetical_pnl_cents": 10.0,
+        },
+        {
+            "id": 2, "created_at": 2.0, "close_time": 20.0,
+            "asset": "XRP", "official_result": "NO", "correct": 0,
+            "entry_ask_cents": 65.0, "hypothetical_pnl_cents": -5.0,
+        },
+        {
+            "id": 3, "created_at": 3.0, "close_time": 30.0,
+            "asset": "SOL", "official_result": "NO", "correct": 0,
+            "entry_ask_cents": 70.0, "hypothetical_pnl_cents": -8.0,
+        },
+        {
+            "id": 4, "created_at": 4.0, "close_time": 40.0,
+            "asset": "SOL", "official_result": "YES", "correct": 1,
+            "entry_ask_cents": 73.0, "hypothetical_pnl_cents": 6.0,
+        },
+    ]
+    agg = StrategyBotLedger._agg(rows, min_n=1)
+    assert agg["accuracy"] == 0.5
+    assert 0.0 < agg["accuracy_wilson_95_low"] < 0.5
+    assert 0.5 < agg["accuracy_wilson_95_high"] < 1.0
+    assert agg["fee_adjusted_ev_cents"] == 0.75
+    assert agg["fee_adjusted_net_pnl_cents"] == 3.0
+    assert agg["max_cumulative_drawdown_cents"] == 13.0
+    expected_breakeven = sum(
+        (ask + kalshi_fee_cents(ask)) / 100.0 for ask in (60.0, 65.0, 70.0, 73.0)
+    ) / 4.0
+    assert agg["avg_fee_adjusted_breakeven_rate"] == expected_breakeven
+
+
+def test_frozen_review_cohort_excludes_pre_policy_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_V3_DRIFT_FLOW_SPREAD", "true")
+    ledger = StrategyBotLedger(tmp_path / "cohort.sqlite3")
+    legacy_source = _row(ticker="LEGACY", window_key=1)
+    legacy = BotDecision(
+        BOT_DRIFT_FLOW_SPREAD,
+        ACCEPTED,
+        ("LEGACY_V1",),
+        threshold_profile={"rule_version": "drift-flow-spread-13m-v1"},
+        side_override="YES",
+        entry_ask_cents=65.0,
+        use_entry_ask_override=True,
+    )
+    assert ledger.record_decision(
+        legacy, legacy_source, source_system="drift_shadow"
+    ) is not None
+    frozen_source = _row(ticker="FROZEN", window_key=2, spread_cents=2.0)
+    frozen = drift_flow_spread_13m_decision(frozen_source)
+    assert frozen is not None and frozen.decision_status == ACCEPTED
+    assert ledger.record_decision(
+        frozen, frozen_source, source_system="drift_shadow"
+    ) is not None
+
+    drift = ledger.scoreboard(STRATEGY_VERSION, min_n=1)["drift_system"]
+    assert drift["flow_spread_13m_all_candidates"]["rows"] == 2
+    assert drift["core_funnel"]["overall"]["rows"] == 1
+    assert drift["frozen_core_accepted"]["overall"]["rows"] == 1
+    assert ledger.resolve(
+        source_system="drift_shadow",
+        source_model_version="interval-research-v1",
+        ticker="LEGACY",
+        official_result="YES",
+    ) == 1
+    assert ledger.resolve(
+        source_system="drift_shadow",
+        source_model_version="interval-research-v1",
+        ticker="FROZEN",
+        official_result="YES",
+    ) == 1
+    assert ledger.bot_accepted_resolved_stats(
+        bot_name=BOT_DRIFT_FLOW_SPREAD,
+    )["n"] == 2
+    assert ledger.bot_accepted_resolved_stats(
+        bot_name=BOT_DRIFT_FLOW_SPREAD,
+        threshold_rule_version="drift-flow-spread-13m-frozen-v2",
+    )["n"] == 1
+    ledger.close()
