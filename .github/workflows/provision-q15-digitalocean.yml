@@ -149,6 +149,7 @@ jobs:
         run: |
           ip=$(doctl compute droplet get "${DROPLET_ID}" --format PublicIPv4 --no-header)
           test -n "${ip}"
+          echo "Q15_SERVER_IP=${ip}"
           {
             echo "## Q15 DigitalOcean VM"
             echo
