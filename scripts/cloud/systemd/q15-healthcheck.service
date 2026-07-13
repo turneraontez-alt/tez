@@ -1,0 +1,7 @@
+[Unit]
+Description=Check Q15 health and repair the service
+After=q15.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/q15-healthcheck

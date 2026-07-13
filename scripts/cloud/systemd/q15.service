@@ -1,0 +1,28 @@
+[Unit]
+Description=Q15 market monitor
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=q15
+Group=q15
+WorkingDirectory=/opt/q15/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/q15/venv/bin/python /opt/q15/app/tools/cloud_launcher.py --config /etc/q15/q15.env --config /etc/q15/safety.env -- /opt/q15/venv/bin/python /opt/q15/app/app.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/q15/app /var/lib/q15 /var/backups/q15
+
+[Install]
+WantedBy=multi-user.target

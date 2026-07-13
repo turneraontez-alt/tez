@@ -1,0 +1,13 @@
+[Unit]
+Description=Create a consistent Q15 database backup
+After=q15.service
+
+[Service]
+Type=oneshot
+User=q15
+Group=q15
+WorkingDirectory=/opt/q15/app
+ExecStart=/opt/q15/venv/bin/python /opt/q15/app/tools/cloud_launcher.py --config /etc/q15/q15.env --config /etc/q15/safety.env -- /usr/local/sbin/q15-backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
