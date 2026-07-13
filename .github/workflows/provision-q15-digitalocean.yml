@@ -1,0 +1,164 @@
+name: Provision Q15 DigitalOcean VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type CREATE to confirm a billed DigitalOcean VM"
+        required: true
+        type: string
+      region:
+        description: "DigitalOcean region"
+        required: true
+        default: nyc3
+        type: choice
+        options:
+          - nyc3
+          - sfo3
+          - tor1
+      size:
+        description: "VM size (2 vCPU / 4 GiB is recommended)"
+        required: true
+        default: s-2vcpu-4gb
+        type: choice
+        options:
+          - s-2vcpu-4gb
+          - s-4vcpu-8gb
+
+permissions:
+  contents: read
+
+concurrency:
+  group: q15-digitalocean-production
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: Create or inspect Q15 VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DROPLET_NAME: q15-prod
+      FIREWALL_NAME: q15-prod-firewall
+      SSH_KEY_NAME: q15-cloud-2026-07-12
+      REGION: ${{ inputs.region }}
+      SIZE: ${{ inputs.size }}
+      CONFIRM: ${{ inputs.confirm }}
+
+    steps:
+      - name: Require explicit billing confirmation
+        run: |
+          if [[ "${CONFIRM}" != "CREATE" ]]; then
+            echo "Refusing to create a billed VM: confirmation must be CREATE." >&2
+            exit 1
+          fi
+
+      - name: Check out the deployment package
+        uses: actions/checkout@v4
+
+      - name: Install authenticated doctl
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Verify account and selected capacity
+        run: |
+          doctl account get >/dev/null
+          doctl compute region list --output json \
+            | jq -e --arg region "${REGION}" '.[] | select(.slug == $region and .available == true)' >/dev/null
+          doctl compute size list --output json \
+            | jq -e --arg size "${SIZE}" --arg region "${REGION}" \
+              '.[] | select(.slug == $size and .available == true and (.regions | index($region)))' >/dev/null
+
+      - name: Register the dedicated SSH public key
+        id: ssh_key
+        run: |
+          fingerprint=$(doctl compute ssh-key list --output json \
+            | jq -r --arg name "${SSH_KEY_NAME}" '.[] | select(.name == $name) | .fingerprint' \
+            | head -n 1)
+          if [[ -z "${fingerprint}" ]]; then
+            doctl compute ssh-key create "${SSH_KEY_NAME}" \
+              --public-key "$(cat scripts/cloud/q15-cloud-ed25519.pub)" >/dev/null
+            fingerprint=$(doctl compute ssh-key list --output json \
+              | jq -r --arg name "${SSH_KEY_NAME}" '.[] | select(.name == $name) | .fingerprint' \
+              | head -n 1)
+          fi
+          test -n "${fingerprint}"
+          echo "fingerprint=${fingerprint}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or reuse the Q15 Droplet
+        id: droplet
+        env:
+          SSH_FINGERPRINT: ${{ steps.ssh_key.outputs.fingerprint }}
+        run: |
+          droplet_id=$(doctl compute droplet list --output json \
+            | jq -r --arg name "${DROPLET_NAME}" '.[] | select(.name == $name) | .id' \
+            | head -n 1)
+          created=false
+          if [[ -z "${droplet_id}" ]]; then
+            doctl compute droplet create "${DROPLET_NAME}" \
+              --region "${REGION}" \
+              --size "${SIZE}" \
+              --image ubuntu-24-04-x64 \
+              --ssh-keys "${SSH_FINGERPRINT}" \
+              --enable-monitoring \
+              --enable-private-networking \
+              --enable-backups \
+              --backup-policy-plan weekly \
+              --backup-policy-weekday SUN \
+              --backup-policy-hour 4 \
+              --tag-name q15-prod \
+              --user-data-file scripts/cloud/digitalocean-cloud-init.yaml \
+              --wait >/dev/null
+            droplet_id=$(doctl compute droplet list --output json \
+              | jq -r --arg name "${DROPLET_NAME}" '.[] | select(.name == $name) | .id' \
+              | head -n 1)
+            created=true
+          fi
+          test -n "${droplet_id}"
+          echo "id=${droplet_id}" >> "${GITHUB_OUTPUT}"
+          echo "created=${created}" >> "${GITHUB_OUTPUT}"
+
+      - name: Apply the Q15 cloud firewall
+        env:
+          DROPLET_ID: ${{ steps.droplet.outputs.id }}
+        run: |
+          firewall_id=$(doctl compute firewall list --output json \
+            | jq -r --arg name "${FIREWALL_NAME}" '.[] | select(.name == $name) | .id' \
+            | head -n 1)
+          inbound="protocol:tcp,ports:22,address:0.0.0.0/0,address:::/0"
+          outbound="protocol:icmp,address:0.0.0.0/0,address:::/0 protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0"
+          if [[ -z "${firewall_id}" ]]; then
+            doctl compute firewall create \
+              --name "${FIREWALL_NAME}" \
+              --droplet-ids "${DROPLET_ID}" \
+              --inbound-rules "${inbound}" \
+              --outbound-rules "${outbound}" >/dev/null
+          else
+            doctl compute firewall update "${firewall_id}" \
+              --name "${FIREWALL_NAME}" \
+              --droplet-ids "${DROPLET_ID}" \
+              --inbound-rules "${inbound}" \
+              --outbound-rules "${outbound}" >/dev/null
+          fi
+
+      - name: Publish connection details
+        env:
+          DROPLET_ID: ${{ steps.droplet.outputs.id }}
+          CREATED: ${{ steps.droplet.outputs.created }}
+        run: |
+          ip=$(doctl compute droplet get "${DROPLET_ID}" --format PublicIPv4 --no-header)
+          test -n "${ip}"
+          {
+            echo "## Q15 DigitalOcean VM"
+            echo
+            echo "- Name: \`${DROPLET_NAME}\`"
+            echo "- IPv4: \`${ip}\`"
+            echo "- Region: \`${REGION}\`"
+            echo "- Size: \`${SIZE}\`"
+            echo "- Created in this run: \`${CREATED}\`"
+            echo "- Weekly backups: enabled"
+            echo "- Public inbound ports: SSH 22 only"
+            echo
+            echo "Cloud-init may need 5-10 minutes before SSH is ready."
+          } >> "${GITHUB_STEP_SUMMARY}"

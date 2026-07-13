@@ -23,6 +23,29 @@ current public IP. Do not open port 8000.
 Paste `digitalocean-cloud-init.yaml` into the Droplet user-data field. It clones
 the public repository and installs Q15 without starting it.
 
+## Phone-only provisioning
+
+If the PC browser is not accessible, the manual GitHub Actions workflow can
+create the VM without exposing the DigitalOcean token in chat:
+
+1. On a phone, sign in to DigitalOcean, add a payment method, then open
+   `https://cloud.digitalocean.com/account/api/tokens`.
+2. Generate a token named `q15-github-provision`, choose a one-day expiration,
+   and choose Full Access. The token is only needed during provisioning.
+3. Open
+   `https://github.com/turneraontez-alt/tez/settings/secrets/actions/new` and
+   create a repository secret named `DIGITALOCEAN_ACCESS_TOKEN` whose value is
+   the DigitalOcean token. Do not put the token in an issue, commit, or chat.
+4. Open
+   `https://github.com/turneraontez-alt/tez/actions/workflows/provision-q15-digitalocean.yml`,
+   choose **Run workflow**, type `CREATE`, keep `nyc3` and `s-2vcpu-4gb`, and
+   run it. This confirms creation of the billed VM and weekly backups.
+5. After the workflow succeeds, revoke the one-day DigitalOcean token. The
+   workflow summary contains the server IP needed for the final migration.
+
+The workflow is idempotent: rerunning it reuses a Droplet named `q15-prod`
+instead of creating a duplicate.
+
 ## Secrets and state
 
 Copy the local environment outside Git:
