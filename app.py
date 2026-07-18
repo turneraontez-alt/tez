@@ -1235,6 +1235,13 @@ def _start_refresh():
                 start_liq_feed()
             except Exception as exc:
                 logger.warning("Liquidation feed did not start: %s", exc)
+            try:
+                # TT-Edge (tt_edge/): TT Elite betting ANALYSIS autoscan —
+                # separate subsystem, own DB/thread, never places orders.
+                from tt_edge.integration import start_autoscan
+                start_autoscan()
+            except Exception as exc:
+                logger.warning("TT-Edge autoscan did not start: %s", exc)
             threading.Thread(target=refresh_loop, daemon=True).start()
             _refresh_started = True
             logger.info("Refresh loop started")

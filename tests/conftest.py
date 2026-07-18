@@ -19,6 +19,16 @@ _TEMPORARY_DIRECTORY = tempfile.TemporaryDirectory
 
 
 @pytest.fixture(autouse=True)
+def _tt_edge_autoscan_off_in_tests(monkeypatch):
+    """TT-Edge autoscan defaults ON in production (inside app.py startup) but
+    must never spawn its browser/Telegram thread from a test import; tests
+    that exercise it call the integration functions directly."""
+    monkeypatch.setenv("TT_EDGE_AUTOSCAN_ENABLED", "false")
+    monkeypatch.setenv("TT_EDGE_AUTO_INSTALL", "false")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _ultoim_off_in_tests(monkeypatch):
     monkeypatch.setenv("Q15_ULTOIM_ENABLED", "false")
     try:

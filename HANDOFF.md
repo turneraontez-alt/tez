@@ -8,6 +8,35 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge zero-command: autoscan inside app.py
+Run time: 2026-07-18 (follow-on; owner: "wait, I have to do the commands?").
+
+The pick loop now needs NO commands beyond the owner's normal deploy
+routine (git pull + restart the app). `tt_edge/integration.py` +
+a guarded 6-line hook in app.py's `_start_refresh` (house pattern — same
+try/except as every other subsystem):
+- Daemon thread runs the autoscan cycle every TT_EDGE_AUTOSCAN_INTERVAL_S;
+  kill switch TT_EDGE_AUTOSCAN_ENABLED=false; forced off for every test via
+  conftest autouse (like ultoim).
+- Self-bootstrap (TT_EDGE_AUTO_INSTALL, default on): pip-installs
+  playwright and runs the idempotent chromium install if missing; failure
+  degrades to cache-only cycles with periodic errors, never a crash.
+- PAPER bankroll auto-seeds once from TT_EDGE_BANKROLL_INIT_DOLLARS
+  (default 65.00, the spec's launch tier); never reseeds an existing value.
+- Telegram needs nothing: inside the app process the Q15 creds exist, so
+  the fallback delivers picks to the owner's existing channel.
+- Containment: config errors, cycle crashes, and bootstrap failures are all
+  logged-and-survived; the Q15 monitor cannot be taken down by TT-Edge.
+  Do NOT also run the standalone jobs/autoscan.py against the same DB.
+
+Verification: 11 new tests (gating incl. production default ON, bootstrap
+paths, bankroll seed/override/no-reseed, loop containment: a cycle that
+raises twice keeps cycling; invalid config returns instead of raising);
+tt_edge total 254. Full suite green (see run below); config audit OK.
+DEPLOY: owner's local host — git pull + restart the app. Picks then flow
+with zero further action (verify anytime:
+`python3 -m tt_edge.jobs.autoscan --probe --test-message`).
+
 ## Shipped THIS session - TT-Edge: --probe diagnosis + .env bootstrap
 Run time: 2026-07-18 (follow-on; owner: "I'm not seeing any" picks).
 

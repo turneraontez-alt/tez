@@ -57,13 +57,27 @@ Two deliberate Phase-0 policies, revisit with calibration data:
   the bankroll is a paper ledger of what the system recommended until the
   operator goes live and reconciles it by hand.
 
-## Quickstart — automated (Phase 1 autoscan)
+## Quickstart — zero-command (in-app autoscan)
+
+**The loop runs inside the Q15 monitor.** The operator's normal deploy —
+`git pull` + restart the app — is the only action needed: at startup
+`app.py` spawns the TT-Edge autoscan thread (guarded like every other
+subsystem; `TT_EDGE_AUTOSCAN_ENABLED=false` is the kill switch), which
+self-installs Playwright/Chromium if missing (`TT_EDGE_AUTO_INSTALL`),
+seeds the PAPER bankroll on first run (`TT_EDGE_BANKROLL_INIT_DOLLARS`,
+default $65), and delivers picks over the Q15 Telegram credentials already
+present in the app process.
+
+## Quickstart — standalone loop (same thing, own process)
 
 ```bash
 pip install playwright                          # once, on the host
 python3 -m tt_edge.jobs.bankroll --set 65.00    # once
 python3 -m tt_edge.jobs.autoscan                # loop: fetch -> grade -> scan -> alert
 ```
+
+Run EITHER the in-app thread OR the standalone loop against a given DB,
+never both (double alerts race).
 
 Every 30 minutes the autoscan pulls the TT Elite boards (yesterday for
 results, today + tomorrow for picks), each upcoming match's H2H / form /
