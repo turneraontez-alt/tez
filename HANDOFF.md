@@ -8,6 +8,55 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge: TT Elite betting analysis pipeline (Phase 0)
+Run time: 2026-07-18.
+
+Owner commissioned a NEW, separate subsystem (`tt_edge/` package, ~2.4k lines
++ 189 tests): an analysis-and-alerting pipeline for TT Elite Series (Polish
+league) table tennis moneylines. Analysis only — it finds prices and alerts;
+a human clicks buttons; nothing can place/modify/cancel a bet. Phase 0 per
+the build spec:
+- `scrapers/`: sofascore XHR-intercept fetcher (Playwright, lazy import —
+  parsers and tests never need a browser) with provenance ENVELOPE files;
+  pure defensive parsers for board / H2H / per-player form; manual odds
+  entry CLI as the stopgap odds source (append-only snapshots keyed
+  (match, book, captured_at) — feeds the fix-risk movement guard now, CLV
+  later).
+- `freshness.py`: hard-reject guard (board >=30m, H2H/form >=24h, odds
+  >=10m stale). Every payload carries fetched_at; naive datetimes raise.
+- `model/`: H2H rate (Laplace + 365d half-life decay), form differential
+  (last 15, hot 5 x2, no look-ahead), common-opponent differential (60d);
+  hand-set logistic blend 0.45/0.35/0.20 (weights frozen until >=300 graded
+  rows); Platt calibration port of the ledger_v95 fit (clamps, applied-step
+  convergence), versioned in DB, INACTIVE until manually promoted.
+- `edge/`: Decimal-only proportional de-vig; `edge_calc.py` is the SINGLE
+  edge source (the tri-calc drift Q15 once had cannot recur); abstains:
+  stale data, insufficient data (<5 H2H AND <3 common opps), |edge|<3pts,
+  edge<5pts, >=15c adverse line move (fix-risk hard pass), no bankroll,
+  >=3 open picks. Quarter-Kelly staking, 5% cap dominates $1 floor,
+  bankroll is a DB value (never a constant).
+- `alerts/telegram.py`: rides the shared notifications TelegramSendClient on
+  its own TT_EDGE_TELEGRAM_* bot/chat; claim-row -> send -> mark-delivered
+  ordering (failed send retries WITHOUT a new row; rescan cannot
+  double-alert — DB unique claim per match/market/day). No legacy
+  formatter/suppression markers (tested).
+- `db/`: portable schema (tt_-prefixed; SQLite default, Postgres via
+  TT_EDGE_DATABASE_URL) + one repo module holding every SQL statement.
+  `jobs/`: scan (--dry-run end-to-end), grade (settle-once, bankroll move,
+  grades EVERY prediction into the calibration corpus, --fit/--activate),
+  odds_entry, bankroll CLIs.
+- `tt_edge/README.md` carries the pre-committed KILL CRITERIA: at 200 graded
+  recommendations, ROI < -8% or persistently negative CLV = stop/rework.
+
+Verification: full suite 2185 passed, 5 skipped (was 1996+5; +189 tt_edge).
+config_audit --check OK (1057 vars; all TT_EDGE_* documented in
+.env.example). CLI smoke run on a temp DB: bankroll seed -> odds entry ->
+dry-run scan (spec-format alert, $3.25 capped stake on the $65 example
+roll) -> grade (+270c settlement, bankroll 6500c->6770c). Deploy: nothing to
+restart — new standalone package, no Q15 runtime code touched; operator
+starts using it via the CLIs when ready (needs playwright installed only for
+live fetching).
+
 ## Shipped THIS session - Drift validated add-ons and settlement repair
 Run time: 2026-07-10.
 
