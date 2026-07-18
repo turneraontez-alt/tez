@@ -77,6 +77,20 @@ the default fallback rides the Q15 monitor's existing bot/chat
 `Price source: sofascore — take X or better` line: the edge exists AT that
 price; if your book posts a worse one, skip the bet.
 
+**Not seeing picks?** Run the one-shot diagnosis:
+
+```bash
+python3 -m tt_edge.jobs.autoscan --probe --test-message
+```
+
+It checks every link — bankroll, Telegram (and which bot it will use,
+sending a test message), sofascore reachability, board freshness, upcoming
+match count, odds coverage — and prints a READY / NOT READY verdict naming
+exactly what to fix. Remember: a READY probe with zero alerts just means no
+match currently clears the edge threshold; that is the system being
+selective. The CLIs auto-load repo-root `.env` / `.env.local` (an exported
+environment variable always wins), so secrets stored there are picked up.
+
 ## Quickstart — manual (Phase 0 flow, still supported)
 
 ```bash

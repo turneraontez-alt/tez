@@ -38,6 +38,7 @@ from pathlib import Path
 from tt_edge.config import load_config
 from tt_edge.db import repo as repo_mod
 from tt_edge.edge.vig import american_to_decimal_odds
+from tt_edge.envfile import bootstrap_env
 from tt_edge.jobs import setup_logging
 from tt_edge.model.calibration import CalibrationError, fit_platt
 
@@ -195,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     setup_logging()
+    bootstrap_env()
     config = load_config()
     results = [parse_result_arg(text) for text in args.result]
     if args.results_file:

@@ -46,6 +46,7 @@ from typing import Any
 from tt_edge.alerts.telegram import TTEdgeTelegram
 from tt_edge.config import TTEdgeConfig, load_config
 from tt_edge.db import repo as repo_mod
+from tt_edge.envfile import bootstrap_env
 from tt_edge.jobs import setup_logging
 from tt_edge.jobs.grade import GradeReport, ResultInput, run_grade
 from tt_edge.jobs.scan import MatchOutcome, ScanData, run_scan
@@ -179,6 +180,91 @@ def cycle_dates(now: datetime, forward: int) -> tuple[list[str], list[str]]:
     return [(today - timedelta(days=1)).isoformat()] + scan, scan
 
 
+def run_probe(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
+              data_dir: Path, sender: TTEdgeTelegram | None,
+              scan_dates: list[str], now: datetime,
+              test_message: bool = False) -> int:
+    """One-shot health diagnosis: answers "why am I not seeing picks?".
+
+    Prints every link of the chain and returns 0 only when the pipeline is
+    able to produce and deliver a pick (data may still abstain — that's the
+    system being selective, not a fault)."""
+    healthy = True
+    print("TT-Edge probe")
+    print(f"  database: {config.database_url}")
+
+    bankroll = repo.get_bankroll_cents()
+    if bankroll is None:
+        healthy = False
+        print("  bankroll: NOT SET -> python3 -m tt_edge.jobs.bankroll "
+              "--set 65.00")
+    else:
+        print(f"  bankroll: ${bankroll / 100:.2f}")
+
+    if sender is None or not sender.configured:
+        healthy = False
+        print("  telegram: MUTED — set TT_EDGE_TELEGRAM_BOT_TOKEN + "
+              "TT_EDGE_TELEGRAM_CHAT_ID (or TELEGRAM_BOT_TOKEN + "
+              "TELEGRAM_CHAT_ID for the Q15-channel fallback)")
+    else:
+        label = ("dedicated TT_EDGE bot" if sender.source == "dedicated"
+                 else "Q15 channel fallback")
+        print(f"  telegram: configured ({label})")
+        if test_message:
+            result = sender.send("\U0001F3D3 TT EDGE probe — delivery OK")
+            if result["ok"]:
+                print("  telegram test message: DELIVERED")
+            else:
+                healthy = False
+                print(f"  telegram test message: FAILED ({result['error']})")
+
+    envelopes = load_envelopes(data_dir)
+    boards = {e.entity_id: e for e in envelopes if e.kind == sofascore.BOARD}
+    odds_ids = {e.entity_id for e in envelopes if e.kind == sofascore.ODDS}
+    h2h_count = sum(1 for e in envelopes if e.kind == sofascore.H2H)
+    form_count = sum(1 for e in envelopes if e.kind == sofascore.FORM)
+    fresh_boards = 0
+    for date_str in scan_dates:
+        board_env = boards.get(date_str)
+        if board_env is None:
+            print(f"  board {date_str}: MISSING — sofascore fetch failed or "
+                  "never ran")
+            continue
+        check = freshness_check_board(board_env, now, config)
+        board = parse_board_for_probe(board_env, config)
+        upcoming = [m for m in board.matches if m.start_time > now]
+        with_odds = sum(1 for m in upcoming if m.source_event_id in odds_ids)
+        state = "fresh" if check.ok else f"STALE ({check.age_seconds:.0f}s)"
+        if check.ok:
+            fresh_boards += 1
+        print(f"  board {date_str}: {state}, {len(upcoming)} upcoming TT "
+              f"match(es), odds for {with_odds}")
+    print(f"  cache: {h2h_count} h2h, {form_count} form envelope(s) in "
+          f"{data_dir}")
+    if fresh_boards == 0:
+        healthy = False
+        print("  data: NO FRESH BOARD — run without --no-fetch, check that "
+              "this host can reach sofascore.com")
+
+    print(f"  verdict: {'READY — alerts will fire when an edge qualifies' if healthy else 'NOT READY (fix the lines above)'}")
+    return 0 if healthy else 1
+
+
+def freshness_check_board(board_env: sofascore.Envelope, now: datetime,
+                          config: TTEdgeConfig):
+    from tt_edge import freshness
+    return freshness.check("board", board_env.fetched_at, now,
+                           config.max_board_age_s)
+
+
+def parse_board_for_probe(board_env: sofascore.Envelope,
+                          config: TTEdgeConfig):
+    from tt_edge.scrapers.board import parse_board_payload
+    return parse_board_payload(board_env.payload,
+                               fetched_at=board_env.fetched_at,
+                               tournament_keyword=config.tournament_keyword)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tt_edge.jobs.autoscan",
@@ -189,6 +275,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="print alerts instead of sending Telegram")
     parser.add_argument("--no-fetch", action="store_true",
                         help="skip the browser; use cached envelopes only")
+    parser.add_argument("--probe", action="store_true",
+                        help="diagnose the whole chain once and exit "
+                             "(answers: why am I not seeing picks?)")
+    parser.add_argument("--test-message", action="store_true",
+                        help="with --probe: send a test Telegram message")
     parser.add_argument("--data-dir", type=Path,
                         help="envelope cache dir (default: "
                              "TT_EDGE_AUTOSCAN_DATA_DIR)")
@@ -196,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     setup_logging()
+    bootstrap_env()
     config = load_config()
     # Autoscan prices come from sofascore; only an EXPLICIT TT_EDGE_BOOK
     # overrides that (e.g. an operator running manual entries in parallel
@@ -208,6 +300,25 @@ def main(argv: list[str] | None = None) -> int:
     repo = repo_mod.connect(args.db or config.database_url)
     try:
         repo.apply_migrations()
+        if args.probe:
+            fetch_dates, scan_dates = cycle_dates(
+                datetime.now(timezone.utc), config.autoscan_dates_forward)
+            if not args.no_fetch:
+                try:
+                    sofascore.fetch_bundle(
+                        fetch_dates, data_dir,
+                        tournament_keyword=config.tournament_keyword,
+                        provider_id=config.odds_provider_id,
+                        max_matches=config.autoscan_max_matches,
+                        request_gap_s=config.request_gap_ms / 1000.0,
+                        h2h_refresh_s=float(config.h2h_refresh_s))
+                except RuntimeError as exc:
+                    print(f"  fetch: FAILED — {exc}")
+            return run_probe(repo=repo, config=config, data_dir=data_dir,
+                             sender=TTEdgeTelegram.from_config(config),
+                             scan_dates=scan_dates,
+                             now=datetime.now(timezone.utc),
+                             test_message=args.test_message)
         if repo.get_bankroll_cents() is None:
             print("bankroll NOT SET — seed it once with:\n"
                   "  python3 -m tt_edge.jobs.bankroll --set 65.00")
@@ -237,11 +348,16 @@ def main(argv: list[str] | None = None) -> int:
                     # playwright missing — actionable, not a crash loop.
                     print(str(exc))
                     return 2
-            run_cycle(repo=repo, config=config,
-                      envelopes=load_envelopes(data_dir),
-                      scan_dates=scan_dates,
-                      now=datetime.now(timezone.utc), sender=sender,
-                      dry_run=args.dry_run)
+            report = run_cycle(repo=repo, config=config,
+                               envelopes=load_envelopes(data_dir),
+                               scan_dates=scan_dates,
+                               now=datetime.now(timezone.utc), sender=sender,
+                               dry_run=args.dry_run)
+            if report.boards_scanned == 0:
+                logger.error(
+                    "cycle saw no board for %s — sofascore unreachable or "
+                    "fetch failing; diagnose with: python3 -m "
+                    "tt_edge.jobs.autoscan --probe", scan_dates)
             if args.once:
                 return 0
             try:

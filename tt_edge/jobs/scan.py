@@ -35,6 +35,7 @@ from tt_edge.config import TTEdgeConfig, load_config
 from tt_edge.db import repo as repo_mod
 from tt_edge.edge import edge_calc
 from tt_edge.edge.vig import movement_cents
+from tt_edge.envfile import bootstrap_env
 from tt_edge.jobs import setup_logging
 from tt_edge.model import features as feats
 from tt_edge.model.calibration import CalibrationTransform
@@ -448,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     setup_logging()
+    bootstrap_env()
     config = load_config()
     for url in args.live_url:
         for envelope in sofascore.fetch_payloads(url):

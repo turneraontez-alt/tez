@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 
 from tt_edge.config import load_config
 from tt_edge.db import repo as repo_mod
+from tt_edge.envfile import bootstrap_env
 from tt_edge.jobs import setup_logging
 
 
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     setup_logging()
+    bootstrap_env()
     config = load_config()
     repo = repo_mod.connect(args.db or config.database_url)
     try:

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -265,8 +266,15 @@ def fetch_bundle(dates: list[str], out_dir: Path, *,
     out_dir.mkdir(parents=True, exist_ok=True)
     envelopes: list[Envelope] = []
 
+    # A pinned @playwright version can disagree with the machine's browser
+    # build; PLAYWRIGHT_CHROMIUM_EXECUTABLE points at an existing Chromium
+    # binary instead of downloading one (e.g. /opt/pw-browsers/chromium in
+    # the Claude web sandbox).
+    executable = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or None
+
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
+        browser = playwright.chromium.launch(headless=headless,
+                                             executable_path=executable)
         try:
             page = browser.new_page()
             page.goto("https://www.sofascore.com/table-tennis",

@@ -119,8 +119,13 @@ class TTEdgeTelegram:
     """Send adapter. Missing token/chat means muted — records still written,
     nothing delivered (same contract as every other book sender)."""
 
-    def __init__(self, client: TelegramSendClient) -> None:
+    def __init__(self, client: TelegramSendClient,
+                 source: str = "dedicated") -> None:
         self._client = client
+        # 'dedicated' (TT_EDGE bot), 'q15_fallback', or 'unconfigured' —
+        # surfaced by the autoscan --probe so the operator can see where
+        # (or why not) alerts will land.
+        self.source = source if client.enabled else "unconfigured"
 
     @classmethod
     def from_config(cls, config: TTEdgeConfig, **client_kwargs) -> "TTEdgeTelegram":
@@ -131,11 +136,14 @@ class TTEdgeTelegram:
         pass through that channel untouched."""
         token = config.telegram_token
         chat_id = config.telegram_chat_id
+        source = "dedicated"
         if not token and config.telegram_fallback and config.q15_telegram_token:
             token = config.q15_telegram_token
             chat_id = config.q15_telegram_chat_id
+            source = "q15_fallback"
         return cls(TelegramSendClient(
-            token, chat_id, enabled=config.telegram_enabled, **client_kwargs))
+            token, chat_id, enabled=config.telegram_enabled, **client_kwargs),
+            source=source)
 
     @property
     def configured(self) -> bool:
