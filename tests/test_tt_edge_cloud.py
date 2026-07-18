@@ -98,6 +98,47 @@ class TestOdds:
         with pytest.raises(betsapi.BetsAPIError):
             betsapi.parse_odds_series([1], "9001")
 
+    def test_current_odds_returns_latest_price(self):
+        payload = {"success": 1, "results": {"odds": {"92_1": [
+            {"add_time": str(NOW_TS - 7200), "home_od": "1.50",
+             "away_od": "2.50"},
+            {"add_time": str(NOW_TS - 3600), "home_od": "1.80",
+             "away_od": "2.05"},
+        ]}}}
+        assert betsapi.current_odds(payload) == (-125, 105)   # newest wins
+        assert betsapi.current_odds({"results": {}}) is None
+
+    def test_stable_old_price_is_not_stale(self):
+        # A price Bet365 set 2h ago but never changed must still be usable:
+        # fetch_cloud_bundle stamps it at `now`, so freshness passes.
+        payload = {"success": 1, "results": {"odds": {"92_1": [
+            {"add_time": str(NOW_TS - 7200), "home_od": "1.80",
+             "away_od": "2.05"}]}}}
+
+        class OneOddsTransport:
+            def __call__(self, url, timeout):
+                import json as _json
+                import urllib.parse as _up
+                q = _up.parse_qs(_up.urlparse(url).query)
+                if "/v3/events/upcoming" in url:
+                    return 200, _json.dumps({"success": 1, "results": [
+                        bets_event(9001, 101, 102, START_TS,
+                                   home_name="Marud", away_name="G")]}).encode()
+                if "/v1/event/history" in url:
+                    r = _scenario_routes()["/v1/event/history"]["results"]
+                    return 200, _json.dumps({"success": 1, "results": r}).encode()
+                if "/v2/event/odds" in url:
+                    return 200, _json.dumps(payload).encode()
+                return 200, b'{"success":1,"results":[]}'
+
+        client = betsapi.BetsAPIClient("tok", transport=OneOddsTransport())
+        bundle = betsapi.fetch_cloud_bundle(
+            client, ["2026-07-18"], league_id="29128", max_events=5,
+            now=fx.NOW)
+        assert len(bundle.odds_snapshots) == 1
+        # captured_at is the fetch time, NOT the 2h-old add_time.
+        assert bundle.odds_snapshots[0].captured_at == fx.NOW
+
 
 class FakeTransport:
     """URL-dispatching transport: path substring -> JSON payload."""
