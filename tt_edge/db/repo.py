@@ -345,6 +345,18 @@ class TTEdgeRepo:
             "ON rec.match_source_id = res.match_source_id "
             "WHERE rec.status = 'open'")
 
+    def open_recommendation_matches(self) -> list[dict[str, Any]]:
+        """Tournament + start time of every OPEN recommendation's match —
+        what a cycle needs to fetch results for leagues it no longer scans."""
+        rows = self._fetchall(
+            "SELECT DISTINCT m.tournament, m.start_time "
+            "FROM tt_recommendations rec JOIN tt_matches m "
+            "ON rec.match_source_id = m.source_event_id "
+            "WHERE rec.status = 'open'")
+        for row in rows:
+            row["start_time"] = _as_dt(row["start_time"])
+        return rows
+
     def settle_recommendation(self, recommendation_id: int, status: str,
                               profit_cents: int, settled_at: datetime) -> bool:
         """Settle exactly once — a second settle attempt is a no-op (the

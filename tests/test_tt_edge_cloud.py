@@ -2,16 +2,19 @@
 full cloud cycle — fake transport, in-memory SQLite, real git tmp repos."""
 import gzip
 import json
+import logging
 import subprocess
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 
 from tests import tt_edge_fixtures as fx
 from tt_edge import state_sync
 from tt_edge.edge.vig import OddsError
-from tt_edge.jobs.cloud_cycle import main as cloud_main, run_cloud_cycle
+from tt_edge.jobs.cloud_cycle import (grade_only_result_dates,
+                                      main as cloud_main, run_cloud_cycle)
 from tt_edge.scrapers import betsapi
+from tt_edge.scrapers.events import ParsedEvent
 
 NOW_TS = int(fx.NOW.timestamp())
 START_TS = int(fx.START.timestamp())
@@ -351,6 +354,105 @@ class TestCloudCycle:
         assert inserted == 2                        # one odds row per league
         # Both matches are strong home favorites -> both recommend.
         assert report.recommended == 2
+
+
+class TestGradeOnlyLeagues:
+    """Split coverage: a league with OPEN claims that is no longer in the
+    scan list must still get a results-only fetch — its claims settle, but
+    it can never produce a new pick (stuck claims would otherwise pin the
+    max-open-picks cap and suppress every future pick)."""
+
+    def _open_claim(self, repo, event_id, tournament, start, *, now):
+        repo.upsert_match(ParsedEvent(
+            source_event_id=event_id, home_id=f"h{event_id}", home_name="H",
+            away_id=f"a{event_id}", away_name="A", start_time=start,
+            status_type="notstarted", winner_code=None,
+            tournament_name=tournament), now)
+        assert repo.insert_recommendation(
+            match_source_id=event_id, market="ML", side="home", pick_name="H",
+            model_p="0.6", fair_p="0.5", edge="0.1", price_american=-120,
+            stake_cents=100, bankroll_cents=6500, recommended_at=now,
+            recommended_on=now.date().isoformat(), basis_json="{}",
+            data_ages_json="{}") is not None
+
+    def test_open_claim_in_unscanned_league_settles_without_new_picks(self):
+        repo = fx.make_repo()
+        repo.set_bankroll_cents(6500, fx.NOW)
+        sender, post = fx.make_sender()
+        config = fx.make_config(book=betsapi.BOOK, tournament_keyword="")
+        # Seed: a normal TT Elite cycle claims the Marud pick.
+        run_cloud_cycle(
+            repo=repo, config=config,
+            client=betsapi.BetsAPIClient(
+                "tok", transport=FakeTransport(_scenario_routes())),
+            now=fx.NOW, sender=sender, league_ids=["29128"], dry_run=False)
+        assert repo.open_recommendation_count() == 1
+        assert len(post.calls) == 1
+
+        # Cups-only cycle: TT Elite is no longer scanned, but its open claim
+        # triggers a results-only fetch for the claim's own day.
+        transport = FakeTransport({
+            "/v3/events/upcoming": {"success": 1, "results": []},
+            "league_id=29128": {"success": 1, "results": [
+                bets_event(9001, 101, 102, START_TS, status="3", ss="3-1",
+                           home_name="Marud", away_name="Gumulinski")]},
+            "/v3/events/ended": {"success": 1, "results": []},
+        })
+        later = fx.NOW + timedelta(minutes=90)
+        report, _ = run_cloud_cycle(
+            repo=repo, config=config,
+            client=betsapi.BetsAPIClient("tok", transport=transport),
+            now=later, sender=sender, league_ids=["29097"], dry_run=False)
+
+        assert report.grade.recommendations_settled == 1
+        assert repo.get_bankroll_cents() == 6760       # stake 325 at -125
+        assert repo.open_recommendation_count() == 0
+        assert len(post.calls) == 1                    # seed alert only
+        assert not report.outcomes                     # nothing scannable
+        # TT Elite saw ONLY ended fetches, on the claim's start date …
+        elite = [u for u in transport.urls if "league_id=29128" in u]
+        day = fx.START.astimezone(timezone.utc).strftime("%Y%m%d")
+        assert elite and all("/v3/events/ended" in u and f"day={day}" in u
+                             for u in elite)
+        # … and no per-event calls happened anywhere (nothing was scanned).
+        assert not any("/v1/event/history" in u or "/v2/event/odds" in u
+                       for u in transport.urls)
+
+    def test_dates_derive_from_claims_and_skip_scanned_or_unmapped(
+            self, caplog):
+        repo = fx.make_repo()
+        old = fx.NOW - timedelta(days=3)
+        self._open_claim(repo, "111", "TT Elite Series", old, now=fx.NOW)
+        self._open_claim(repo, "222", "Czech Liga Pro", fx.NOW, now=fx.NOW)
+        self._open_claim(repo, "333", "Mystery League", fx.NOW, now=fx.NOW)
+
+        with caplog.at_level(logging.WARNING):
+            fetches = grade_only_result_dates(repo, ["22742"])
+        # Czech is scanned (skipped); the days-old TT Elite claim still gets
+        # its own result day; the unmapped league is logged, not fatal.
+        assert fetches == {"29128": [old.astimezone(timezone.utc)
+                                     .date().isoformat()]}
+        assert "Mystery League" in caplog.text
+        assert grade_only_result_dates(repo, ["29128", "22742"]) == {}
+
+    def test_results_bundle_is_ended_only_and_degrades(self):
+        transport = FakeTransport({
+            "day=20260717": {"success": 1, "results": [
+                bets_event(1, 10, 11, NOW_TS - 3600, status="3", ss="3-2"),
+                bets_event(2, 12, 13, NOW_TS + 3600, status="0")]},
+            "day=20260716": {"success": 0, "error": "PERMISSION"},
+        })
+        client = betsapi.BetsAPIClient("tok", transport=transport)
+        bundle = betsapi.fetch_results_bundle(
+            client, ["2026-07-17", "2026-07-16"], league_id="29128",
+            now=fx.NOW)
+        assert [e.entity_id for e in bundle.envelopes] == ["2026-07-17",
+                                                           "2026-07-16"]
+        finished_day, failed_day = bundle.envelopes
+        assert [e["id"] for e in finished_day.payload["events"]] == [1]
+        assert failed_day.payload["events"] == []      # failure degrades
+        assert bundle.odds_snapshots == [] and bundle.events_fetched == 0
+        assert all("/v3/events/ended" in u for u in transport.urls)
 
 
 class TestParseLeagueIds:
