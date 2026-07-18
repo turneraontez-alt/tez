@@ -182,7 +182,7 @@ class TestCloudCycle:
 
         report, odds_inserted = run_cloud_cycle(
             repo=repo, config=config, client=self._client(), now=fx.NOW,
-            sender=sender, league_id="29128", dry_run=False)
+            sender=sender, league_ids=["29128"], dry_run=False)
 
         assert odds_inserted == 1
         assert report.recommended == 1 and report.delivered == 1
@@ -197,11 +197,11 @@ class TestCloudCycle:
         sender, post = fx.make_sender()
         config = fx.make_config(book=betsapi.BOOK)
         run_cloud_cycle(repo=repo, config=config, client=self._client(),
-                        now=fx.NOW, sender=sender, league_id="29128",
+                        now=fx.NOW, sender=sender, league_ids=["29128"],
                         dry_run=False)
         second, odds_second = run_cloud_cycle(
             repo=repo, config=config, client=self._client(), now=fx.NOW,
-            sender=sender, league_id="29128", dry_run=False)
+            sender=sender, league_ids=["29128"], dry_run=False)
         assert len(post.calls) == 1
         assert odds_second == 0                      # same add_time deduped
 
@@ -213,7 +213,7 @@ class TestCloudCycle:
         later = fx.NOW + timedelta(minutes=90)
         report, _ = run_cloud_cycle(
             repo=repo, config=config, client=self._client(routes), now=later,
-            sender=sender, league_id="29128", dry_run=False)
+            sender=sender, league_ids=["29128"], dry_run=False)
         assert report.grade.recommendations_settled == 1
         assert report.grade.profit_cents == 260      # stake 325 at -125
         assert repo.get_bankroll_cents() == 6760
@@ -226,7 +226,7 @@ class TestCloudCycle:
         report, _ = run_cloud_cycle(
             repo=repo, config=fx.make_config(book=betsapi.BOOK),
             client=self._client(routes), now=fx.NOW, sender=None,
-            league_id="29128", dry_run=True)
+            league_ids=["29128"], dry_run=True)
         assert report.outcomes[0].status == "NO_BET"
         assert "insufficient_data" in report.outcomes[0].reasons
 
@@ -234,6 +234,95 @@ class TestCloudCycle:
         monkeypatch.delenv("TT_EDGE_BETSAPI_KEY", raising=False)
         assert cloud_main(["--no-state", "--dry-run"]) == 3
         assert "no TT_EDGE_BETSAPI_KEY" in capsys.readouterr().out
+
+    def test_multiple_leagues_merge_into_one_cycle(self):
+        # Two leagues, one upcoming match each; both must be scanned and the
+        # per-league board/history/odds must route by their own ids.
+        cup_h2h = [bets_event(5000 + i, 301, 302, NOW_TS - 86400 * (2 + i),
+                              status="3", ss="3-1" if i % 5 else "1-3")
+                   for i in range(20)]
+        cup_form_h = [bets_event(5100 + i, 301, 900 + i,
+                                 NOW_TS - 86400 * (1 + i), status="3",
+                                 ss="3-0" if i < 11 else "0-3")
+                      for i in range(15)]
+        cup_form_a = [bets_event(5200 + i, 302, 900 + i,
+                                 NOW_TS - 86400 * (1 + i), status="3",
+                                 ss="0-3" if i < 9 else "3-0")
+                      for i in range(15)]
+
+        class LeagueTransport:
+            def __init__(self):
+                self.leagues_seen = set()
+
+            def __call__(self, url, timeout):
+                import json as _json
+                import urllib.parse as _up
+                query = _up.parse_qs(_up.urlparse(url).query)
+                if "/v3/events/upcoming" in url:
+                    league = query["league_id"][0]
+                    self.leagues_seen.add(league)
+                    if league == "29128":
+                        ev = [bets_event(9001, 101, 102, START_TS,
+                                         home_name="Marud",
+                                         away_name="Gumu")]
+                    else:            # 29097 TT Cup
+                        ev = [bets_event(7700, 301, 302, START_TS,
+                                         home_name="Cupic", away_name="Cupax")]
+                    return 200, _json.dumps({"success": 1, "results": ev}).encode()
+                if "/v3/events/ended" in url:
+                    return 200, b'{"success":1,"results":[]}'
+                if "/v1/event/history" in url:
+                    eid = query["event_id"][0]
+                    if eid == "9001":
+                        r = {"h2h": _scenario_routes()["/v1/event/history"]
+                             ["results"]["h2h"],
+                             "home": _scenario_routes()["/v1/event/history"]
+                             ["results"]["home"],
+                             "away": _scenario_routes()["/v1/event/history"]
+                             ["results"]["away"]}
+                    else:
+                        r = {"h2h": cup_h2h, "home": cup_form_h,
+                             "away": cup_form_a}
+                    return 200, _json.dumps({"success": 1, "results": r}).encode()
+                if "/v2/event/odds" in url:
+                    eid = query["event_id"][0]
+                    price = ("1.80", "2.05") if eid == "9001" else ("1.72", "2.10")
+                    body = {"success": 1, "results": {"odds": {"92_1": [
+                        {"add_time": str(NOW_TS - 40), "home_od": price[0],
+                         "away_od": price[1]}]}}}
+                    return 200, _json.dumps(body).encode()
+                return 200, b'{"success":1,"results":[]}'
+
+        transport = LeagueTransport()
+        repo = fx.make_repo()
+        repo.set_bankroll_cents(6500, fx.NOW)
+        client = betsapi.BetsAPIClient("tok", transport=transport)
+        # tournament_keyword must be empty (cloud mode) or the non-"TT Elite"
+        # league's board would be filtered away.
+        config = fx.make_config(book=betsapi.BOOK, tournament_keyword="")
+        report, inserted = run_cloud_cycle(
+            repo=repo, config=config, client=client, now=fx.NOW, sender=None,
+            league_ids=["29128", "29097"], dry_run=True)
+
+        assert transport.leagues_seen == {"29128", "29097"}
+        scanned = {o.match_source_id for o in report.outcomes}
+        assert scanned == {"9001", "7700"}
+        assert inserted == 2                        # one odds row per league
+        # Both matches are strong home favorites -> both recommend.
+        assert report.recommended == 2
+
+
+class TestParseLeagueIds:
+    def test_default_is_the_three_book_leagues(self):
+        assert betsapi.parse_league_ids(None) == ["29128", "29097", "22742"]
+        assert betsapi.parse_league_ids("  ") == ["29128", "29097", "22742"]
+
+    def test_comma_separated_dedup_order_preserving(self):
+        assert betsapi.parse_league_ids("29097, 22742 ,29097") == \
+            ["29097", "22742"]
+
+    def test_single_league(self):
+        assert betsapi.parse_league_ids("22307") == ["22307"]
 
 
 class TestStateSync:
