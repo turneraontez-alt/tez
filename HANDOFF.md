@@ -8,6 +8,36 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - PC back: SPLIT COVERAGE decided + Routine now cups-only
+Run time: 2026-07-18 (owner: "okay im on my pc set up what you need to").
+
+Owner is back at the PC (its app last ran 2026-07-16 / commit c78c4de —
+pre-TT-Edge, so a pull+restart is pending there). Asked the owner to choose
+the TT-Edge operating mode; they chose **SPLIT COVERAGE**:
+- HOME (the PC's in-app autoscan, automatic on pull+restart) owns TT Elite
+  Series — sofascore prices, 30-min cadence, Q15 Telegram fallback.
+- CLOUD (hourly Routine) owns the cups ONLY. The old all-3-leagues Routine
+  was deleted and recreated as "TT-Edge cloud pick cycle (cups only)"
+  (trig_014BzJsXMdjdzVys4QjzYdLe, hourly at :01) with
+  ``TT_EDGE_BETSAPI_LEAGUE_ID=29097,22742`` pinned on the command line in
+  its prompt — structurally cannot double-alert TT Elite regardless of what
+  the environment settings hold. Still exits quietly until the owner puts
+  TT_EDGE_BETSAPI_KEY in the Claude Code environment settings (owner-only).
+Convention documented in ``.env.example`` (cloud block) and
+``tt_edge/README.md`` so future sessions honor the per-league either/or.
+
+OWNER ACTIONS PENDING (given in-session): PC ``git pull`` + app restart,
+then ``python3 -m tt_edge.jobs.autoscan --probe --test-message``; put
+TT_EDGE_BETSAPI_KEY in environment settings; from the PC run
+``scripts/prune_branches.sh --all`` (58 stale claude/* refs) and
+``git push origin --delete tt-edge-state-test`` (sandbox cannot delete refs).
+
+Verification: docs-only diff — full suite 2296 passed, 5 skipped; config
+audit OK (1072 env reads documented/baselined). Sandbox env note: this
+session's container needed ``pip install -r requirements.txt pytest
+playwright --ignore-installed PyJWT`` before the suite would run (two
+tt_edge integration tests assume the playwright package is importable).
+
 ## Shipped THIS session - TT-Edge fix: BetsAPI stale-odds false-reject
 Run time: 2026-07-18 (follow-on; while hunting a live pick, the DB showed 52
 matches/sweep rejected for stale_odds).

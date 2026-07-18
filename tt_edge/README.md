@@ -82,8 +82,11 @@ Set `TT_EDGE_BETSAPI_KEY` in the Claude Code environment; without it the
 scheduled cycle exits quietly. By default it covers the three high-frequency
 leagues a book typically posts — **TT Elite Series, TT Cup, and Czech Liga
 Pro** — overridable via `TT_EDGE_BETSAPI_LEAGUE_ID` (comma-separated;
-Setka Cup is `22307`). **Run either cloud mode or a home loop — never both**
-(each has its own DB, so both would alert).
+Setka Cup is `22307`). **A league must never be covered by cloud mode AND a
+home loop at the same time** (each has its own DB, so both would alert).
+The live setup is SPLIT COVERAGE (owner decision 2026-07-18): the home
+in-app autoscan owns TT Elite, and the hourly Routine runs cups-only with
+`TT_EDGE_BETSAPI_LEAGUE_ID=29097,22742` pinned in its prompt.
 
 Sofascore is NOT usable from the cloud: it blocks datacenter traffic
 (curl 403 / browser reset / fetcher 404 — verified). Home machines on
