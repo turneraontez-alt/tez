@@ -1,7 +1,7 @@
 {
-  "commit": "5aca47a",
+  "commit": "ffe1b0d",
   "branch": "claude/pc-setup-llrxgt",
-  "committed_at": "2026-07-18T23:33:43Z",
-  "summary": "TT-Edge split coverage: home TT Elite + cloud Routine cups-only",
-  "tests": "2296 passed, 5 skipped in 71.00s (0:01:11)"
+  "committed_at": "2026-07-18T23:59:22Z",
+  "summary": "TT-Edge grade-only results: unscanned leagues' open claims settle",
+  "tests": "2299 passed, 5 skipped in 73.81s (0:01:13)"
 }
