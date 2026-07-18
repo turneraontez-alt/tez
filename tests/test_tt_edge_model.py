@@ -57,6 +57,12 @@ class TestH2HFeature:
                            half_life_days=365.0)
         assert feat.n_meetings == 0
 
+    def test_future_dated_meeting_excluded(self):
+        # A source glitch stamping a "finished" meeting in the future must
+        # not inform the prediction (no look-ahead).
+        feat = h2h_feature([_match(-1, "A")], "A", NOW, half_life_days=365.0)
+        assert feat.n_meetings == 0
+
     def test_naive_timestamp_rejected(self):
         naive = MatchResult(start_time=NOW.replace(tzinfo=None),
                             winner_id="A", home_id="A", away_id="B")
@@ -169,6 +175,16 @@ class TestBlend:
                                    **self.W)
         score = (0.45 * (2 * 0.727 - 1) + 0.35 * 0.6) / 0.80
         assert result.common_component is None
+        assert result.p_home == pytest.approx(_sigmoid(2.5 * score))
+
+    def test_one_sided_form_drops_the_form_weight(self):
+        # An absent opponent history is not a differential: the form weight
+        # is dropped and the rest renormalizes (missing-feature contract).
+        result = blend_probability(self._h2h(), self._form(0.9),
+                                   self._form(0.5, n=0), self._common(),
+                                   **self.W)
+        score = (0.45 * (2 * 0.727 - 1) + 0.20 * 0.75) / 0.65
+        assert result.form_component is None
         assert result.p_home == pytest.approx(_sigmoid(2.5 * score))
 
     def test_everything_missing_is_coin_flip(self):

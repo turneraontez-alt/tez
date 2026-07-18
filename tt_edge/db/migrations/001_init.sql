@@ -4,7 +4,9 @@
 --   {TS} -> TIMESTAMPTZ (postgres)           | TEXT (sqlite, ISO-8601 UTC)
 -- Booleans are INTEGER 0/1 everywhere; money is integer cents; probabilities
 -- and edges are exact decimal TEXT. Statements are ;-separated (no ; inside
--- any statement).
+-- any statement). CONVENTION (enforced in review): every statement must be
+-- IDEMPOTENT (IF NOT EXISTS / additive) — SQLite applies DDL in autocommit,
+-- so a mid-file failure heals only if a rerun is harmless.
 
 CREATE TABLE IF NOT EXISTS tt_players (
     id {PK},

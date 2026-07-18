@@ -4,6 +4,11 @@ This module is the single source of truth for "edge" — the Q15 audit found
 three inconsistent edge calculations and this pipeline does not repeat that.
 Nothing else in tt_edge subtracts model and market probabilities.
 
+Deliberate Phase-0 conservatism: only the MODEL-FAVORED side is ever
+evaluated. A price-only "edge" on a side the model gives < 50% (market even
+more pessimistic than the model) is exactly the trade an uncalibrated launch
+model should not take; revisit once calibration is fitted and validated.
+
 Decision order (first failure wins, but every failed guard is logged):
 
 1. Freshness — any stale board/H2H/form/odds payload is a hard NO BET.

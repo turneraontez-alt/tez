@@ -78,7 +78,7 @@ class AlertContext:
     bankroll_cents: int
     board_age_s: float
     h2h_age_s: float | None         # None = no H2H data (common-opps pick)
-    odds_age_s: float
+    odds_age_s: float | None        # None only on a resend with no fresh odds
 
 
 def build_alert(ctx: AlertContext) -> str:
@@ -102,7 +102,8 @@ def build_alert(ctx: AlertContext) -> str:
          f"roll {_fmt_dollars(ctx.bankroll_cents)})"),
         (f"Data age: board {format_age(ctx.board_age_s)}, "
          f"H2H {'-' if ctx.h2h_age_s is None else format_age(ctx.h2h_age_s)}, "
-         f"odds {format_age(ctx.odds_age_s)}"),
+         f"odds "
+         f"{'-' if ctx.odds_age_s is None else format_age(ctx.odds_age_s)}"),
     ]
     return "\n".join(lines)
 

@@ -35,7 +35,7 @@ def make_config(**overrides: Any) -> TTEdgeConfig:
         h2h_half_life_days=365.0, common_opp_window_days=60,
         form_last_n=15, form_hot_n=5,
         min_h2h_meetings=5, min_common_opps=3, calibration_min_rows=300,
-        tournament_keyword="TT Elite",
+        tournament_keyword="TT Elite", book="manual",
         telegram_token="test-token", telegram_chat_id="test-chat",
         telegram_enabled=True)
     return dataclasses.replace(base, **overrides) if overrides else base

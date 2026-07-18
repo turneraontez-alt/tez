@@ -11,9 +11,10 @@ from tt_edge.scrapers.events import ParsedEvent, event_list, parse_event
 
 logger = logging.getLogger(__name__)
 
-# Board statuses worth analyzing: not started (bettable) is the target;
-# postponed/cancelled/finished are excluded.
-_ANALYZABLE_STATUSES = ("notstarted", "")
+# Board statuses worth analyzing: ONLY not-started events are bettable
+# pre-match. In-progress/finished/postponed are excluded, and so is a
+# missing/malformed status — an event we can't classify is not one we bet.
+_ANALYZABLE_STATUSES = ("notstarted",)
 
 
 @dataclass(frozen=True)

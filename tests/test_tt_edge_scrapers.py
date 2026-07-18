@@ -59,6 +59,14 @@ class TestBoardParsing:
                                     tournament_keyword="TT Elite")
         assert [m.source_event_id for m in board.matches] == ["1", "2"]
 
+    def test_missing_status_is_not_bettable(self):
+        # An event we can't classify (no status object) must not be analyzed.
+        event = event_dict(1, 11, "A", 12, "B", NOW)
+        del event["status"]
+        board = parse_board_payload({"events": [event]}, fetched_at=NOW,
+                                    tournament_keyword="TT Elite")
+        assert board.matches == ()
+
     def test_start_times_are_aware_utc(self):
         payload = {"events": [event_dict(1, 11, "A", 12, "B", NOW)]}
         board = parse_board_payload(payload, fetched_at=NOW,

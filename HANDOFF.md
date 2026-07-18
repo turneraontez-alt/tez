@@ -48,8 +48,22 @@ the build spec:
 - `tt_edge/README.md` carries the pre-committed KILL CRITERIA: at 200 graded
   recommendations, ROI < -8% or persistently negative CLV = stop/rework.
 
-Verification: full suite 2185 passed, 5 skipped (was 1996+5; +189 tt_edge).
-config_audit --check OK (1057 vars; all TT_EDGE_* documented in
+An adversarial review pass (parallel subagent, repro-confirmed findings) was
+applied before merge:
+- Idempotency claims now key on the MATCH's UTC start date, not the scan
+  instant's date — a rescan across UTC midnight (TT Elite night sessions)
+  can no longer double-alert and double-settle the same match.
+- Undelivered claimed alerts re-send BEFORE re-evaluation, so odds gone
+  stale since the claim can't strand an alert the operator never got.
+- Started matches are never bettable (a 29-min-old board passes freshness
+  while its matches are mid-play); missing-status events dropped.
+- Settlements + bankroll now move in ONE transaction (settle_batch); scan
+  reads only the configured book's odds series (TT_EDGE_BOOK) so a second
+  book can't fabricate line movement; H2H look-ahead filter; one-sided form
+  drops its blend weight; PG dialect render/param tests added.
+
+Verification: full suite 2198 passed, 5 skipped (was 1996+5; +202 tt_edge).
+config_audit --check OK (1058 vars; all TT_EDGE_* documented in
 .env.example). CLI smoke run on a temp DB: bankroll seed -> odds entry ->
 dry-run scan (spec-format alert, $3.25 capped stake on the $65 example
 roll) -> grade (+270c settlement, bankroll 6500c->6770c). Deploy: nothing to

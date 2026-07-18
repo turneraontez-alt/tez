@@ -59,6 +59,16 @@ class TestOddsSnapshots:
         assert [s.home_price for s in history] == [-120, -135]
         assert history[0].captured_at.tzinfo == timezone.utc
 
+    def test_history_filters_by_book(self):
+        repo = make_repo()
+        repo.insert_odds_snapshot(OddsSnapshot("9001", "manual", -120, 100,
+                                               NOW))
+        repo.insert_odds_snapshot(OddsSnapshot("9001", "sharp", -140, 120,
+                                               NOW))
+        manual_only = repo.odds_history("9001", "manual")
+        assert [s.book for s in manual_only] == ["manual"]
+        assert len(repo.odds_history("9001")) == 2
+
 
 class TestPredictions:
     def test_one_row_per_match_market_day(self):
@@ -127,6 +137,41 @@ class TestRecommendations:
         with pytest.raises(RepoError):
             repo.settle_recommendation(rec_id, "push", 0, NOW)
 
+    def test_settle_batch_moves_bankroll_only_by_applied_rows(self):
+        repo = make_repo()
+        repo.set_bankroll_cents(6500, NOW)
+        first = _rec(repo)
+        second = _rec(repo, match_id="9002")
+        repo.settle_recommendation(first, "won", 270, NOW)  # already settled
+        settled, profit, bankroll = repo.settle_batch(
+            [(first, "lost", -123), (second, "won", 100)], NOW,
+            move_bankroll=True)
+        assert settled == [second]
+        assert profit == 100
+        assert bankroll == 6600
+        assert repo.get_bankroll_cents() == 6600
+        # The already-settled row kept its original outcome.
+        row = repo.recommendation_by_key("9001", "ML", "2026-07-18")
+        assert row["status"] == "won" and row["profit_cents"] == 270
+
+    def test_settle_batch_invalid_status_rolls_back_everything(self):
+        repo = make_repo()
+        repo.set_bankroll_cents(6500, NOW)
+        first = _rec(repo)
+        with pytest.raises(RepoError):
+            repo.settle_batch([(first, "won", 270), (first, "push", 0)], NOW,
+                              move_bankroll=True)
+        row = repo.recommendation_by_key("9001", "ML", "2026-07-18")
+        assert row["status"] == "open"           # nothing applied
+        assert repo.get_bankroll_cents() == 6500
+
+    def test_settle_batch_without_bankroll_row(self):
+        repo = make_repo()
+        rec_id = _rec(repo)
+        settled, profit, bankroll = repo.settle_batch(
+            [(rec_id, "won", 270)], NOW, move_bankroll=True)
+        assert settled == [rec_id] and profit == 270 and bankroll is None
+
 
 class TestResultsAndBankroll:
     def test_result_recorded_once(self):
@@ -185,6 +230,36 @@ class TestCalibrationVersions:
         repo = make_repo()
         with pytest.raises(RepoError):
             repo.activate_calibration(7)
+
+
+class TestPostgresDialect:
+    """The PG path can't run in CI, but its query/DDL rendering can."""
+
+    def test_percent_s_params_pass_through(self):
+        from tt_edge.db.repo import TTEdgeRepo
+        repo = TTEdgeRepo.__new__(TTEdgeRepo)
+        repo.dialect = "postgres"
+        assert repo._sql("SELECT x FROM t WHERE a = %s AND b = %s") == \
+            "SELECT x FROM t WHERE a = %s AND b = %s"
+        repo.dialect = "sqlite"
+        assert repo._sql("WHERE a = %s") == "WHERE a = ?"
+
+    def test_migrations_render_for_postgres(self):
+        from pathlib import Path
+        import tt_edge.db.repo as repo_mod
+        tokens = repo_mod._DIALECT_TOKENS["postgres"]
+        for path in sorted(
+                (Path(repo_mod.__file__).parent / "migrations").glob("*.sql")):
+            ddl = path.read_text(encoding="utf-8")
+            for token, replacement in tokens.items():
+                ddl = ddl.replace(token, replacement)
+            ddl = "\n".join(line for line in ddl.splitlines()
+                            if not line.lstrip().startswith("--"))
+            assert "{" not in ddl, f"{path.name}: unresolved token"
+            statements = [s for s in ddl.split(";") if s.strip()]
+            assert statements, f"{path.name}: no statements"
+            assert any("BIGSERIAL" in s for s in statements)
+            assert "%" not in ddl, f"{path.name}: % would trip psycopg2"
 
 
 class TestPlayersAndMatches:

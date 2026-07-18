@@ -100,6 +100,10 @@ class TTEdgeConfig:
     # Board filter.
     tournament_keyword: str
 
+    # The book being bet. Odds snapshots from other books are ignored by the
+    # scan (mixing books would fake line movement and misprice the edge).
+    book: str
+
     # Telegram (token/chat unset => muted, alerts logged but not sent).
     telegram_token: str | None
     telegram_chat_id: str
@@ -158,6 +162,7 @@ def load_config() -> TTEdgeConfig:
             os.environ.get("TT_EDGE_CALIBRATION_MIN_ROWS"), 300),
         tournament_keyword=os.environ.get("TT_EDGE_TOURNAMENT_KEYWORD",
                                           "TT Elite"),
+        book=os.environ.get("TT_EDGE_BOOK", "manual"),
         telegram_token=os.environ.get("TT_EDGE_TELEGRAM_BOT_TOKEN") or None,
         telegram_chat_id=os.environ.get("TT_EDGE_TELEGRAM_CHAT_ID", ""),
         telegram_enabled=_bool(os.environ.get("TT_EDGE_TELEGRAM_ENABLED"), True),

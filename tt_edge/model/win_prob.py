@@ -63,7 +63,10 @@ def blend_probability(h2h: H2HFeature | None, subject_form: FormFeature,
     if h2h is not None and h2h.n_meetings > 0:
         h2h_component = 2.0 * h2h.rate - 1.0
         terms.append((w_h2h, h2h_component))
-    if subject_form.n_results > 0 or opponent_form.n_results > 0:
+    if subject_form.n_results > 0 and opponent_form.n_results > 0:
+        # BOTH sides must have history: comparing a real rate against an
+        # absent player's neutral 0.5 default is not a differential, it's
+        # noise — the missing-feature contract drops the weight instead.
         form_component = subject_form.rate - opponent_form.rate
         terms.append((w_form, form_component))
     if common is not None and common.n_common > 0:

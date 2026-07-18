@@ -14,6 +14,10 @@ Settlement math (Decimal; conservative floor rounding):
   match's predictions are NOT graded (a walkover says nothing about the
   model).
 
+Policy: EVERY open recommendation settles, delivered or not — the bankroll
+is a PAPER ledger of what the system recommended (dry-run and muted rows
+included) until the operator is live and keeps it synced to reality by hand.
+
 Usage::
 
     python3 -m tt_edge.jobs.grade --result 12345=home --result 12346=away
@@ -127,8 +131,7 @@ def run_grade(*, repo: repo_mod.TTEdgeRepo, results: list[ResultInput],
                         result.match_source_id)
 
     bankroll_before = repo.get_bankroll_cents()
-    total_profit = 0
-    settled = 0
+    planned: list[tuple[int, str, int]] = []
     for row in repo.open_recommendations_with_results():
         winner = row["winner_side"]
         if winner == "void":
@@ -139,22 +142,23 @@ def run_grade(*, repo: repo_mod.TTEdgeRepo, results: list[ResultInput],
             status = "lost"
         profit = settlement_profit_cents(status, int(row["stake_cents"]),
                                          int(row["price_american"]))
-        if repo.settle_recommendation(int(row["id"]), status, profit, now):
-            settled += 1
-            total_profit += profit
-            logger.info("rec %s (match %s): %s %+dc", row["id"],
-                        row["match_source_id"], status, profit)
+        planned.append((int(row["id"]), status, profit))
+        logger.info("rec %s (match %s): settling %s %+dc", row["id"],
+                    row["match_source_id"], status, profit)
 
-    bankroll_after = bankroll_before
-    if settled and bankroll_before is not None:
-        bankroll_after = bankroll_before + total_profit
-        if bankroll_after < 0:
-            # Stakes are capped at 5% of roll so this needs an out-of-band
-            # bankroll edit to happen; keep the DB sane and say so loudly.
-            logger.warning("settlement drove bankroll below zero (%dc); "
-                           "clamping to 0", bankroll_after)
-            bankroll_after = 0
-        repo.set_bankroll_cents(bankroll_after, now)
+    # One transaction for settlements + bankroll: a crash cannot apply P&L
+    # without its settlements or settle without moving the roll (the
+    # settle-once guard would make that divergence permanent on rerun).
+    settled_ids, total_profit, new_bankroll = repo.settle_batch(
+        planned, now, move_bankroll=bankroll_before is not None)
+    settled = len(settled_ids)
+    bankroll_after = (new_bankroll if new_bankroll is not None
+                      else bankroll_before)
+    if bankroll_before is not None and new_bankroll == 0 and \
+            bankroll_before + total_profit < 0:
+        # Stakes are capped at 5% of roll, so hitting the zero clamp needs an
+        # out-of-band bankroll edit; say so loudly.
+        logger.warning("settlement drove bankroll below zero; clamped to 0")
 
     graded = 0
     for row in repo.ungraded_predictions_with_results():

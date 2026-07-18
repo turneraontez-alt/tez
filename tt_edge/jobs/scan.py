@@ -6,9 +6,12 @@ manually-entered odds already sitting in the DB (``jobs/odds_entry.py``).
 
 For EVERY board match the scan writes a prediction row (the unbiased
 calibration corpus), then either claims + alerts a recommendation or logs a
-reasoned NO BET. Idempotency: rescanning the same day never duplicates a
-prediction, a recommendation, or an alert; a recommendation whose alert
-send previously failed is re-sent WITHOUT a new row.
+reasoned NO BET. Idempotency: the claim key is (match, market, the MATCH's
+start date in UTC) — never the scan instant's date, so a rescan that crosses
+UTC midnight cannot re-claim (TT Elite night sessions straddle it). A
+recommendation whose alert send previously failed is re-sent WITHOUT a new
+row, and that retry runs BEFORE re-evaluation — data gone stale since the
+claim must not strand an undelivered alert.
 
 Usage::
 
@@ -150,7 +153,6 @@ def run_scan(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
     board_check = freshness.check("board", board.fetched_at, now,
                                   config.max_board_age_s)
     transform = repo.active_calibration() or CalibrationTransform(0.0, 1.0)
-    scan_day = now.astimezone(timezone.utc).date().isoformat()
     outcomes: list[MatchOutcome] = []
 
     logger.info("scan: %d board match(es), board_age=%.0fs stale=%s",
@@ -161,19 +163,55 @@ def run_scan(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
         outcomes.append(_scan_match(
             repo=repo, config=config, event=event, data=data,
             board_check=board_check, transform=transform, now=now,
-            scan_day=scan_day, sender=sender, dry_run=dry_run))
+            sender=sender, dry_run=dry_run))
     return outcomes
 
 
 def _scan_match(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
                 event: ParsedEvent, data: ScanData,
                 board_check: freshness.FreshnessCheck,
-                transform: CalibrationTransform, now: datetime, scan_day: str,
+                transform: CalibrationTransform, now: datetime,
                 sender: TTEdgeTelegram | None, dry_run: bool) -> MatchOutcome:
     match_id = event.source_event_id
+    # The idempotency day is the MATCH's day, not the scan's: a rescan just
+    # after UTC midnight must hit the same claim as the one just before.
+    day_key = event.start_time.astimezone(timezone.utc).date().isoformat()
     repo.upsert_player(event.home_id, event.home_name, now)
     repo.upsert_player(event.away_id, event.away_name, now)
     repo.upsert_match(event, now)
+
+    # A started (or earlier) match is not bettable pre-match, whatever the
+    # board's freshness says — a 29-minute-old board passes the guard while
+    # its matches may already be mid-play.
+    if event.start_time <= now:
+        existing = repo.recommendation_by_key(match_id, MARKET_ML, day_key)
+        if existing is not None and existing["status"] == "open" and \
+                existing["alert_delivered_at"] is None:
+            logger.warning("match %s: claimed recommendation expired "
+                           "undelivered (match started)", match_id)
+        logger.info("match %s: NO_BET match_started", match_id)
+        return MatchOutcome(match_id, event.home_name, event.away_name,
+                            edge_calc.NO_BET, ("match_started",), None, None,
+                            None, None, False, False)
+
+    # Claim check FIRST: an undelivered claimed alert is re-sent regardless
+    # of what a re-evaluation would say now (the claim is the commitment);
+    # a delivered claim ends the match's scan immediately.
+    existing = repo.recommendation_by_key(match_id, MARKET_ML, day_key)
+    if existing is not None:
+        if existing["status"] != "open" or \
+                existing["alert_delivered_at"] is not None:
+            logger.info("match %s: already claimed for %s; skip",
+                        match_id, day_key)
+            return MatchOutcome(match_id, event.home_name, event.away_name,
+                                edge_calc.RECOMMEND, ("duplicate_scan",),
+                                existing["side"], Decimal(existing["edge"]),
+                                int(existing["stake_cents"]), None, False,
+                                False)
+        return _resend_claimed(repo=repo, config=config, event=event,
+                               data=data, board_check=board_check,
+                               existing=existing, now=now, sender=sender,
+                               dry_run=dry_run)
 
     checks = [board_check]
     ages: dict = {"board": board_check.age_seconds}
@@ -231,14 +269,15 @@ def _scan_match(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
     p_home = transform.apply(blend.p_home)
     model_p_home = Decimal(str(round(p_home, 6)))
 
-    # Odds: manual snapshots from the DB. No odds -> reasoned NO BET (the
+    # Odds: manual snapshots from the DB, ONLY the configured book (mixing
+    # books would fabricate line movement). No odds -> reasoned NO BET (the
     # prediction row is still written for the calibration corpus).
-    history = repo.odds_history(match_id)
+    history = repo.odds_history(match_id, config.book)
     h2h_n = h2h_feature.n_meetings if h2h_feature else 0
     if not history:
         reasons = edge_calc.dedupe_reasons(
             [c.reason for c in checks if not c.ok] + ["no_odds"])
-        _write_prediction(repo, match_id, scan_day, model_p_home, None,
+        _write_prediction(repo, match_id, day_key, model_p_home, None,
                           edge_calc.NO_BET, reasons, now)
         logger.info("match %s: NO_BET %s", match_id, ",".join(reasons))
         return MatchOutcome(match_id, event.home_name, event.away_name,
@@ -270,7 +309,7 @@ def _scan_match(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
 
     fair_p_home = (decision.fair_p if decision.side == "home"
                    else Decimal(1) - decision.fair_p)
-    _write_prediction(repo, match_id, scan_day, model_p_home,
+    _write_prediction(repo, match_id, day_key, model_p_home,
                       fair_p_home, decision.status, decision.reasons, now)
 
     if not decision.is_recommendation:
@@ -293,35 +332,20 @@ def _scan_match(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
         fair_p=str(decision.fair_p), edge=str(decision.edge),
         price_american=decision.price_american, stake_cents=stake_cents,
         bankroll_cents=bankroll_cents, recommended_at=now,
-        recommended_on=scan_day, basis_json=json.dumps(basis),
+        recommended_on=day_key, basis_json=json.dumps(basis),
         data_ages_json=json.dumps({k: round(v, 1) for k, v in ages.items()
                                    if v is not None}))
 
     if rec_id is None:
-        # Duplicate claim: alert only if the earlier send never confirmed.
-        existing = repo.recommendation_by_key(match_id, MARKET_ML, scan_day)
-        if existing is None or existing["alert_delivered_at"] is not None:
-            logger.info("match %s: recommendation already alerted today; skip",
-                        match_id)
-            return MatchOutcome(match_id, event.home_name, event.away_name,
-                                edge_calc.RECOMMEND, ("duplicate_scan",),
-                                decision.side, decision.edge,
-                                stake_cents, None, False, False)
-        rec_id = int(existing["id"])
-        # Re-send the CLAIMED recommendation verbatim (stored numbers, fresh
-        # data ages) rather than today's recomputation.
-        stored_basis = json.loads(existing["basis"])
-        decision = edge_calc.Decision(
-            status=edge_calc.RECOMMEND, side=existing["side"],
-            model_p=Decimal(existing["model_p"]),
-            fair_p=Decimal(existing["fair_p"]),
-            edge=Decimal(existing["edge"]),
-            price_american=int(existing["price_american"]),
-            stake=decision.stake, reasons=())
-        basis = stored_basis
-        stake_cents = int(existing["stake_cents"])
-        bankroll_cents = int(existing["bankroll_cents"])
-        pick_name = existing["pick_name"]
+        # Defensive: the claim was checked at the top of this function, so
+        # losing it here means a concurrent scanner won the race. Skip —
+        # that scanner owns the send.
+        logger.info("match %s: lost claim race for %s; skip", match_id,
+                    day_key)
+        return MatchOutcome(match_id, event.home_name, event.away_name,
+                            edge_calc.RECOMMEND, ("duplicate_scan",),
+                            decision.side, decision.edge, stake_cents, None,
+                            False, False)
 
     text = build_alert(_alert_context(event, pick_name, decision.side,
                                       decision, basis, stake_cents,
@@ -346,12 +370,62 @@ def _scan_match(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
                         stake_cents, text, sent, delivered)
 
 
-def _write_prediction(repo: repo_mod.TTEdgeRepo, match_id: str, scan_day: str,
+def _resend_claimed(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
+                    event: ParsedEvent, data: ScanData,
+                    board_check: freshness.FreshnessCheck, existing: dict,
+                    now: datetime, sender: TTEdgeTelegram | None,
+                    dry_run: bool) -> MatchOutcome:
+    """Re-send a claimed-but-undelivered recommendation VERBATIM (the stored
+    numbers are the commitment; only the data ages are refreshed). Runs
+    before re-evaluation on purpose: odds gone stale since the claim must
+    not strand an alert the operator never received."""
+    match_id = event.source_event_id
+    h2h_env = data.h2h.get(match_id)
+    history = repo.odds_history(match_id, config.book)
+    basis = json.loads(existing["basis"])
+    text = build_alert(AlertContext(
+        home_name=event.home_name, away_name=event.away_name,
+        pick_name=existing["pick_name"], start_time=event.start_time,
+        market=MARKET_ML, price_american=int(existing["price_american"]),
+        fair_p=Decimal(existing["fair_p"]), model_p=Decimal(existing["model_p"]),
+        edge=Decimal(existing["edge"]), h2h_wins=basis["h2h_w"],
+        h2h_losses=basis["h2h_l"], l20_wins=basis["l20_w"],
+        l20_losses=basis["l20_l"], form_diff=basis["form_diff"],
+        common_opps=basis["common_opps"], common_net=basis["common_net"],
+        stake_cents=int(existing["stake_cents"]),
+        kelly_multiplier=config.kelly_fraction,
+        bankroll_cents=int(existing["bankroll_cents"]),
+        board_age_s=board_check.age_seconds,
+        h2h_age_s=(freshness.age_seconds(h2h_env.fetched_at, now)
+                   if h2h_env is not None else None),
+        odds_age_s=(freshness.age_seconds(history[-1].captured_at, now)
+                    if history else None)))
+    sent = delivered = False
+    if dry_run:
+        logger.info("DRY RUN resend for match %s:\n%s", match_id, text)
+    elif sender is not None:
+        result = sender.send(text)
+        sent = not result["muted"]
+        delivered = bool(result["ok"])
+        if delivered:
+            repo.mark_alert_delivered(int(existing["id"]), now)
+        elif sent:
+            logger.error("match %s: alert resend failed (%s); will retry on "
+                         "next scan", match_id, result["error"])
+    logger.info("match %s: RESEND %s delivered=%s", match_id,
+                existing["pick_name"], delivered)
+    return MatchOutcome(match_id, event.home_name, event.away_name,
+                        edge_calc.RECOMMEND, ("resend_undelivered",),
+                        existing["side"], Decimal(existing["edge"]),
+                        int(existing["stake_cents"]), text, sent, delivered)
+
+
+def _write_prediction(repo: repo_mod.TTEdgeRepo, match_id: str, day_key: str,
                       model_p_home: Decimal, fair_p_home: Decimal | None,
                       decision: str, reasons: tuple[str, ...],
                       now: datetime) -> None:
     repo.insert_prediction(
-        match_source_id=match_id, market=MARKET_ML, predicted_on=scan_day,
+        match_source_id=match_id, market=MARKET_ML, predicted_on=day_key,
         model_p_home=str(model_p_home),
         fair_p_home=None if fair_p_home is None else str(fair_p_home),
         decision=decision, reasons_json=json.dumps(list(reasons)),

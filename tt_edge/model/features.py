@@ -57,12 +57,17 @@ def h2h_feature(meetings: list[MatchResult], subject_id: str, now: datetime,
                 *, half_life_days: float) -> H2HFeature:
     """H2H rate with exponential age decay (recent meetings dominate career)
     and Laplace smoothing (wins+1)/(n+2) on the DECAYED counts, so a 3-0
-    record does not read as certainty."""
+    record does not read as certainty. Meetings timestamped at/after ``now``
+    are excluded (no look-ahead — a future-dated source glitch must not
+    inform the prediction)."""
     now = require_aware("now", now)
     if half_life_days <= 0:
         raise ValueError(f"half_life_days must be positive; got {half_life_days}")
-    relevant = sorted((m for m in meetings if m.involves(subject_id)),
-                      key=lambda m: m.start_time, reverse=True)
+    relevant = sorted(
+        (m for m in meetings
+         if m.involves(subject_id)
+         and require_aware("meeting.start_time", m.start_time) < now),
+        key=lambda m: m.start_time, reverse=True)
     weighted_wins = 0.0
     weighted_total = 0.0
     career_w = career_l = l20_w = l20_l = 0

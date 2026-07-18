@@ -117,8 +117,13 @@ class TTEdgeRepo:
     # ── migrations ───────────────────────────────────────────────────────
 
     def apply_migrations(self) -> list[str]:
-        """Apply pending .sql migrations in name order (idempotent; each
-        file's statements run in one transaction with its ledger row)."""
+        """Apply pending .sql migrations in name order.
+
+        NOT transactional on SQLite: Python's sqlite3 runs DDL in autocommit,
+        so a mid-file failure can leave earlier statements applied without a
+        ledger row. Every migration statement must therefore be IDEMPOTENT
+        (IF NOT EXISTS / additive) so a retry heals — that is a convention
+        this repo enforces in review, stated in the migrations header."""
         tokens = _DIALECT_TOKENS[self.dialect]
         self._execute(
             "CREATE TABLE IF NOT EXISTS tt_schema_migrations ("
@@ -209,13 +214,23 @@ class TTEdgeRepo:
         self.commit()
         return cur.rowcount == 1
 
-    def odds_history(self, match_source_id: str) -> list[OddsSnapshot]:
-        """All price observations for a match, oldest first."""
-        rows = self._fetchall(
-            "SELECT match_source_id, book, home_price, away_price, captured_at "
-            "FROM tt_odds_snapshots WHERE match_source_id = %s "
-            "ORDER BY captured_at ASC, id ASC",
-            (match_source_id,))
+    def odds_history(self, match_source_id: str,
+                     book: str | None = None) -> list[OddsSnapshot]:
+        """Price observations for a match, oldest first. Pass ``book`` to get
+        a single book's series — mixing books would fabricate line movement
+        (the scan always filters to the configured book)."""
+        if book is None:
+            rows = self._fetchall(
+                "SELECT match_source_id, book, home_price, away_price, "
+                "captured_at FROM tt_odds_snapshots WHERE match_source_id = %s "
+                "ORDER BY captured_at ASC, id ASC",
+                (match_source_id,))
+        else:
+            rows = self._fetchall(
+                "SELECT match_source_id, book, home_price, away_price, "
+                "captured_at FROM tt_odds_snapshots WHERE match_source_id = %s "
+                "AND book = %s ORDER BY captured_at ASC, id ASC",
+                (match_source_id, book))
         return [OddsSnapshot(match_source_id=row["match_source_id"],
                              book=row["book"],
                              home_price=int(row["home_price"]),
@@ -342,6 +357,50 @@ class TTEdgeRepo:
             (status, profit_cents, _iso(settled_at), recommendation_id))
         self.commit()
         return cur.rowcount == 1
+
+    def settle_batch(self, settlements: list[tuple[int, str, int]],
+                     settled_at: datetime, *,
+                     move_bankroll: bool) -> tuple[list[int], int, int | None]:
+        """Settle many recommendations AND move the bankroll in ONE
+        transaction, so a crash cannot apply P&L without its settlements (or
+        vice versa) — the ``status = 'open'`` guard would otherwise make the
+        divergence permanent on rerun.
+
+        ``settlements`` is (recommendation_id, status, profit_cents). Returns
+        (settled_ids, applied_profit_cents, new_bankroll_cents). Rows already
+        settled are skipped and contribute no P&L. The bankroll moves only by
+        the profit of rows settled in THIS call, clamped at zero, and only
+        when ``move_bankroll`` and a bankroll row exists."""
+        settled_ids: list[int] = []
+        applied_profit = 0
+        try:
+            for recommendation_id, status, profit_cents in settlements:
+                if status not in ("won", "lost", "void"):
+                    raise RepoError(f"invalid settlement status {status!r}")
+                cur = self._execute(
+                    "UPDATE tt_recommendations SET status = %s, "
+                    "profit_cents = %s, settled_at = %s "
+                    "WHERE id = %s AND status = 'open'",
+                    (status, profit_cents, _iso(settled_at),
+                     recommendation_id))
+                if cur.rowcount == 1:
+                    settled_ids.append(recommendation_id)
+                    applied_profit += profit_cents
+            new_bankroll: int | None = None
+            if move_bankroll and settled_ids:
+                row = self._fetchone(
+                    "SELECT cents FROM tt_bankroll WHERE id = 1")
+                if row is not None:
+                    new_bankroll = max(0, int(row["cents"]) + applied_profit)
+                    self._execute(
+                        "UPDATE tt_bankroll SET cents = %s, updated_at = %s "
+                        "WHERE id = 1",
+                        (new_bankroll, _iso(settled_at)))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return settled_ids, applied_profit, new_bankroll
 
     # ── results ──────────────────────────────────────────────────────────
 

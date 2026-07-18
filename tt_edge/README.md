@@ -42,10 +42,20 @@ On each run (`jobs/scan.py`):
    idempotency claim — a rescan can never double-alert), then send, then
    `alert_delivered_at` only after Telegram confirms.
 
-`jobs/grade.py` records official results, settles exactly once, moves the
-bankroll, grades EVERY prediction (not just recommendations — the unbiased
-calibration corpus), and can fit/promote Platt calibration versions
-(fit stores INACTIVE; promotion is a deliberate manual flag).
+`jobs/grade.py` records official results, settles exactly once (settlements
+and the bankroll move in one transaction), grades EVERY prediction (not just
+recommendations — the unbiased calibration corpus), and can fit/promote
+Platt calibration versions (fit stores INACTIVE; promotion is a deliberate
+manual flag).
+
+Two deliberate Phase-0 policies, revisit with calibration data:
+
+- **Model-favored side only.** A price-only "edge" on a side the model gives
+  < 50% is not taken — an uncalibrated model disagreeing with the market
+  that hard is more likely wrong than right.
+- **Paper bankroll.** Every open recommendation settles, delivered or not;
+  the bankroll is a paper ledger of what the system recommended until the
+  operator goes live and reconciles it by hand.
 
 ## Quickstart
 
