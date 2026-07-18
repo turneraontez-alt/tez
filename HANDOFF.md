@@ -8,6 +8,31 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge fix: grade-only results for unscanned leagues
+Run time: 2026-07-18/19 (follow-on; owner pasted the BetsAPI token in-session
+and asked for fresh odds — the live cups-only run then exposed the gap).
+
+Bug (latent, would have bitten within hours): the cups-only Routine never
+fetches TT Elite results, so the 3 OPEN TT Elite claims in the cloud DB
+(recommended 22:56Z, pre-split) could never settle — and
+``edge_calc`` abstains on ``open_recommendations >= 3``, so every future
+cup pick would have been silently suppressed forever. Fix: the cloud cycle
+now self-heals — ``grade_only_result_dates`` maps each open claim's
+tournament to its BetsAPI league id (new ``betsapi.LEAGUE_ID_BY_NAME``) and,
+for leagues NOT in the scan list, fetches a results-only bundle
+(``betsapi.fetch_results_bundle``: ended feed only, not-started events
+dropped, no history/odds calls) on each claim's own start date. Grading
+settles them; the board parser only analyzes ``notstarted`` events, so a
+grade-only league structurally cannot produce a new pick (no double-alert
+with the home loop). Unmapped tournament names log a warning naming the fix.
+
+Verification: 3 new tests (full settle-without-scan flow incl. no
+upcoming/history/odds calls for the unscanned league; date derivation skips
+scanned + unmapped leagues and reaches days-old claims; results bundle is
+ended-only and degrades per-date). Live token validated in-session: cups
+cycle ran clean (101 matches, 22 odds rows, no qualifying picks — selective,
+not broken). Full suite green (below); config audit OK.
+
 ## Shipped THIS session - PC back: SPLIT COVERAGE decided + Routine now cups-only
 Run time: 2026-07-18 (owner: "okay im on my pc set up what you need to").
 

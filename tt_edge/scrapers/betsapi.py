@@ -45,6 +45,19 @@ DEFAULT_LEAGUE_ID = "29128"     # TT Elite Series (from the build spec)
 #   (22307 Setka Cup is also available; add it if the book offers it).
 DEFAULT_LEAGUE_IDS = ("29128", "29097", "22742")
 
+# Canonical BetsAPI league names -> ids. These are the exact names the API
+# serves (and therefore what translate_event stores in tt_matches.tournament),
+# verified against the live feed. Needed to fetch RESULTS for open claims
+# whose league is not in the current scan list (split coverage: a league can
+# move to another loop, but its outstanding claims must still settle here —
+# stuck open claims pin the max-open-picks cap and suppress every new pick).
+LEAGUE_ID_BY_NAME = {
+    "TT Elite Series": "29128",
+    "TT Cup": "29097",
+    "Czech Liga Pro": "22742",
+    "Setka Cup": "22307",
+}
+
 
 def parse_league_ids(raw: str | None) -> list[str]:
     """Comma-separated league ids -> a de-duplicated, order-preserving list;
@@ -329,3 +342,33 @@ def fetch_cloud_bundle(client: BetsAPIClient, fetch_dates: list[str], *,
                        len(upcoming_events), max_events)
     return CloudBundle(envelopes=envelopes, odds_snapshots=odds_snapshots,
                        events_fetched=len(upcoming_events[:max_events]))
+
+
+def fetch_results_bundle(client: BetsAPIClient, result_dates: list[str], *,
+                         league_id: str, now: datetime) -> CloudBundle:
+    """Results-only board envelopes for a league that is GRADED but not
+    scanned (open claims remain after the league left the scan list).
+
+    Only the ended feed is fetched — no upcoming events, no history, no
+    odds — and any not-started stragglers are dropped, so downstream the
+    board parser (which analyzes only ``notstarted`` events) can never
+    produce a pick from these envelopes; grading consumes the finished/
+    canceled rows and settles the outstanding claims. Per-date failures
+    degrade to an empty board for that date, never fatal."""
+    envelopes: list[sofascore.Envelope] = []
+    for date_str in result_dates:
+        day = date_str.replace("-", "")
+        try:
+            events = translate_events(client.ended(day, league_id))
+        except BetsAPIError as exc:
+            logger.warning("betsapi: ended failed for %s (league %s): %s",
+                           date_str, league_id, exc)
+            events = []
+        events = [event for event in events
+                  if event["status"]["type"] != "notstarted"]
+        envelopes.append(sofascore.Envelope(
+            kind=sofascore.BOARD, entity_id=date_str,
+            url=f"betsapi:results/{league_id}/{day}", fetched_at=now,
+            payload={"events": events}))
+    return CloudBundle(envelopes=envelopes, odds_snapshots=[],
+                       events_fetched=0)
