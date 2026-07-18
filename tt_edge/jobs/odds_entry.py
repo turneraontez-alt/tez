@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from tt_edge.config import load_config
 from tt_edge.db import repo as repo_mod
 from tt_edge.edge.vig import movement_cents
+from tt_edge.envfile import bootstrap_env
 from tt_edge.jobs import setup_logging
 from tt_edge.scrapers.odds import OddsSnapshot, parse_american_str
 
@@ -41,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     setup_logging()
+    bootstrap_env()
     config = load_config()
     captured_at = (datetime.fromisoformat(args.captured_at)
                    if args.captured_at else datetime.now(timezone.utc))

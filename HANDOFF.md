@@ -8,6 +8,35 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge: --probe diagnosis + .env bootstrap
+Run time: 2026-07-18 (follow-on; owner: "I'm not seeing any" picks).
+
+Root cause of "no picks": nothing is RUNNING the loop — the owner's host
+last pushed a learning snapshot 2026-07-16 (running_commit c78c4de, pre-
+TT-Edge), so the autoscan has never been started there; and the web sandbox
+cannot run it for real (its egress proxy resets sofascore connections —
+verified live — and holds no Telegram secrets). Made the on-host start
+foolproof instead:
+- `python3 -m tt_edge.jobs.autoscan --probe [--test-message]`: one-shot
+  chain diagnosis — bankroll, Telegram (which bot: dedicated vs Q15
+  fallback; optional real test send), board fetch/freshness, upcoming-match
+  and odds coverage — with a READY/NOT READY verdict naming the broken
+  link. The loop also logs an ERROR pointing at --probe whenever a cycle
+  sees no board.
+- `tt_edge/envfile.py`: job CLIs auto-load repo-root `.env` / `.env.local`
+  (setdefault semantics — real env always wins) so Telegram secrets stored
+  in files reach a fresh terminal's autoscan.
+- `PLAYWRIGHT_CHROMIUM_EXECUTABLE`: point Playwright at an existing
+  Chromium when the pip version disagrees with installed browsers (the web
+  sandbox needs /opt/pw-browsers/chromium; validated — browser launched).
+
+Verification: 6 new tests (envfile semantics, telegram source tagging,
+probe READY/NOT-READY/stale paths); tt_edge total 243. Full suite 2239
+passed, 5 skipped; config audit OK. NEXT OPERATOR STEP (nothing happens
+until this): on the local host `git pull`, `pip install playwright`,
+`python3 -m tt_edge.jobs.bankroll --set 65.00`, then
+`python3 -m tt_edge.jobs.autoscan` (verify first with --probe).
+
 ## Shipped THIS session - TT-Edge Phase 1: autoscan (automated picks loop)
 Run time: 2026-07-18 (same session as Phase 0 below; owner: "set it up so
 you start sending me picks, do whatever you need to do").
