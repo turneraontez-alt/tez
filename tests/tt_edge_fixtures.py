@@ -37,7 +37,12 @@ def make_config(**overrides: Any) -> TTEdgeConfig:
         min_h2h_meetings=5, min_common_opps=3, calibration_min_rows=300,
         tournament_keyword="TT Elite", book="manual",
         telegram_token="test-token", telegram_chat_id="test-chat",
-        telegram_enabled=True)
+        telegram_enabled=True,
+        telegram_fallback=True, q15_telegram_token=None,
+        q15_telegram_chat_id="",
+        autoscan_interval_s=1800, autoscan_dates_forward=2,
+        autoscan_max_matches=12, autoscan_data_dir="data/tt_scrape",
+        h2h_refresh_s=21600, odds_provider_id=1, request_gap_ms=350)
     return dataclasses.replace(base, **overrides) if overrides else base
 
 

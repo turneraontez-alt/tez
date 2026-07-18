@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 BOARD = "board"
 H2H = "h2h"
 FORM = "form"
+ODDS = "odds"
+KINDS = (BOARD, H2H, FORM, ODDS)
+
+_API_BASE = "https://api.sofascore.com/api/v1"
 
 _BOARD_RE = re.compile(
     r"api\.sofascore\.com/api/v1/sport/table-tennis/scheduled-events/"
@@ -47,6 +51,24 @@ _BOARD_RE = re.compile(
 _H2H_RE = re.compile(r"api\.sofascore\.com/api/v1/event/(?P<entity>\d+)/h2h/events")
 _FORM_RE = re.compile(
     r"api\.sofascore\.com/api/v1/team/(?P<entity>\d+)/events/last/\d+")
+_ODDS_RE = re.compile(
+    r"api\.sofascore\.com/api/v1/event/(?P<entity>\d+)/odds/\d+/all")
+
+
+def board_api_url(date_str: str) -> str:
+    return f"{_API_BASE}/sport/table-tennis/scheduled-events/{date_str}"
+
+
+def h2h_api_url(event_id: str) -> str:
+    return f"{_API_BASE}/event/{event_id}/h2h/events"
+
+
+def form_api_url(player_id: str) -> str:
+    return f"{_API_BASE}/team/{player_id}/events/last/0"
+
+
+def odds_api_url(event_id: str, provider_id: int) -> str:
+    return f"{_API_BASE}/event/{event_id}/odds/{provider_id}/all"
 
 
 @dataclass(frozen=True)
@@ -57,7 +79,8 @@ class Classified:
 
 def classify_url(url: str) -> Classified | None:
     """Which pipeline input (if any) a sofascore XHR URL carries."""
-    for kind, pattern in ((BOARD, _BOARD_RE), (H2H, _H2H_RE), (FORM, _FORM_RE)):
+    for kind, pattern in ((BOARD, _BOARD_RE), (H2H, _H2H_RE), (FORM, _FORM_RE),
+                          (ODDS, _ODDS_RE)):
         match = pattern.search(url)
         if match:
             return Classified(kind=kind, entity_id=match.group("entity"))
@@ -109,7 +132,7 @@ def load_envelope(path: Path) -> Envelope:
         raise EnvelopeError(f"{path}: not an envelope (no 'payload' field)")
     kind = body.get("kind")
     fetched_raw = body.get("fetched_at")
-    if kind not in (BOARD, H2H, FORM) or not isinstance(fetched_raw, str):
+    if kind not in KINDS or not isinstance(fetched_raw, str):
         raise EnvelopeError(f"{path}: envelope lacks kind/fetched_at")
     try:
         fetched_at = datetime.fromisoformat(fetched_raw)
@@ -193,6 +216,120 @@ def fetch_payloads(page_url: str, *, wait_seconds: float = 12.0,
     return envelopes
 
 
+def fresh_entity_ids(out_dir: Path, kind: str, max_age_s: float,
+                     now: datetime) -> set[str]:
+    """Entity ids of cached envelopes of ``kind`` younger than ``max_age_s``
+    — the bundle fetcher skips refetching those (H2H/form barely move
+    intra-day; being polite to the source is part of the design)."""
+    fresh: set[str] = set()
+    for path in out_dir.glob(f"{kind}_*.json"):
+        try:
+            envelope = load_envelope(path)
+        except EnvelopeError:
+            continue
+        age = (now - envelope.fetched_at).total_seconds()
+        if envelope.kind == kind and 0 <= age < max_age_s:
+            fresh.add(envelope.entity_id)
+    return fresh
+
+
+def fetch_bundle(dates: list[str], out_dir: Path, *,
+                 tournament_keyword: str, provider_id: int,
+                 max_matches: int, request_gap_s: float,
+                 h2h_refresh_s: float, headless: bool = True,
+                 clock: Callable[[], datetime] | None = None) -> list[Envelope]:
+    """The Phase 1 collection loop: everything one scan cycle needs.
+
+    Loads one sofascore page for a real browser fingerprint, then issues
+    browser-context API GETs (``page.request`` carries the fingerprint —
+    plain HTTP gets 403): per date the board, and per upcoming TT Elite
+    match its H2H, both players' form, and the odds. Fresh cached H2H/form
+    envelopes (younger than ``h2h_refresh_s``) are NOT refetched; boards and
+    odds always are. Every payload is saved to ``out_dir`` as an envelope
+    and also returned.
+
+    Failures are per-request: one bad response is logged and skipped, the
+    bundle continues (the freshness guard downstream decides what the gaps
+    mean).
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "playwright is not installed; `pip install playwright` on the "
+            "host that runs the autoscan") from exc
+
+    from tt_edge.scrapers.board import parse_board_payload
+
+    now = clock or (lambda: datetime.now(timezone.utc))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    envelopes: list[Envelope] = []
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=headless)
+        try:
+            page = browser.new_page()
+            page.goto("https://www.sofascore.com/table-tennis",
+                      timeout=45_000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2_000)
+
+            def api_get(url: str) -> Any | None:
+                try:
+                    response = page.request.get(
+                        url, headers={"Accept": "application/json"})
+                    if response.status != 200:
+                        logger.warning("bundle: HTTP %s for %s",
+                                       response.status, url)
+                        return None
+                    return response.json()
+                except Exception as exc:  # noqa: BLE001 - per-request
+                    # boundary: one failed GET must not abort the cycle.
+                    logger.warning("bundle: request failed %s: %s", url, exc)
+                    return None
+                finally:
+                    page.wait_for_timeout(int(request_gap_s * 1000))
+
+            def capture(kind: str, entity_id: str, url: str) -> Any | None:
+                payload = api_get(url)
+                if payload is None:
+                    return None
+                envelope = Envelope(kind=kind, entity_id=entity_id, url=url,
+                                    fetched_at=now(), payload=payload)
+                save_envelope(envelope, out_dir)
+                envelopes.append(envelope)
+                return payload
+
+            fresh_h2h = fresh_entity_ids(out_dir, H2H, h2h_refresh_s, now())
+            fresh_form = fresh_entity_ids(out_dir, FORM, h2h_refresh_s, now())
+
+            for date_str in dates:
+                board_payload = capture(BOARD, date_str,
+                                        board_api_url(date_str))
+                if board_payload is None:
+                    continue
+                board = parse_board_payload(
+                    board_payload, fetched_at=now(),
+                    tournament_keyword=tournament_keyword)
+                upcoming = list(board.matches)[:max_matches]
+                logger.info("bundle %s: %d upcoming TT match(es)",
+                            date_str, len(upcoming))
+                for event in upcoming:
+                    if event.source_event_id not in fresh_h2h:
+                        capture(H2H, event.source_event_id,
+                                h2h_api_url(event.source_event_id))
+                    for player_id in (event.home_id, event.away_id):
+                        if player_id not in fresh_form:
+                            capture(FORM, player_id, form_api_url(player_id))
+                            fresh_form.add(player_id)  # shared opponents dedup
+                    capture(ODDS, event.source_event_id,
+                            odds_api_url(event.source_event_id, provider_id))
+        finally:
+            browser.close()
+    logger.info("bundle: captured %d payload(s) across %d date(s)",
+                len(envelopes), len(dates))
+    return envelopes
+
+
 def _wrap_file(raw_path: Path, kind: str, entity_id: str,
                fetched_at: datetime, out_dir: Path) -> Path:
     payload = json.loads(raw_path.read_text(encoding="utf-8"))
@@ -215,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="run the browser headed (debugging)")
     parser.add_argument("--wrap", type=Path,
                         help="wrap a hand-saved raw payload file instead of fetching")
-    parser.add_argument("--kind", choices=(BOARD, H2H, FORM),
+    parser.add_argument("--kind", choices=KINDS,
                         help="kind for --wrap")
     parser.add_argument("--entity-id", default="",
                         help="entity id for --wrap (event/player id or date)")

@@ -57,7 +57,27 @@ Two deliberate Phase-0 policies, revisit with calibration data:
   the bankroll is a paper ledger of what the system recommended until the
   operator goes live and reconciles it by hand.
 
-## Quickstart
+## Quickstart — automated (Phase 1 autoscan)
+
+```bash
+pip install playwright                          # once, on the host
+python3 -m tt_edge.jobs.bankroll --set 65.00    # once
+python3 -m tt_edge.jobs.autoscan                # loop: fetch -> grade -> scan -> alert
+```
+
+Every 30 minutes the autoscan pulls the TT Elite boards (yesterday for
+results, today + tomorrow for picks), each upcoming match's H2H / form /
+sofascore odds, grades finished matches (bankroll moves automatically), and
+alerts qualifying edges. Telegram: set `TT_EDGE_TELEGRAM_BOT_TOKEN` +
+`TT_EDGE_TELEGRAM_CHAT_ID` for a dedicated channel, or leave them unset and
+the default fallback rides the Q15 monitor's existing bot/chat
+(`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`) — zero new setup.
+
+**Sofascore prices are not your book's.** Autoscan alerts carry a
+`Price source: sofascore — take X or better` line: the edge exists AT that
+price; if your book posts a worse one, skip the bet.
+
+## Quickstart — manual (Phase 0 flow, still supported)
 
 ```bash
 python3 -m tt_edge.jobs.bankroll --set 65.00
@@ -67,6 +87,10 @@ python3 -m tt_edge.jobs.scan --data-dir data/tt_scrape --dry-run
 # ... after the session:
 python3 -m tt_edge.jobs.grade --result <event_id>=home
 ```
+
+Manual odds entries live under book `manual`, autoscan prices under book
+`sofascore`; each scan reads only its configured book (`TT_EDGE_BOOK`), so
+the two flows never contaminate each other's line-movement history.
 
 Config is entirely env-driven (`TT_EDGE_*`, documented in `.env.example`).
 Storage defaults to SQLite at `data/tt_edge.sqlite3`; point
@@ -81,10 +105,13 @@ Telegram client over a fake transport. No network, no browser.
 
 ## Phasing
 
-- **Phase 0 (this code):** scrapers + freshness guards + manual odds CLI +
+- **Phase 0 (done):** scrapers + freshness guards + manual odds CLI +
   end-to-end alert pipeline with `--dry-run`.
-- **Phase 1:** odds scraper for the actual book; 30-min scan cron during
-  watched sessions; paper-grade 100+ matches.
+- **Phase 1 (this code):** automated odds (sofascore aggregated prices,
+  clearly labeled), the 30-min autoscan loop, automatic result grading.
+  Still pending from the original Phase 1 scope: a scraper for the
+  operator's actual book (needs to know which book) — until then the
+  price-verification rule above stands. Paper-grade 100+ matches.
 - **Phase 2:** calibration reports, fitted weights; go/no-go per the kill
   criteria above.
 - **Phase 3 (only if Phase 2 is green):** BetsAPI migration, live-line

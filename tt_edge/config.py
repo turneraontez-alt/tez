@@ -109,6 +109,23 @@ class TTEdgeConfig:
     telegram_chat_id: str
     telegram_enabled: bool
 
+    # Fallback: when TT_EDGE_TELEGRAM_* is unset, ride the Q15 monitor's
+    # existing bot/chat (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) so picks reach
+    # the operator with zero new setup. Disable with
+    # TT_EDGE_TELEGRAM_FALLBACK=false to keep the channels separate.
+    telegram_fallback: bool
+    q15_telegram_token: str | None
+    q15_telegram_chat_id: str
+
+    # Autoscan (jobs/autoscan.py): the recurring fetch->scan->grade loop.
+    autoscan_interval_s: int
+    autoscan_dates_forward: int      # boards to fetch: today + N-1 ahead
+    autoscan_max_matches: int        # per-date cap on per-match API fetches
+    autoscan_data_dir: str
+    h2h_refresh_s: int               # reuse cached H2H/form younger than this
+    odds_provider_id: int
+    request_gap_ms: int              # politeness gap between API requests
+
 
 def load_config() -> TTEdgeConfig:
     """Build the config snapshot from the environment (validated)."""
@@ -166,6 +183,27 @@ def load_config() -> TTEdgeConfig:
         telegram_token=os.environ.get("TT_EDGE_TELEGRAM_BOT_TOKEN") or None,
         telegram_chat_id=os.environ.get("TT_EDGE_TELEGRAM_CHAT_ID", ""),
         telegram_enabled=_bool(os.environ.get("TT_EDGE_TELEGRAM_ENABLED"), True),
+        telegram_fallback=_bool(os.environ.get("TT_EDGE_TELEGRAM_FALLBACK"),
+                                True),
+        q15_telegram_token=os.environ.get("TELEGRAM_BOT_TOKEN") or None,
+        q15_telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
+        autoscan_interval_s=_int("TT_EDGE_AUTOSCAN_INTERVAL_S",
+                                 os.environ.get("TT_EDGE_AUTOSCAN_INTERVAL_S"),
+                                 1800),
+        autoscan_dates_forward=_int(
+            "TT_EDGE_AUTOSCAN_DATES",
+            os.environ.get("TT_EDGE_AUTOSCAN_DATES"), 2),
+        autoscan_max_matches=_int(
+            "TT_EDGE_AUTOSCAN_MAX_MATCHES",
+            os.environ.get("TT_EDGE_AUTOSCAN_MAX_MATCHES"), 12),
+        autoscan_data_dir=os.environ.get("TT_EDGE_AUTOSCAN_DATA_DIR",
+                                         "data/tt_scrape"),
+        h2h_refresh_s=_int("TT_EDGE_H2H_REFRESH_S",
+                           os.environ.get("TT_EDGE_H2H_REFRESH_S"), 21600),
+        odds_provider_id=_int("TT_EDGE_ODDS_PROVIDER_ID",
+                              os.environ.get("TT_EDGE_ODDS_PROVIDER_ID"), 1),
+        request_gap_ms=_int("TT_EDGE_REQUEST_GAP_MS",
+                            os.environ.get("TT_EDGE_REQUEST_GAP_MS"), 350),
     )
     _validate(cfg)
     return cfg
@@ -201,3 +239,15 @@ def _validate(cfg: TTEdgeConfig) -> None:
                         ("TT_EDGE_MAX_ODDS_AGE_S", cfg.max_odds_age_s)):
         if value < 1:
             raise ConfigError(f"{name} must be >= 1 second")
+    if cfg.autoscan_interval_s < 60:
+        raise ConfigError("TT_EDGE_AUTOSCAN_INTERVAL_S must be >= 60")
+    if not (1 <= cfg.autoscan_dates_forward <= 7):
+        raise ConfigError("TT_EDGE_AUTOSCAN_DATES must be in [1, 7]")
+    if cfg.autoscan_max_matches < 1:
+        raise ConfigError("TT_EDGE_AUTOSCAN_MAX_MATCHES must be >= 1")
+    if cfg.h2h_refresh_s < 60:
+        raise ConfigError("TT_EDGE_H2H_REFRESH_S must be >= 60")
+    if cfg.odds_provider_id < 1:
+        raise ConfigError("TT_EDGE_ODDS_PROVIDER_ID must be >= 1")
+    if cfg.request_gap_ms < 0:
+        raise ConfigError("TT_EDGE_REQUEST_GAP_MS must be >= 0")

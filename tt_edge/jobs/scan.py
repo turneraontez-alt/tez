@@ -139,7 +139,7 @@ def _alert_context(event: ParsedEvent, pick_name: str, side: str,
         common_net=basis["common_net"], stake_cents=stake_cents,
         kelly_multiplier=config.kelly_fraction, bankroll_cents=bankroll_cents,
         board_age_s=ages["board"], h2h_age_s=ages.get("h2h"),
-        odds_age_s=ages["odds"])
+        odds_age_s=ages["odds"], book=config.book)
 
 
 def run_scan(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
@@ -399,7 +399,8 @@ def _resend_claimed(*, repo: repo_mod.TTEdgeRepo, config: TTEdgeConfig,
         h2h_age_s=(freshness.age_seconds(h2h_env.fetched_at, now)
                    if h2h_env is not None else None),
         odds_age_s=(freshness.age_seconds(history[-1].captured_at, now)
-                    if history else None)))
+                    if history else None),
+        book=config.book))
     sent = delivered = False
     if dry_run:
         logger.info("DRY RUN resend for match %s:\n%s", match_id, text)
