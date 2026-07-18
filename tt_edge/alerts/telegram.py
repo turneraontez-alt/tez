@@ -79,6 +79,7 @@ class AlertContext:
     board_age_s: float
     h2h_age_s: float | None         # None = no H2H data (common-opps pick)
     odds_age_s: float | None        # None only on a resend with no fresh odds
+    book: str = "manual"            # odds source; non-manual adds a caveat
 
 
 def build_alert(ctx: AlertContext) -> str:
@@ -105,6 +106,12 @@ def build_alert(ctx: AlertContext) -> str:
          f"odds "
          f"{'-' if ctx.odds_age_s is None else format_age(ctx.odds_age_s)}"),
     ]
+    if ctx.book != "manual":
+        # Aggregated prices are not the operator's book: the edge exists AT
+        # this price. Never chase a worse one.
+        lines.append(f"Price source: {html.escape(ctx.book)} — take "
+                     f"{_fmt_american(ctx.price_american)} or better at "
+                     f"your book")
     return "\n".join(lines)
 
 
@@ -117,9 +124,18 @@ class TTEdgeTelegram:
 
     @classmethod
     def from_config(cls, config: TTEdgeConfig, **client_kwargs) -> "TTEdgeTelegram":
+        """Prefer the dedicated TT_EDGE_TELEGRAM_* bot; when it is unset and
+        the fallback is enabled (default), ride the Q15 monitor's existing
+        bot/chat so picks flow with zero new setup. TT EDGE alerts carry
+        their own 🏓 header and none of the Q15 formatter markers, so they
+        pass through that channel untouched."""
+        token = config.telegram_token
+        chat_id = config.telegram_chat_id
+        if not token and config.telegram_fallback and config.q15_telegram_token:
+            token = config.q15_telegram_token
+            chat_id = config.q15_telegram_chat_id
         return cls(TelegramSendClient(
-            config.telegram_token, config.telegram_chat_id,
-            enabled=config.telegram_enabled, **client_kwargs))
+            token, chat_id, enabled=config.telegram_enabled, **client_kwargs))
 
     @property
     def configured(self) -> bool:

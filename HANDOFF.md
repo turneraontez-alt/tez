@@ -8,6 +8,39 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge Phase 1: autoscan (automated picks loop)
+Run time: 2026-07-18 (same session as Phase 0 below; owner: "set it up so
+you start sending me picks, do whatever you need to do").
+
+Picks now arrive without babysitting. New `jobs/autoscan.py` loop (default
+30 min): fetches the TT Elite boards via browser-context API GETs (one page
+load for the fingerprint — plain HTTP gets 403; then polite `page.request`
+GETs with a 350ms gap), yesterday's board for RESULTS + today's/tomorrow's
+for picks, per-match H2H/form (cached 6h) and sofascore odds; grades
+finished matches FIRST (bankroll moves automatically, frees pick slots);
+appends pre-match odds under book "sofascore" (per-cycle history powers the
+fix-risk movement guard); then runs the unchanged Phase 0 scan and alerts.
+- `scrapers/sofa_odds.py`: fractional ("4/5", "21/20", "1") and decimal
+  ("1.80") strings -> American, Decimal-exact; winner-market extraction;
+  is_live odds never priced. Odds URL kind + envelope support.
+- Telegram: TT_EDGE_TELEGRAM_* preferred; DEFAULT FALLBACK to the Q15
+  monitor's TELEGRAM_BOT_TOKEN/CHAT (TT_EDGE_TELEGRAM_FALLBACK=false to
+  separate) — picks reach the owner's existing channel with zero setup.
+  Alerts priced from sofascore carry "Price source: sofascore — take X or
+  better at your book" (aggregated prices are not the book's; the edge
+  exists AT that price).
+- Books never mix: manual entries stay book "manual", autoscan book
+  "sofascore"; each scan reads only its configured book's series.
+- Operator start (on the local host): `pip install playwright` +
+  `python3 -m tt_edge.jobs.bankroll --set 65.00` +
+  `python3 -m tt_edge.jobs.autoscan` (`--once` = cron mode).
+
+Verification: 35 new tests (odds conversion/payloads, results-from-board,
+fallback selection, full cycle: recommend->deliver->idempotent->auto-grade,
+live-odds refusal, results-only stale boards); tt_edge total 237; full
+suite 2233 passed, 5 skipped; config audit OK (1066 vars). Deploy: owner
+`git pull` + start autoscan; Q15 runtime untouched.
+
 ## Shipped THIS session - TT-Edge: TT Elite betting analysis pipeline (Phase 0)
 Run time: 2026-07-18.
 
