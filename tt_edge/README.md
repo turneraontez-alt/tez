@@ -68,6 +68,24 @@ seeds the PAPER bankroll on first run (`TT_EDGE_BANKROLL_INIT_DOLLARS`,
 default $65), and delivers picks over the Q15 Telegram credentials already
 present in the app process.
 
+## Quickstart — CLOUD mode (no home hardware at all)
+
+With a [BetsAPI](https://betsapi.com) token (paid; TT Elite league 29128
+confirmed; the spec's "cleanest" source) the whole loop runs in hourly
+Claude Code cloud sessions: `jobs/cloud_cycle.py` restores the SQLite state
+from the `tt-edge-state` git branch, pulls boards + per-match H2H/form +
+the full **Bet365 odds time series** from BetsAPI (real book prices, real
+line-movement history), runs the unchanged pipeline, pushes state back, and
+prints a `PICKS` section the Routine forwards as a phone push notification
+(Telegram also works from the cloud when credentials are configured).
+Set `TT_EDGE_BETSAPI_KEY` in the Claude Code environment; without it the
+scheduled cycle exits quietly. **Run either cloud mode or a home loop —
+never both** (each has its own DB, so both would alert).
+
+Sofascore is NOT usable from the cloud: it blocks datacenter traffic
+(curl 403 / browser reset / fetcher 404 — verified). Home machines on
+residential connections are fine.
+
 ## Quickstart — standalone loop (same thing, own process)
 
 ```bash

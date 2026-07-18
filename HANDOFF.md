@@ -8,6 +8,47 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge CLOUD mode (BetsAPI + hourly Routine)
+Run time: 2026-07-18 (follow-on; owner: "can we just run it on the cloud,
+I don't have my computer rn").
+
+Cloud feasibility was tested, not assumed: api.telegram.org reachable from
+the sandbox (HTTP 302); sofascore blocked on every route (curl 403 via the
+egress proxy, Playwright ERR_CONNECTION_RESET, harness WebFetch 404 even on
+known-good endpoints — their bot-wall rejects datacenter traffic; no
+evasion attempted); BetsAPI fully reachable (docs 200, API 401 = answers,
+wants a token); pushing non-claude state branches allowed. Hence:
+- `scrapers/betsapi.py`: stdlib-urllib client (token never logged,
+  success-flag checked) + translators from BetsAPI shapes into the
+  pipeline's canonical event dicts — board (upcoming+ended merged),
+  H2H + both players' form from ONE history call, and the Bet365
+  moneyline TIME SERIES -> chronological odds snapshots under book
+  "bet365" (real line-movement for the fix-risk guard; decimal-odds
+  parsing kept separate from the sofascore fractional heuristic — "2"
+  means +100 here, not 2/1).
+- `state_sync.py`: SQLite state persisted across ephemeral sessions as a
+  single orphan commit on `tt-edge-state` (learning-snapshots pattern;
+  plumbing only: hash-object -> mktree -> commit-tree -> push -f; restore
+  never clobbers a local DB; failures degrade, never crash).
+- `jobs/cloud_cycle.py`: one cycle — restore state, fetch bundle, insert
+  odds, grade+scan (unchanged pipeline), push state, print a `PICKS (n)`
+  section with each alert verbatim. Exits 3 quietly without
+  TT_EDGE_BETSAPI_KEY so the hourly Routine is ~free until the key exists.
+- Hourly Claude Code Routine (fresh session per fire, push notifications)
+  created to run it; picks reach the owner's phone via the Routine
+  notification even with no Telegram configured, and via Telegram once
+  creds are in the environment.
+- Env: TT_EDGE_BETSAPI_KEY / _LEAGUE_ID (29128) / _BASE, TT_EDGE_STATE_BRANCH.
+  OPERATOR: run EITHER cloud mode OR a home loop, never both (separate DBs
+  would double-alert). Stray branch `tt-edge-state-test` (push-permission
+  probe) can be deleted from a host with ref-delete rights.
+
+Verification: 40 new tests (translation/status/winner mapping, decimal-odds
+strictness, series parsing, client error paths, full cloud cycle incl.
+idempotency + later grading + history-failure degradation, state round-trip
+on real git repos incl. single-commit force-push and no-clobber restore);
+tt_edge total 294. Full suite green (below); config audit OK.
+
 ## Shipped THIS session - TT-Edge zero-command: autoscan inside app.py
 Run time: 2026-07-18 (follow-on; owner: "wait, I have to do the commands?").
 
