@@ -169,6 +169,24 @@ def parse_odds_series(payload: Any, match_source_id: str,
     return snapshots
 
 
+def current_odds(payload: Any,
+                 sport_id: int = SPORT_ID_TABLE_TENNIS) -> tuple[int, int] | None:
+    """The most-recent (home, away) American prices from an odds payload, or
+    None when no usable market exists.
+
+    Bet365's ``add_time`` is when the PRICE last changed, not when we pulled
+    it — on low-liquidity table-tennis markets a price can sit unchanged for
+    many minutes. Using it as the freshness timestamp made stable-but-live
+    prices read as ``stale_odds``. Callers instead stamp this current price
+    with the FETCH time, matching how every other feed in the system records
+    an observation (one per fetch, movement measured across fetches)."""
+    series = parse_odds_series(payload, "_current", sport_id)
+    if not series:
+        return None
+    latest = series[-1]
+    return latest.home_price, latest.away_price
+
+
 def _default_transport(url: str, timeout: float) -> tuple[int, bytes]:
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
@@ -293,8 +311,15 @@ def fetch_cloud_bundle(client: BetsAPIClient, fetch_dates: list[str], *,
                 fetched_at=now,
                 payload={"events": translate_events(history.get(side))}))
         try:
-            odds_snapshots.extend(parse_odds_series(client.odds(event_id),
-                                                    event_id))
+            current = current_odds(client.odds(event_id))
+            if current is not None:
+                # Stamp at FETCH time (now), not Bet365's price-set time: a
+                # stable live price must not read as stale, and our movement
+                # series is measured across our own fetches.
+                odds_snapshots.append(OddsSnapshot(
+                    match_source_id=event_id, book=BOOK,
+                    home_price=current[0], away_price=current[1],
+                    captured_at=now))
         except BetsAPIError as exc:
             logger.warning("betsapi: odds failed for %s: %s", event_id, exc)
 

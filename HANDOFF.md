@@ -8,6 +8,25 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - TT-Edge fix: BetsAPI stale-odds false-reject
+Run time: 2026-07-18 (follow-on; while hunting a live pick, the DB showed 52
+matches/sweep rejected for stale_odds).
+
+Bug: cloud odds snapshots used Bet365's ``add_time`` (when the PRICE last
+changed) as ``captured_at``. On low-liquidity table-tennis markets a price
+sits unchanged for many minutes, so the freshness guard (odds >10m = stale)
+false-rejected the CURRENT live price. This suppressed the majority of cloud
+picks. Fix: ``betsapi.current_odds`` returns the newest price and
+``fetch_cloud_bundle`` stamps it at FETCH time (now) — one observation per
+fetch, movement measured across fetches, exactly like the sofascore/home
+path. Live effect: odds rows per sweep 7 -> 48, and a pick surfaced
+immediately (Rutkowski -138, +5.5). parse_odds_series retained for its tests
+but no longer feeds the pipeline directly.
+
+Verification: 2 new tests (current_odds newest-wins; a 2h-old stable price is
+stamped at now and passes freshness); tt_edge total 300. Full suite 2296
+passed, 5 skipped; config audit OK.
+
 ## Shipped THIS session - TT-Edge multi-league cloud (TT Elite + TT Cup + Czech)
 Run time: 2026-07-18 (follow-on; owner sent a book screenshot: "check these
 cups as well" — their book lists TT Elite, TT Cup, Czech Republic Pro League
