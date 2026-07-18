@@ -79,8 +79,11 @@ line-movement history), runs the unchanged pipeline, pushes state back, and
 prints a `PICKS` section the Routine forwards as a phone push notification
 (Telegram also works from the cloud when credentials are configured).
 Set `TT_EDGE_BETSAPI_KEY` in the Claude Code environment; without it the
-scheduled cycle exits quietly. **Run either cloud mode or a home loop —
-never both** (each has its own DB, so both would alert).
+scheduled cycle exits quietly. By default it covers the three high-frequency
+leagues a book typically posts — **TT Elite Series, TT Cup, and Czech Liga
+Pro** — overridable via `TT_EDGE_BETSAPI_LEAGUE_ID` (comma-separated;
+Setka Cup is `22307`). **Run either cloud mode or a home loop — never both**
+(each has its own DB, so both would alert).
 
 Sofascore is NOT usable from the cloud: it blocks datacenter traffic
 (curl 403 / browser reset / fetcher 404 — verified). Home machines on

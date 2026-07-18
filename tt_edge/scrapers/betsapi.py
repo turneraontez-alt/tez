@@ -39,6 +39,24 @@ BOOK = "bet365"
 SPORT_ID_TABLE_TENNIS = 92
 DEFAULT_BASE_URL = "https://api.b365api.com"
 DEFAULT_LEAGUE_ID = "29128"     # TT Elite Series (from the build spec)
+# The high-frequency table-tennis leagues a typical book posts live, by
+# BetsAPI league id (verified against the live upcoming feed):
+#   29128 TT Elite Series | 29097 TT Cup | 22742 Czech Liga Pro
+#   (22307 Setka Cup is also available; add it if the book offers it).
+DEFAULT_LEAGUE_IDS = ("29128", "29097", "22742")
+
+
+def parse_league_ids(raw: str | None) -> list[str]:
+    """Comma-separated league ids -> a de-duplicated, order-preserving list;
+    falls back to DEFAULT_LEAGUE_IDS when empty/unset."""
+    if raw is None or not raw.strip():
+        return list(DEFAULT_LEAGUE_IDS)
+    seen: dict[str, None] = {}
+    for token in raw.split(","):
+        cleaned = token.strip()
+        if cleaned:
+            seen.setdefault(cleaned, None)
+    return list(seen) or list(DEFAULT_LEAGUE_IDS)
 
 # BetsAPI time_status -> the canonical status types the board understands.
 _STATUS_MAP = {

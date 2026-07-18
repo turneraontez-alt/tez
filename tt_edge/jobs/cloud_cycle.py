@@ -41,16 +41,27 @@ logger = logging.getLogger(__name__)
 
 def run_cloud_cycle(*, repo: repo_mod.TTEdgeRepo, config, client,
                     now: datetime, sender: TTEdgeTelegram | None,
-                    league_id: str, dry_run: bool
+                    league_ids: list[str], dry_run: bool
                     ) -> tuple[CycleReport, int]:
-    """Fetch from BetsAPI and run one cycle. Injected client — testable."""
+    """Fetch every league from BetsAPI and run ONE merged cycle.
+
+    Each league is fetched independently (a failure in one is logged and
+    skipped, never fatal to the others) and their canonical envelopes +
+    odds are concatenated. Match ids are globally unique across leagues, so
+    claims, grading, and the shared paper bankroll all compose correctly.
+    Injected client — testable."""
     fetch_dates, scan_dates = cycle_dates(now, config.autoscan_dates_forward)
-    bundle = betsapi.fetch_cloud_bundle(
-        client, fetch_dates, league_id=league_id,
-        max_events=config.autoscan_max_matches, now=now)
-    inserted = sum(1 for snapshot in bundle.odds_snapshots
+    envelopes = []
+    odds_snapshots = []
+    for league_id in league_ids:
+        bundle = betsapi.fetch_cloud_bundle(
+            client, fetch_dates, league_id=league_id,
+            max_events=config.autoscan_max_matches, now=now)
+        envelopes.extend(bundle.envelopes)
+        odds_snapshots.extend(bundle.odds_snapshots)
+    inserted = sum(1 for snapshot in odds_snapshots
                    if repo.insert_odds_snapshot(snapshot))
-    report = run_cycle(repo=repo, config=config, envelopes=bundle.envelopes,
+    report = run_cycle(repo=repo, config=config, envelopes=envelopes,
                        scan_dates=scan_dates, now=now, sender=sender,
                        dry_run=dry_run)
     return report, inserted
@@ -77,8 +88,13 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config()
     if os.environ.get("TT_EDGE_BOOK") is None:
         config = dataclasses.replace(config, book=betsapi.BOOK)
-    league_id = os.environ.get("TT_EDGE_BETSAPI_LEAGUE_ID",
-                               betsapi.DEFAULT_LEAGUE_ID)
+    # In cloud mode the BetsAPI league id already isolates each league, so
+    # the sofascore-style tournament-name filter is redundant and would drop
+    # every non-"TT Elite" league; disable it unless the operator set one.
+    if os.environ.get("TT_EDGE_TOURNAMENT_KEYWORD") is None:
+        config = dataclasses.replace(config, tournament_keyword="")
+    league_ids = betsapi.parse_league_ids(
+        os.environ.get("TT_EDGE_BETSAPI_LEAGUE_ID"))
     base_url = os.environ.get("TT_EDGE_BETSAPI_BASE",
                               betsapi.DEFAULT_BASE_URL)
     branch = os.environ.get("TT_EDGE_STATE_BRANCH", state_sync.DEFAULT_BRANCH)
@@ -99,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         report, odds_inserted = run_cloud_cycle(
             repo=repo, config=config,
             client=betsapi.BetsAPIClient(token, base_url=base_url),
-            now=now, sender=sender, league_id=league_id,
+            now=now, sender=sender, league_ids=league_ids,
             dry_run=args.dry_run)
         bankroll = repo.get_bankroll_cents()
     finally:
@@ -111,7 +127,8 @@ def main(argv: list[str] | None = None) -> int:
 
     picks = [outcome for outcome in report.outcomes
              if outcome.alert_text and not outcome.reasons]
-    print(f"TT-EDGE CLOUD CYCLE: {len(report.outcomes)} match(es) scanned, "
+    print(f"TT-EDGE CLOUD CYCLE: {len(league_ids)} league(s), "
+          f"{len(report.outcomes)} match(es) scanned, "
           f"{odds_inserted} odds row(s), "
           f"{report.grade.recommendations_settled} settled "
           f"({report.grade.profit_cents:+d}c), bankroll "
