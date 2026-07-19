@@ -8,6 +8,37 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - CLOUD-FIRST: Routine owns all leagues, home autoscan default OFF
+Run time: 2026-07-19 (follow-on; owner: "just make the tt elite pics arive
+here too so i can see them all when i ask").
+
+Split coverage lasted ~40 minutes: the owner wants EVERY league's picks
+visible from cloud sessions on demand, so the operating mode is now
+CLOUD-FIRST:
+- Routine recreated as "TT-Edge cloud pick cycle (all leagues)"
+  (trig_01CdhzBLRdyUfwbHyEm22Gz8, hourly at :01) — default league list
+  (29128,29097,22742), no pin.
+- ``integration.autoscan_enabled`` production default flipped to OFF (with
+  docstring + test updates): an unconfigured app restart must not start a
+  second loop that double-alerts against the Routine. Opt back in with
+  TT_EDGE_AUTOSCAN_ENABLED=true only after pausing the Routine.
+- CLAUDE.md gained a "TT-Edge picks on demand" section: when the owner asks
+  for picks, run ``python3 -m tt_edge.jobs.cloud_cycle`` in-session and
+  report the PICKS section + near-miss edges from the scan log; in-session
+  output IS the delivery (no Telegram creds in sandboxes; claims are
+  idempotent so the Routine won't re-alert). README + .env.example updated
+  from split-coverage to cloud-first wording.
+
+Live activity this session (in-session runs with the owner-pasted token,
+now also in environment settings): 2 pre-split TT Elite claims settled via
+the new grade-only path (Malcher won +138c, Rutkowski/Olbrycht lost -205c),
+2 new TT Cup picks claimed and reported in-chat (Moravec -150 edge +10.2,
+Lasota -110 edge +10.5, both start ~06:00Z). Ledger now 6W-3L, net -286c,
+bankroll 6214c, 3 open. KEY-REACHES-ROUTINE still UNVERIFIED: the 00:01
+fire's state push (if any) was overwritten by an in-session run at 00:04 —
+verify at a fire with no in-session runs nearby (state branch commit or
+odds stamps after the :01 fire = confirmed).
+
 ## Shipped THIS session - TT-Edge fix: grade-only results for unscanned leagues
 Run time: 2026-07-18/19 (follow-on; owner pasted the BetsAPI token in-session
 and asked for fresh odds — the live cups-only run then exposed the gap).

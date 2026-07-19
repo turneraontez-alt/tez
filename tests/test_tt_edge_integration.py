@@ -20,7 +20,9 @@ class TestGating:
             monkeypatch.setenv("TT_EDGE_AUTOSCAN_ENABLED", raw)
             assert integration.autoscan_enabled() is expected
         monkeypatch.delenv("TT_EDGE_AUTOSCAN_ENABLED")
-        assert integration.autoscan_enabled() is True    # production default
+        # Production default is OFF (cloud-first: the hourly Routine owns
+        # every league; an unconfigured app must not double-alert).
+        assert integration.autoscan_enabled() is False
 
 
 class TestEnsurePlaywright:
