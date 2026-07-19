@@ -1,7 +1,7 @@
 {
-  "commit": "f3d149d",
+  "commit": "a30881c",
   "branch": "claude/pc-setup-llrxgt",
-  "committed_at": "2026-07-19T00:14:36Z",
-  "summary": "TT-Edge cloud-first: Routine owns all leagues, home autoscan default OFF",
-  "tests": "2299 passed, 5 skipped in 67.83s (0:01:07)"
+  "committed_at": "2026-07-19T01:06:42Z",
+  "summary": "TT-Edge PREDICTION_PLAN.md: model v2 build plan",
+  "tests": "2299 passed, 5 skipped in 72.41s (0:01:12)"
 }
