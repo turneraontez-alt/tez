@@ -19,8 +19,14 @@ Self-bootstrapping (gated by TT_EDGE_AUTO_INSTALL, default on):
 Containment: this module must NEVER take the monitor down. Every cycle runs
 behind a deliberate top-level boundary that logs and continues; a failed
 bootstrap degrades to cache-only cycles with a periodic error instead of
-crashing. Kill switch: TT_EDGE_AUTOSCAN_ENABLED=false. Do not also run the
-standalone ``jobs/autoscan.py`` against the same DB — one loop per DB.
+crashing. Do not also run the standalone ``jobs/autoscan.py`` against the
+same DB — one loop per DB.
+
+DEFAULT: OFF (owner decision 2026-07-19, cloud-first). The hourly cloud
+Routine covers every league (TT Elite + TT Cup + Czech Liga Pro) with its
+own DB, and running this home loop alongside it would double-alert the
+same matches. Opt back in with TT_EDGE_AUTOSCAN_ENABLED=true ONLY after
+pausing the cloud Routine (or restricting its league list).
 """
 from __future__ import annotations
 
@@ -47,7 +53,9 @@ def _flag(name: str, default: bool) -> bool:
 
 
 def autoscan_enabled() -> bool:
-    return _flag("TT_EDGE_AUTOSCAN_ENABLED", True)
+    # Default OFF: the cloud Routine owns all leagues (see module docstring);
+    # an unconfigured app must not start a second, double-alerting loop.
+    return _flag("TT_EDGE_AUTOSCAN_ENABLED", False)
 
 
 def auto_install_enabled() -> bool:

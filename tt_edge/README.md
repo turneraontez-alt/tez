@@ -57,16 +57,18 @@ Two deliberate Phase-0 policies, revisit with calibration data:
   the bankroll is a paper ledger of what the system recommended until the
   operator goes live and reconciles it by hand.
 
-## Quickstart — zero-command (in-app autoscan)
+## Quickstart — in-app autoscan (home mode, DEFAULT OFF)
 
-**The loop runs inside the Q15 monitor.** The operator's normal deploy —
-`git pull` + restart the app — is the only action needed: at startup
-`app.py` spawns the TT-Edge autoscan thread (guarded like every other
-subsystem; `TT_EDGE_AUTOSCAN_ENABLED=false` is the kill switch), which
-self-installs Playwright/Chromium if missing (`TT_EDGE_AUTO_INSTALL`),
-seeds the PAPER bankroll on first run (`TT_EDGE_BANKROLL_INIT_DOLLARS`,
-default $65), and delivers picks over the Q15 Telegram credentials already
-present in the app process.
+The autoscan thread can run inside the Q15 monitor: at startup `app.py`
+spawns it (guarded like every other subsystem), it self-installs
+Playwright/Chromium if missing (`TT_EDGE_AUTO_INSTALL`), seeds the PAPER
+bankroll on first run (`TT_EDGE_BANKROLL_INIT_DOLLARS`, default $65), and
+delivers picks over the Q15 Telegram credentials already present in the
+app process. **Since 2026-07-19 it defaults to OFF** (owner decision,
+cloud-first: the hourly Routine covers every league with its own DB, and a
+second loop would double-alert the same matches). Opt in with
+`TT_EDGE_AUTOSCAN_ENABLED=true` ONLY after pausing the cloud Routine or
+restricting its league list.
 
 ## Quickstart — CLOUD mode (no home hardware at all)
 
@@ -84,9 +86,12 @@ leagues a book typically posts — **TT Elite Series, TT Cup, and Czech Liga
 Pro** — overridable via `TT_EDGE_BETSAPI_LEAGUE_ID` (comma-separated;
 Setka Cup is `22307`). **A league must never be covered by cloud mode AND a
 home loop at the same time** (each has its own DB, so both would alert).
-The live setup is SPLIT COVERAGE (owner decision 2026-07-18): the home
-in-app autoscan owns TT Elite, and the hourly Routine runs cups-only with
-`TT_EDGE_BETSAPI_LEAGUE_ID=29097,22742` pinned in its prompt.
+The live setup is CLOUD-FIRST (owner decision 2026-07-19): the hourly
+Routine covers all three leagues, the in-app home autoscan defaults OFF,
+and the owner sees every pick via Routine push notifications or by asking
+a session to run `python3 -m tt_edge.jobs.cloud_cycle` on demand. A league
+with open claims that later leaves the scan list still gets a results-only
+grading fetch, so its claims settle without producing new picks there.
 
 Sofascore is NOT usable from the cloud: it blocks datacenter traffic
 (curl 403 / browser reset / fetcher 404 — verified). Home machines on

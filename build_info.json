@@ -1,7 +1,7 @@
 {
-  "commit": "ffe1b0d",
+  "commit": "f3d149d",
   "branch": "claude/pc-setup-llrxgt",
-  "committed_at": "2026-07-18T23:59:22Z",
-  "summary": "TT-Edge grade-only results: unscanned leagues' open claims settle",
-  "tests": "2299 passed, 5 skipped in 73.81s (0:01:13)"
+  "committed_at": "2026-07-19T00:14:36Z",
+  "summary": "TT-Edge cloud-first: Routine owns all leagues, home autoscan default OFF",
+  "tests": "2299 passed, 5 skipped in 67.83s (0:01:07)"
 }
