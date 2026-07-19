@@ -8,6 +8,22 @@
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
 
+## Shipped THIS session - PREDICTION_PLAN.md: model v2 build plan (owner-requested)
+Run time: 2026-07-19 (follow-on; owner wants a fully fleshed-out prediction
+system for the TT leagues with non-standard features, plan first).
+
+``tt_edge/PREDICTION_PLAN.md`` is now the standing build plan: Phase A data
+foundation (results backfill, per-set score verification, ratings/feature/
+model-version tables) -> B league-aware MOV-Elo with Glicko-style RD gating
+as a shadow head -> C feature expansion (same-day rematch, fatigue/workload,
+time-of-day residuals, layoff, clutch/deciding-set, opponent-adjusted form
+residual, H2H residual vs rating expectation, margin trend, per-league
+calibration; market features quarantined to a separate overlay head) ->
+D fitted logistic + per-league Platt -> E promotion gates (Brier/log-loss
+vs champion AND vs market close, CLV tracking to start early) -> F edge-
+ranked slot claiming + report integration. Build phases in order in future
+sessions; every phase behind the shadow/challenger discipline.
+
 ## Shipped THIS session - CLOUD-FIRST: Routine owns all leagues, home autoscan default OFF
 Run time: 2026-07-19 (follow-on; owner: "just make the tt elite pics arive
 here too so i can see them all when i ask").
