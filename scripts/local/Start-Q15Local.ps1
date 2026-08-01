@@ -42,10 +42,17 @@ if (Test-Path -LiteralPath $appPidPath) {
 if ($healthyAppRunning -and -not $ForceUnsafeRestart) {
     $restartWindow = Get-Q15ExactCaptureRestartWindow
     if ($restartWindow.protected) {
-        throw (
+        # NOTE the parentheses around the concatenation: -f binds TIGHTER than +,
+        # so without them the format operator consumed only the final fragment
+        # (which has no placeholders) and the message printed a literal
+        # "{0}; next capture in {1}s. Retry in {2}s" — telling the operator
+        # nothing about how long to wait, in exactly the situation where they
+        # need it.
+        throw ((
             "Refusing to restart healthy Q15 app inside the exact-capture " +
             "protection window ({0}; next capture in {1}s). Retry in {2}s " +
-            "or use -ForceUnsafeRestart only for an emergency recovery." -f
+            "or use -ForceUnsafeRestart only for an emergency recovery."
+        ) -f
             $restartWindow.reason,
             $restartWindow.seconds_until_capture,
             $restartWindow.retry_after_seconds
