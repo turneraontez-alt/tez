@@ -4,6 +4,8 @@ TT-Edge bug)."""
 import subprocess
 import threading
 
+import pytest
+
 from tests import tt_edge_fixtures as fx
 from tt_edge import integration
 
@@ -25,6 +27,25 @@ class TestGating:
         assert integration.autoscan_enabled() is False
 
 
+def _playwright_installed() -> bool:
+    """Is the real playwright package importable here?"""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("playwright") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+# Two tests below assert the HAPPY path, which needs playwright genuinely
+# importable. It is on the cloud box but not in every local venv, and a missing
+# optional scraper dependency is an environment fact, not a regression — skip
+# rather than fail. The negative-path test above stubs the import and always runs.
+requires_playwright = pytest.mark.skipif(
+    not _playwright_installed(),
+    reason="playwright is not installed in this environment")
+
+
 class TestEnsurePlaywright:
     def test_no_install_when_disabled_and_missing(self, monkeypatch):
         real_import = __builtins__["__import__"] if isinstance(
@@ -42,6 +63,7 @@ class TestEnsurePlaywright:
                                              calls.append(a)) is False
         assert calls == []
 
+    @requires_playwright
     def test_importable_returns_true_without_subprocess_when_exe_set(
             self, monkeypatch):
         # playwright IS importable in this environment; with an explicit
@@ -52,6 +74,7 @@ class TestEnsurePlaywright:
             run=lambda *a, **k: calls.append(a)) is True
         assert calls == []
 
+    @requires_playwright
     def test_chromium_install_attempted_when_enabled(self, monkeypatch):
         monkeypatch.setenv("TT_EDGE_AUTO_INSTALL", "true")
         monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", raising=False)

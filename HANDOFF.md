@@ -3,8 +3,22 @@
 ## Shipped 2026-07-31 - Full-repo review: secret leak, executor lifecycle, freshness gates
 
 Full audit of the repo (6 parallel reviewers + adversarial verification), then
-every confirmed finding fixed.  Suite: **2729 passed, 5 skipped**; `config_audit
---check` OK.  The local stack was restarted onto this code and verified healthy
+every confirmed finding fixed, then merged with the TT-Edge work on `origin/main`.
+Suite (both systems together): **3030 passed, 7 skipped**; `config_audit --check` OK.
+
+**Cross-system bug the merge exposed — `tt_edge` was rewriting the test
+environment.**  `tt_edge/envfile.py::bootstrap_env()` splices the real
+`.env.local` into `os.environ` (setdefault), and every tt_edge job module calls
+it at import.  So once any tt_edge test ran, ~24 live `Q15_ULTOIM_V2_*` values
+were resident for the rest of the session and every Q15 test after it was
+silently evaluated against PRODUCTION config instead of the defaults it asserts
+— 31 failures the first time both suites ran in one process, and, worse, quietly
+meaningless Q15 assertions whenever ordering put tt_edge first.  `bootstrap_env`
+is now a no-op under pytest when targeting the real `os.environ` (explicit
+mappings and `load_env_file` are unaffected, so the tt_edge tests that exercise
+the loader still do).  Separately, the two `TestEnsurePlaywright` happy-path
+tests now skip when playwright is not installed rather than failing — a missing
+optional scraper dep is an environment fact, not a regression.  The local stack was restarted onto this code and verified healthy
 (7 assets tracked, executor still `DRY_RUN=true` + `KILL=true` on both books).
 
 **SECURITY - ACTION REQUIRED: the Telegram bot token was published.**

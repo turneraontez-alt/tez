@@ -45,7 +45,20 @@ def load_env_file(path: Path,
 
 def bootstrap_env(environ: MutableMapping[str, str] = os.environ) -> int:
     """Load ``.env.local`` then ``.env`` from the repo root (first hit per
-    key wins; the process environment always wins over both)."""
+    key wins; the process environment always wins over both).
+
+    NO-OP UNDER PYTEST when operating on the real process environment. Importing
+    or exercising any tt_edge job used to splice the owner's LIVE ``.env.local``
+    into ``os.environ`` for the rest of the session — roughly 24 ``Q15_ULTOIM_V2_*``
+    values among them — so every Q15 test that ran afterwards was silently
+    evaluated against production config instead of the defaults it asserts. That
+    is invisible when the two suites run apart and breaks 31 tests when they run
+    together. Tests that want the loader call ``load_env_file`` with an explicit
+    mapping, which is unaffected; passing a non-``os.environ`` mapping here also
+    still works, so only the global-mutation path is suppressed.
+    """
+    if environ is os.environ and "PYTEST_CURRENT_TEST" in os.environ:
+        return 0
     loaded = 0
     for name in (".env.local", ".env"):
         loaded += load_env_file(REPO_ROOT / name, environ)
