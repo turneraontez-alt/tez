@@ -1,0 +1,38 @@
+{
+  "artifact_emitted": false,
+  "audit_version": "q15-rti-microstructure-preregister-readiness-v1",
+  "cohorts": {
+    "BTC": {
+      "complete_close_windows": 1,
+      "minimum_complete_close_windows": 150,
+      "ready_for_locked_freeze": false,
+      "windows_remaining": 149
+    },
+    "NON_BTC_TRANSFER": {
+      "complete_close_windows": 1,
+      "minimum_complete_close_windows": 60,
+      "ready_for_locked_freeze": false,
+      "windows_remaining": 59
+    }
+  },
+  "complete_microstructure_close_windows": 1,
+  "coverage_clean": true,
+  "design_id": "q15-rti-market-residual-orthogonal-compact-v12",
+  "design_sha256": "3f878d532c1ba6578e9eeb347ab2025b1c5a14c9ce27cd79a367016238ff854a",
+  "feature_count": 20,
+  "feature_schema_version": "rti-probability-microstructure-features-v12",
+  "generated_at": "2026-07-22T08:47:49.296514+00:00",
+  "incomplete_seven_asset_windows": 10,
+  "model_feature_timestamp_failures": 0,
+  "model_feature_unavailable_rows": 0,
+  "model_fit_performed": false,
+  "outcome_labels_read": false,
+  "paper_only": true,
+  "partial_schema_windows": 0,
+  "readiness_integrity_scope": "design_eligible_model_windows",
+  "ready_for_any_locked_freeze": false,
+  "schema_complete_microstructure_close_windows": 90,
+  "status": "WAITING_FOR_COMPLETE_WINDOWS",
+  "timestamp_alignment_failures": 0,
+  "unusable_model_feature_close_windows": 0
+}

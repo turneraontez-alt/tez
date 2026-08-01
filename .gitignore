@@ -42,6 +42,10 @@ health_snapshot.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# pytest basetemp dirs created by the suite's --basetemp runs. Most of the bulk is
+# *.sqlite3 (already ignored above) but the .json/.sample/.npz leftovers are not, and
+# they add thousands of files to `git status` inside a OneDrive-synced folder.
+.pytest_tmp*/
 *.egg-info/
 dist/
 build/

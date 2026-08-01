@@ -152,6 +152,23 @@ def test_strangle_shadow_health_reports_latest_created_at(tmp_path, monkeypatch)
     assert health["latest_age_seconds"] == pytest.approx(79.0)
 
 
+def test_strangle_watchdog_uses_observe_heartbeat_not_sparse_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW", "true")
+    monkeypatch.setenv("Q15_STRANGLE_SHADOW_DB", str(tmp_path / "heartbeat.sqlite3"))
+    ss.reset_strangle_shadow()
+    q = ss.get_strangle_shadow()
+    q.observe(
+        asset="BTC", close_time=CLOSE, seconds_remaining=500,
+        yes_bid=48, yes_ask=52, now=CLOSE - 500,
+    )
+
+    health = ss.strangle_shadow_health(now=CLOSE - 499)
+
+    assert health["rows_written"] == 0
+    assert health["latest_age_seconds"] is None
+    assert health["watchdog_age_seconds"] == pytest.approx(1.0)
+
+
 def test_multi_round_harvests_each_mark(tmp_path, monkeypatch):
     monkeypatch.setenv("Q15_STRANGLE_SHADOW", "true")
     monkeypatch.setenv("Q15_STRANGLE_SHADOW_DB", str(tmp_path / "mr.sqlite3"))

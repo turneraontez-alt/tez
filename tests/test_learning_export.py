@@ -234,7 +234,7 @@ def test_build_snapshot_does_not_mutate_source(tmp_path, monkeypatch):
     _make_v95_db(src)
     # Flush WAL into the main file so its bytes are stable for the comparison.
     flush = subprocess.run(
-        ["python3", "-c",
+        [sys.executable, "-c",
          f"import sqlite3;c=sqlite3.connect({str(src)!r});"
          "c.execute('PRAGMA wal_checkpoint(TRUNCATE)');c.close()"],
         capture_output=True, text=True,

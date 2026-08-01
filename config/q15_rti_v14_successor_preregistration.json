@@ -1,0 +1,83 @@
+{
+  "charter_id": "q15-rti-v14-nested-safe-residual-trust-preregistration-v1",
+  "charter_status": "MANUALLY_PREREGISTERED_FROM_OPENED_V11_ARCHITECTURE_EVIDENCE_BEFORE_ANY_V13_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-22T17:38:00Z",
+  "source_design_id": "q15-rti-market-residual-cohort-conditioned-compact-v13",
+  "source_design_sha256": "adc900b5882567446cb3d4a8f5fc0cb795e278dd38db2c6179e54cc83fc673ed",
+  "source_v13_feature_audit_sha256": "2abd8c1c860c08d6ec183cb6c348a74a64c5cb9bb7ebee122c0ddbbea5a91511",
+  "source_v13_evidence": {
+    "complete_executable_close_windows": 5,
+    "rows": 35,
+    "fully_observed_rows": 34,
+    "soft_degraded_rows": 1,
+    "timestamp_alignment_failures": 0,
+    "outcome_labels_read": false,
+    "model_fit_performed": false,
+    "performance_metrics_inspected": false,
+    "last_close_time": 1784742300.0
+  },
+  "opened_v11_architecture_evidence": {
+    "diagnostic_id": "q15-rti-v11-opened-fold-architecture-diagnostic-v1",
+    "opened_pretest_rows": 288,
+    "untouched_test_rows_used": 0,
+    "untouched_test_labels_read": false,
+    "v11_brier_delta_vs_market": 0.00018001475340216,
+    "v11_log_loss_delta_vs_market": 0.0004104719324754,
+    "compact_brier_delta_vs_market": 0.00010198339782772,
+    "compact_log_loss_delta_vs_market": 0.0002261800917856,
+    "nested_safe_blend_selected_factors": [0.0, 0.0, 0.0],
+    "interpretation": "the residual learner needs a training-only trust control because the best opened-fold action was exact market fallback in every fold"
+  },
+  "manual_successor_decision": {
+    "proposed_design_id": "q15-rti-market-anchored-nested-safe-residual-v14",
+    "selection_basis": "OPENED_V11_ARCHITECTURE_FAILURE_WITH_V13_OUTCOMES_UNREAD",
+    "feature_schema_unchanged_from_v13": true,
+    "feature_formulas_unchanged_from_v13": true,
+    "base_residual_optimizer_unchanged_from_v13": true,
+    "entry_policy_unchanged": true,
+    "only_model_change": "select residual-logit trust from a fixed grid using inner chronological out-of-fold predictions inside each outer training period",
+    "fixed_residual_trust_factors": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "fallback_factor": 0.0,
+    "factor_zero_is_exact_market_prior": true,
+    "selection_requires_brier_and_log_loss_improvement": true,
+    "selection_requires_paired_close_window_bootstrap_upper_below_zero": true,
+    "outer_validation_labels_may_not_select_their_factor": true,
+    "calibration_labels_may_not_select_their_factor": true,
+    "untouched_test_labels_may_not_select_their_factor": true,
+    "prospective_after_close_time": 1784742300.0,
+    "first_eligible_close_time": 1784743200.0,
+    "historical_credit_allowed": false,
+    "v11_v12_v13_remain_frozen_parallel_controls": true
+  },
+  "inner_chronology": {
+    "NON_BTC_TRANSFER": {
+      "initial_train_windows": 12,
+      "validation_block_windows": 4
+    },
+    "BTC": {
+      "initial_train_windows": 30,
+      "validation_block_windows": 10
+    },
+    "same_close_assets_must_share_inner_fold": true,
+    "inner_validation_is_strictly_later_than_inner_training": true,
+    "factor_is_reselected_inside_each_outer_training_period": true
+  },
+  "required_before_executable_v14_design": {
+    "new_design_manifest_and_sha256": true,
+    "new_feature_schema_identity_and_boundary": true,
+    "new_walk_forward_protocol_bound_to_design": true,
+    "fixed_factor_grid_and_inner_folds": true,
+    "same_close_assets_share_every_outer_and_inner_fold": true,
+    "btc_and_non_btc_evaluated_separately": true,
+    "exact_market_fallback_when_inner_evidence_is_weak": true,
+    "no_v13_outcome_labels_read_before_v13_readiness": true,
+    "manual_activation_only": true
+  },
+  "paper_only": true,
+  "notification_eligible": false,
+  "automatic_design_creation_allowed": false,
+  "automatic_refit": false,
+  "automatic_activation": false,
+  "automatic_promotion": false,
+  "real_trading_allowed": false
+}

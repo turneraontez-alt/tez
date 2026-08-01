@@ -36,10 +36,35 @@ so the packages stay importable without ``requests`` installed.
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Callable
 
 API_URL_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
+
+# ``requests`` builds its exception text from the request URL, so a transport
+# failure echoes ".../bot<TOKEN>/sendMessage" verbatim. Match the token segment
+# structurally so a token this client was NOT constructed with is still caught.
+_BOT_TOKEN_URL_RE = re.compile(r"(/bot)[^/\s]+", re.IGNORECASE)
+
+
+def redact_token(text: Any, token: str | None = None) -> Any:
+    """Strip a Telegram bot token out of ``text`` before it is logged or stored.
+
+    Two passes, because a leak has two shapes: the configured token appearing
+    verbatim anywhere in the string, and a token embedded in an API URL inside a
+    transport exception. The second pass is what makes this safe to apply to
+    strings whose origin we do not control.
+
+    Falsy input is returned unchanged so callers can pass an optional error
+    through without a None check.
+    """
+    if not text:
+        return text
+    out = str(text)
+    if token:
+        out = out.replace(str(token), "***")
+    return _BOT_TOKEN_URL_RE.sub(r"\1***", out)
 
 
 def muted_result() -> dict[str, Any]:
@@ -121,7 +146,10 @@ class TelegramSendClient:
                     timeout=self.timeout_seconds,
                 )
             except error_types as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+                # The exception text embeds the request URL (with the token) —
+                # redact before it reaches the result dict, which callers persist
+                # into their ledgers (and which those ledgers export off-box).
+                last_error = redact_token(f"{type(exc).__name__}: {exc}", self.token)
             else:
                 if resp.status_code == 200:
                     message_id = None

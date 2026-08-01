@@ -3,7 +3,8 @@ param(
     [switch]$SkipInstall,
     [switch]$NoRelay,
     [switch]$NoLearningExport,
-    [switch]$AllowLiveTrading
+    [switch]$AllowLiveTrading,
+    [switch]$ForceUnsafeRestart
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,33 @@ $pidRel = if ($env:Q15_LOCAL_PID_DIR) { $env:Q15_LOCAL_PID_DIR } else { "work/lo
 $logDir = Join-Path $root $logRel
 $pidDir = Join-Path $root $pidRel
 New-Item -ItemType Directory -Force -Path $logDir,$pidDir | Out-Null
+$appPidPath = Join-Path $pidDir "app.pid"
+$healthyAppRunning = $false
+if (Test-Path -LiteralPath $appPidPath) {
+    try {
+        $existingAppPid = [int](
+            (Get-Content -LiteralPath $appPidPath -Raw).Trim()
+        )
+        $existingApp = Get-Process -Id $existingAppPid -ErrorAction Stop
+        $healthyAppRunning = -not $existingApp.HasExited
+    }
+    catch {
+        $healthyAppRunning = $false
+    }
+}
+if ($healthyAppRunning -and -not $ForceUnsafeRestart) {
+    $restartWindow = Get-Q15ExactCaptureRestartWindow
+    if ($restartWindow.protected) {
+        throw (
+            "Refusing to restart healthy Q15 app inside the exact-capture " +
+            "protection window ({0}; next capture in {1}s). Retry in {2}s " +
+            "or use -ForceUnsafeRestart only for an emergency recovery." -f
+            $restartWindow.reason,
+            $restartWindow.seconds_until_capture,
+            $restartWindow.retry_after_seconds
+        )
+    }
+}
 $stopScript = Join-Path $PSScriptRoot "Stop-Q15Local.ps1"
 if (Test-Path -LiteralPath $stopScript) {
     & $stopScript -PidDir $pidDir -IncludeStale
@@ -33,10 +61,10 @@ if (Test-Path -LiteralPath $storageScript) {
     & $storageScript
 }
 $services = @(
-    @{ Name = "app"; Args = @((Join-Path $root "app.py")) }
+    @{ Name = "app"; Args = @("app.py") }
 )
-if (-not $NoRelay) { $services += @{ Name = "github-relay"; Args = @((Join-Path $root "tools/github_relay.py")) } }
-if (-not $NoLearningExport) { $services += @{ Name = "learning-export"; Args = @((Join-Path $root "tools/learning_export.py")) } }
+if (-not $NoRelay) { $services += @{ Name = "github-relay"; Args = @("tools/github_relay.py") } }
+if (-not $NoLearningExport) { $services += @{ Name = "learning-export"; Args = @("tools/learning_export.py") } }
 foreach ($svc in $services) {
     $out = Join-Path $logDir ($svc.Name + ".out.log")
     $err = Join-Path $logDir ($svc.Name + ".err.log")

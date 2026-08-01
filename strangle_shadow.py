@@ -132,6 +132,7 @@ class StrangleShadow:
         self.db_path = db_path or _db_path()
         self._lock = threading.Lock()
         self._live: dict[tuple[str, float], dict[str, Any]] = {}
+        self._last_observe_at: float | None = None
         self._conn: sqlite3.Connection | None = None
         if self.enabled:
             self._connect()
@@ -165,6 +166,7 @@ class StrangleShadow:
         if not self.enabled or close_time is None or seconds_remaining is None:
             return
         ts = time.time() if now is None else float(now)
+        self._last_observe_at = ts
         sr = float(seconds_remaining)
         yb, ya = _num(yes_bid), _num(yes_ask)
         a_up = str(asset).upper()
@@ -345,11 +347,18 @@ def strangle_shadow_health(now: float | None = None) -> dict[str, Any]:
         "db_path": db_path,
         "latest_created_at": None,
         "latest_age_seconds": None,
+        "watchdog_age_seconds": None,
         "rows_written": 0,
         "status": "disabled" if not enabled else "missing",
         "missing_reason": None if not enabled else "strangle_db_missing",
     }
     path = Path(db_path)
+    with _singleton_lock:
+        runtime = _singleton
+    if runtime is not None and runtime.enabled and runtime._last_observe_at is not None:
+        info["watchdog_age_seconds"] = round(
+            max(0.0, current - runtime._last_observe_at), 3
+        )
     if not path.is_file():
         return info
     try:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
+import time
 
 import pytest
 
@@ -13,9 +15,19 @@ from coinbase_adv_l2 import CoinbaseAdvancedL2Collector
 from kraken_l3 import KrakenL3Collector
 from q15_upgrade.marketlead.config import MarketLeadConfig
 from q15_upgrade.marketlead.features import MarketLeadFeatureEngine
+from q15_upgrade.marketlead.ledger import MarketLeadLedger
 from q15_upgrade.marketlead.live_sources import live_market_sources
 from q15_upgrade.marketlead.runner import MarketLeadRunner
-from q15_upgrade.ws_client import KalshiWebSocketFeed
+from q15_upgrade.strategy_bots.telegram import build_marketlead_alert
+from q15_upgrade.strategy_bots.rules import (
+    RTI_EXACT_MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION,
+)
+from q15_upgrade.ws_client import (
+    MICROSTRUCTURE_BOOK_EVENT_RETENTION_SECONDS,
+    MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION,
+    MICROSTRUCTURE_TIME_BASIS,
+    KalshiWebSocketFeed,
+)
 from tools.q15_marketlead_report import build_report
 
 
@@ -77,6 +89,17 @@ def _kalshi():
     }
 
 
+def _lagging_kalshi(*, age=0.2):
+    return {
+        **_kalshi(),
+        "book_age_seconds": age,
+        "event_age_seconds": age,
+        "yes_microprice_edge_cents": -0.4,
+        "book_delta_pressure_yes_15s": -0.5,
+        "trade_imbalance_yes_15s": -0.6,
+    }
+
+
 def _config(path, **kwargs):
     values = dict(
         enabled=True,
@@ -102,6 +125,9 @@ def _config(path, **kwargs):
 
 
 def test_kalshi_event_microstructure_tracks_pressure_and_microprice(monkeypatch):
+    assert MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION == (
+        RTI_EXACT_MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION
+    )
     monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
     monkeypatch.delenv("KALSHI_ACCESS_KEY", raising=False)
     feed = KalshiWebSocketFeed()
@@ -142,6 +168,197 @@ def test_kalshi_event_microstructure_tracks_pressure_and_microprice(monkeypatch)
     assert metrics["book_delta_pressure_yes_5s"] == pytest.approx(1.0)
     assert metrics["trade_imbalance_yes_15s"] == pytest.approx(1.0)
     assert metrics["event_count_5s"] == 1
+    assert metrics["taker_yes_volume_15s"] == pytest.approx(4.0)
+    assert metrics["taker_no_volume_15s"] == pytest.approx(0.0)
+    assert metrics["taker_net_yes_volume_15s"] == pytest.approx(4.0)
+    assert metrics["microstructure_extension_schema_version"] == (
+        MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION
+    )
+    assert metrics["book_add_volume_yes_5s"] == pytest.approx(5.0)
+    assert metrics["book_remove_volume_yes_5s"] == pytest.approx(0.0)
+    assert metrics["microprice_change_cents_5s"] == pytest.approx(1.0 / 6.0)
+    assert metrics["microprice_range_cents_5s"] == pytest.approx(1.0 / 6.0)
+    assert metrics["microprice_variation_cents_5s"] == pytest.approx(1.0 / 6.0)
+    assert metrics["microprice_trend_efficiency_5s"] == pytest.approx(1.0)
+    assert metrics["trade_yes_price_change_cents_5s"] == pytest.approx(0.0)
+    assert metrics["trade_yes_price_range_cents_5s"] == pytest.approx(0.0)
+    assert metrics["trade_yes_vwap_cents_5s"] == pytest.approx(67.0)
+
+
+def test_kalshi_book_removes_float_dust_instead_of_creating_ghost_best_bid(monkeypatch):
+    monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_ACCESS_KEY", raising=False)
+    feed = KalshiWebSocketFeed()
+    now = 1_900_000_000.0
+    feed._handle_book_snapshot(
+        {
+            "market_ticker": "KXDUST",
+            "yes_dollars": [["0.9900", "0.1"], ["0.6000", "12"]],
+            "no_dollars": [["0.3800", "15"]],
+        },
+        now,
+    )
+    for delta in ("0.2", "-0.3"):
+        feed._handle_book_delta(
+            {
+                "market_ticker": "KXDUST",
+                "side": "yes",
+                "price_dollars": "0.9900",
+                "delta_fp": delta,
+            },
+            now + 1,
+        )
+
+    metrics = feed.get_microstructure("KXDUST", now=now + 1.1)
+    assert metrics["available"] is True
+    assert metrics["yes_bid_cents"] == 60.0
+    assert metrics["yes_ask_cents"] == 62.0
+    assert metrics["yes_bid_qty"] == 12.0
+
+
+def test_kalshi_microstructure_uses_genuine_time_horizons_above_5000_events(
+    monkeypatch,
+):
+    """Busy BTC windows must never collapse to the most recent 5,000 rows."""
+    monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_ACCESS_KEY", raising=False)
+    feed = KalshiWebSocketFeed()
+    ticker = "KXBTC-HIGH-ACTIVITY"
+    now = 1_900_000_100.0
+    feed._handle_book_snapshot(
+        {
+            "market_ticker": ticker,
+            "yes_dollars": [["0.5500", "10"]],
+            "no_dollars": [["0.4400", "10"]],
+        },
+        now - 70.0,
+    )
+    with feed._lock:
+        feed._books[ticker]["updated_at"] = now
+        events = feed._book_events[ticker]
+        for index in range(6001):
+            received_at = now - 60.0 + index * 0.01
+            events.append({
+                # Deliberately unusable exchange time: window membership must
+                # use the timestamp at which the decision process saw the row.
+                "ts": now + 600.0,
+                "received_at": received_at,
+                "side": "no" if index < 3000 else "yes",
+                "delta": 1.0,
+                "at_best_before": False,
+                "at_best_after": False,
+            })
+        # Future decision evidence must not leak into a point-in-time feature.
+        events.append({
+            "ts": now - 1.0,
+            "received_at": now + 1.0,
+            "side": "yes",
+            "delta": 1.0,
+            "at_best_before": False,
+            "at_best_after": False,
+        })
+
+    metrics = feed.get_microstructure(ticker, now=now)
+
+    assert feed._book_events[ticker].maxlen is None
+    assert metrics["microstructure_time_basis"] == MICROSTRUCTURE_TIME_BASIS
+    assert metrics["history_count_capped"] is False
+    assert metrics["book_window_complete_60s"] is True
+    assert metrics["trade_window_complete_60s"] is True
+    assert metrics["microstructure_window_complete_60s"] is True
+    assert metrics["event_count_60s"] == 6001
+    assert metrics["event_count_30s"] == 3001
+    assert metrics["event_count_5s"] == 501
+    assert metrics["book_delta_pressure_yes_30s"] == pytest.approx(1.0)
+    assert metrics["book_delta_pressure_yes_60s"] == pytest.approx(1.0 / 6001.0)
+    assert metrics["trade_imbalance_yes_60s"] == pytest.approx(0.0)
+    health = feed.health()["microstructure_history"]
+    assert health["count_capped"] is False
+    assert health["time_basis"] == "local_received_at"
+    assert health["extension_schema_version"] == (
+        MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION
+    )
+    assert health["buffers"][ticker]["book_event_rows"] == 6002
+
+
+def test_kalshi_microstructure_prunes_by_receive_time_not_count(monkeypatch):
+    monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_ACCESS_KEY", raising=False)
+    feed = KalshiWebSocketFeed()
+    ticker = "KXBTC-TIME-RETENTION"
+    now = 1_900_000_200.0
+    feed._handle_book_snapshot(
+        {
+            "market_ticker": ticker,
+            "yes_dollars": [["0.5500", "10"]],
+            "no_dollars": [["0.4400", "10"]],
+        },
+        now - 100.0,
+    )
+    with feed._lock:
+        feed._books[ticker]["updated_at"] = now
+        for received_at, microprice in (
+            (now - 95.0, 49.0),
+            (now - 10.0, 55.5),
+        ):
+            feed._book_events[ticker].append({
+                "ts": received_at,
+                "received_at": received_at,
+                "side": "yes",
+                "delta": 1.0,
+                "at_best_before": False,
+                "at_best_after": False,
+                "yes_microprice_after_cents": microprice,
+            })
+
+    metrics = feed.get_microstructure(ticker, now=now)
+
+    assert MICROSTRUCTURE_BOOK_EVENT_RETENTION_SECONDS == 90.0
+    assert len(feed._book_events[ticker]) == 1
+    assert metrics["event_count_60s"] == 1
+    assert feed._book_retention_baseline_microprice[ticker] == pytest.approx(49.0)
+    assert metrics["microprice_change_cents_60s"] == pytest.approx(6.5)
+    assert metrics["microprice_range_cents_60s"] == pytest.approx(6.5)
+
+
+def test_kalshi_microstructure_history_fails_closed_until_rewarmed(monkeypatch):
+    monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_ACCESS_KEY", raising=False)
+    feed = KalshiWebSocketFeed()
+    ticker = "KXBTC-RECONNECT"
+    now = 1_900_000_300.0
+    snapshot = {
+        "market_ticker": ticker,
+        "yes_dollars": [["0.5500", "10"]],
+        "no_dollars": [["0.4400", "10"]],
+    }
+    feed._handle_book_snapshot(snapshot, now)
+
+    cold = feed.get_microstructure(ticker, now=now + 59.0, max_book_age=1000.0)
+    warm = feed.get_microstructure(ticker, now=now + 60.1, max_book_age=1000.0)
+    assert cold["microstructure_window_complete_60s"] is False
+    assert warm["microstructure_window_complete_60s"] is True
+    assert warm["microprice_change_cents_60s"] == pytest.approx(0.0)
+    assert warm["microprice_variation_cents_60s"] == pytest.approx(0.0)
+    assert warm["book_add_volume_yes_60s"] == pytest.approx(0.0)
+    assert warm["book_remove_volume_no_60s"] == pytest.approx(0.0)
+    assert warm["trade_yes_price_change_cents_60s"] == pytest.approx(0.0)
+    assert warm["trade_yes_vwap_cents_60s"] is None
+
+    with feed._lock:
+        feed._invalidate_microstructure_history_locked()
+    invalidated = feed.get_microstructure(
+        ticker, now=now + 61.0, max_book_age=1000.0,
+    )
+    assert invalidated["book_history_started_at"] is None
+    assert invalidated["microstructure_window_complete_5s"] is False
+
+    feed._handle_book_snapshot(snapshot, now + 62.0)
+    rewarmed = feed.get_microstructure(
+        ticker, now=now + 122.1, max_book_age=1000.0,
+    )
+    assert rewarmed["book_window_complete_60s"] is True
+    assert rewarmed["trade_window_complete_60s"] is True
 
 
 def test_feature_engine_builds_ready_joint_alignment(tmp_path):
@@ -174,6 +391,64 @@ def test_feature_engine_builds_ready_joint_alignment(tmp_path):
     assert row["venue_aligned_fraction"] == pytest.approx(1.0)
     assert row["kalshi_pressure_side"] > 0
     assert row["joint_alignment"] == 1
+    assert row["lead_lag_candidate"] == 0
+
+
+def test_feature_engine_builds_external_lead_kalshi_lag_candidate(tmp_path):
+    config = _config(str(tmp_path / "marketlead.sqlite3"))
+    engine = MarketLeadFeatureEngine(config)
+    engine.build(
+        asset="BTC",
+        analysis=_analysis(),
+        canonical=_Canonical(public=_public(100.0, (100.0, 100.0, 100.0))),
+        now=100.0,
+        official_index={"index_px": 100.0},
+        kalshi=_kalshi(),
+    )
+    lagging_kalshi = {
+        **_kalshi(),
+        "yes_microprice_edge_cents": -0.4,
+        "book_delta_pressure_yes_15s": -0.5,
+        "trade_imbalance_yes_15s": -0.6,
+    }
+    row = engine.build(
+        asset="BTC",
+        analysis=_analysis(),
+        canonical=_Canonical(public=_public(115.0, (100.3, 100.4, 100.2))),
+        now=115.0,
+        official_index={"index_px": 100.1},
+        kalshi=lagging_kalshi,
+    )
+    payload = json.loads(row["features_json"])
+
+    assert row["evidence_status"] == "READY"
+    assert row["proxy_distance_side_bps"] > 0
+    assert row["venue_impulse_side"] > 0
+    assert row["kalshi_pressure_side"] <= -0.10
+    assert row["joint_alignment"] == 0
+    assert row["lead_lag_candidate"] == 1
+    assert payload["candidate"]["lead_lag_candidate"] is True
+    assert payload["candidate"]["rule_version"] == "external-lead-kalshi-lag-v1"
+
+
+def test_feature_engine_strict_freshness_rejects_stale_kalshi_events(tmp_path):
+    config = _config(
+        str(tmp_path / "marketlead.sqlite3"), kalshi_stale_seconds=3.0
+    )
+    row = MarketLeadFeatureEngine(config).build(
+        asset="BTC",
+        analysis=_analysis(),
+        canonical=_Canonical(public=_public(100.0, (100.2, 100.3, 100.1))),
+        now=100.0,
+        official_index={"index_px": 100.0},
+        kalshi=_lagging_kalshi(age=3.01),
+    )
+    payload = json.loads(row["features_json"])
+
+    assert row["evidence_status"] == "PARTIAL"
+    assert row["lead_lag_candidate"] == 0
+    assert "KALSHI_EVENTS_STALE" in row["missing_reasons_json"]
+    assert payload["kalshi_freshness"]["fresh"] is False
 
 
 def test_feature_engine_fails_closed_with_missing_lanes(tmp_path):
@@ -498,8 +773,432 @@ def test_runner_records_once_and_resolves_without_delivery_surface(tmp_path):
     assert status["trades"] is False
     report = build_report(db_path)
     assert report["target_status"] == "COLLECTING"
+    assert report["evaluation_kind"] == "PROSPECTIVE_IMMUTABLE_FIXED_BLOCK_AUDIT"
+    assert report["promotion_eligible"] is False
+    assert report["retrospective_diagnostic"]["promotion_eligible"] is False
+    assert report["historical_candidate_metrics_promotion_eligible"] is False
     assert report["coverage"]["observations"] == 1
-    assert report["candidate_overall"]["resolved"] == 1
+    assert report["candidate_overall"]["resolved"] == 0
+    assert report["legacy_joint_alignment_overall"]["resolved"] == 1
+
+
+def test_prospective_audit_collects_atomically_while_notifications_are_off(tmp_path):
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            v3_notify_enabled=False,
+            kalshi_stale_seconds=3.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+    )
+    runner.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={
+            "BTC": _Canonical(public=_public(100.0, (100.2, 100.3, 100.1)))
+        },
+        now=100.0,
+    )
+
+    decisions = runner.ledger.audit_decision_rows(
+        "marketlead-prospective-audit-v2"
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["qualified"] == 1
+    assert json.loads(decisions[0]["reason_codes_json"]) == []
+    assert decisions[0]["created_at"] >= runner._audit_registration["registered_at"]
+    assert runner.ledger.notification_rows() == []
+    audit = runner.status()["prospective_audit"]
+    assert audit["prospective_only"] is True
+    assert audit["backfill_allowed"] is False
+    assert audit["decisions"] == 1
+    assert audit["target_status"] == "COLLECTING"
+
+
+def test_prospective_audit_records_rejection_reasons_without_alerting(tmp_path):
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            v3_notify_enabled=True,
+            v3_min_proxy_distance_bps=999.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=lambda *args, **kwargs: pytest.fail(
+            "rejected audit row must not alert"
+        ),
+    )
+    runner.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={
+            "BTC": _Canonical(public=_public(100.0, (100.2, 100.3, 100.1)))
+        },
+        now=100.0,
+    )
+
+    decision = runner.ledger.audit_decision_rows()[0]
+    assert decision["qualified"] == 0
+    assert "PROXY_DISTANCE_BELOW_MIN" in json.loads(
+        decision["reason_codes_json"]
+    )
+    report = runner.status()["prospective_audit"]
+    assert report["qualified"] == 0
+    assert report["reject_reason_counts"]["PROXY_DISTANCE_BELOW_MIN"] == 1
+
+
+def test_new_rule_cannot_backfill_an_observation_captured_by_old_rule(tmp_path):
+    db_path = str(tmp_path / "marketlead.sqlite3")
+    providers = {
+        "microstructure_provider": lambda ticker, now=None: _lagging_kalshi(),
+        "index_provider": lambda asset, spot, now: {"index_px": 100.0},
+        "market_source_provider": lambda asset, now: {},
+    }
+    first = MarketLeadRunner(
+        _config(db_path, v3_rule_version="audit-rule-v1"), **providers
+    )
+    first.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={
+            "BTC": _Canonical(
+                ticker="KXBTC-OLD",
+                public=_public(100.0, (100.2, 100.3, 100.1)),
+            )
+        },
+        now=100.0,
+    )
+
+    second = MarketLeadRunner(
+        _config(db_path, v3_rule_version="audit-rule-v2"), **providers
+    )
+    second.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={
+            "BTC": _Canonical(
+                ticker="KXBTC-OLD",
+                public=_public(101.0, (100.2, 100.3, 100.1)),
+            )
+        },
+        now=101.0,
+    )
+    assert second.ledger.audit_decision_rows("audit-rule-v2") == []
+
+    second.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={
+            "BTC": _Canonical(
+                ticker="KXBTC-NEW",
+                public=_public(102.0, (100.2, 100.3, 100.1)),
+            )
+        },
+        now=102.0,
+    )
+    decisions = second.ledger.audit_decision_rows("audit-rule-v2")
+    assert [row["ticker"] for row in decisions] == ["KXBTC-NEW"]
+
+
+def test_changed_threshold_requires_new_rule_version_and_fails_closed(tmp_path):
+    db_path = str(tmp_path / "marketlead.sqlite3")
+    first = MarketLeadRunner(
+        _config(
+            db_path,
+            v3_rule_version="frozen-audit-v1",
+            v3_min_proxy_distance_bps=5.0,
+        )
+    )
+    assert first._audit_registration["valid"] is True
+
+    deliveries = []
+    changed = MarketLeadRunner(
+        _config(
+            db_path,
+            v3_rule_version="frozen-audit-v1",
+            v3_min_proxy_distance_bps=6.0,
+            v3_notify_enabled=True,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=lambda text, **kwargs: deliveries.append(text) or {},
+    )
+    assert changed._audit_registration["valid"] is False
+    assert changed._audit_registration["error"] == "immutable_rule_config_mismatch"
+    changed.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={
+            "BTC": _Canonical(
+                ticker="KXBTC-CHANGED",
+                public=_public(100.0, (100.2, 100.3, 100.1)),
+            )
+        },
+        now=100.0,
+    )
+    assert len(changed.ledger.rows()) == 1
+    assert changed.ledger.audit_decision_rows("frozen-audit-v1") == []
+    assert deliveries == []
+    assert changed.status()["notifies"] is False
+
+
+def test_prospective_audit_scores_correlated_assets_as_one_fixed_window(tmp_path):
+    base = time.time()
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            v3_rule_version="fixed-block-audit-v1",
+            audit_block_windows=2,
+            audit_min_blocks=1,
+            audit_accuracy_min=0.50,
+            audit_wilson_lb_min=0.0,
+            kalshi_stale_seconds=3.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+    )
+    tickers: list[tuple[str, str]] = []
+    for offset in (0.0, 900.0):
+        now = base + offset
+        canonicals = {}
+        for asset in ("BTC", "ETH"):
+            ticker = f"KX{asset}-{int(offset)}"
+            canonical = _Canonical(
+                ticker=ticker,
+                public=_public(now, (100.2, 100.3, 100.1)),
+            )
+            canonical.settlement_time = now + 780.0
+            canonicals[asset] = canonical
+            tickers.append((ticker, "NO" if offset == 0.0 and asset == "ETH" else "YES"))
+        runner.observe(
+            analyses={"BTC": _analysis(), "ETH": _analysis()},
+            canonicals=canonicals,
+            now=now,
+        )
+    runner.resolve_settled(
+        [{"ticker": ticker, "result": result} for ticker, result in tickers],
+        base + 1800.0,
+    )
+
+    report = runner.ledger.prospective_audit_report(
+        "fixed-block-audit-v1",
+        block_windows=99,
+        min_blocks=99,
+        accuracy_min=0.99,
+        wilson_lb_min=0.99,
+    )
+    assert report["row_metrics"]["resolved"] == 4
+    assert report["row_metrics"]["wins"] == 3
+    assert report["window_metrics"]["resolved"] == 2
+    assert report["window_metrics"]["wins"] == 1
+    assert report["blocks"][0]["windows"] == 2
+    assert report["blocks"][0]["complete"] is True
+    assert report["requirements"]["block_windows"] == 2
+    assert report["requirements"]["minimum_complete_blocks"] == 1
+    assert report["requirements"]["accuracy_each_complete_block"] == 0.50
+    assert report["target_status"] == "PASS"
+
+    decision_id = runner.ledger.audit_decision_rows("fixed-block-audit-v1")[0]["id"]
+    with sqlite3.connect(runner.config.db_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE marketlead_audit_decisions SET qualified=0 WHERE id=?",
+                (decision_id,),
+            )
+    with sqlite3.connect(runner.config.db_path) as connection:
+        connection.execute(
+            "UPDATE marketlead_observations SET config_hash='tampered' WHERE ticker=?",
+            (tickers[0][0],),
+        )
+    assert runner.ledger.prospective_audit_report(
+        "fixed-block-audit-v1"
+    )["target_status"] == "INVALID"
+
+
+def test_runner_queues_one_precision_v3_alert_with_durable_dedup(tmp_path):
+    deliveries = []
+
+    def sender(text, *, idempotency_key, expires_at):
+        deliveries.append((text, idempotency_key, expires_at))
+        return {"outbox_status": "PENDING", "delivered": False, "error": None}
+
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            v3_notify_enabled=True,
+            kalshi_stale_seconds=3.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=sender,
+        notification_status_provider=lambda key: "PENDING",
+    )
+    canonical = _Canonical(public=_public(100.0, (100.2, 100.3, 100.1)))
+
+    runner.observe(
+        analyses={"BTC": _analysis()}, canonicals={"BTC": canonical}, now=100.0
+    )
+    runner.observe(
+        analyses={"BTC": _analysis()}, canonicals={"BTC": canonical}, now=101.0
+    )
+
+    assert len(deliveries) == 1
+    text, key, expires_at = deliveries[0]
+    assert key == (
+        "marketlead-test:marketlead:v3:marketlead-prospective-audit-v2:"
+        "BTC:2111112:780"
+    )
+    assert expires_at == canonical.settlement_time
+    assert "V3 MARKETLEAD PROSPECTIVE AUDIT 13M" in text
+    assert "marketlead-prospective-audit-v2" in text
+    assert "prospective paper-only monitor; no order placed" in text
+    notifications = runner.ledger.notification_rows()
+    assert len(notifications) == 1
+    assert notifications[0]["status"] == "QUEUED_RETRY"
+    status = runner.status()
+    assert status["notifies"] is True
+    assert status["trades"] is False
+    assert status["v3_notifications"]["counts"] == {"QUEUED_RETRY": 1}
+    assert status["notification_filter"]["proxy_distance_side_bps_min"] == 5.0
+    assert status["notification_filter"]["venue_impulse_side_min"] == 0.20
+    assert status["notification_filter"]["kalshi_pressure_side_max"] == -0.20
+    assert status["notification_guard"]["auto_muted"] is False
+
+
+def test_runner_precision_gate_rejects_weak_candidate_but_keeps_data(tmp_path):
+    deliveries = []
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            v3_notify_enabled=True,
+            v3_min_proxy_distance_bps=999.0,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=lambda text, **kwargs: deliveries.append(text) or {},
+        notification_status_provider=lambda key: None,
+    )
+    runner.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={"BTC": _Canonical(public=_public(100.0, (100.2, 100.3, 100.1)))},
+        now=100.0,
+    )
+
+    assert len(runner.ledger.rows()) == 1
+    assert runner.ledger.rows()[0]["lead_lag_candidate"] == 1
+    assert runner.ledger.notification_rows() == []
+    assert deliveries == []
+
+
+def test_runner_auto_mutes_precision_alerts_below_live_accuracy_bar(tmp_path):
+    deliveries = []
+    runner = MarketLeadRunner(
+        _config(
+            str(tmp_path / "marketlead.sqlite3"),
+            v3_notify_enabled=True,
+            v3_guard_min_resolved=8,
+            v3_guard_accuracy_min=0.80,
+        ),
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=lambda text, **kwargs: deliveries.append(text) or {},
+        notification_status_provider=lambda key: None,
+    )
+    runner.ledger.notification_performance = lambda *args, **kwargs: {
+        "available": True,
+        "resolved": 8,
+        "wins": 6,
+        "losses": 2,
+        "accuracy": 0.75,
+        "gross_pnl_cents": -10.0,
+    }
+    runner.observe(
+        analyses={"BTC": _analysis()},
+        canonicals={"BTC": _Canonical(public=_public(100.0, (100.2, 100.3, 100.1)))},
+        now=100.0,
+    )
+
+    status = runner.status()
+    assert status["notification_configured"] is True
+    assert status["notifies"] is False
+    assert status["notification_guard"]["auto_muted"] is True
+    assert runner.ledger.notification_rows() == []
+    assert deliveries == []
+
+
+def test_runner_recovers_failed_v3_enqueue_after_restart(tmp_path):
+    db_path = str(tmp_path / "marketlead.sqlite3")
+    base = time.time()
+    canonical = _Canonical(public=_public(base, (100.2, 100.3, 100.1)))
+    canonical.settlement_time = base + 780.0
+    config = _config(
+        db_path,
+        v3_notify_enabled=True,
+        v3_notify_retry_seconds=0.0,
+        kalshi_stale_seconds=3.0,
+    )
+    first = MarketLeadRunner(
+        config,
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=lambda *args, **kwargs: {
+            "delivered": False,
+            "error": "outbox_unavailable",
+        },
+        notification_status_provider=lambda key: None,
+    )
+    first.observe(
+        analyses={"BTC": _analysis()}, canonicals={"BTC": canonical}, now=base
+    )
+    assert first.ledger.notification_rows()[0]["status"] == "DELIVERY_FAILED"
+
+    recovered = []
+    second = MarketLeadRunner(
+        config,
+        microstructure_provider=lambda ticker, now=None: _lagging_kalshi(),
+        index_provider=lambda asset, spot, now: {"index_px": 100.0},
+        market_source_provider=lambda asset, now: {},
+        notification_sender=lambda text, **kwargs: (
+            recovered.append(kwargs["idempotency_key"])
+            or {"outbox_status": "PENDING", "delivered": False}
+        ),
+        notification_status_provider=lambda key: "PENDING",
+    )
+    expected_key = (
+        "marketlead-test:marketlead:v3:marketlead-prospective-audit-v2:BTC:"
+        f"{int(canonical.settlement_time // 900)}:780"
+    )
+
+    assert recovered == [expected_key]
+    assert second.ledger.notification_rows()[0]["status"] == "QUEUED_RETRY"
+
+
+def test_marketlead_card_is_monitoring_only():
+    text = build_marketlead_alert({
+        "asset": "BTC",
+        "predicted_side": "YES",
+        "ticker": "KXBTC-TEST",
+        "entry_ask_cents": 68.0,
+        "paper_limit_cents": 69.0,
+        "paper_limit_touched": 1,
+        "kalshi_book_age_seconds": 0.2,
+        "kalshi_event_age_seconds": 0.1,
+        "proxy_distance_side_bps": 4.2,
+        "venue_impulse_side": 0.4,
+        "rti_proxy_source_count": 2,
+        "venue_source_count": 2,
+        "kalshi_pressure_side": -0.3,
+        "features_json": json.dumps({
+            "candidate": {"kalshi_pressure_side_max": -0.10}
+        }),
+    })
+
+    assert "PAPER WATCH YES" in text
+    assert "no order placed" in text
+    assert "BUY" not in text
 
 
 def test_runner_exposes_live_source_freshness_status(tmp_path):

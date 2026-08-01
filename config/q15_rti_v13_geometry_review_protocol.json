@@ -1,0 +1,56 @@
+{
+  "protocol_id": "q15-rti-v13-outcome-blind-geometry-review-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_30_WINDOW_V13_FEATURE_STATISTICS",
+  "preregistered_at": "2026-07-22T16:36:26Z",
+  "applies_to_design_id": "q15-rti-market-residual-cohort-conditioned-compact-v13",
+  "applies_to_design_sha256": "adc900b5882567446cb3d4a8f5fc0cb795e278dd38db2c6179e54cc83fc673ed",
+  "evidence_available_at_preregistration": {
+    "complete_executable_close_windows": 1,
+    "feature_statistics_inspected": false,
+    "correlation_statistics_inspected": false,
+    "outcome_labels_read": false,
+    "model_fit_performed": false,
+    "performance_metrics_inspected": false
+  },
+  "review_trigger": {
+    "complete_executable_close_windows": 30,
+    "same_seven_assets_required_per_close": true,
+    "partial_close_windows_forbidden": true,
+    "timestamp_alignment_failures_must_equal": 0,
+    "nonfinite_feature_values_must_equal": 0
+  },
+  "fixed_checks": {
+    "pairwise_absolute_correlation_ceiling": 0.95,
+    "exact_signed_duplicate_pairs_must_equal": 0,
+    "condition_number_nonzero_subspace_maximum": 50.0,
+    "btc_conditioned_feature_must_be_constant_zero": true,
+    "btc_active_feature_count_maximum": 19,
+    "btc_rank_deficiency_vs_active_features_must_equal": 0,
+    "non_btc_rank_deficiency_vs_active_features_must_equal": 0,
+    "btc_projected_train_rows_per_active_feature_minimum": 4.7,
+    "non_btc_projected_train_rows_per_active_feature_minimum": 10.0
+  },
+  "conditioned_feature": {
+    "name": "cross_asset_btc_minus_non_btc_median_non_btc_only_60s",
+    "expected_btc_value": 0.0,
+    "purpose": "remove the V12 BTC structural alias without removing the non-BTC transfer-cohort regime signal"
+  },
+  "failure_policy": {
+    "any_failed_check_requires_manual_diagnosis": true,
+    "new_successor_requires_new_preregistration": true,
+    "v11_v12_and_v13_remain_frozen_parallel_controls": true,
+    "historical_credit_allowed": false,
+    "automatic_design_creation_allowed": false,
+    "automatic_feature_removal_allowed": false,
+    "automatic_threshold_change_allowed": false,
+    "automatic_refit_allowed": false,
+    "automatic_activation_allowed": false,
+    "automatic_promotion_allowed": false
+  },
+  "report_only": true,
+  "outcome_labels_forbidden": true,
+  "model_fit_forbidden": true,
+  "entry_policy_changes_forbidden": true,
+  "notification_eligible": false,
+  "real_trading_allowed": false
+}

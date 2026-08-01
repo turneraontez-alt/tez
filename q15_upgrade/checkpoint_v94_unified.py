@@ -159,19 +159,86 @@ def _normalize_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
 
 
-def _walk(node: Any, depth: int = 0) -> Iterable[tuple[str, Any]]:
-    if depth > 6:
+_MAX_WALK_DEPTH = 6
+# A bridged live payload can legitimately contain 600 nine-field candle rows,
+# plus separate short-cadence histories and analysis metadata.  Fifty thousand
+# leaves ample room for that shape while still bounding a corrupted/combined
+# graph that could otherwise monopolize the refresh loop.
+_MAX_WALK_ITEMS = 50_000
+_MAX_WALK_SEQUENCE_ITEMS = 500
+
+
+def _walk(
+    node: Any,
+    depth: int = 0,
+    *,
+    _seen: set[int] | None = None,
+    _budget: list[int] | None = None,
+    _truncated: list[bool] | None = None,
+) -> Iterable[tuple[str, Any]]:
+    """Walk a snapshot once, with hard bounds on adversarial object graphs.
+
+    Live snapshots can contain shared caches and, occasionally, back-references.
+    The old depth-only guard revisited those objects along every path, making a
+    shallow cyclic/shared graph grow exponentially.  The mutable budget is
+    shared by the whole depth-first traversal, while ``_seen`` ensures a
+    container's first position remains authoritative.
+    """
+    if depth > _MAX_WALK_DEPTH or not isinstance(node, (Mapping, list, tuple)):
         return
+    if _seen is None:
+        _seen = set()
+    if _budget is None:
+        _budget = [_MAX_WALK_ITEMS]
+    if _truncated is None:
+        _truncated = [False]
+    marker = id(node)
+    if marker in _seen:
+        return
+    if _budget[0] <= 0:
+        _truncated[0] = True
+        return
+    _seen.add(marker)
+
     if isinstance(node, Mapping):
-        for key, value in node.items():
+        iterator = iter(node.items())
+        while True:
+            try:
+                key, value = next(iterator)
+            except StopIteration:
+                return
+            if _budget[0] <= 0:
+                # We observed that another item exists but deliberately do not
+                # yield it.  _first_value uses this signal to avoid promoting an
+                # earlier partial match over an exact match hidden past the cap.
+                _truncated[0] = True
+                return
+            _budget[0] -= 1
             normalized = _normalize_key(key)
             yield normalized, value
             if isinstance(value, (Mapping, list, tuple)):
-                yield from _walk(value, depth + 1)
-    elif isinstance(node, (list, tuple)):
-        for value in node[:500]:
+                yield from _walk(
+                    value, depth + 1, _seen=_seen, _budget=_budget,
+                    _truncated=_truncated,
+                )
+    else:
+        iterator = iter(node)
+        inspected = 0
+        while inspected < _MAX_WALK_SEQUENCE_ITEMS:
+            try:
+                value = next(iterator)
+            except StopIteration:
+                return
+            if _budget[0] <= 0:
+                _truncated[0] = True
+                return
+            inspected += 1
+            _budget[0] -= 1
             if isinstance(value, (Mapping, list, tuple)):
-                yield from _walk(value, depth + 1)
+                yield from _walk(
+                    value, depth + 1, _seen=_seen, _budget=_budget,
+                    _truncated=_truncated,
+                )
 
 
 def _first_value(snapshot: Mapping[str, Any], aliases: Sequence[str]) -> Any:
@@ -179,16 +246,27 @@ def _first_value(snapshot: Mapping[str, Any], aliases: Sequence[str]) -> Any:
     for alias in aliases:
         if alias in snapshot and snapshot.get(alias) is not None:
             return snapshot.get(alias)
-    exact: list[Any] = []
-    partial: list[Any] = []
-    for key, value in _walk(snapshot):
+    partial: Any = None
+    has_partial = False
+    budget = [_MAX_WALK_ITEMS]
+    truncated = [False]
+    for key, value in _walk(snapshot, _budget=budget, _truncated=truncated):
         if value is None:
             continue
         if key in aliases_normalized:
-            exact.append(value)
-        elif any(alias in key for alias in aliases_normalized):
-            partial.append(value)
-    return exact[0] if exact else partial[0] if partial else None
+            # The first exact depth-first match always wins, so continuing the
+            # walk cannot change the result.  A partial match is retained only
+            # as fallback because any later exact match has higher precedence.
+            return value
+        if not has_partial and any(alias in key for alias in aliases_normalized):
+            partial = value
+            has_partial = True
+    if truncated[0]:
+        # Exact matches outrank partial matches.  Once the hard cap cuts a walk
+        # short we cannot prove that no exact match remains, so fail
+        # conservatively and let the caller use its normal missing-value path.
+        return None
+    return partial if has_partial else None
 
 
 def _first_num(snapshot: Mapping[str, Any], aliases: Sequence[str]) -> float | None:
@@ -305,18 +383,27 @@ def _canonical_candles(
     cached: Sequence[Mapping[str, Any]] | None,
 ) -> list[dict[str, float]]:
     candidates: list[Sequence[Any]] = []
+    candidate_ids: set[int] = set()
+
+    def append_candidate(candidate: Sequence[Any]) -> None:
+        marker = id(candidate)
+        if marker in candidate_ids:
+            return
+        candidate_ids.add(marker)
+        candidates.append(candidate)
+
     if cached:
-        candidates.append(cached)
+        append_candidate(cached)
     for key in (
         "underlying_candles_5s", "underlying_candles", "spot_candles_5s",
         "spot_candles", "candles_5s", "candles", "ohlc", "ohlcv", "bars",
     ):
         value = snapshot.get(key)
         if isinstance(value, (list, tuple)):
-            candidates.append(value)
+            append_candidate(value)
     for key, value in _walk(snapshot):
         if isinstance(value, (list, tuple)) and any(token in key for token in ("candle", "ohlc", "bar")):
-            candidates.append(value)
+            append_candidate(value)
 
     merged: dict[float, dict[str, float]] = {}
     for candidate in candidates:

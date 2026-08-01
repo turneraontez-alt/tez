@@ -14,7 +14,32 @@ from typing import Any, Mapping
 from ..lineage import lineage_stamp
 from .config import MarketLeadConfig
 
-FEATURE_SCHEMA_VERSION = "q15-marketlead-evidence-v1"
+FEATURE_SCHEMA_VERSION = "q15-marketlead-evidence-v2"
+LEAD_LAG_RULE_VERSION = "external-lead-kalshi-lag-v1"
+
+
+def feature_lineage_config(config: MarketLeadConfig) -> dict[str, Any]:
+    """Single canonical definition of the inputs that shape evidence rows."""
+    return {
+        "mark_seconds": config.mark_seconds,
+        "min_proxy_sources": config.min_proxy_sources,
+        "min_venue_sources": config.min_venue_sources,
+        "proxy_sources": sorted(config.proxy_sources),
+        "require_live_proxy_sources": config.require_live_proxy_sources,
+        "source_stale_seconds": config.source_stale_seconds,
+        "transport_stale_seconds": config.transport_stale_seconds,
+        "source_future_tolerance_seconds": (
+            config.source_future_tolerance_seconds
+        ),
+        "max_source_spread_bps": config.max_source_spread_bps,
+        "sync_tolerance_seconds": config.sync_tolerance_seconds,
+        "max_proxy_dispersion_bps": config.max_proxy_dispersion_bps,
+        "history_seconds": config.history_seconds,
+        "lead_lag_rule_version": LEAD_LAG_RULE_VERSION,
+        "lead_lag_pressure_max": config.lead_lag_pressure_max,
+        "kalshi_stale_seconds": config.kalshi_stale_seconds,
+        "paper_limit_cents": config.paper_limit_cents,
+    }
 
 
 def _num(value: Any) -> float | None:
@@ -79,6 +104,15 @@ class MarketLeadFeatureEngine:
                     message_age is None
                     or message_age > max(0.0, self.config.transport_stale_seconds)
                 ):
+                    continue
+                # The BOOK's own age, not the transport's. `timestamp` above is
+                # `sample_timestamp`, stamped at read time, so `age` is always ~0 and can
+                # never see a stale book; heartbeats likewise keep `message_age` low after a
+                # level2 subscription silently dies. This is the only gate that rejects a
+                # frozen book being served as a live venue at quality 1.0.
+                book_stale_limit = max(0.0, getattr(self.config, "book_stale_seconds", 0.0))
+                book_age = _num(source.get("book_update_age_seconds"))
+                if book_stale_limit and book_age is not None and book_age > book_stale_limit:
                     continue
                 if (
                     best_bid is None
@@ -306,6 +340,14 @@ class MarketLeadFeatureEngine:
             entry_ask = _num(quote.get("ask_cents"))
         kalshi_row = dict(kalshi or {})
         kalshi_available = bool(kalshi_row.get("available"))
+        kalshi_book_age = _num(kalshi_row.get("book_age_seconds"))
+        kalshi_event_age = _num(kalshi_row.get("event_age_seconds"))
+        kalshi_fresh = bool(
+            kalshi_book_age is not None
+            and kalshi_event_age is not None
+            and kalshi_book_age <= max(0.0, self.config.kalshi_stale_seconds)
+            and kalshi_event_age <= max(0.0, self.config.kalshi_stale_seconds)
+        )
         pressure_yes = _num(kalshi_row.get("book_delta_pressure_yes_15s"))
         trade_yes = _num(kalshi_row.get("trade_imbalance_yes_15s"))
         micro_edge_yes = _num(kalshi_row.get("yes_microprice_edge_cents"))
@@ -335,6 +377,8 @@ class MarketLeadFeatureEngine:
             missing.append("VENUE_IMPULSE_INCOMPLETE")
         if not kalshi_available or kalshi_pressure_side is None:
             missing.append("KALSHI_EVENTS_INCOMPLETE")
+        elif not kalshi_fresh:
+            missing.append("KALSHI_EVENTS_STALE")
         limitations: list[str] = []
         if index_price is None:
             limitations.append("OFFICIAL_INDEX_GAP_UNAVAILABLE")
@@ -344,6 +388,17 @@ class MarketLeadFeatureEngine:
             and proxy_distance_side_bps is not None and proxy_distance_side_bps > 0
             and venue_impulse_side is not None and venue_impulse_side > 0
             and kalshi_pressure_side is not None and kalshi_pressure_side > 0
+        )
+        # A lead is useful before Kalshi has followed it. Requiring Kalshi
+        # pressure to agree (the legacy joint-alignment cohort) selected moves
+        # that were often already priced in. This prospective cohort instead
+        # requires external price/impulse agreement while Kalshi still lags.
+        lead_lag_candidate = bool(
+            evidence_status == "READY"
+            and proxy_distance_side_bps is not None and proxy_distance_side_bps > 0
+            and venue_impulse_side is not None and venue_impulse_side > 0
+            and kalshi_pressure_side is not None
+            and kalshi_pressure_side <= self.config.lead_lag_pressure_max
         )
         feature_payload = {
             "proxy": {
@@ -382,6 +437,28 @@ class MarketLeadFeatureEngine:
                 "max_proxy_dispersion_bps": self.config.max_proxy_dispersion_bps,
             },
             "kalshi": kalshi_row,
+            "kalshi_freshness": {
+                "book_age_seconds": kalshi_book_age,
+                "event_age_seconds": kalshi_event_age,
+                "max_age_seconds": self.config.kalshi_stale_seconds,
+                "fresh": kalshi_fresh,
+            },
+            "candidate": {
+                "rule_version": LEAD_LAG_RULE_VERSION,
+                "lead_lag_candidate": lead_lag_candidate,
+                "kalshi_pressure_side_max": self.config.lead_lag_pressure_max,
+                "proxy_distance_aligned": (
+                    proxy_distance_side_bps is not None
+                    and proxy_distance_side_bps > 0
+                ),
+                "venue_impulse_aligned": (
+                    venue_impulse_side is not None and venue_impulse_side > 0
+                ),
+                "kalshi_lagging": (
+                    kalshi_pressure_side is not None
+                    and kalshi_pressure_side <= self.config.lead_lag_pressure_max
+                ),
+            },
         }
         return {
             "system_version": self.config.system_version,
@@ -418,8 +495,8 @@ class MarketLeadFeatureEngine:
             "venue_leader": leader,
             "venue_leader_persistence": leader_persistence,
             "kalshi_available": 1 if kalshi_available else 0,
-            "kalshi_book_age_seconds": _num(kalshi_row.get("book_age_seconds")),
-            "kalshi_event_age_seconds": _num(kalshi_row.get("event_age_seconds")),
+            "kalshi_book_age_seconds": kalshi_book_age,
+            "kalshi_event_age_seconds": kalshi_event_age,
             "kalshi_yes_bid_cents": _num(kalshi_row.get("yes_bid_cents")),
             "kalshi_yes_ask_cents": _num(kalshi_row.get("yes_ask_cents")),
             "kalshi_microprice_yes_cents": _num(kalshi_row.get("yes_microprice_cents")),
@@ -442,32 +519,21 @@ class MarketLeadFeatureEngine:
             "paper_touch_price_cents": selected_ask if touched else None,
             "execution_status": "TOUCHED" if touched else "WAITING_TOUCH",
             "joint_alignment": 1 if joint_alignment else 0,
+            "lead_lag_candidate": 1 if lead_lag_candidate else 0,
             "evidence_status": evidence_status,
             "missing_reasons_json": json.dumps(missing, separators=(",", ":")),
             "limitations_json": json.dumps(limitations, separators=(",", ":")),
             "features_json": json.dumps(feature_payload, sort_keys=True, separators=(",", ":")),
             **lineage_stamp(
                 feature_schema_version=FEATURE_SCHEMA_VERSION,
-                config={
-                    "mark_seconds": self.config.mark_seconds,
-                    "min_proxy_sources": self.config.min_proxy_sources,
-                    "min_venue_sources": self.config.min_venue_sources,
-                    "proxy_sources": sorted(self.config.proxy_sources),
-                    "require_live_proxy_sources": (
-                        self.config.require_live_proxy_sources
-                    ),
-                    "source_stale_seconds": self.config.source_stale_seconds,
-                    "transport_stale_seconds": self.config.transport_stale_seconds,
-                    "source_future_tolerance_seconds": (
-                        self.config.source_future_tolerance_seconds
-                    ),
-                    "max_source_spread_bps": self.config.max_source_spread_bps,
-                    "sync_tolerance_seconds": self.config.sync_tolerance_seconds,
-                    "max_proxy_dispersion_bps": self.config.max_proxy_dispersion_bps,
-                    "paper_limit_cents": self.config.paper_limit_cents,
-                },
+                config=feature_lineage_config(self.config),
             ),
         }
 
 
-__all__ = ["FEATURE_SCHEMA_VERSION", "MarketLeadFeatureEngine"]
+__all__ = [
+    "FEATURE_SCHEMA_VERSION",
+    "LEAD_LAG_RULE_VERSION",
+    "feature_lineage_config",
+    "MarketLeadFeatureEngine",
+]

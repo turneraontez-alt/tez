@@ -1,0 +1,17 @@
+{
+  "version": "q15-rti-scheduled-maintenance-v1",
+  "recorded_at": "2026-07-23T10:17:47Z",
+  "source": "user_confirmed_local_maintenance",
+  "outcome_labels_used": false,
+  "changes_audit_credit": false,
+  "changes_features_models_thresholds_or_gates": false,
+  "windows": [
+    {
+      "start_close_time_inclusive": 1784790000.0,
+      "end_close_time_inclusive": 1784797200.0,
+      "local_display": "2026-07-23 03:00-05:00 America/New_York",
+      "reason": "scheduled_maintenance",
+      "audit_credit_allowed": false
+    }
+  ]
+}

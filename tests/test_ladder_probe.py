@@ -119,3 +119,17 @@ def test_ladder_disabled_is_noop(tmp_path, monkeypatch):
         seconds_remaining=600.0,
         now=1000.0,
     ) is False
+
+
+def test_ladder_watchdog_tracks_worker_not_sparse_capture_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_FEED_LADDER", "true")
+    probe = LadderProbe(db_path=str(tmp_path / "ladder.sqlite3"), client=FakeKalshi())
+    probe.start()
+    try:
+        health = probe.health()
+        assert health["worker_alive"] is True
+        assert health["last_capture_age_seconds"] is None
+        assert health["watchdog_age_seconds"] == 0.0
+        assert health["status"] == "running"
+    finally:
+        probe.stop()

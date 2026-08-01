@@ -1308,7 +1308,19 @@ class UltoimV2Runner:
             from q15_upgrade.executor import get_executor
             ex = get_executor()
             if ex is not None and exit_value is not None:
-                ex.on_exit(str(cand.get("ticker") or ""), window_key, int(round(exit_value)))
+                ticker = str(cand.get("ticker") or "")
+                res = ex.on_exit(ticker, window_key, int(round(exit_value)))
+                # The defensive exit is the ~84%-accurate protection on an open
+                # position; a SKIPPED one used to leave no trace at all because
+                # this result was discarded. Log the outcome either way.
+                if res.get("placed"):
+                    logger.info("executor exit placed %s w%s: %s x%s (cancel=%s)",
+                                ticker, window_key, res.get("mode"), res.get("count"),
+                                (res.get("cancel") or {}).get("ok"))
+                else:
+                    logger.warning(
+                        "executor exit NOT placed %s w%s: %s — verify the position "
+                        "against the account", ticker, window_key, res.get("reason"))
         except Exception:
             logger.exception("executor on_exit hook failed (non-fatal)")
 

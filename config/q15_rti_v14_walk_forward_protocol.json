@@ -1,0 +1,99 @@
+{
+  "protocol_id": "q15-rti-v14-nested-safe-residual-expanding-walk-forward-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_ANY_V14_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-22T17:42:00Z",
+  "applies_to_design_id": "q15-rti-market-anchored-nested-safe-residual-v14",
+  "applies_to_design_sha256": "aa5efa9a986dc575ee4e358777cd2394b38550ad7328154b58a7d06bf55c3dda",
+  "source_successor_charter_id": "q15-rti-v14-nested-safe-residual-trust-preregistration-v1",
+  "source_successor_charter_sha256": "30d1d00af4cd6abac5d1775e8e722a39b49cb2849311eea7f304c1b2bd2ec670",
+  "outcome_labels_used_for_protocol": false,
+  "performance_metrics_inspected_before_preregistration": false,
+  "feature_rows_may_be_inspected_without_labels": true,
+  "changes_features_model_or_hyperparameters": false,
+  "paper_only": true,
+  "real_trading_allowed": false,
+  "notification_eligible": false,
+  "automatic_promotion": false,
+  "automatic_hyperparameter_search": false,
+  "fold_policy": "EXPANDING_TRAIN_NEXT_CONTIGUOUS_BLOCK",
+  "same_close_assets_must_share_fold": true,
+  "btc_and_non_btc_must_be_evaluated_separately": true,
+  "uses_only_preregistered_train_and_calibration_windows": true,
+  "untouched_test_windows_forbidden": true,
+  "temporary_fold_models_are_not_deployable_artifacts": true,
+  "residual_trust_selection": {
+    "architecture": "nested_chronological_safe_residual_trust_v1",
+    "fixed_factor_grid": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "fallback_factor": 0.0,
+    "factor_zero_is_exact_market_prior": true,
+    "selection_metric": "minimum_mean_of_relative_brier_and_log_loss_delta",
+    "selection_requires_observed_brier_delta_below_zero": true,
+    "selection_requires_observed_log_loss_delta_below_zero": true,
+    "selection_requires_brier_bootstrap_one_sided_upper_below_zero": true,
+    "selection_requires_log_loss_bootstrap_one_sided_upper_below_zero": true,
+    "tie_breaker": "smaller_factor",
+    "bootstrap": {
+      "version": "q15-rti-paired-close-window-bootstrap-v1",
+      "cluster_key": "close_time",
+      "resamples": 5000,
+      "confidence_level": 0.9,
+      "random_seed": 2026072202,
+      "minimum_mean_brier_improvement": 0.0,
+      "minimum_mean_log_loss_improvement": 0.0,
+      "model_minus_market_loss_delta": true,
+      "same_close_assets_resampled_together": true,
+      "one_sided_upper_bound_reported": true,
+      "two_sided_interval_reported": true
+    },
+    "inner_folds": {
+      "NON_BTC_TRANSFER": {"initial_train_windows": 12, "validation_block_windows": 4},
+      "BTC": {"initial_train_windows": 30, "validation_block_windows": 10}
+    },
+    "same_close_assets_must_share_inner_fold": true,
+    "inner_validation_strictly_after_inner_training": true,
+    "factor_reselected_inside_each_outer_training_period": true,
+    "outer_validation_labels_used_for_factor_selection": false,
+    "calibration_labels_used_for_factor_selection": false,
+    "untouched_test_labels_used_for_factor_selection": false
+  },
+  "paired_close_window_bootstrap": {
+    "version": "q15-rti-paired-close-window-bootstrap-v1",
+    "cluster_key": "close_time",
+    "resamples": 5000,
+    "confidence_level": 0.9,
+    "random_seed": 2026072201,
+    "minimum_mean_brier_improvement": 0.001,
+    "minimum_mean_log_loss_improvement": 0.001,
+    "model_minus_market_loss_delta": true,
+    "same_close_assets_resampled_together": true,
+    "one_sided_upper_bound_reported": true,
+    "two_sided_interval_reported": true
+  },
+  "cohorts": {
+    "BTC": {
+      "initial_train_windows": 60,
+      "validation_block_windows": 20,
+      "fold_count": 3
+    },
+    "NON_BTC_TRANSFER": {
+      "initial_train_windows": 24,
+      "validation_block_windows": 8,
+      "fold_count": 3
+    }
+  },
+  "gate": {
+    "aggregate_brier_must_strictly_beat_market": true,
+    "aggregate_log_loss_must_strictly_beat_market": true,
+    "every_fold_brier_must_not_worsen": true,
+    "every_fold_log_loss_must_not_worsen": true,
+    "aggregate_brier_bootstrap_upper_must_be_strictly_negative": true,
+    "aggregate_log_loss_bootstrap_upper_must_be_strictly_negative": true,
+    "aggregate_bootstrap_upper_must_clear_fixed_effect_floor": true,
+    "calibration_bootstrap_upper_must_be_strictly_negative": true,
+    "calibration_bootstrap_upper_must_clear_fixed_effect_floor": true,
+    "untouched_test_bootstrap_upper_must_be_strictly_negative": true,
+    "untouched_test_bootstrap_upper_must_clear_fixed_effect_floor": true,
+    "fallback_when_not_met": "KALSHI_MARKET_PRIOR",
+    "untouched_test_may_be_read_when_not_met": false
+  }
+}

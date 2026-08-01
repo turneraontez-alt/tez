@@ -79,8 +79,37 @@ def threshold_seconds() -> float:
     return _env_float("Q15_CYCLE_WATCHDOG_SECONDS", 10.0, 0.5, 3600.0)
 
 
-def feed_stale_seconds() -> float:
-    return _env_float("Q15_FEED_WATCHDOG_STALE_SECONDS", 300.0, 1.0, 86400.0)
+def feed_stale_thresholds() -> dict[str, float]:
+    """Optional per-feed stale thresholds.
+
+    Collectors run at different cadences (for example, live websocket messages
+    versus 15-second SQLite snapshots), so one global threshold either pages too
+    noisily or notices a stopped fast feed much too late.  The comma-separated
+    ``Q15_FEED_WATCHDOG_THRESHOLDS`` value accepts ``name=seconds`` entries and
+    falls back to ``Q15_FEED_WATCHDOG_STALE_SECONDS`` for unlisted feeds.
+    """
+    raw = os.environ.get("Q15_FEED_WATCHDOG_THRESHOLDS", "")
+    thresholds: dict[str, float] = {}
+    for part in raw.replace(";", ",").split(","):
+        if "=" not in part:
+            continue
+        name, value = (piece.strip() for piece in part.split("=", 1))
+        if not name:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds):
+            thresholds[name] = max(1.0, min(86400.0, seconds))
+    return thresholds
+
+
+def feed_stale_seconds(feed_name: str | None = None) -> float:
+    default = _env_float("Q15_FEED_WATCHDOG_STALE_SECONDS", 300.0, 1.0, 86400.0)
+    if feed_name is None:
+        return default
+    return feed_stale_thresholds().get(str(feed_name), default)
 
 
 def feed_grace_seconds() -> float:
@@ -406,12 +435,12 @@ def observe_feed_ages(feed_ages: dict[str, float | None], *, now: float | None =
     do not alert.
     """
     current = time.time() if now is None else float(now)
-    threshold = feed_stale_seconds()
     grace = feed_grace_seconds()
     with _pager_lock:
         feeds = _feed_state["feeds"]
         for name, raw_age in feed_ages.items():
             feed_name = str(name)
+            threshold = feed_stale_seconds(feed_name)
             age = _clean_age(raw_age)
             prev = dict(feeds.get(feed_name) or {})
             stale = bool(age is not None and age > threshold)
@@ -424,6 +453,7 @@ def observe_feed_ages(feed_ages: dict[str, float | None], *, now: float | None =
             stale_for = (current - stale_since) if stale_since is not None else 0.0
             feeds[feed_name] = {
                 "age_seconds": round(age, 3) if age is not None else None,
+                "stale_seconds": threshold,
                 "stale": stale,
                 "stale_for_seconds": round(max(0.0, stale_for), 3),
                 "stale_since_epoch": stale_since,
@@ -449,6 +479,7 @@ def feed_health() -> dict:
     return {
         "enabled": _env_bool("Q15_FEED_WATCHDOG_ENABLED", True),
         "stale_seconds": feed_stale_seconds(),
+        "stale_seconds_by_feed": feed_stale_thresholds(),
         "grace_seconds": feed_grace_seconds(),
         "cooldown_seconds": feed_alert_cooldown_seconds(),
         "last_alert_at_iso": _iso_from_epoch(last_alert_at) if last_alert_at else None,
@@ -486,7 +517,11 @@ def feed_alert_message(now: float | None = None) -> str | None:
     for name, info in ready:
         age = info.get("age_seconds")
         stale_for = info.get("stale_for_seconds")
-        lines.append(f"{name}: age {age:.0f}s, stale for {stale_for:.0f}s.")
+        threshold = info.get("stale_seconds")
+        lines.append(
+            f"{name}: age {age:.0f}s (limit {threshold:.0f}s), "
+            f"stale for {stale_for:.0f}s."
+        )
     lines.append("Check /api/health -> feed_watchdog and collector logs.")
     return "\n".join(lines)
 

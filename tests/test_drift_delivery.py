@@ -213,6 +213,51 @@ def test_outbox_does_not_treat_nonempty_failure_mapping_as_delivered(
     outbox.close()
 
 
+def test_generic_v3_outbox_producer_is_nonblocking_and_idempotent(
+    tmp_path, monkeypatch
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    _enable_outbox(tmp_path, monkeypatch)
+    expiry = time.time() + 600.0
+
+    first = runtime.enqueue_v3_outbox_notification(
+        "MarketLead paper watch",
+        idempotency_key="marketlead:test:key",
+        expires_at=expiry,
+    )
+    second = runtime.enqueue_v3_outbox_notification(
+        "MarketLead paper watch",
+        idempotency_key="marketlead:test:key",
+        expires_at=expiry,
+    )
+
+    assert first["outbox_status"] == "PENDING"
+    assert second["outbox_status"] == "PENDING"
+    assert telegram.sent == []
+    assert runtime.v3_outbox_notification_status("marketlead:test:key") == "PENDING"
+    assert len(runtime.get_drift_outbox().rows()) == 1
+
+
+def test_generic_v3_outbox_producer_fails_closed_without_outbox(
+    tmp_path, monkeypatch
+):
+    telegram = _Telegram()
+    _configure_runtime(tmp_path, monkeypatch, telegram)
+    monkeypatch.setenv("Q15_V3_DRIFT_OUTBOX_ENABLED", "false")
+
+    result = runtime.enqueue_v3_outbox_notification(
+        "MarketLead paper watch",
+        idempotency_key="marketlead:test:no-outbox",
+        expires_at=time.time() + 600.0,
+    )
+
+    assert result["delivered"] is False
+    assert result["error"] == "v3_outbox_required"
+    assert telegram.sent == []
+    assert runtime.v3_outbox_notification_status("marketlead:test:no-outbox") is None
+
+
 def test_disabled_rule_does_not_burn_drift_row_identity(tmp_path, monkeypatch):
     telegram = _Telegram()
     _configure_runtime(tmp_path, monkeypatch, telegram)

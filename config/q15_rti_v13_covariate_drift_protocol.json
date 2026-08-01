@@ -1,0 +1,63 @@
+{
+  "protocol_id": "q15-rti-v13-outcome-blind-60-window-covariate-drift-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_60_WINDOW_V13_CHRONOLOGICAL_STATISTICS",
+  "preregistered_at": "2026-07-22T16:36:26Z",
+  "applies_to_design_id": "q15-rti-market-residual-cohort-conditioned-compact-v13",
+  "applies_to_design_sha256": "adc900b5882567446cb3d4a8f5fc0cb795e278dd38db2c6179e54cc83fc673ed",
+  "evidence_available_at_preregistration": {
+    "complete_executable_close_windows": 1,
+    "chronological_split_statistics_inspected": false,
+    "feature_statistics_inspected": false,
+    "outcome_labels_read": false,
+    "model_fit_performed": false,
+    "performance_metrics_inspected": false,
+    "source_v12_30_window_drift_breaches": [
+      "BTC:feature:log1p_realized_volatility_bps",
+      "NON_BTC_TRANSFER:feature:log1p_realized_volatility_bps"
+    ]
+  },
+  "review_trigger": {
+    "minimum_complete_executable_close_windows": 60,
+    "same_close_assets_must_share_half": true,
+    "chronological_halves": true,
+    "odd_middle_close_assigned_to_late_half": true,
+    "minimum_close_windows_per_half": 30,
+    "partial_close_windows_forbidden": true,
+    "timestamp_alignment_failures_must_equal": 0,
+    "nonfinite_feature_values_must_equal": 0
+  },
+  "fixed_metrics": {
+    "standardized_mean_shift_formula": "(late_mean - early_mean) / max(overall_population_std, standardization_min_std)",
+    "absolute_standardized_mean_shift_maximum": 1.0,
+    "dispersion_ratio_formula": "late_population_std / early_population_std",
+    "dispersion_ratio_minimum": 0.25,
+    "dispersion_ratio_maximum": 4.0,
+    "both_halves_constant_dispersion_ratio": 1.0,
+    "one_half_constant_other_active_is_breach": true,
+    "missing_indicator_absolute_rate_shift_maximum": 0.25,
+    "market_prior_is_audited_with_same_mean_and_dispersion_thresholds": true,
+    "constant_features_excluded_from_mean_shift_breaches": true
+  },
+  "mandatory_focus": {
+    "feature": "log1p_realized_volatility_bps",
+    "review_both_cohorts": true,
+    "automatic_normalization_or_threshold_tuning_forbidden": true,
+    "outcome_conditioned_interpretation_forbidden": true
+  },
+  "breach_policy": {
+    "any_feature_or_market_prior_breach_marks_drift_detected": true,
+    "manual_root_cause_review_required": true,
+    "v11_v12_and_v13_remain_frozen": true,
+    "automatic_feature_removal_allowed": false,
+    "automatic_threshold_change_allowed": false,
+    "automatic_refit_allowed": false,
+    "automatic_activation_allowed": false,
+    "automatic_promotion_allowed": false,
+    "historical_credit_allowed": false
+  },
+  "report_only": true,
+  "outcome_labels_forbidden": true,
+  "model_fit_forbidden": true,
+  "notification_eligible": false,
+  "real_trading_allowed": false
+}

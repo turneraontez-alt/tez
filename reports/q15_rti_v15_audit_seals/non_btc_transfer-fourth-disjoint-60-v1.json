@@ -1,0 +1,254 @@
+{
+  "automatic_promotion": false,
+  "cohort": "NON_BTC_TRANSFER",
+  "cohort_assets": [
+    "BNB",
+    "DOGE",
+    "ETH",
+    "HYPE",
+    "SOL",
+    "XRP"
+  ],
+  "comparator_row_identity": {
+    "row_ids_sha256": "b3bfaa42c17334e471b9e891eaa922cc372b1bf8eb73d0326bad95bc19788c25",
+    "v14_receives_path_features": false,
+    "v15_market_v14_use_identical_rows": true
+  },
+  "complete_close_windows_available": 165,
+  "contract_identity": {
+    "mismatch_rows": 0,
+    "outcome_labels_read": false,
+    "rows": 360,
+    "version": "q15-rti-exact-kalshi-contract-identity-alignment-v1"
+  },
+  "design_id": "q15-rti-market-anchored-independent-path-augmented-residual-v15",
+  "design_sha256": "8c6facc23a0a56968c8a24408272f676923e78a7b51111a39122577d902f0ba7",
+  "evaluation_protocol_id": "q15-rti-v15-path-augmented-nested-safe-expanding-walk-forward-v1",
+  "evaluation_protocol_sha256": "e4233be29f211e314344d817de296ca3ef99f5026f67edcaadbe2a44d25b3536",
+  "excluded_authorized_close_times_sha256": "659ee001971378226a9c83c98a27c621d68c8a4558ff4855c4e048ac64f95830",
+  "excluded_authorized_close_windows": 144,
+  "excluded_authorized_row_ids_sha256": "df73a4c4729ae406f533c34ab8566df2d905a0920c9428ec56977b45c74161bb",
+  "excluded_authorized_rows": 864,
+  "features_models_thresholds_costs_and_gates_unchanged": true,
+  "first_selected_close_time": 1784894400.0,
+  "fold_manifest": {
+    "inner_validation_strictly_after_training": true,
+    "outer_fold_count": 3,
+    "outer_folds": [
+      {
+        "fold": 1,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "1b56f10c553a0f876cac120890e6aedb6188b8484692363d719b22d898dc1b11",
+            "train_close_windows": 12,
+            "validation_close_times_sha256": "6ddb4c0291d328f71c75c482c47aed5283dc0765766b798255bd000be4581865",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "b59f980566f0b0d954cd4f1020ecdf0e400a61d99afe6a554227eb363f7fb3fc",
+            "train_close_windows": 16,
+            "validation_close_times_sha256": "c34c52cdef33ab5483e5091fd11cc86bf067a3e538f8b7efcc6a3b2339af68ff",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 3,
+            "train_close_times_sha256": "8177948961e0524abad9b93c9f71867414013bc99f1ef48b32ac41268841ea55",
+            "train_close_windows": 20,
+            "validation_close_times_sha256": "c219f1b9907e37aa817a85a0491485844c58a0048d04266de4d9997849a6ac4e",
+            "validation_close_windows": 4
+          }
+        ],
+        "train_close_times_sha256": "fc08286d8ca0ccfda6cbb7686575cc98ac58c294c1fcd7e6749f89953668db72",
+        "train_close_windows": 24,
+        "validation_close_times_sha256": "b69487f444ffd505e37580c29779b710f774bfff45330232a89b6818fc1513af",
+        "validation_close_windows": 8
+      },
+      {
+        "fold": 2,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "1b56f10c553a0f876cac120890e6aedb6188b8484692363d719b22d898dc1b11",
+            "train_close_windows": 12,
+            "validation_close_times_sha256": "6ddb4c0291d328f71c75c482c47aed5283dc0765766b798255bd000be4581865",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "b59f980566f0b0d954cd4f1020ecdf0e400a61d99afe6a554227eb363f7fb3fc",
+            "train_close_windows": 16,
+            "validation_close_times_sha256": "c34c52cdef33ab5483e5091fd11cc86bf067a3e538f8b7efcc6a3b2339af68ff",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 3,
+            "train_close_times_sha256": "8177948961e0524abad9b93c9f71867414013bc99f1ef48b32ac41268841ea55",
+            "train_close_windows": 20,
+            "validation_close_times_sha256": "c219f1b9907e37aa817a85a0491485844c58a0048d04266de4d9997849a6ac4e",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 4,
+            "train_close_times_sha256": "fc08286d8ca0ccfda6cbb7686575cc98ac58c294c1fcd7e6749f89953668db72",
+            "train_close_windows": 24,
+            "validation_close_times_sha256": "52a7f740e1f196253289c98a5b699ebca13b1a0764b9fee420ebafb1ef9d7f8b",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 5,
+            "train_close_times_sha256": "ba1009150c013b311c98b1221cf561061f2deadb4f53b5e4e6c76fa8690cac33",
+            "train_close_windows": 28,
+            "validation_close_times_sha256": "885f9dc0b3090674e8e9c228234d29dcb4a73c2ae2a93ea5da964660f5d039ea",
+            "validation_close_windows": 4
+          }
+        ],
+        "train_close_times_sha256": "84316cb69c4a4428b8f96ab7cc7bc48c6b35de385e96690eabd8576a2ae8de53",
+        "train_close_windows": 32,
+        "validation_close_times_sha256": "46138276ac4d8637511eff950f56b22e992b53ec7233a9c09ed453317abaf7fb",
+        "validation_close_windows": 8
+      },
+      {
+        "fold": 3,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "1b56f10c553a0f876cac120890e6aedb6188b8484692363d719b22d898dc1b11",
+            "train_close_windows": 12,
+            "validation_close_times_sha256": "6ddb4c0291d328f71c75c482c47aed5283dc0765766b798255bd000be4581865",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "b59f980566f0b0d954cd4f1020ecdf0e400a61d99afe6a554227eb363f7fb3fc",
+            "train_close_windows": 16,
+            "validation_close_times_sha256": "c34c52cdef33ab5483e5091fd11cc86bf067a3e538f8b7efcc6a3b2339af68ff",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 3,
+            "train_close_times_sha256": "8177948961e0524abad9b93c9f71867414013bc99f1ef48b32ac41268841ea55",
+            "train_close_windows": 20,
+            "validation_close_times_sha256": "c219f1b9907e37aa817a85a0491485844c58a0048d04266de4d9997849a6ac4e",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 4,
+            "train_close_times_sha256": "fc08286d8ca0ccfda6cbb7686575cc98ac58c294c1fcd7e6749f89953668db72",
+            "train_close_windows": 24,
+            "validation_close_times_sha256": "52a7f740e1f196253289c98a5b699ebca13b1a0764b9fee420ebafb1ef9d7f8b",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 5,
+            "train_close_times_sha256": "ba1009150c013b311c98b1221cf561061f2deadb4f53b5e4e6c76fa8690cac33",
+            "train_close_windows": 28,
+            "validation_close_times_sha256": "885f9dc0b3090674e8e9c228234d29dcb4a73c2ae2a93ea5da964660f5d039ea",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 6,
+            "train_close_times_sha256": "84316cb69c4a4428b8f96ab7cc7bc48c6b35de385e96690eabd8576a2ae8de53",
+            "train_close_windows": 32,
+            "validation_close_times_sha256": "d5b3e898e76fa5aed723ceeae88ba29f4088dfc28066b6b81a744902ed423681",
+            "validation_close_windows": 4
+          },
+          {
+            "fold": 7,
+            "train_close_times_sha256": "04bed72c9d1a4d3f356a3611e75ceb33e197a6a20dc4bf7f54d0db3baf6d0afe",
+            "train_close_windows": 36,
+            "validation_close_times_sha256": "d8b8ab5deb6fe3c98645b0cecb393acf6149fb760ae4451ef9ce6ff900d484cf",
+            "validation_close_windows": 4
+          }
+        ],
+        "train_close_times_sha256": "1fd050b04c02e93beecd622c9435ec25465801394b0941dfd45af834d6f47c73",
+        "train_close_windows": 40,
+        "validation_close_times_sha256": "b41c1c061da544dd4ec56373780db73f92dce7e8e47288a0c8bf3287ea071efc",
+        "validation_close_windows": 8
+      }
+    ],
+    "outer_validation_strictly_after_training": true,
+    "pretest_close_times_sha256": "d17b0e3ec376190070c6fc85d1fd25f1bc52d2ce830cc345b0df1eadc781a848",
+    "pretest_close_windows": 48,
+    "same_close_assets_share_every_outer_and_inner_fold": true,
+    "untouched_test_close_times_sha256": "25c9884f42349295273d187128cb73c2cfd40f8a2a7735d02d51b800866f47f4",
+    "untouched_test_close_windows": 12
+  },
+  "fourth_population_labels_read_before_freeze": false,
+  "fourth_protocol_id": "q15-rti-v15-non-btc-fourth-disjoint-audit-v1",
+  "fourth_protocol_sha256": "baad00d291d83d4992059fd112eb2925b93ac384fb4ad460981dd14a6bb401db",
+  "generated_at": "2026-07-26T09:38:47.734712+00:00",
+  "geometry_payload_sha256": "d4831b2a68a0af6cb73af721829d2a0a54df2786451063110fa9be4ce58afe7c",
+  "label_access_policy": {
+    "manual_action_required": true,
+    "only_train_and_calibration_ids_may_be_opened_first": true,
+    "other_cohort_labels_remain_sealed": true,
+    "seal_and_reconstructed_feature_evidence_must_match_before_any_read": true,
+    "untouched_test_labels_remain_sealed_until_every_prior_gate_passes": true,
+    "untouched_test_requires_exclusive_one_shot_reservation": true
+  },
+  "last_selected_close_time": 1784952000.0,
+  "market_prior_consistency": {
+    "audit_version": "q15-rti-market-prior-outcome-blind-consistency-v1",
+    "maximum_absolute_delta": 5.551115123125783e-17,
+    "maximum_exact_capture_offset_seconds": 0.7416121959686279,
+    "maximum_kalshi_source_cutoff_delta_seconds": 0.0,
+    "outcome_labels_read": false,
+    "rows": 420,
+    "status": "PASS"
+  },
+  "minimum_complete_close_windows": 60,
+  "model_fit_performed": false,
+  "notification_eligible": false,
+  "outcome_columns_selected": false,
+  "outcome_labels_read": false,
+  "outcome_values_used_for_selection": false,
+  "paper_artifact_created": false,
+  "partitions": {
+    "calibration": {
+      "close_times_sha256": "a4ab27c5f65eeccbe05fb2ce120d16ba058f908c04cce520072b4b0b406b2eb0",
+      "close_windows": 12,
+      "first_close_time": 1784926800.0,
+      "last_close_time": 1784937600.0,
+      "name": "calibration",
+      "row_count": 72,
+      "row_ids_sha256": "fd0e5d620b012b7464b3da188c5fe7d5bde807562e8d19ccd1f6035510a57186"
+    },
+    "development": {
+      "close_times_sha256": "04bed72c9d1a4d3f356a3611e75ceb33e197a6a20dc4bf7f54d0db3baf6d0afe",
+      "close_windows": 36,
+      "first_close_time": 1784894400.0,
+      "last_close_time": 1784925900.0,
+      "name": "development",
+      "row_count": 216,
+      "row_ids_sha256": "259d21590e16977bcc8e560af8b18e9a645910f5236ab33ebbbe92a10b725366"
+    },
+    "untouched_test": {
+      "close_times_sha256": "25c9884f42349295273d187128cb73c2cfd40f8a2a7735d02d51b800866f47f4",
+      "close_windows": 12,
+      "first_close_time": 1784938500.0,
+      "last_close_time": 1784952000.0,
+      "name": "untouched_test",
+      "row_count": 72,
+      "row_ids_sha256": "bd06dba4c9cc25893b252a8415ac28b13a704ecab24d1b29550bf99aec2361ec"
+    }
+  },
+  "probability_scoring_performed": false,
+  "real_trading_allowed": false,
+  "seal_sha256": "ce0b40c032113b869f1b9918e8d1607d48b40b88237efa242300d0fafc0b9a94",
+  "seal_version": "q15-rti-v15-outcome-blind-audit-execution-seal-v3",
+  "selected_all_seven_source_rows": 420,
+  "selected_close_times_sha256": "a9704a72531f4922f04abb06a41c46365ff5c902c8cc38f4fb57d788c3c99ad0",
+  "selected_close_windows": 60,
+  "selected_feature_evidence_sha256": "70360d13dce3a977673a451dbec31c698ec3f4451e6c3635e934545d30390b89",
+  "selected_row_ids_sha256": "b3bfaa42c17334e471b9e891eaa922cc372b1bf8eb73d0326bad95bc19788c25",
+  "selected_rows": 360,
+  "selection": "EARLIEST_60_COMPLETE_V15_WINDOWS_DISJOINT_FROM_ALL_144_PREVIOUSLY_AUTHORIZED_CLOSE_WINDOWS",
+  "status": "READY_FOR_MANUAL_TRAIN_CAL_LABEL_ACCESS",
+  "train_calibration_label_access_authorized": false,
+  "train_calibration_row_ids_sha256": "a1919995c009bc504da4088165f74e8f6fc9afeb8479cd9467024afd5522a237",
+  "untouched_test_label_access_authorized": false,
+  "untouched_test_row_ids_sha256": "bd06dba4c9cc25893b252a8415ac28b13a704ecab24d1b29550bf99aec2361ec",
+  "windows_remaining": 0
+}

@@ -1,0 +1,1250 @@
+{
+  "accuracy_change_test": {
+    "forward_correct": 48,
+    "forward_n": 100,
+    "frozen_correct": 7,
+    "frozen_n": 10,
+    "method": "two_sided_fisher_exact",
+    "p_value": 0.3203084930494916,
+    "statistically_distinguishable_at_5pct": false
+  },
+  "audit_version": "q15-rti-forward-drift-audit-v1",
+  "freeze_close_time": 1784432700.0,
+  "generated_from_durable_ledger": true,
+  "integrity": {
+    "canonical_fee_slippage_economics_required": true,
+    "rejected_rows": 73,
+    "rejection_reasons": {
+      "evaluation_not_exact": 24,
+      "not_exact_record_kind": 23,
+      "quote_stale": 26
+    },
+    "same_close_assets_kept_in_same_period": true,
+    "source_rows": 1832,
+    "timestamp_alignment_required": true,
+    "valid_exact_rows": 1759
+  },
+  "interpretation_guardrails": {
+    "diagnosis_can_promote_new_threshold": false,
+    "historical_7_of_10_established_stable_edge": false,
+    "next_valid_test": "future durable prospective rows after a new rule freeze",
+    "post_freeze_period_has_been_seen": true,
+    "post_freeze_period_is_no_longer_untouched_for_new_rules": true
+  },
+  "paper_only": true,
+  "periods": {
+    "frozen_historical": {
+      "breakdowns": {
+        "by_acceleration": {
+          "missing": {
+            "accuracy": 0.7,
+            "assets": {
+              "BTC": 4,
+              "DOGE": 1,
+              "HYPE": 3,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.585089,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6050890000000001,
+            "correct": 7,
+            "ev_cents_per_contract": 9.4911,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 94.911,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 10,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 9.4911,
+            "trade_frequency_per_window": 0.2127659574468085,
+            "wilson_95_high": 0.8922087325936989,
+            "wilson_95_low": 0.39677814746114537
+          }
+        },
+        "by_asset": {
+          "BTC": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5722125,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.5922124999999999,
+            "correct": 2,
+            "ev_cents_per_contract": -9.22125,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -36.885,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 4,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -3.6885,
+            "trade_frequency_per_window": 0.0851063829787234,
+            "wilson_95_high": 0.8499610108478506,
+            "wilson_95_low": 0.15003898915214947
+          },
+          "DOGE": {
+            "accuracy": 1.0,
+            "assets": {
+              "DOGE": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.62666,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.64666,
+            "correct": 1,
+            "ev_cents_per_contract": 35.334,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 35.334,
+            "max_drawdown_cents_per_contract": 0.0,
+            "n": 1,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 3.5334,
+            "trade_frequency_per_window": 0.02127659574468085,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723745
+          },
+          "HYPE": {
+            "accuracy": 0.6666666666666666,
+            "assets": {
+              "HYPE": 3
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6035633333333333,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6235633333333332,
+            "correct": 2,
+            "ev_cents_per_contract": 4.310333333333333,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 12.931,
+            "max_drawdown_cents_per_contract": 65.65,
+            "n": 3,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 1.2931,
+            "trade_frequency_per_window": 0.06382978723404255,
+            "wilson_95_high": 0.9385080552796037,
+            "wilson_95_low": 0.2076596008020477
+          },
+          "SOL": {
+            "accuracy": 1.0,
+            "assets": {
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5623450000000001,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.582345,
+            "correct": 2,
+            "ev_cents_per_contract": 41.7655,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 83.531,
+            "max_drawdown_cents_per_contract": 0.0,
+            "n": 2,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 8.3531,
+            "trade_frequency_per_window": 0.0425531914893617,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.34238022750665303
+          }
+        },
+        "by_distance": {
+          "missing": {
+            "accuracy": 0.7,
+            "assets": {
+              "BTC": 4,
+              "DOGE": 1,
+              "HYPE": 3,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.585089,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6050890000000001,
+            "correct": 7,
+            "ev_cents_per_contract": 9.4911,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 94.911,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 10,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 9.4911,
+            "trade_frequency_per_window": 0.2127659574468085,
+            "wilson_95_high": 0.8922087325936989,
+            "wilson_95_low": 0.39677814746114537
+          }
+        },
+        "by_market_price": {
+          "50_to_54c": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 2,
+              "HYPE": 1,
+              "SOL": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5474300000000001,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.56743,
+            "correct": 2,
+            "ev_cents_per_contract": -6.743,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -26.972,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 4,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -2.6972,
+            "trade_frequency_per_window": 0.0851063829787234,
+            "wilson_95_high": 0.8499610108478506,
+            "wilson_95_low": 0.15003898915214947
+          },
+          "55c_plus": {
+            "accuracy": 0.8333333333333334,
+            "assets": {
+              "BTC": 2,
+              "DOGE": 1,
+              "HYPE": 2,
+              "SOL": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6101949999999999,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.630195,
+            "correct": 5,
+            "ev_cents_per_contract": 20.313833333333335,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 121.883,
+            "max_drawdown_cents_per_contract": 65.65,
+            "n": 6,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 12.1883,
+            "trade_frequency_per_window": 0.1276595744680851,
+            "wilson_95_high": 0.9699466302516935,
+            "wilson_95_low": 0.43649717781352987
+          }
+        },
+        "by_momentum": {
+          "1bps_plus": {
+            "accuracy": 0.8333333333333334,
+            "assets": {
+              "DOGE": 1,
+              "HYPE": 3,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5936733333333333,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6136733333333333,
+            "correct": 5,
+            "ev_cents_per_contract": 21.966,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 131.796,
+            "max_drawdown_cents_per_contract": 65.65,
+            "n": 6,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 13.1796,
+            "trade_frequency_per_window": 0.1276595744680851,
+            "wilson_95_high": 0.9699466302516935,
+            "wilson_95_low": 0.43649717781352987
+          },
+          "under_0_25bps": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5722125,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.5922124999999999,
+            "correct": 2,
+            "ev_cents_per_contract": -9.22125,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -36.885,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 4,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -3.6885,
+            "trade_frequency_per_window": 0.0851063829787234,
+            "wilson_95_high": 0.8499610108478506,
+            "wilson_95_low": 0.15003898915214947
+          }
+        },
+        "by_second_half": {
+          "missing": {
+            "accuracy": 0.7,
+            "assets": {
+              "BTC": 4,
+              "DOGE": 1,
+              "HYPE": 3,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.585089,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6050890000000001,
+            "correct": 7,
+            "ev_cents_per_contract": 9.4911,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 94.911,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 10,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 9.4911,
+            "trade_frequency_per_window": 0.2127659574468085,
+            "wilson_95_high": 0.8922087325936989,
+            "wilson_95_low": 0.39677814746114537
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.75,
+            "assets": {
+              "BTC": 3,
+              "DOGE": 1,
+              "HYPE": 2,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.59575,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.61575,
+            "correct": 6,
+            "ev_cents_per_contract": 13.425,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 107.4,
+            "max_drawdown_cents_per_contract": 84.105,
+            "n": 8,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 10.74,
+            "trade_frequency_per_window": 0.1702127659574468,
+            "wilson_95_high": 0.9285207872478909,
+            "wilson_95_low": 0.40927543031016883
+          },
+          "YES": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 1,
+              "HYPE": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5424450000000001,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.562445,
+            "correct": 1,
+            "ev_cents_per_contract": -6.2445,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -12.489,
+            "max_drawdown_cents_per_contract": 54.75,
+            "n": 2,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -1.2489,
+            "trade_frequency_per_window": 0.0425531914893617,
+            "wilson_95_high": 0.9054687942657693,
+            "wilson_95_low": 0.09453120573423074
+          }
+        },
+        "by_spot_alignment": {
+          "missing": {
+            "accuracy": 0.7,
+            "assets": {
+              "BTC": 4,
+              "DOGE": 1,
+              "HYPE": 3,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.585089,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6050890000000001,
+            "correct": 7,
+            "ev_cents_per_contract": 9.4911,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 94.911,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 10,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 9.4911,
+            "trade_frequency_per_window": 0.2127659574468085,
+            "wilson_95_high": 0.8922087325936989,
+            "wilson_95_low": 0.39677814746114537
+          }
+        },
+        "by_transfer_cohort": {
+          "BTC": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5722125,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.5922124999999999,
+            "correct": 2,
+            "ev_cents_per_contract": -9.22125,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -36.885,
+            "max_drawdown_cents_per_contract": 112.489,
+            "n": 4,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -3.6885,
+            "trade_frequency_per_window": 0.0851063829787234,
+            "wilson_95_high": 0.8499610108478506,
+            "wilson_95_low": 0.15003898915214947
+          },
+          "NON_BTC_TRANSFER": {
+            "accuracy": 0.8333333333333334,
+            "assets": {
+              "DOGE": 1,
+              "HYPE": 3,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5936733333333333,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6136733333333333,
+            "correct": 5,
+            "ev_cents_per_contract": 21.966,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 131.796,
+            "max_drawdown_cents_per_contract": 65.65,
+            "n": 6,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 13.1796,
+            "trade_frequency_per_window": 0.1276595744680851,
+            "wilson_95_high": 0.9699466302516935,
+            "wilson_95_low": 0.43649717781352987
+          }
+        }
+      },
+      "correct_feature_medians": {
+        "entry_ask_cents": {
+          "median": 57.0,
+          "n": 7
+        },
+        "rti_distance_to_remaining_volatility": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_acceleration_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_range_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_realized_volatility_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_second_half_side_move_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_strike_crossings": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_trend_efficiency": {
+          "median": null,
+          "n": 0
+        },
+        "rti_side_move_bps": {
+          "median": 1.3003901170357757,
+          "n": 7
+        },
+        "rti_signed_distance_bps": {
+          "median": null,
+          "n": 0
+        },
+        "spot_depth_imbalance": {
+          "median": null,
+          "n": 0
+        }
+      },
+      "enhanced_path_feature_coverage": {
+        "rows": 10,
+        "rows_with_signed_distance": 0
+      },
+      "overall": {
+        "accuracy": 0.7,
+        "assets": {
+          "BTC": 4,
+          "DOGE": 1,
+          "HYPE": 3,
+          "SOL": 2
+        },
+        "avg_fee_adjusted_break_even_rate": 0.585089,
+        "avg_fee_slippage_adjusted_break_even_rate": 0.6050890000000001,
+        "correct": 7,
+        "ev_cents_per_contract": 9.4911,
+        "fee_slippage_adjusted_pnl_cents_per_contract": 94.911,
+        "max_drawdown_cents_per_contract": 112.489,
+        "n": 10,
+        "provisional": true,
+        "ten_contract_net_pnl_dollars": 9.4911,
+        "trade_frequency_per_window": 0.2127659574468085,
+        "wilson_95_high": 0.8922087325936989,
+        "wilson_95_low": 0.39677814746114537
+      },
+      "wrong_feature_medians": {
+        "entry_ask_cents": {
+          "median": 54.0,
+          "n": 3
+        },
+        "rti_distance_to_remaining_volatility": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_acceleration_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_range_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_realized_volatility_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_second_half_side_move_bps": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_strike_crossings": {
+          "median": null,
+          "n": 0
+        },
+        "rti_path_trend_efficiency": {
+          "median": null,
+          "n": 0
+        },
+        "rti_side_move_bps": {
+          "median": 0.23760921923671852,
+          "n": 3
+        },
+        "rti_signed_distance_bps": {
+          "median": null,
+          "n": 0
+        },
+        "spot_depth_imbalance": {
+          "median": null,
+          "n": 0
+        }
+      }
+    },
+    "post_freeze_forward": {
+      "breakdowns": {
+        "by_acceleration": {
+          "decelerating": {
+            "accuracy": 0.5087719298245614,
+            "assets": {
+              "BTC": 18,
+              "DOGE": 3,
+              "ETH": 9,
+              "HYPE": 19,
+              "SOL": 6,
+              "XRP": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6014907017543862,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6214907017543863,
+            "correct": 29,
+            "ev_cents_per_contract": -11.271877192982457,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -642.497,
+            "max_drawdown_cents_per_contract": 940.065,
+            "n": 57,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -64.2497,
+            "trade_frequency_per_window": 0.2688679245283019,
+            "wilson_95_high": 0.6338371758159258,
+            "wilson_95_low": 0.3825989849761273
+          },
+          "missing": {
+            "accuracy": 0.4444444444444444,
+            "assets": {
+              "BTC": 3,
+              "ETH": 1,
+              "HYPE": 1,
+              "XRP": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6113066666666667,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6313066666666668,
+            "correct": 4,
+            "ev_cents_per_contract": -18.686222222222224,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -168.176,
+            "max_drawdown_cents_per_contract": 207.46,
+            "n": 9,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -16.8176,
+            "trade_frequency_per_window": 0.04245283018867924,
+            "wilson_95_high": 0.733348706504507,
+            "wilson_95_low": 0.18877852109766452
+          },
+          "nonnegative": {
+            "accuracy": 0.4411764705882353,
+            "assets": {
+              "BNB": 1,
+              "BTC": 4,
+              "DOGE": 1,
+              "ETH": 5,
+              "HYPE": 11,
+              "SOL": 7,
+              "XRP": 5
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6001900000000002,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.62019,
+            "correct": 15,
+            "ev_cents_per_contract": -17.90135294117647,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -608.646,
+            "max_drawdown_cents_per_contract": 745.396,
+            "n": 34,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -60.8646,
+            "trade_frequency_per_window": 0.16037735849056603,
+            "wilson_95_high": 0.6054610074379694,
+            "wilson_95_low": 0.2888348224624216
+          }
+        },
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.0,
+            "assets": {
+              "BNB": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.62666,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.64666,
+            "correct": 0,
+            "ev_cents_per_contract": -64.666,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -64.666,
+            "max_drawdown_cents_per_contract": 64.666,
+            "n": 1,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -6.4666,
+            "trade_frequency_per_window": 0.0047169811320754715,
+            "wilson_95_high": 0.7934506856227626,
+            "wilson_95_low": 0.0
+          },
+          "BTC": {
+            "accuracy": 0.52,
+            "assets": {
+              "BTC": 25
+            },
+            "avg_fee_adjusted_break_even_rate": 0.601316,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6213159999999999,
+            "correct": 13,
+            "ev_cents_per_contract": -10.1316,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -253.29,
+            "max_drawdown_cents_per_contract": 377.237,
+            "n": 25,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -25.329,
+            "trade_frequency_per_window": 0.1179245283018868,
+            "wilson_95_high": 0.6996871404588704,
+            "wilson_95_low": 0.3349851695035678
+          },
+          "DOGE": {
+            "accuracy": 1.0,
+            "assets": {
+              "DOGE": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5969425,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6169425000000001,
+            "correct": 4,
+            "ev_cents_per_contract": 38.30575,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 153.223,
+            "max_drawdown_cents_per_contract": 0.0,
+            "n": 4,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 15.3223,
+            "trade_frequency_per_window": 0.018867924528301886,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.5101091635454027
+          },
+          "ETH": {
+            "accuracy": 0.4666666666666667,
+            "assets": {
+              "ETH": 15
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5976846666666666,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6176846666666667,
+            "correct": 7,
+            "ev_cents_per_contract": -15.1018,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -226.527,
+            "max_drawdown_cents_per_contract": 300.153,
+            "n": 15,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -22.6527,
+            "trade_frequency_per_window": 0.07075471698113207,
+            "wilson_95_high": 0.698830199745016,
+            "wilson_95_low": 0.24809535365737387
+          },
+          "HYPE": {
+            "accuracy": 0.5161290322580645,
+            "assets": {
+              "HYPE": 31
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6056112903225808,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6256112903225807,
+            "correct": 16,
+            "ev_cents_per_contract": -10.948225806451612,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -339.395,
+            "max_drawdown_cents_per_contract": 525.94,
+            "n": 31,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -33.9395,
+            "trade_frequency_per_window": 0.14622641509433962,
+            "wilson_95_high": 0.6802974843758269,
+            "wilson_95_low": 0.348403954480288
+          },
+          "SOL": {
+            "accuracy": 0.3076923076923077,
+            "assets": {
+              "SOL": 13
+            },
+            "avg_fee_adjusted_break_even_rate": 0.593936923076923,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6139369230769232,
+            "correct": 4,
+            "ev_cents_per_contract": -30.62446153846154,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -398.118,
+            "max_drawdown_cents_per_contract": 398.118,
+            "n": 13,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -39.8118,
+            "trade_frequency_per_window": 0.06132075471698113,
+            "wilson_95_high": 0.5763065681945096,
+            "wilson_95_low": 0.12680703655710515
+          },
+          "XRP": {
+            "accuracy": 0.36363636363636365,
+            "assets": {
+              "XRP": 11
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6077690909090909,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6277690909090908,
+            "correct": 4,
+            "ev_cents_per_contract": -26.413272727272727,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -290.546,
+            "max_drawdown_cents_per_contract": 335.796,
+            "n": 11,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -29.0546,
+            "trade_frequency_per_window": 0.05188679245283019,
+            "wilson_95_high": 0.6461988254921511,
+            "wilson_95_low": 0.15166471095367573
+          }
+        },
+        "by_distance": {
+          "1_to_3bps": {
+            "accuracy": 0.46875,
+            "assets": {
+              "BNB": 1,
+              "BTC": 10,
+              "ETH": 6,
+              "HYPE": 5,
+              "SOL": 5,
+              "XRP": 5
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5880140625,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6080140625000002,
+            "correct": 15,
+            "ev_cents_per_contract": -13.92640625,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -445.645,
+            "max_drawdown_cents_per_contract": 545.971,
+            "n": 32,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -44.5645,
+            "trade_frequency_per_window": 0.1509433962264151,
+            "wilson_95_high": 0.6355048288102536,
+            "wilson_95_low": 0.30869387108068835
+          },
+          "3bps_plus": {
+            "accuracy": 0.49056603773584906,
+            "assets": {
+              "BTC": 10,
+              "DOGE": 2,
+              "ETH": 8,
+              "HYPE": 25,
+              "SOL": 6,
+              "XRP": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6147247169811324,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6347247169811323,
+            "correct": 26,
+            "ev_cents_per_contract": -14.415867924528301,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -764.041,
+            "max_drawdown_cents_per_contract": 900.89,
+            "n": 53,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -76.4041,
+            "trade_frequency_per_window": 0.25,
+            "wilson_95_high": 0.6211647088532004,
+            "wilson_95_low": 0.3612424984784323
+          },
+          "missing": {
+            "accuracy": 0.4444444444444444,
+            "assets": {
+              "BTC": 3,
+              "ETH": 1,
+              "HYPE": 1,
+              "XRP": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6113066666666667,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6313066666666668,
+            "correct": 4,
+            "ev_cents_per_contract": -18.686222222222224,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -168.176,
+            "max_drawdown_cents_per_contract": 207.46,
+            "n": 9,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -16.8176,
+            "trade_frequency_per_window": 0.04245283018867924,
+            "wilson_95_high": 0.733348706504507,
+            "wilson_95_low": 0.18877852109766452
+          },
+          "under_1bps": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 2,
+              "DOGE": 2,
+              "SOL": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.549095,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.569095,
+            "correct": 3,
+            "ev_cents_per_contract": -6.9095,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -41.457,
+            "max_drawdown_cents_per_contract": 125.98,
+            "n": 6,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -4.1457,
+            "trade_frequency_per_window": 0.02830188679245283,
+            "wilson_95_high": 0.8123836935173494,
+            "wilson_95_low": 0.1876163064826506
+          }
+        },
+        "by_market_price": {
+          "50_to_54c": {
+            "accuracy": 0.35714285714285715,
+            "assets": {
+              "BTC": 5,
+              "DOGE": 1,
+              "ETH": 1,
+              "HYPE": 3,
+              "SOL": 3,
+              "XRP": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5453021428571428,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.565302142857143,
+            "correct": 5,
+            "ev_cents_per_contract": -20.81592857142857,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -291.423,
+            "max_drawdown_cents_per_contract": 379.929,
+            "n": 14,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -29.1423,
+            "trade_frequency_per_window": 0.0660377358490566,
+            "wilson_95_high": 0.612355768960926,
+            "wilson_95_low": 0.1634473175355414
+          },
+          "55c_plus": {
+            "accuracy": 0.5,
+            "assets": {
+              "BNB": 1,
+              "BTC": 20,
+              "DOGE": 3,
+              "ETH": 14,
+              "HYPE": 28,
+              "SOL": 10,
+              "XRP": 10
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6111506976744183,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6311506976744189,
+            "correct": 43,
+            "ev_cents_per_contract": -13.115069767441861,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -1127.896,
+            "max_drawdown_cents_per_contract": 1177.672,
+            "n": 86,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -112.7896,
+            "trade_frequency_per_window": 0.4056603773584906,
+            "wilson_95_high": 0.6033902767257906,
+            "wilson_95_low": 0.3966097232742094
+          }
+        },
+        "by_momentum": {
+          "0_25_to_1bps": {
+            "accuracy": 0.6153846153846154,
+            "assets": {
+              "BTC": 4,
+              "ETH": 2,
+              "HYPE": 3,
+              "XRP": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6008076923076923,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6208076923076924,
+            "correct": 8,
+            "ev_cents_per_contract": -0.5423076923076923,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -7.05,
+            "max_drawdown_cents_per_contract": 207.524,
+            "n": 13,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -0.705,
+            "trade_frequency_per_window": 0.06132075471698113,
+            "wilson_95_high": 0.8229029220223743,
+            "wilson_95_low": 0.355228915126657
+          },
+          "1bps_plus": {
+            "accuracy": 0.4,
+            "assets": {
+              "BTC": 13,
+              "DOGE": 2,
+              "ETH": 11,
+              "HYPE": 25,
+              "SOL": 8,
+              "XRP": 6
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6061204615384617,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6261204615384618,
+            "correct": 26,
+            "ev_cents_per_contract": -22.612046153846155,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -1469.783,
+            "max_drawdown_cents_per_contract": 1552.339,
+            "n": 65,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -146.9783,
+            "trade_frequency_per_window": 0.30660377358490565,
+            "wilson_95_high": 0.5214400065175953,
+            "wilson_95_low": 0.2897202997469763
+          },
+          "under_0_25bps": {
+            "accuracy": 0.6363636363636364,
+            "assets": {
+              "BNB": 1,
+              "BTC": 8,
+              "DOGE": 2,
+              "ETH": 2,
+              "HYPE": 3,
+              "SOL": 5,
+              "XRP": 1
+            },
+            "avg_fee_adjusted_break_even_rate": 0.590220909090909,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6102209090909091,
+            "correct": 14,
+            "ev_cents_per_contract": 2.614272727272727,
+            "fee_slippage_adjusted_pnl_cents_per_contract": 57.514,
+            "max_drawdown_cents_per_contract": 186.696,
+            "n": 22,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": 5.7514,
+            "trade_frequency_per_window": 0.10377358490566038,
+            "wilson_95_high": 0.8026679532963387,
+            "wilson_95_low": 0.42951708090131013
+          }
+        },
+        "by_second_half": {
+          "continuing": {
+            "accuracy": 0.41509433962264153,
+            "assets": {
+              "BNB": 1,
+              "BTC": 9,
+              "DOGE": 2,
+              "ETH": 7,
+              "HYPE": 18,
+              "SOL": 9,
+              "XRP": 7
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6074377358490569,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6274377358490568,
+            "correct": 22,
+            "ev_cents_per_contract": -21.23433962264151,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -1125.42,
+            "max_drawdown_cents_per_contract": 1262.17,
+            "n": 53,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -112.542,
+            "trade_frequency_per_window": 0.25,
+            "wilson_95_high": 0.549055778186556,
+            "wilson_95_low": 0.29260908779813966
+          },
+          "fading": {
+            "accuracy": 0.5789473684210527,
+            "assets": {
+              "BTC": 13,
+              "DOGE": 2,
+              "ETH": 7,
+              "HYPE": 12,
+              "SOL": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5920323684210528,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.612032368421053,
+            "correct": 22,
+            "ev_cents_per_contract": -3.3085,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -125.723,
+            "max_drawdown_cents_per_contract": 541.582,
+            "n": 38,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -12.5723,
+            "trade_frequency_per_window": 0.1792452830188679,
+            "wilson_95_high": 0.7214749884224129,
+            "wilson_95_low": 0.42192345343670545
+          },
+          "missing": {
+            "accuracy": 0.4444444444444444,
+            "assets": {
+              "BTC": 3,
+              "ETH": 1,
+              "HYPE": 1,
+              "XRP": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6113066666666667,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6313066666666668,
+            "correct": 4,
+            "ev_cents_per_contract": -18.686222222222224,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -168.176,
+            "max_drawdown_cents_per_contract": 207.46,
+            "n": 9,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -16.8176,
+            "trade_frequency_per_window": 0.04245283018867924,
+            "wilson_95_high": 0.733348706504507,
+            "wilson_95_low": 0.18877852109766452
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.4418604651162791,
+            "assets": {
+              "BNB": 1,
+              "BTC": 15,
+              "DOGE": 1,
+              "ETH": 3,
+              "HYPE": 14,
+              "SOL": 7,
+              "XRP": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6110102325581399,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6310102325581399,
+            "correct": 19,
+            "ev_cents_per_contract": -18.914976744186045,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -813.344,
+            "max_drawdown_cents_per_contract": 921.32,
+            "n": 43,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -81.3344,
+            "trade_frequency_per_window": 0.2028301886792453,
+            "wilson_95_high": 0.5889238554717591,
+            "wilson_95_low": 0.30433309839170514
+          },
+          "YES": {
+            "accuracy": 0.5087719298245614,
+            "assets": {
+              "BTC": 10,
+              "DOGE": 3,
+              "ETH": 12,
+              "HYPE": 17,
+              "SOL": 6,
+              "XRP": 9
+            },
+            "avg_fee_adjusted_break_even_rate": 0.5950833333333335,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6150833333333332,
+            "correct": 29,
+            "ev_cents_per_contract": -10.631140350877192,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -605.975,
+            "max_drawdown_cents_per_contract": 823.786,
+            "n": 57,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -60.5975,
+            "trade_frequency_per_window": 0.2688679245283019,
+            "wilson_95_high": 0.6338371758159258,
+            "wilson_95_low": 0.3825989849761273
+          }
+        },
+        "by_spot_alignment": {
+          "aligned": {
+            "accuracy": 0.5652173913043478,
+            "assets": {
+              "BNB": 1,
+              "BTC": 11,
+              "DOGE": 1,
+              "ETH": 8,
+              "HYPE": 15,
+              "SOL": 5,
+              "XRP": 5
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6058013043478263,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6258013043478263,
+            "correct": 26,
+            "ev_cents_per_contract": -6.058391304347826,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -278.686,
+            "max_drawdown_cents_per_contract": 514.519,
+            "n": 46,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -27.8686,
+            "trade_frequency_per_window": 0.2169811320754717,
+            "wilson_95_high": 0.6979073722198005,
+            "wilson_95_low": 0.4224743369429499
+          },
+          "missing": {
+            "accuracy": 0.5,
+            "assets": {
+              "BTC": 1,
+              "ETH": 1,
+              "HYPE": 4,
+              "XRP": 2
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6118625,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6318625000000001,
+            "correct": 4,
+            "ev_cents_per_contract": -13.18625,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -105.49,
+            "max_drawdown_cents_per_contract": 181.09,
+            "n": 8,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -10.549,
+            "trade_frequency_per_window": 0.03773584905660377,
+            "wilson_95_high": 0.7847839377861224,
+            "wilson_95_low": 0.21521606221387757
+          },
+          "opposed": {
+            "accuracy": 0.391304347826087,
+            "assets": {
+              "BTC": 13,
+              "DOGE": 3,
+              "ETH": 6,
+              "HYPE": 12,
+              "SOL": 8,
+              "XRP": 4
+            },
+            "avg_fee_adjusted_break_even_rate": 0.596335434782609,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6163354347826091,
+            "correct": 18,
+            "ev_cents_per_contract": -22.503108695652173,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -1035.143,
+            "max_drawdown_cents_per_contract": 1092.301,
+            "n": 46,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -103.5143,
+            "trade_frequency_per_window": 0.2169811320754717,
+            "wilson_95_high": 0.5354315676837925,
+            "wilson_95_low": 0.26393225037829016
+          }
+        },
+        "by_transfer_cohort": {
+          "BTC": {
+            "accuracy": 0.52,
+            "assets": {
+              "BTC": 25
+            },
+            "avg_fee_adjusted_break_even_rate": 0.601316,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6213159999999999,
+            "correct": 13,
+            "ev_cents_per_contract": -10.1316,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -253.29,
+            "max_drawdown_cents_per_contract": 377.237,
+            "n": 25,
+            "provisional": true,
+            "ten_contract_net_pnl_dollars": -25.329,
+            "trade_frequency_per_window": 0.1179245283018868,
+            "wilson_95_high": 0.6996871404588704,
+            "wilson_95_low": 0.3349851695035678
+          },
+          "NON_BTC_TRANSFER": {
+            "accuracy": 0.4666666666666667,
+            "assets": {
+              "BNB": 1,
+              "DOGE": 4,
+              "ETH": 15,
+              "HYPE": 31,
+              "SOL": 13,
+              "XRP": 11
+            },
+            "avg_fee_adjusted_break_even_rate": 0.6021372,
+            "avg_fee_slippage_adjusted_break_even_rate": 0.6221372000000003,
+            "correct": 35,
+            "ev_cents_per_contract": -15.547053333333333,
+            "fee_slippage_adjusted_pnl_cents_per_contract": -1166.029,
+            "max_drawdown_cents_per_contract": 1261.495,
+            "n": 75,
+            "provisional": false,
+            "ten_contract_net_pnl_dollars": -116.6029,
+            "trade_frequency_per_window": 0.35377358490566035,
+            "wilson_95_high": 0.5784246261091504,
+            "wilson_95_low": 0.35815696338970343
+          }
+        }
+      },
+      "correct_feature_medians": {
+        "entry_ask_cents": {
+          "median": 60.0,
+          "n": 48
+        },
+        "rti_distance_to_remaining_volatility": {
+          "median": 0.28987586789373787,
+          "n": 44
+        },
+        "rti_path_acceleration_bps": {
+          "median": -1.082320587915131,
+          "n": 44
+        },
+        "rti_path_range_bps": {
+          "median": 3.854640776654012,
+          "n": 44
+        },
+        "rti_path_realized_volatility_bps": {
+          "median": 3.1631809154503254,
+          "n": 44
+        },
+        "rti_path_second_half_side_move_bps": {
+          "median": -0.0905932695977052,
+          "n": 44
+        },
+        "rti_path_strike_crossings": {
+          "median": 0.0,
+          "n": 44
+        },
+        "rti_path_trend_efficiency": {
+          "median": 0.08466675200543927,
+          "n": 44
+        },
+        "rti_side_move_bps": {
+          "median": 1.0972102368755667,
+          "n": 48
+        },
+        "rti_signed_distance_bps": {
+          "median": 3.5424027700292626,
+          "n": 44
+        },
+        "spot_depth_imbalance": {
+          "median": 0.05852539168395836,
+          "n": 44
+        }
+      },
+      "enhanced_path_feature_coverage": {
+        "rows": 100,
+        "rows_with_signed_distance": 91
+      },
+      "overall": {
+        "accuracy": 0.48,
+        "assets": {
+          "BNB": 1,
+          "BTC": 25,
+          "DOGE": 4,
+          "ETH": 15,
+          "HYPE": 31,
+          "SOL": 13,
+          "XRP": 11
+        },
+        "avg_fee_adjusted_break_even_rate": 0.6019318999999999,
+        "avg_fee_slippage_adjusted_break_even_rate": 0.6219319000000003,
+        "correct": 48,
+        "ev_cents_per_contract": -14.19319,
+        "fee_slippage_adjusted_pnl_cents_per_contract": -1419.319,
+        "max_drawdown_cents_per_contract": 1514.345,
+        "n": 100,
+        "provisional": false,
+        "ten_contract_net_pnl_dollars": -141.9319,
+        "trade_frequency_per_window": 0.4716981132075472,
+        "wilson_95_high": 0.5768342223477603,
+        "wilson_95_low": 0.384645517580519
+      },
+      "wrong_feature_medians": {
+        "entry_ask_cents": {
+          "median": 58.0,
+          "n": 52
+        },
+        "rti_distance_to_remaining_volatility": {
+          "median": 0.2547614320140888,
+          "n": 47
+        },
+        "rti_path_acceleration_bps": {
+          "median": -1.2836970474960907,
+          "n": 47
+        },
+        "rti_path_range_bps": {
+          "median": 4.2411385907328345,
+          "n": 47
+        },
+        "rti_path_realized_volatility_bps": {
+          "median": 3.665698670873013,
+          "n": 47
+        },
+        "rti_path_second_half_side_move_bps": {
+          "median": 0.2243341681762434,
+          "n": 47
+        },
+        "rti_path_strike_crossings": {
+          "median": 0.0,
+          "n": 47
+        },
+        "rti_path_trend_efficiency": {
+          "median": 0.11688311688316183,
+          "n": 47
+        },
+        "rti_side_move_bps": {
+          "median": 1.4521312305599214,
+          "n": 52
+        },
+        "rti_signed_distance_bps": {
+          "median": 3.1464870246100674,
+          "n": 47
+        },
+        "spot_depth_imbalance": {
+          "median": 0.03414273066400111,
+          "n": 48
+        }
+      }
+    }
+  }
+}

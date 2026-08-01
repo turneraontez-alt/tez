@@ -27,6 +27,10 @@ logger = logging.getLogger("q15.executor.store")
 # Immediate (POST-time) fill classification labels.
 FILLED, PARTIAL, RESTED, CANCELED, FAILED, DRY_RUN, UNKNOWN = (
     "FILLED", "PARTIAL", "RESTED", "CANCELED", "FAILED", "DRY_RUN", "UNKNOWN")
+# The POST failed in a way that does NOT prove the order was rejected (read
+# timeout, mid-flight connection drop). The order may be live at Kalshi. Kept
+# distinct from FAILED so reconciliation can find exactly these rows.
+UNCERTAIN = "UNCERTAIN"
 # Labels that mean "no (full) fill" — what "missed" counts.
 MISSED_LABELS = (RESTED, CANCELED)
 
@@ -56,7 +60,10 @@ def classify_fill(res: Mapping[str, Any], requested_count: int) -> tuple[str, in
     schema (data[.order].{status, fill_count, order_id}); any unexpected shape -> UNKNOWN."""
     try:
         if not res.get("ok"):
-            return FAILED, 0, None
+            # An ambiguous transport failure is not a rejection — the order may
+            # be live. Report 0 filled (we genuinely do not know) but label it so
+            # it can be reconciled against the account rather than written off.
+            return (UNCERTAIN if res.get("uncertain") else FAILED), 0, None
         if res.get("dry_run"):
             return DRY_RUN, None, None
         order = _inner_order(res.get("data"))
@@ -212,8 +219,90 @@ class ExecutorStore:
                 stake_cents INTEGER, mode TEXT, http_ok INTEGER, http_status INTEGER,
                 fill_status TEXT, snapshot_age_ms REAL, balance_latency_ms REAL,
                 order_latency_ms REAL, response_json TEXT)""")
+        # Small durable key/value side table. Holds the daily-stop reference
+        # (day-start balance + its UTC date) so the circuit breaker survives a
+        # process restart instead of re-arming at the drawn-down balance.
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS executor_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at REAL)""")
         self._ensure_columns()
         self._conn.commit()
+
+    # -- durable key/value -------------------------------------------------
+    def get_meta(self, key: str) -> str | None:
+        """Return a stored meta value, or None (never raises)."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM executor_meta WHERE key=?", (str(key),)).fetchone()
+        except Exception:  # noqa: BLE001 - best-effort; caller falls back to defaults
+            logger.exception("executor meta read failed (ignored)")
+            return None
+        return None if row is None or row[0] is None else str(row[0])
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Upsert a meta value (never raises)."""
+        try:
+            import time as _time
+            self._conn.execute(
+                "INSERT INTO executor_meta (key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (str(key), str(value), _time.time()))
+            self._conn.commit()
+        except Exception:  # noqa: BLE001 - best-effort; never disrupt the executor
+            logger.exception("executor meta write failed (ignored)")
+
+    def recent_entry_orders(self, since_seconds: float = 7200.0,
+                            mode: str | None = None) -> list[dict[str, Any]]:
+        """Most recent SUCCESSFUL entry placement per (window_key, ticker).
+
+        Feeds position rehydrate after a restart: without it ``state.positions``
+        comes back empty and every defensive exit refuses with NO_POSITION while
+        a real, funded position rides to settlement. Carries ``order_id`` so a
+        still-resting entry can be CANCELLED rather than only sold against.
+
+        ``mode`` ("LIVE" / "dry-run") restricts the rows to placements made in the
+        SAME posture the caller is running in now, so a book that was flipped from
+        dry-run to live does not inherit simulated positions (or the reverse).
+
+        Rows are returned oldest-first so a caller building a dict naturally
+        keeps the newest. Best-effort: any failure returns []."""
+        try:
+            import time as _time
+            cutoff = _time.time() - float(since_seconds)
+            sql = ("SELECT window_key, ticker, order_id, requested_count, filled_count, "
+                   "fill_status, limit_price_cents, mode, created_at "
+                   "FROM executor_orders "
+                   "WHERE action='entry' AND http_ok=1 AND created_at >= ? "
+                   "AND window_key IS NOT NULL AND ticker IS NOT NULL")
+            args: tuple = (cutoff,)
+            if mode is not None:
+                sql += " AND mode=?"
+                args = (cutoff, str(mode))
+            rows = self._conn.execute(sql + " ORDER BY created_at ASC", args).fetchall()
+        except Exception:  # noqa: BLE001 - best-effort; never block executor init
+            logger.exception("recent_entry_orders failed (position rehydrate skipped)")
+            return []
+        out: list[dict[str, Any]] = []
+        for wk, tk, oid, req, filled, status, px, mode, created in rows:
+            try:
+                window_key = int(wk)
+            except (TypeError, ValueError):
+                continue
+            out.append({
+                "window_key": window_key,
+                "ticker": str(tk),
+                "order_id": None if oid is None else str(oid),
+                "requested_count": _count(req) or 0,
+                "filled_count": _count(filled),
+                "fill_status": None if status is None else str(status),
+                "limit_price_cents": _count(px),
+                "mode": None if mode is None else str(mode),
+                "created_at": created,
+            })
+        return out
 
     def _ensure_columns(self) -> None:
         """Migrate old local order stores without disturbing existing immediate-fill rows."""

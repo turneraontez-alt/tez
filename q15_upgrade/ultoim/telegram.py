@@ -48,8 +48,13 @@ class UltoimTelegram:
                 timeout=8,
             )
         except requests.RequestException as exc:
+            # The exception text embeds the request URL (with the token) — redact
+            # before it reaches the result dict, which callers persist.
+            from notifications.telegram_client import redact_token
+
             return {"ok": False, "delivered": False, "muted": False,
-                    "message_id": None, "error": f"{type(exc).__name__}: {exc}"}
+                    "message_id": None,
+                    "error": redact_token(f"{type(exc).__name__}: {exc}", self.token)}
         if resp.status_code != 200:
             return {"ok": False, "delivered": False, "muted": False,
                     "message_id": None, "error": f"HTTP {resp.status_code}"}

@@ -370,19 +370,33 @@ class LadderProbe:
 
     def health(self) -> dict[str, Any]:
         now = time.time()
+        worker_alive = bool(self._worker is not None and self._worker.is_alive())
+        capture_age = (
+            None if self._last_capture_at is None
+            else round(max(0.0, now - self._last_capture_at), 3)
+        )
+        # Captures occur only at configured checkpoint marks, so row age is not
+        # a liveness signal between marks.  The worker thread and its empty queue
+        # are the continuous health surface; a dead worker falls back to the age
+        # of its last successful capture (or startup age in the app helper).
+        watchdog_age = 0.0 if worker_alive and self._last_error is None else capture_age
         return {
             "enabled": self.enabled,
             "read_only": True,
             "db_path": self.db_path,
-            "last_capture_age_seconds": (
-                None if self._last_capture_at is None else round(max(0.0, now - self._last_capture_at), 3)
-            ),
+            "last_capture_age_seconds": capture_age,
+            "watchdog_age_seconds": watchdog_age,
+            "worker_alive": worker_alive,
             "last_error": self._last_error,
             "rows_written": self._rows_written,
             "dropped_jobs": self._dropped_jobs,
             "queue_size": self._queue.qsize(),
             "timeout_seconds": self.timeout_seconds,
-            "status": "disabled" if not self.enabled else "running",
+            "status": (
+                "disabled" if not self.enabled
+                else "running" if worker_alive and self._last_error is None
+                else "error_or_stopped"
+            ),
         }
 
 

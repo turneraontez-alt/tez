@@ -19,6 +19,11 @@ from typing import Sequence
 from .features import FEATURE_NAMES
 from .mathx import clamp, normal_cdf, sigmoid
 
+try:  # Optional at import time so the dependency-free fallback still works.
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised by fallback-specific tests
+    _np = None
+
 _IDX = {name: i for i, name in enumerate(FEATURE_NAMES)}
 
 
@@ -66,6 +71,50 @@ class LogisticRegression(BaseModel):
         n = len(X)
         if n == 0:
             return self
+        if _np is not None:
+            return self._fit_numpy(X, y, sample_weight)
+        return self._fit_python(X, y, sample_weight)
+
+    def _fit_numpy(self, X, y, sample_weight=None):
+        """Run the same fixed-step batch gradient descent in native arrays.
+
+        Moving the row arithmetic out of Python keeps live refits from delaying
+        the market-data loop. Hyperparameters and update equations are unchanged.
+        """
+        matrix = _np.asarray(X, dtype=_np.float64)
+        labels = _np.asarray(y, dtype=_np.float64)
+        n, d = matrix.shape
+        means = matrix.mean(axis=0)
+        stds = _np.sqrt(_np.mean((matrix - means) ** 2, axis=0))
+        safe_stds = _np.where(stds > 0.0, stds, 1.0)
+        z = (matrix - means) / safe_stds
+        if _np.any(stds <= 0.0):
+            z[:, stds <= 0.0] = 0.0
+        weights = _np.zeros(d, dtype=_np.float64)
+        bias = 0.0
+        sample_weights = (
+            _np.ones(n, dtype=_np.float64)
+            if sample_weight is None
+            else _np.asarray(sample_weight, dtype=_np.float64)
+        )
+        weight_total = float(sample_weights.sum()) or 1.0
+        for _ in range(self.max_iter):
+            scores = z @ weights + bias
+            pred = 1.0 / (1.0 + _np.exp(-_np.clip(scores, -709.0, 709.0)))
+            err = (pred - labels) * sample_weights
+            gradient = (z.T @ err) / weight_total
+            gradient += (self.l2 / weight_total) * weights
+            weights -= self.lr * gradient
+            bias -= self.lr * (float(err.sum()) / weight_total)
+        self.means = means.tolist()
+        self.stds = stds.tolist()
+        self.weights = weights.tolist()
+        self.bias = float(bias)
+        self.fitted = True
+        return self
+
+    def _fit_python(self, X, y, sample_weight=None):
+        n = len(X)
         d = len(X[0])
         # Standardize on TRAIN only.
         self.means = [sum(row[j] for row in X) / n for j in range(d)]

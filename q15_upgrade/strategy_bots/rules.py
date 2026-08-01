@@ -10,6 +10,26 @@ import math
 import os
 from typing import Any, Mapping
 
+from .costs import (
+    KALSHI_Q15_FEE_SCHEDULE_VERSION,
+    RTI_EXECUTION_COST_MODEL_VERSION,
+)
+from .rti_independent_microstructure import (
+    PERSISTED_KEYS as RTI_INDEPENDENT_MICROSTRUCTURE_KEYS,
+)
+from .rti_independent_path import (
+    PERSISTED_KEYS as RTI_INDEPENDENT_PATH_KEYS,
+)
+from .rti_cross_asset_context import (
+    PERSISTED_KEYS as RTI_CROSS_ASSET_KEYS,
+)
+from .rti_microstructure_v11_identity import (
+    DESIGN_ID as RTI_MICROSTRUCTURE_V11_DESIGN_ID,
+    DESIGN_SHA256 as RTI_MICROSTRUCTURE_V11_DESIGN_SHA256,
+    EVALUATION_PROTOCOL_ID as RTI_MICROSTRUCTURE_V11_PROTOCOL_ID,
+    EVALUATION_PROTOCOL_SHA256 as RTI_MICROSTRUCTURE_V11_PROTOCOL_SHA256,
+)
+
 
 STRATEGY_VERSION = "filtered-alert-system-v3-13m-sniper-provisional"
 
@@ -24,6 +44,7 @@ BOT_HVF_DEPTH_FLOW = "hvf_depth_flow_wrapper"
 BOT_BTC_REGIME = "btc_regime_context_probe"
 BOT_DEPTH_FORMULA_15M = "v3_15m_depth_formula_research"
 BOT_THIRTEEN_M_SNIPER = "thirteen_m_sniper"
+BOT_RTI_PATH_13M = "rti_path_13m"
 BOT_WARN_FLIP = "warn_flip_entry"
 BOT_FAV_10M = "fav_10m"
 BOT_TOP_PICK_13M = "top_pick_13m"
@@ -75,6 +96,245 @@ DRIFT_EVIDENCE_POLICY_VERSION = "drift-evidence-policy-v1"
 DRIFT_CORE_RULE_VERSION = "drift-flow-spread-13m-fresh60-v3"
 DRIFT_CONSENSUS_FALLBACK_POLICY_VERSION = "drift-consensus-fallback-v1"
 
+# Frozen prospective policy selected from the strict BTC historical audit. The
+# six non-BTC cohorts transfer the same gates prospectively but get independent
+# version identities so they can never contaminate BTC's validated book.
+RTI_PATH_13M_RULE_VERSION = "btc-rti-path-13m-62c-exact-v3"
+RTI_PATH_13M_INDEX_IDS = {
+    "BTC": "BRTI",
+    "ETH": "ETHUSD_RTI",
+    "SOL": "SOLUSD_RTI",
+    "XRP": "XRPUSD_RTI",
+    "DOGE": "DOGEUSD_RTI",
+    "BNB": "BNBUSD_RTI",
+    "HYPE": "HYPEUSD_RTI",
+}
+RTI_PATH_13M_RULE_VERSIONS = {
+    "BTC": RTI_PATH_13M_RULE_VERSION,
+    **{
+        asset: f"{asset.lower()}-rti-path-13m-62c-transfer-exact-v3"
+        for asset in RTI_PATH_13M_INDEX_IDS
+        if asset != "BTC"
+    },
+}
+RTI_PATH_13M_ASK_MAX_CENTS = 62.0
+RTI_PATH_13M_SPREAD_MAX_CENTS = 1.5
+RTI_PATH_13M_PERSISTENCE_MIN = 0.80
+RTI_PATH_13M_MAX_DATA_AGE_SECONDS = 2.0
+RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS = 2.0
+RTI_PATH_13M_CHALLENGER_POLICY_VERSION = (
+    "rti-path-challengers-forward-20260719-v3"
+)
+RTI_PATH_13M_SPOT_CONFIRM_CHALLENGER_ID = "spot_book_confirm_v1"
+RTI_PATH_13M_SPOT_CONFIRM_POLICY_VERSION = (
+    "rti-path-spot-book-confirm-shadow-20260718-v1"
+)
+RTI_PATH_13M_SPOT_SNAPSHOT_MAX_AGE_SECONDS = 3.0
+RTI_PATH_13M_SPOT_BOOK_MIN_AGE_SECONDS = -3.0
+RTI_PATH_13M_SPOT_BOOK_MAX_AGE_SECONDS = 2.0
+RTI_PATH_13M_IMPULSE_CHALLENGER_ID = "impulse_strength_v1"
+RTI_PATH_13M_IMPULSE_POLICY_VERSION = (
+    "rti-path-impulse-strength-paper-20260719-v1"
+)
+RTI_PATH_13M_IMPULSE_DISTANCE_MIN_BPS = 1.0
+RTI_PATH_13M_IMPULSE_MOVE_MIN_BPS = 0.5
+RTI_PATH_13M_IMPULSE_TREND_EFFICIENCY_MIN = 0.25
+RTI_PATH_13M_IMPULSE_SECOND_HALF_MOVE_MIN_BPS = 0.0
+RTI_PATH_13M_IMPULSE_MAX_STRIKE_CROSSINGS = 1
+RTI_PATH_13M_IMPULSE_MIN_SECONDS_SINCE_CROSSING = 20.0
+RTI_PATH_13M_IMPULSE_MIN_DEPTH_CONTRACTS = 10.0
+RTI_PATH_13M_IMPULSE_SPOT_SIGNED_IMBALANCE_MIN = -0.25
+RTI_PATH_13M_COUNTERTREND_CHALLENGER_ID = "rti_countertrend_value_v1"
+RTI_PATH_13M_COUNTERTREND_POLICY_VERSION = (
+    "rti-countertrend-value-record-only-20260719-v1"
+)
+RTI_PATH_13M_COUNTERTREND_OPPOSITE_ASK_MIN_CENTS = 41.0
+RTI_PATH_13M_COUNTERTREND_OPPOSITE_ASK_MAX_CENTS = 50.0
+RTI_PATH_13M_COUNTERTREND_SPREAD_MAX_CENTS = 2.0
+RTI_PATH_13M_COUNTERTREND_MIN_DEPTH_CONTRACTS = 10.0
+RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID = "rti_probability_value_v2"
+RTI_PATH_13M_PROBABILITY_V2_POLICY_VERSION = (
+    "rti-probability-value-paper-20260720-v2"
+)
+RTI_PATH_13M_PROBABILITY_V2_MIN_EV_CENTS = 3.0
+RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID = "rti_probability_value_v3"
+RTI_PATH_13M_PROBABILITY_V3_POLICY_VERSION = (
+    "rti-probability-value-paper-20260720-v3"
+)
+RTI_PATH_13M_PROBABILITY_V3_MIN_EV_CENTS = 3.0
+RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID = (
+    "rti_microstructure_value_v11"
+)
+RTI_PATH_13M_MICROSTRUCTURE_V11_POLICY_VERSION = (
+    "rti-microstructure-v11-prospective-paper-ledger-v1"
+)
+RTI_PATH_13M_MICROSTRUCTURE_V11_MIN_EV_CENTS = 3.0
+RTI_PATH_13M_DELAYED_CONFIRM_CHALLENGER_ID = "rti_delayed_confirm_30s_v1"
+RTI_PATH_13M_DELAYED_CONFIRM_POLICY_VERSION = (
+    "rti-delayed-confirm-30s-record-only-20260720-v1"
+)
+RTI_PATH_13M_DELAYED_CONFIRM_SECONDS = 30.0
+RTI_PATH_13M_DELAYED_CONFIRM_EXPECTED_COUNT = 31
+RTI_PATH_13M_DELAYED_CONFIRM_60S_CHALLENGER_ID = "rti_delayed_confirm_60s_v1"
+RTI_PATH_13M_DELAYED_CONFIRM_60S_POLICY_VERSION = (
+    "rti-delayed-confirm-60s-record-only-20260720-v1"
+)
+RTI_PATH_13M_DELAYED_CONFIRM_60S_SECONDS = 60.0
+RTI_PATH_13M_DELAYED_CONFIRM_60S_EXPECTED_COUNT = 61
+RTI_PATH_13M_DELAYED_CONFIRM_90S_CHALLENGER_ID = "rti_delayed_stability_90s_v1"
+RTI_PATH_13M_DELAYED_CONFIRM_90S_POLICY_VERSION = (
+    "rti-delayed-stability-90s-record-only-20260720-v1"
+)
+RTI_PATH_13M_DELAYED_CONFIRM_90S_SECONDS = 90.0
+RTI_PATH_13M_DELAYED_CONFIRM_90S_EXPECTED_COUNT = 91
+RTI_PATH_13M_DELAYED_FLIP_60S_CHALLENGER_ID = "rti_delayed_flip_60s_v1"
+RTI_PATH_13M_DELAYED_FLIP_60S_POLICY_VERSION = (
+    "rti-delayed-flip-60s-record-only-20260720-v1"
+)
+RTI_PATH_13M_DELAYED_CONFIRM_ASK_MAX_CENTS = 62.0
+RTI_PATH_13M_DELAYED_CONFIRM_SPREAD_MAX_CENTS = 1.5
+RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS = 10.0
+RTI_PATH_13M_FEE_SCHEDULE_VERSION = KALSHI_Q15_FEE_SCHEDULE_VERSION
+
+
+def rti_path_13m_rule_version(asset: Any) -> str | None:
+    return RTI_PATH_13M_RULE_VERSIONS.get(str(asset or "").upper())
+
+SPOT_MID_PATH_KEYS = (
+    "spot_mid_path_schema_version",
+    "spot_mid_path_time_basis",
+    "spot_mid_path_captured_at",
+    "spot_mid_history_started_at",
+    "spot_mid_history_seconds",
+    "spot_mid_history_retention_seconds",
+    "spot_mid_record_interval_seconds",
+    *(
+        f"spot_mid_{metric}_{horizon}s"
+        for horizon in (15, 60)
+        for metric in (
+            "window_complete",
+            "path_missing_reason",
+            "path_count",
+            "path_start_at",
+            "path_end_at",
+            "path_max_gap_seconds",
+            "start",
+            "end",
+            "change_bps",
+            "range_bps",
+            "realized_volatility_bps",
+            "trend_efficiency",
+        )
+    ),
+)
+
+RTI_SPOT_LEAD_LAG_KEYS = (
+    "rti_spot_lead_lag_schema_version",
+    "rti_spot_lead_lag_status",
+    "rti_spot_lead_lag_missing_reason",
+    "rti_spot_basis_bps",
+    "rti_spot_basis_start_60s_bps",
+    "rti_spot_basis_change_60s_bps",
+    "rti_index_move_bps_60s",
+    "rti_spot_move_bps_60s",
+    "rti_spot_minus_index_momentum_bps_60s",
+)
+
+RTI_CROSS_VENUE_KEYS = (
+    "rti_cross_venue_schema_version",
+    "rti_cross_venue_time_basis",
+    "rti_cross_venue_status",
+    "rti_cross_venue_missing_reason",
+    "rti_cross_venue_evidence_cutoff_at",
+    "rti_cross_venue_max_lag_seconds",
+    "rti_cross_venue_primary_source",
+    "rti_cross_venue_available_count",
+    "rti_cross_venue_consensus_mid",
+    "rti_cross_venue_current_divergence_bps",
+    "rti_cross_venue_primary_basis_bps",
+    *(
+        f"rti_cross_venue_{venue}_{key}"
+        for venue in ("coinbase", "kraken")
+        for key in (
+            "status",
+            "missing_reason",
+            "symbol",
+            "snapshot_created_at",
+            "snapshot_age_seconds",
+            "message_age_seconds",
+            "mid",
+        )
+    ),
+    *(
+        f"rti_cross_venue_{venue}_{key}_{horizon}s"
+        for venue in ("coinbase", "kraken")
+        for horizon in (15, 60)
+        for key in (
+            "start_created_at",
+            "start_age_seconds",
+            "start_mid",
+            "change_bps",
+        )
+    ),
+    *(
+        f"rti_cross_venue_{key}_{horizon}s"
+        for horizon in (15, 60)
+        for key in (
+            "consensus_change_bps",
+            "momentum_spread_bps",
+            "direction_agreement",
+            "primary_minus_consensus_bps",
+            "primary_direction_agreement",
+        )
+    ),
+)
+
+RTI_INDEPENDENT_VENUE_KEYS = (
+    "rti_independent_venue_schema_version",
+    "rti_independent_venue_time_basis",
+    "rti_independent_venue_status",
+    "rti_independent_venue_missing_reason",
+    "rti_independent_venue_evidence_cutoff_at",
+    "rti_independent_venue_max_lag_seconds",
+    "rti_independent_venue_available_count",
+    "rti_independent_venue_consensus_mid",
+    "rti_independent_venue_current_divergence_bps",
+    *(
+        f"rti_independent_venue_{venue}_{key}"
+        for venue in ("coinbase", "kraken")
+        for key in (
+            "status",
+            "missing_reason",
+            "symbol",
+            "snapshot_created_at",
+            "snapshot_age_seconds",
+            "message_age_seconds",
+            "mid",
+        )
+    ),
+    *(
+        f"rti_independent_venue_{venue}_{key}_{horizon}s"
+        for venue in ("coinbase", "kraken")
+        for horizon in (15, 60)
+        for key in (
+            "start_created_at",
+            "start_age_seconds",
+            "start_mid",
+            "change_bps",
+        )
+    ),
+    *(
+        f"rti_independent_venue_{key}_{horizon}s"
+        for horizon in (15, 60)
+        for key in (
+            "consensus_start_mid",
+            "consensus_change_bps",
+            "momentum_spread_bps",
+            "direction_agreement",
+        )
+    ),
+)
+
 SPOT_DEPTH_KEYS = (
     "spot_depth_status",
     "spot_depth_missing_reason",
@@ -113,12 +373,74 @@ SPOT_DEPTH_KEYS = (
     "spot_depth_last_trade_price",
     "spot_depth_last_trade_side",
     "spot_depth_last_trade_size",
+    *SPOT_MID_PATH_KEYS,
+    *RTI_SPOT_LEAD_LAG_KEYS,
+    *RTI_CROSS_VENUE_KEYS,
+    *RTI_INDEPENDENT_VENUE_KEYS,
+    *RTI_INDEPENDENT_MICROSTRUCTURE_KEYS,
+    *RTI_INDEPENDENT_PATH_KEYS,
+    *RTI_CROSS_ASSET_KEYS,
 )
 
 KALSHI_FLOW_KEYS = (
-    "kalshi_taker_yes_volume_15s",
-    "kalshi_taker_no_volume_15s",
-    "kalshi_taker_net_yes_volume_15s",
+    "kalshi_microstructure_schema_version",
+    "kalshi_microstructure_extension_schema_version",
+    "kalshi_microstructure_captured_at",
+    "kalshi_microstructure_time_basis",
+    "kalshi_history_count_capped",
+    "kalshi_book_event_retention_seconds",
+    "kalshi_trade_retention_seconds",
+    "kalshi_book_history_started_at",
+    "kalshi_trade_history_started_at",
+    "kalshi_book_history_seconds",
+    "kalshi_trade_history_seconds",
+    "kalshi_yes_microprice_cents",
+    "kalshi_yes_microprice_edge_cents",
+    *(
+        f"kalshi_{metric}_{horizon}s"
+        for horizon in (5, 15, 30, 60)
+        for metric in (
+            "book_window_complete",
+            "trade_window_complete",
+            "microstructure_window_complete",
+            "event_count",
+            "trade_count",
+            "book_delta_pressure_yes",
+            "trade_imbalance_yes",
+            "taker_yes_volume",
+            "taker_no_volume",
+            "taker_net_yes_volume",
+            "yes_best_depletion",
+            "no_best_depletion",
+            "yes_best_refill",
+            "no_best_refill",
+        )
+    ),
+    *(
+        f"kalshi_{metric}_{horizon}s"
+        for horizon in (5, 15, 30, 60)
+        for metric in (
+            "book_add_volume_yes",
+            "book_remove_volume_yes",
+            "book_add_volume_no",
+            "book_remove_volume_no",
+            "microprice_change_cents",
+            "microprice_range_cents",
+            "microprice_variation_cents",
+            "microprice_trend_efficiency",
+            "trade_yes_price_change_cents",
+            "trade_yes_price_range_cents",
+            "trade_yes_price_variation_cents",
+            "trade_yes_price_trend_efficiency",
+            "trade_yes_vwap_cents",
+        )
+    ),
+)
+RTI_EXACT_MICROSTRUCTURE_SCHEMA_V1 = "rti-exact-microstructure-v1"
+RTI_EXACT_MICROSTRUCTURE_SCHEMA_V2 = "rti-exact-microstructure-v2"
+RTI_EXACT_MICROSTRUCTURE_SCHEMA_VERSION = RTI_EXACT_MICROSTRUCTURE_SCHEMA_V2
+RTI_EXACT_MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION = (
+    "rti-exact-microstructure-extension-v1"
 )
 
 KALSHI_DEPTH_KEYS = (
@@ -3735,6 +4057,1253 @@ def thirteen_m_sniper_decision(
         side_override=side,
         entry_ask_cents=quote,
         use_entry_ask_override=quote is not None,
+    )
+
+
+def rti_path_13m_decision(row: Mapping[str, Any]) -> BotDecision:
+    """Frozen 13M RTI-path gate with strictly isolated per-asset cohorts."""
+    asset = _asset(row)
+    interval = str(row.get("interval") or "").upper()
+    index_id = str(row.get("rti_index_id") or "").upper()
+    expected_index_id = RTI_PATH_13M_INDEX_IDS.get(asset)
+    rule_version = rti_path_13m_rule_version(asset)
+    side = _side(row.get("rti_side"))
+    side_14m = _side(row.get("rti_14m_side"))
+    ask = _num(row.get("entry_ask_cents"))
+    spread = _num(row.get("spread_cents"))
+    persistence = _num(row.get("rti_path_persistence"))
+    side_move = _num(row.get("rti_side_move"))
+    side_move_bps = _num(row.get("rti_side_move_bps"))
+    signed_distance_bps = _num(row.get("rti_signed_distance_bps"))
+    trend_efficiency = _num(row.get("rti_path_trend_efficiency"))
+    second_half_move_bps = _num(row.get("rti_path_second_half_side_move_bps"))
+    strike_crossings = _num(row.get("rti_path_strike_crossings"))
+    seconds_since_crossing = _num(row.get("rti_path_seconds_since_last_crossing"))
+    depth_contracts = _num(row.get("depth_contracts"))
+    opposite_side = _side(row.get("rti_opposite_side"))
+    opposite_ask = _num(row.get("rti_opposite_ask_cents"))
+    opposite_depth = _num(row.get("rti_opposite_depth_contracts"))
+    timing_offset = _num(row.get("rti_timing_offset_s"))
+    quote_age = _num(row.get("quote_age_seconds"))
+    decision_age = _num(row.get("rti_decision_age_s"))
+    max_receive_age = _num(row.get("rti_path_max_receive_age_s"))
+    path_count = int(_num(row.get("rti_path_count")) or 0)
+    expected_count = int(_num(row.get("rti_path_expected_count")) or 61)
+    evaluation_delay = _num(row.get("rti_path_evaluation_delay_s"))
+    close_time = _num(row.get("close_time"))
+    resolved_n = int(_num(row.get("rti_path_13m_resolved_n")) or 0)
+    resolved_correct = int(_num(row.get("rti_path_13m_correct")) or 0)
+    resolved_accuracy = _num(row.get("rti_path_13m_accuracy"))
+    resolved_wilson_lb = _num(row.get("rti_path_13m_wilson_lb"))
+    resolved_pnl = _num(row.get("rti_path_13m_net_pnl_cents"))
+
+    profile: dict[str, Any] = {
+        "rule_version": rule_version,
+        "paper_only": True,
+        "forward_only": True,
+        "historically_validated_asset": "BTC",
+        "historically_validated": asset == "BTC",
+        "prospective_transfer": asset != "BTC",
+        "asset_cohort": asset,
+        "interval_required": "13M",
+        "index_required": expected_index_id,
+        "path_expected_seconds": 61,
+        "same_side_at_14m_required": True,
+        "persistence_min": RTI_PATH_13M_PERSISTENCE_MIN,
+        "side_move_min": 0.0,
+        "ask_max_cents": RTI_PATH_13M_ASK_MAX_CENTS,
+        "spread_max_cents": RTI_PATH_13M_SPREAD_MAX_CENTS,
+        "max_data_age_seconds": RTI_PATH_13M_MAX_DATA_AGE_SECONDS,
+        "max_timing_offset_seconds": RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS,
+        "sim_contracts": 10,
+        "sim_full_fill_supported": (
+            depth_contracts is not None and depth_contracts >= 10.0
+        ),
+        "slippage_cents_per_contract": 2.0,
+        "fee_schedule_version": RTI_PATH_13M_FEE_SCHEDULE_VERSION,
+        "execution_cost_model_version": RTI_EXECUTION_COST_MODEL_VERSION,
+        "resolved_n": resolved_n,
+        "resolved_correct": resolved_correct,
+        "resolved_accuracy": resolved_accuracy,
+        "resolved_wilson_lb": resolved_wilson_lb,
+        "resolved_net_pnl_cents_per_contract": resolved_pnl,
+    }
+    for key in (
+        "rti_path_status", "rti_path_missing_reason", "rti_index_id",
+        "rti_path_expected_count", "rti_path_count", "rti_path_complete",
+        "rti_path_missing_seconds", "rti_path_max_receive_age_s",
+        "rti_decision_age_s", "rti_strike", "rti_path_start_px",
+        "rti_path_end_px", "rti_14m_side", "rti_side",
+        "rti_same_side_14m", "rti_path_persistence", "rti_move_raw",
+        "rti_side_move", "rti_side_move_bps", "rti_timing_offset_s",
+        "rti_signed_distance_bps", "rti_absolute_distance_bps",
+        "rti_path_range_bps", "rti_path_realized_volatility_bps",
+        "rti_path_trend_efficiency", "rti_path_first_half_side_move_bps",
+        "rti_path_second_half_side_move_bps", "rti_path_acceleration_bps",
+        "rti_path_strike_crossings", "rti_path_seconds_since_last_crossing",
+        "rti_expected_remaining_volatility_bps",
+        "rti_distance_to_remaining_volatility",
+        "rti_quote_source_side", "rti_quote_inverted", "quote_age_seconds",
+        "rti_market_mid_probability", "rti_opposite_side",
+        "rti_opposite_ask_cents", "rti_opposite_depth_contracts",
+        "quote_age_source", "quote_captured_at", "rti_evaluated_at",
+        "capture_mode", "rti_path_evaluation_delay_s", "rti_storage_delay_s",
+        "rti_risk_policy_version", "rti_reversal_risk_class",
+        "rti_reversal_risk_reason_codes",
+        "rti_settlement_average_risk_class",
+        "rti_settlement_average_risk_reason_codes",
+        "rti_path_regime_class", "rti_market_agreement_class",
+        "rti_risk_notification_eligible",
+        "rti_risk_historical_credit_allowed",
+        "depth_contracts", "kalshi_depth_status",
+        "kalshi_depth_missing_reason",
+        "rti_spot_evidence_as_of", "rti_spot_snapshot_created_at",
+        "rti_spot_snapshot_age_s",
+        "rti_spot_book_age_s", "spot_depth_status",
+        "spot_depth_missing_reason", "spot_depth_source",
+        "spot_depth_age_seconds", "spot_depth_trade_age_seconds",
+        "spot_depth_imbalance",
+    ):
+        profile[key] = row.get(key)
+    for key in KALSHI_FLOW_KEYS:
+        profile[key] = row.get(key)
+
+    # Two pre-registered forward challengers. They do not alter the strict
+    # book or place orders, but accepted rows may produce deduplicated paper
+    # notifications. Each relaxes only the spread ceiling and pays for that
+    # extra liquidity risk with either materially stronger RTI path persistence
+    # or a lower entry price. Storing the verdict now prevents a future audit
+    # from choosing thresholds after seeing settlement outcomes.
+    common_quality = {
+        "ASSET_SUPPORTED": asset in RTI_PATH_13M_INDEX_IDS and rule_version is not None,
+        "RULE_VERSION": str(row.get("model_version") or "") == rule_version,
+        "INTERVAL_13M": interval == "13M",
+        "OFFICIAL_INDEX": expected_index_id is not None and index_id == expected_index_id,
+        "PATH_61_FRESH": bool(row.get("rti_path_complete"))
+        and path_count == 61
+        and expected_count == 61
+        and max_receive_age is not None
+        and decision_age is not None
+        and max_receive_age <= RTI_PATH_13M_MAX_DATA_AGE_SECONDS
+        and decision_age <= RTI_PATH_13M_MAX_DATA_AGE_SECONDS,
+        "EXACT_TIMING": timing_offset is not None
+        and 0.0 <= timing_offset <= RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS,
+        "EVALUATION_WITHIN_2S": evaluation_delay is not None
+        and 0.0 <= evaluation_delay <= RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS,
+        "SIDE_AVAILABLE": side in {"YES", "NO"},
+        "QUOTE_FRESH": quote_age is not None
+        and quote_age <= RTI_PATH_13M_MAX_DATA_AGE_SECONDS,
+    }
+
+    def _challenger(
+        *, name: str, persistence_min: float, ask_max: float, spread_max: float,
+    ) -> dict[str, Any]:
+        checks = {
+            **common_quality,
+            "SAME_SIDE_14M": side is not None
+            and side_14m == side
+            and row.get("rti_same_side_14m") is True,
+            f"PERSISTENCE_{int(persistence_min * 100)}": persistence is not None
+            and persistence >= persistence_min,
+            "MOMENTUM_NONNEGATIVE": side_move is not None and side_move >= 0.0,
+            f"ASK_MAX_{int(ask_max)}": ask is not None and ask <= ask_max,
+            "BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+            f"SPREAD_MAX_{spread_max:g}": spread is not None and spread <= spread_max,
+        }
+        failures = [key for key, passed_check in checks.items() if not passed_check]
+        return {
+            "name": name,
+            "accepted": not failures,
+            "failures": failures,
+            "criteria": {
+                "persistence_min": persistence_min,
+                "ask_max_cents": ask_max,
+                "spread_max_cents": spread_max,
+                "all_strict_freshness_gates": True,
+                "same_side_14m_required": True,
+                "side_move_min": 0.0,
+            },
+            "notification_eligible": True,
+            "paper_only": True,
+        }
+
+    profile["challenger_policy_version"] = RTI_PATH_13M_CHALLENGER_POLICY_VERSION
+    profile["challengers"] = {
+        "strong_path_wide_v1": _challenger(
+            name="strong path / wider spread",
+            persistence_min=0.90,
+            ask_max=62.0,
+            spread_max=2.0,
+        ),
+        "value_price_wide_v1": _challenger(
+            name="lower price / wider spread",
+            persistence_min=0.80,
+            ask_max=58.0,
+            spread_max=2.0,
+        ),
+    }
+    # The two 2c-spread books remain frozen counterfactual ledgers, but their
+    # forward performance no longer justifies independent Telegram delivery.
+    for legacy_wide in ("strong_path_wide_v1", "value_price_wide_v1"):
+        profile["challengers"][legacy_wide]["notification_eligible"] = False
+        profile["challengers"][legacy_wide]["notification_status"] = (
+            "MUTED_FORWARD_REVIEW_20260719"
+        )
+    spot_status = str(row.get("spot_depth_status") or "").lower()
+    spot_snapshot_age = _num(row.get("rti_spot_snapshot_age_s"))
+    spot_book_age = _num(row.get("rti_spot_book_age_s"))
+    spot_imbalance = _num(row.get("spot_depth_imbalance"))
+    spot_aligned = (
+        spot_imbalance is not None
+        and ((side == "YES" and spot_imbalance > 0.0)
+             or (side == "NO" and spot_imbalance < 0.0))
+    )
+    spot_signed_imbalance = (
+        None
+        if spot_imbalance is None or side not in {"YES", "NO"}
+        else spot_imbalance * (1.0 if side == "YES" else -1.0)
+    )
+    spot_checks = {
+        **common_quality,
+        "STRICT_SAME_SIDE_14M": side is not None
+        and side_14m == side
+        and row.get("rti_same_side_14m") is True,
+        "STRICT_PERSISTENCE_80": persistence is not None
+        and persistence >= RTI_PATH_13M_PERSISTENCE_MIN,
+        "STRICT_MOMENTUM_NONNEGATIVE": side_move is not None and side_move >= 0.0,
+        "STRICT_ASK_MAX_62": ask is not None and ask <= RTI_PATH_13M_ASK_MAX_CENTS,
+        "STRICT_BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+        "STRICT_SPREAD_MAX_1_5": spread is not None
+        and spread <= RTI_PATH_13M_SPREAD_MAX_CENTS,
+        "SPOT_STATUS_OK": spot_status == "ok",
+        "SPOT_SNAPSHOT_AS_OF_DECISION": spot_snapshot_age is not None
+        and spot_snapshot_age >= 0.0,
+        "SPOT_SNAPSHOT_FRESH_3S": spot_snapshot_age is not None
+        and 0.0 <= spot_snapshot_age <= RTI_PATH_13M_SPOT_SNAPSHOT_MAX_AGE_SECONDS,
+        "SPOT_BOOK_FRESH_2S": spot_book_age is not None
+        and RTI_PATH_13M_SPOT_BOOK_MIN_AGE_SECONDS
+        <= spot_book_age <= RTI_PATH_13M_SPOT_BOOK_MAX_AGE_SECONDS,
+        "SPOT_IMBALANCE_AVAILABLE": spot_imbalance is not None,
+        "SPOT_BOOK_ALIGNS_RTI": spot_aligned,
+    }
+    spot_failures = [key for key, passed_check in spot_checks.items() if not passed_check]
+    profile["challengers"][RTI_PATH_13M_SPOT_CONFIRM_CHALLENGER_ID] = {
+        "name": "fresh spot-book confirmation",
+        "accepted": not spot_failures,
+        "failures": spot_failures,
+        "criteria": {
+            "policy_version": RTI_PATH_13M_SPOT_CONFIRM_POLICY_VERSION,
+            "strict_control_required": True,
+            "spot_snapshot_max_age_seconds": RTI_PATH_13M_SPOT_SNAPSHOT_MAX_AGE_SECONDS,
+            "spot_book_min_age_seconds": RTI_PATH_13M_SPOT_BOOK_MIN_AGE_SECONDS,
+            "spot_book_max_age_seconds": RTI_PATH_13M_SPOT_BOOK_MAX_AGE_SECONDS,
+            "spot_depth_imbalance_must_align_with_rti_side": True,
+        },
+        "notification_eligible": False,
+        "paper_only": True,
+        "forward_only": True,
+        "promotion_status": "ACCRUING_TO_30",
+        "review_bars": [30, 60, 150],
+        "manual_promotion_only": True,
+    }
+    impulse_checks = {
+        **common_quality,
+        "STRICT_SAME_SIDE_14M": side is not None
+        and side_14m == side
+        and row.get("rti_same_side_14m") is True,
+        "STRICT_PERSISTENCE_80": persistence is not None
+        and persistence >= RTI_PATH_13M_PERSISTENCE_MIN,
+        "STRICT_ASK_MAX_62": ask is not None and ask <= RTI_PATH_13M_ASK_MAX_CENTS,
+        "STRICT_BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+        "STRICT_SPREAD_MAX_1_5": spread is not None
+        and spread <= RTI_PATH_13M_SPREAD_MAX_CENTS,
+        "DISTANCE_MIN_1_BPS": signed_distance_bps is not None
+        and signed_distance_bps >= RTI_PATH_13M_IMPULSE_DISTANCE_MIN_BPS,
+        "MOVE_MIN_0_5_BPS": side_move_bps is not None
+        and side_move_bps >= RTI_PATH_13M_IMPULSE_MOVE_MIN_BPS,
+        "TREND_EFFICIENCY_MIN_0_25": trend_efficiency is not None
+        and trend_efficiency >= RTI_PATH_13M_IMPULSE_TREND_EFFICIENCY_MIN,
+        "SECOND_HALF_NOT_FADING": second_half_move_bps is not None
+        and second_half_move_bps >= RTI_PATH_13M_IMPULSE_SECOND_HALF_MOVE_MIN_BPS,
+        "STRIKE_CROSSINGS_MAX_1": strike_crossings is not None
+        and strike_crossings <= RTI_PATH_13M_IMPULSE_MAX_STRIKE_CROSSINGS,
+        "LAST_CROSSING_CLEAR_20S": strike_crossings is not None
+        and (
+            strike_crossings == 0.0
+            or (
+                seconds_since_crossing is not None
+                and seconds_since_crossing
+                >= RTI_PATH_13M_IMPULSE_MIN_SECONDS_SINCE_CROSSING
+            )
+        ),
+        "DISPLAYED_DEPTH_SUPPORTS_10": depth_contracts is not None
+        and depth_contracts >= RTI_PATH_13M_IMPULSE_MIN_DEPTH_CONTRACTS,
+        "SPOT_STATUS_OK": spot_status == "ok",
+        "SPOT_SNAPSHOT_AS_OF_DECISION": spot_snapshot_age is not None
+        and spot_snapshot_age >= 0.0,
+        "SPOT_SNAPSHOT_FRESH_3S": spot_snapshot_age is not None
+        and spot_snapshot_age <= RTI_PATH_13M_SPOT_SNAPSHOT_MAX_AGE_SECONDS,
+        "SPOT_BOOK_FRESH_2S": spot_book_age is not None
+        and RTI_PATH_13M_SPOT_BOOK_MIN_AGE_SECONDS
+        <= spot_book_age <= RTI_PATH_13M_SPOT_BOOK_MAX_AGE_SECONDS,
+        "SPOT_IMBALANCE_AVAILABLE": spot_signed_imbalance is not None,
+        "SPOT_NOT_STRONGLY_OPPOSED": spot_signed_imbalance is not None
+        and spot_signed_imbalance
+        >= RTI_PATH_13M_IMPULSE_SPOT_SIGNED_IMBALANCE_MIN,
+    }
+    impulse_failures = [
+        key for key, passed_check in impulse_checks.items() if not passed_check
+    ]
+    profile["challengers"][RTI_PATH_13M_IMPULSE_CHALLENGER_ID] = {
+        "name": "impulse strength v1",
+        "accepted": not impulse_failures,
+        "failures": impulse_failures,
+        "criteria": {
+            "policy_version": RTI_PATH_13M_IMPULSE_POLICY_VERSION,
+            "strict_control_required": True,
+            "signed_distance_min_bps": RTI_PATH_13M_IMPULSE_DISTANCE_MIN_BPS,
+            "side_move_min_bps": RTI_PATH_13M_IMPULSE_MOVE_MIN_BPS,
+            "trend_efficiency_min": RTI_PATH_13M_IMPULSE_TREND_EFFICIENCY_MIN,
+            "second_half_side_move_min_bps": (
+                RTI_PATH_13M_IMPULSE_SECOND_HALF_MOVE_MIN_BPS
+            ),
+            "strike_crossings_max": RTI_PATH_13M_IMPULSE_MAX_STRIKE_CROSSINGS,
+            "seconds_since_crossing_min": (
+                RTI_PATH_13M_IMPULSE_MIN_SECONDS_SINCE_CROSSING
+            ),
+            "displayed_depth_min_contracts": (
+                RTI_PATH_13M_IMPULSE_MIN_DEPTH_CONTRACTS
+            ),
+            "spot_signed_imbalance_min": (
+                RTI_PATH_13M_IMPULSE_SPOT_SIGNED_IMBALANCE_MIN
+            ),
+            "spot_snapshot_max_age_seconds": (
+                RTI_PATH_13M_SPOT_SNAPSHOT_MAX_AGE_SECONDS
+            ),
+            "spot_book_max_age_seconds": RTI_PATH_13M_SPOT_BOOK_MAX_AGE_SECONDS,
+            "selected_after_reviewed_losses": True,
+            "historical_credit_allowed": False,
+        },
+        "evidence": {
+            "signed_distance_bps": signed_distance_bps,
+            "side_move_bps": side_move_bps,
+            "trend_efficiency": trend_efficiency,
+            "second_half_side_move_bps": second_half_move_bps,
+            "strike_crossings": strike_crossings,
+            "seconds_since_last_crossing": seconds_since_crossing,
+            "displayed_depth_contracts": depth_contracts,
+            "spot_signed_imbalance": spot_signed_imbalance,
+        },
+        "notification_eligible": True,
+        "paper_only": True,
+        "forward_only": True,
+        "promotion_status": "ACCRUING_TO_30",
+        "review_bars": [30, 60, 150],
+        "manual_promotion_only": True,
+    }
+    countertrend_checks = {
+        **common_quality,
+        "OPPOSITE_SIDE_AVAILABLE": opposite_side in {"YES", "NO"}
+        and opposite_side != side,
+        "BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+        "SPREAD_MAX_2": spread is not None
+        and spread <= RTI_PATH_13M_COUNTERTREND_SPREAD_MAX_CENTS,
+        "OPPOSITE_ASK_MIN_41": opposite_ask is not None
+        and opposite_ask >= RTI_PATH_13M_COUNTERTREND_OPPOSITE_ASK_MIN_CENTS,
+        "OPPOSITE_ASK_MAX_50": opposite_ask is not None
+        and opposite_ask <= RTI_PATH_13M_COUNTERTREND_OPPOSITE_ASK_MAX_CENTS,
+        "OPPOSITE_DEPTH_SUPPORTS_10": opposite_depth is not None
+        and opposite_depth >= RTI_PATH_13M_COUNTERTREND_MIN_DEPTH_CONTRACTS,
+    }
+    countertrend_failures = [
+        key for key, passed_check in countertrend_checks.items() if not passed_check
+    ]
+    profile["challengers"][RTI_PATH_13M_COUNTERTREND_CHALLENGER_ID] = {
+        "name": "RTI countertrend value v1",
+        "accepted": not countertrend_failures,
+        "failures": countertrend_failures,
+        "side_override": opposite_side,
+        "entry_ask_cents": opposite_ask,
+        "displayed_depth_contracts": opposite_depth,
+        "criteria": {
+            "policy_version": RTI_PATH_13M_COUNTERTREND_POLICY_VERSION,
+            "opposite_ask_min_cents": (
+                RTI_PATH_13M_COUNTERTREND_OPPOSITE_ASK_MIN_CENTS
+            ),
+            "opposite_ask_max_cents": (
+                RTI_PATH_13M_COUNTERTREND_OPPOSITE_ASK_MAX_CENTS
+            ),
+            "spread_max_cents": RTI_PATH_13M_COUNTERTREND_SPREAD_MAX_CENTS,
+            "displayed_depth_min_contracts": (
+                RTI_PATH_13M_COUNTERTREND_MIN_DEPTH_CONTRACTS
+            ),
+            "fresh_opposite_quote_required": True,
+            "selected_after_reviewed_results": True,
+            "historical_credit_allowed": False,
+        },
+        "notification_eligible": False,
+        "paper_only": True,
+        "forward_only": True,
+        "promotion_status": "RESEARCH_ONLY_ACCRUING_TO_30",
+        "review_bars": [30, 60, 150],
+        "manual_promotion_only": True,
+    }
+    probability_raw = row.get("rti_probability_shadow_v2")
+    probability = (
+        dict(probability_raw)
+        if isinstance(probability_raw, Mapping)
+        else {}
+    )
+    recommendation_raw = probability.get("entry_recommendation")
+    recommendation = (
+        dict(recommendation_raw)
+        if isinstance(recommendation_raw, Mapping)
+        else {}
+    )
+    probability_side = _side(recommendation.get("side"))
+    probability_ask = _num(recommendation.get("ask_cents"))
+    probability_depth = _num(recommendation.get("depth_contracts"))
+    probability_ev = _num(
+        recommendation.get("expected_value_cents_per_contract")
+    )
+    probability_checks = {
+        **common_quality,
+        "MODEL_V2_AVAILABLE": probability.get("available") is True,
+        "MODEL_V2_PROSPECTIVE_AFTER_FREEZE": probability.get("prospective")
+        is True,
+        "MODEL_V2_VERSION_FROZEN": str(probability.get("model_version") or "")
+        .startswith("rti-probability-shadow-v2-"),
+        "MODEL_V2_ARTIFACT_FINGERPRINTED": bool(
+            probability.get("artifact_sha256")
+        ),
+        "MODEL_V2_COHORT_ISOLATED": probability.get("cohort")
+        == ("BTC" if asset == "BTC" else "NON_BTC_TRANSFER"),
+        "MODEL_V2_SIDE_AVAILABLE": probability_side in {"YES", "NO"},
+        "MODEL_V2_NEW_ASK_MAX_62": probability_ask is not None
+        and probability_ask <= RTI_PATH_13M_ASK_MAX_CENTS,
+        "MODEL_V2_BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+        "MODEL_V2_SPREAD_MAX_1_5": spread is not None
+        and spread <= RTI_PATH_13M_SPREAD_MAX_CENTS,
+        "MODEL_V2_DEPTH_CAPTURED": recommendation.get("depth_available")
+        is True,
+        "MODEL_V2_DEPTH_SUPPORTS_10": probability_depth is not None
+        and probability_depth >= RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS,
+        "MODEL_V2_EV_AFTER_COSTS_MIN_3C": probability_ev is not None
+        and probability_ev >= RTI_PATH_13M_PROBABILITY_V2_MIN_EV_CENTS,
+    }
+    probability_failures = [
+        key for key, passed_check in probability_checks.items()
+        if not passed_check
+    ]
+    profile["challengers"][RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID] = {
+        "name": "RTI probability value v2",
+        "accepted": not probability_failures,
+        "failures": probability_failures,
+        "side_override": probability_side,
+        "entry_ask_cents": probability_ask,
+        "displayed_depth_contracts": probability_depth,
+        "evidence": {
+            "model_version": probability.get("model_version"),
+            "artifact_sha256": probability.get("artifact_sha256"),
+            "prospective_after_close_time": probability.get(
+                "prospective_after_close_time"
+            ),
+            "cohort": probability.get("cohort"),
+            "raw_yes_probability": probability.get("raw_yes_probability"),
+            "calibrated_yes_probability": probability.get(
+                "calibrated_yes_probability"
+            ),
+            "market_yes_probability": probability.get(
+                "market_yes_probability"
+            ),
+            "selected_win_probability": recommendation.get(
+                "win_probability"
+            ),
+            "expected_value_cents_per_contract": probability_ev,
+            "fee_cents_per_contract": recommendation.get(
+                "fee_cents_per_contract"
+            ),
+        },
+        "criteria": {
+            "policy_version": RTI_PATH_13M_PROBABILITY_V2_POLICY_VERSION,
+            "correct_yes_no_market_orientation_required": True,
+            "cohort_models": ["BTC", "NON_BTC_TRANSFER"],
+            "cohort_mixing_forbidden": True,
+            "prospective_after_artifact_cutoff_required": True,
+            "min_expected_value_cents_after_fee_slippage": (
+                RTI_PATH_13M_PROBABILITY_V2_MIN_EV_CENTS
+            ),
+            "ask_max_cents": RTI_PATH_13M_ASK_MAX_CENTS,
+            "spread_max_cents": RTI_PATH_13M_SPREAD_MAX_CENTS,
+            "displayed_depth_min_contracts": (
+                RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS
+            ),
+            "selected_after_v1_orientation_bug_review": True,
+            "historical_credit_allowed": False,
+        },
+        "notification_eligible": False,
+        "paper_only": True,
+        "forward_only": True,
+        "historical_credit_allowed": False,
+        "manual_promotion_only": True,
+        "promotion_status": "QUARANTINED_NUMERICAL_OOD_PRE_OUTCOME_REVIEW",
+        "promotion_prohibited": True,
+        "known_issue": (
+            "non-BTC invariant depth-missing feature had a tiny nonzero "
+            "training std and saturated live raw probabilities"
+        ),
+        "review_bars": [30, 60, 150],
+    }
+    probability_v3_raw = row.get("rti_probability_shadow_v3")
+    probability_v3 = (
+        dict(probability_v3_raw)
+        if isinstance(probability_v3_raw, Mapping)
+        else {}
+    )
+    recommendation_v3_raw = probability_v3.get("entry_recommendation")
+    recommendation_v3 = (
+        dict(recommendation_v3_raw)
+        if isinstance(recommendation_v3_raw, Mapping)
+        else {}
+    )
+    probability_v3_side = _side(recommendation_v3.get("side"))
+    probability_v3_ask = _num(recommendation_v3.get("ask_cents"))
+    probability_v3_depth = _num(recommendation_v3.get("depth_contracts"))
+    probability_v3_ev = _num(
+        recommendation_v3.get("expected_value_cents_per_contract")
+    )
+    standardization_v3_raw = probability_v3.get("standardization")
+    standardization_v3 = (
+        dict(standardization_v3_raw)
+        if isinstance(standardization_v3_raw, Mapping)
+        else {}
+    )
+    standardization_policy_v3_raw = probability_v3.get(
+        "standardization_policy"
+    )
+    standardization_policy_v3 = (
+        dict(standardization_policy_v3_raw)
+        if isinstance(standardization_policy_v3_raw, Mapping)
+        else {}
+    )
+    calibration_policy_v3_raw = probability_v3.get("calibration_policy")
+    calibration_policy_v3 = (
+        dict(calibration_policy_v3_raw)
+        if isinstance(calibration_policy_v3_raw, Mapping)
+        else {}
+    )
+    probability_v3_checks = {
+        **common_quality,
+        "MODEL_V3_AVAILABLE": probability_v3.get("available") is True,
+        "MODEL_V3_PROSPECTIVE_AFTER_FREEZE": probability_v3.get(
+            "prospective"
+        ) is True,
+        "MODEL_V3_VERSION_FROZEN": str(
+            probability_v3.get("model_version") or ""
+        ).startswith("rti-probability-shadow-v3-"),
+        "MODEL_V3_ARTIFACT_FINGERPRINTED": bool(
+            probability_v3.get("artifact_sha256")
+        ),
+        "MODEL_V3_COHORT_ISOLATED": probability_v3.get("cohort")
+        == ("BTC" if asset == "BTC" else "NON_BTC_TRANSFER"),
+        "MODEL_V3_NEAR_ZERO_STD_GUARD": (
+            _num(standardization_policy_v3.get("min_std")) is not None
+            and float(standardization_policy_v3["min_std"]) >= 1e-8
+        ),
+        "MODEL_V3_MONOTONE_CALIBRATION": calibration_policy_v3.get(
+            "monotone_slope_required"
+        ) is True,
+        "MODEL_V3_NOT_OUT_OF_DISTRIBUTION": probability_v3.get(
+            "out_of_distribution"
+        ) is False
+        and standardization_v3.get("out_of_distribution") is False,
+        "MODEL_V3_SIDE_AVAILABLE": probability_v3_side in {"YES", "NO"},
+        "MODEL_V3_NEW_ASK_MAX_62": probability_v3_ask is not None
+        and probability_v3_ask <= RTI_PATH_13M_ASK_MAX_CENTS,
+        "MODEL_V3_BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+        "MODEL_V3_SPREAD_MAX_1_5": spread is not None
+        and spread <= RTI_PATH_13M_SPREAD_MAX_CENTS,
+        "MODEL_V3_DEPTH_CAPTURED": recommendation_v3.get("depth_available")
+        is True,
+        "MODEL_V3_DEPTH_SUPPORTS_10": probability_v3_depth is not None
+        and probability_v3_depth
+        >= RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS,
+        "MODEL_V3_EV_AFTER_COSTS_MIN_3C": probability_v3_ev is not None
+        and probability_v3_ev >= RTI_PATH_13M_PROBABILITY_V3_MIN_EV_CENTS,
+    }
+    probability_v3_failures = [
+        key
+        for key, passed_check in probability_v3_checks.items()
+        if not passed_check
+    ]
+    profile["challengers"][RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID] = {
+        "name": "RTI probability value v3",
+        "accepted": not probability_v3_failures,
+        "failures": probability_v3_failures,
+        "side_override": probability_v3_side,
+        "entry_ask_cents": probability_v3_ask,
+        "displayed_depth_contracts": probability_v3_depth,
+        "evidence": {
+            "model_version": probability_v3.get("model_version"),
+            "artifact_sha256": probability_v3.get("artifact_sha256"),
+            "prospective_after_close_time": probability_v3.get(
+                "prospective_after_close_time"
+            ),
+            "cohort": probability_v3.get("cohort"),
+            "raw_yes_probability": probability_v3.get("raw_yes_probability"),
+            "calibrated_yes_probability": probability_v3.get(
+                "calibrated_yes_probability"
+            ),
+            "market_yes_probability": probability_v3.get(
+                "market_yes_probability"
+            ),
+            "selected_win_probability": recommendation_v3.get(
+                "win_probability"
+            ),
+            "expected_value_cents_per_contract": probability_v3_ev,
+            "fee_cents_per_contract": recommendation_v3.get(
+                "fee_cents_per_contract"
+            ),
+            "max_abs_z_preclip": standardization_v3.get(
+                "max_abs_z_preclip"
+            ),
+            "out_of_distribution": probability_v3.get(
+                "out_of_distribution"
+            ),
+        },
+        "criteria": {
+            "policy_version": RTI_PATH_13M_PROBABILITY_V3_POLICY_VERSION,
+            "near_zero_variance_features_disabled": True,
+            "bounded_standardized_features": True,
+            "out_of_distribution_fails_entry": True,
+            "monotone_calibration_required": True,
+            "cohort_models": ["BTC", "NON_BTC_TRANSFER"],
+            "cohort_mixing_forbidden": True,
+            "prospective_after_every_inspected_close_required": True,
+            "min_expected_value_cents_after_fee_slippage": (
+                RTI_PATH_13M_PROBABILITY_V3_MIN_EV_CENTS
+            ),
+            "ask_max_cents": RTI_PATH_13M_ASK_MAX_CENTS,
+            "spread_max_cents": RTI_PATH_13M_SPREAD_MAX_CENTS,
+            "displayed_depth_min_contracts": (
+                RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS
+            ),
+            "selected_after_v2_pre_outcome_numerical_ood_review": True,
+            "historical_credit_allowed": False,
+        },
+        "notification_eligible": False,
+        "paper_only": True,
+        "forward_only": True,
+        "historical_credit_allowed": False,
+        "manual_promotion_only": True,
+        "promotion_status": "RESEARCH_ONLY_ACCRUING_TO_30",
+        "review_bars": [30, 60, 150],
+    }
+    microstructure_v11_raw = row.get("rti_microstructure_shadow_v11")
+    if isinstance(microstructure_v11_raw, Mapping):
+        microstructure_v11 = dict(microstructure_v11_raw)
+        recommendation_v11_raw = microstructure_v11.get(
+            "entry_recommendation"
+        )
+        recommendation_v11 = (
+            dict(recommendation_v11_raw)
+            if isinstance(recommendation_v11_raw, Mapping)
+            else {}
+        )
+        v11_side = _side(recommendation_v11.get("side"))
+        v11_ask = _num(recommendation_v11.get("ask_cents"))
+        v11_depth = _num(
+            recommendation_v11.get("displayed_depth_contracts")
+        )
+        v11_ev = _num(
+            recommendation_v11.get("expected_value_cents_per_contract")
+        )
+        v11_yes_probability = _num(
+            microstructure_v11.get("yes_probability")
+        )
+        v11_market_probability = _num(
+            microstructure_v11.get("market_yes_probability")
+        )
+        v11_cutoff = _num(
+            microstructure_v11.get("prospective_after_close_time")
+        )
+
+        def _is_sha256(value: Any) -> bool:
+            text = str(value or "")
+            return len(text) == 64 and all(
+                character in "0123456789abcdef" for character in text
+            )
+
+        v11_checks = {
+            **common_quality,
+            "MODEL_V11_AVAILABLE": microstructure_v11.get("available") is True,
+            "MODEL_V11_PROSPECTIVE_AFTER_LOCK": microstructure_v11.get(
+                "prospective"
+            ) is True
+            and close_time is not None
+            and v11_cutoff is not None
+            and close_time > v11_cutoff,
+            "MODEL_V11_VERSION_FROZEN": str(
+                microstructure_v11.get("model_version") or ""
+            ).startswith(
+                f"rti-microstructure-paper-{RTI_MICROSTRUCTURE_V11_DESIGN_ID}-"
+            ),
+            "MODEL_V11_ARTIFACT_FINGERPRINTED": _is_sha256(
+                microstructure_v11.get("artifact_sha256")
+            ),
+            "MODEL_V11_TEST_STATE_FINGERPRINTED": _is_sha256(
+                microstructure_v11.get("test_state_sha256")
+            ),
+            "MODEL_V11_TEST_METRICS_FINGERPRINTED": _is_sha256(
+                microstructure_v11.get("test_metrics_sha256")
+            ),
+            "MODEL_V11_TEST_STATE_FINALIZED": microstructure_v11.get(
+                "test_state_version"
+            ) == "q15-rti-untouched-test-state-v2"
+            and microstructure_v11.get("untouched_test_status")
+            == "PASSED_UNTOUCHED_TEST_PAPER_ARTIFACT_ONLY",
+            "MODEL_V11_DESIGN_BOUND": microstructure_v11.get("design_id")
+            == RTI_MICROSTRUCTURE_V11_DESIGN_ID
+            and microstructure_v11.get("design_sha256")
+            == RTI_MICROSTRUCTURE_V11_DESIGN_SHA256,
+            "MODEL_V11_PROTOCOL_BOUND": microstructure_v11.get(
+                "walk_forward_protocol_id"
+            ) == RTI_MICROSTRUCTURE_V11_PROTOCOL_ID
+            and microstructure_v11.get("walk_forward_protocol_sha256")
+            == RTI_MICROSTRUCTURE_V11_PROTOCOL_SHA256,
+            "MODEL_V11_COHORT_ISOLATED": microstructure_v11.get("cohort")
+            == ("BTC" if asset == "BTC" else "NON_BTC_TRANSFER"),
+            "MODEL_V11_NOT_OUT_OF_DISTRIBUTION": microstructure_v11.get(
+                "out_of_distribution"
+            ) is False,
+            "MODEL_V11_PROBABILITIES_VALID": v11_yes_probability is not None
+            and 0.0 <= v11_yes_probability <= 1.0
+            and v11_market_probability is not None
+            and 0.0 <= v11_market_probability <= 1.0,
+            "MODEL_V11_PAPER_ONLY": microstructure_v11.get("paper_only")
+            is True,
+            "MODEL_V11_NOTIFICATION_DISABLED": microstructure_v11.get(
+                "notification_eligible"
+            ) is False,
+            "MODEL_V11_AUTOMATIC_PROMOTION_DISABLED": microstructure_v11.get(
+                "automatic_promotion"
+            ) is False,
+            "MODEL_V11_REAL_TRADING_DISABLED": microstructure_v11.get(
+                "real_trading_allowed"
+            ) is False,
+            "MODEL_V11_SIDE_AVAILABLE": v11_side in {"YES", "NO"},
+            "MODEL_V11_ASK_MAX_62": v11_ask is not None
+            and v11_ask <= RTI_PATH_13M_ASK_MAX_CENTS,
+            "MODEL_V11_BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+            "MODEL_V11_SPREAD_MAX_1_5": spread is not None
+            and spread <= RTI_PATH_13M_SPREAD_MAX_CENTS,
+            "MODEL_V11_DEPTH_SUPPORTS_10": v11_depth is not None
+            and v11_depth >= RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS,
+            "MODEL_V11_EV_AFTER_COSTS_MIN_3C": v11_ev is not None
+            and v11_ev >= RTI_PATH_13M_MICROSTRUCTURE_V11_MIN_EV_CENTS,
+            "MODEL_V11_ENTRY_COST_POLICY_BOUND": recommendation_v11.get(
+                "simulation_contracts"
+            ) == 10
+            and recommendation_v11.get("slippage_cents_per_contract") == 2.0
+            and recommendation_v11.get("fee_schedule_version")
+            == KALSHI_Q15_FEE_SCHEDULE_VERSION
+            and recommendation_v11.get("execution_cost_model_version")
+            == RTI_EXECUTION_COST_MODEL_VERSION,
+        }
+        v11_failures = [
+            key for key, passed_check in v11_checks.items()
+            if not passed_check
+        ]
+        profile["challengers"][
+            RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID
+        ] = {
+            "name": "RTI cross-asset regime V11",
+            "accepted": not v11_failures,
+            "failures": v11_failures,
+            "side_override": v11_side,
+            "entry_ask_cents": v11_ask,
+            "displayed_depth_contracts": v11_depth,
+            "evidence": {
+                "model_version": microstructure_v11.get("model_version"),
+                "artifact_sha256": microstructure_v11.get(
+                    "artifact_sha256"
+                ),
+                "test_state_version": microstructure_v11.get(
+                    "test_state_version"
+                ),
+                "test_state_sha256": microstructure_v11.get(
+                    "test_state_sha256"
+                ),
+                "test_metrics_sha256": microstructure_v11.get(
+                    "test_metrics_sha256"
+                ),
+                "untouched_test_status": microstructure_v11.get(
+                    "untouched_test_status"
+                ),
+                "design_id": microstructure_v11.get("design_id"),
+                "design_sha256": microstructure_v11.get("design_sha256"),
+                "walk_forward_protocol_id": microstructure_v11.get(
+                    "walk_forward_protocol_id"
+                ),
+                "walk_forward_protocol_sha256": microstructure_v11.get(
+                    "walk_forward_protocol_sha256"
+                ),
+                "prospective_after_close_time": microstructure_v11.get(
+                    "prospective_after_close_time"
+                ),
+                "cohort": microstructure_v11.get("cohort"),
+                "yes_probability": v11_yes_probability,
+                "market_yes_probability": v11_market_probability,
+                "selected_win_probability": recommendation_v11.get(
+                    "win_probability"
+                ),
+                "expected_value_cents_per_contract": v11_ev,
+                "simulated_fill_cents": recommendation_v11.get(
+                    "simulated_fill_cents"
+                ),
+                "fee_cents_per_contract": recommendation_v11.get(
+                    "fee_cents_per_contract"
+                ),
+                "max_abs_z_preclip": microstructure_v11.get(
+                    "max_abs_z_preclip"
+                ),
+                "out_of_distribution": microstructure_v11.get(
+                    "out_of_distribution"
+                ),
+            },
+            "criteria": {
+                "policy_version": (
+                    RTI_PATH_13M_MICROSTRUCTURE_V11_POLICY_VERSION
+                ),
+                "exact_locked_design_id": (
+                    RTI_MICROSTRUCTURE_V11_DESIGN_ID
+                ),
+                "exact_locked_design_sha256": (
+                    RTI_MICROSTRUCTURE_V11_DESIGN_SHA256
+                ),
+                "exact_walk_forward_protocol_id": (
+                    RTI_MICROSTRUCTURE_V11_PROTOCOL_ID
+                ),
+                "exact_walk_forward_protocol_sha256": (
+                    RTI_MICROSTRUCTURE_V11_PROTOCOL_SHA256
+                ),
+                "finalized_untouched_test_lineage_required": True,
+                "cohort_mixing_forbidden": True,
+                "prospective_after_locked_cutoff_required": True,
+                "out_of_distribution_fails_entry": True,
+                "min_expected_value_cents_after_fee_slippage": (
+                    RTI_PATH_13M_MICROSTRUCTURE_V11_MIN_EV_CENTS
+                ),
+                "ask_max_cents": RTI_PATH_13M_ASK_MAX_CENTS,
+                "spread_max_cents": RTI_PATH_13M_SPREAD_MAX_CENTS,
+                "displayed_depth_min_contracts": (
+                    RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS
+                ),
+                "historical_credit_allowed": False,
+            },
+            "notification_eligible": False,
+            "paper_only": True,
+            "forward_only": True,
+            "historical_credit_allowed": False,
+            "manual_promotion_only": True,
+            "automatic_promotion": False,
+            "real_trading_allowed": False,
+            "promotion_status": "PAPER_ACCRUAL_MANUAL_REVIEW_30_60_150",
+            "review_bars": [30, 60, 150],
+        }
+    profile["challenger_review"] = {
+        "resolved_bars": [30, 60, 150],
+        "manual_promotion_only": True,
+        "automatic_threshold_changes": False,
+        "strict_book_unchanged": True,
+        "historical_credit_for_impulse_v1": False,
+    }
+
+    passed: list[str] = ["RTI_PATH_13M_EVAL"]
+    failures: list[str] = []
+    if asset not in RTI_PATH_13M_INDEX_IDS or rule_version is None:
+        failures.append("ASSET_UNSUPPORTED")
+    elif str(row.get("model_version") or "") != rule_version:
+        failures.append("RULE_VERSION_MISMATCH")
+    if interval != "13M":
+        failures.append("INTERVAL_NOT_13M")
+    if expected_index_id is None or index_id != expected_index_id:
+        failures.append("INDEX_NOT_OFFICIAL_RTI")
+    if not bool(row.get("rti_path_complete")) or path_count != 61 or expected_count != 61:
+        failures.append("RTI_PATH_INCOMPLETE")
+    else:
+        passed.append("RTI_PATH_61_OF_61")
+    if (
+        max_receive_age is None
+        or decision_age is None
+        or max_receive_age > RTI_PATH_13M_MAX_DATA_AGE_SECONDS
+        or decision_age > RTI_PATH_13M_MAX_DATA_AGE_SECONDS
+    ):
+        failures.append("RTI_PATH_STALE")
+    else:
+        passed.append("RTI_PATH_FRESH")
+    if timing_offset is None or not (
+        0.0 <= timing_offset <= RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS
+    ):
+        failures.append("CAPTURE_NOT_EXACT_13M")
+    else:
+        passed.append("CAPTURE_EXACT_13M")
+    if side not in {"YES", "NO"}:
+        failures.append("RTI_SIDE_MISSING")
+    if side is None or side_14m != side or row.get("rti_same_side_14m") is not True:
+        failures.append("RTI_14M_SIDE_MISMATCH")
+    else:
+        passed.append("RTI_14M_SIDE_AGREES")
+    if persistence is None or persistence < RTI_PATH_13M_PERSISTENCE_MIN:
+        failures.append("RTI_PERSISTENCE_BELOW_80")
+    else:
+        passed.append("RTI_PERSISTENCE_80")
+    if side_move is None or side_move < 0.0:
+        failures.append("RTI_MOMENTUM_NEGATIVE")
+    else:
+        passed.append("RTI_MOMENTUM_NONNEGATIVE")
+    if quote_age is None or quote_age > RTI_PATH_13M_MAX_DATA_AGE_SECONDS:
+        failures.append("QUOTE_STALE_OR_MISSING")
+    else:
+        passed.append("QUOTE_FRESH")
+    if ask is None:
+        failures.append("RTI_SIDE_ASK_MISSING")
+    elif ask > RTI_PATH_13M_ASK_MAX_CENTS:
+        failures.append("RTI_SIDE_ASK_ABOVE_62")
+    else:
+        passed.append("RTI_SIDE_ASK_62_OR_LESS")
+    if spread is None:
+        failures.append("SPREAD_MISSING")
+    elif spread < 0.0:
+        failures.append("SPREAD_CROSSED")
+    elif spread > RTI_PATH_13M_SPREAD_MAX_CENTS:
+        failures.append("SPREAD_ABOVE_1_5")
+    else:
+        passed.append("SPREAD_1_5_OR_LESS")
+
+    status = REJECTED if failures else ACCEPTED
+    return BotDecision(
+        BOT_RTI_PATH_13M,
+        status,
+        tuple(passed + failures),
+        threshold_profile={**profile, "passed": not failures},
+        side_override=side,
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def _rti_delayed_confirmation_decision(
+    row: Mapping[str, Any],
+    *,
+    challenger_id: str,
+    policy_version: str,
+    delay_seconds: float,
+    expected_path_count: int,
+    interval_required: str,
+    name: str,
+    reason_prefix: str,
+) -> BotDecision:
+    """Evaluate one frozen delayed-confirmation policy without quote reuse."""
+    asset = _asset(row)
+    expected_index_id = RTI_PATH_13M_INDEX_IDS.get(asset)
+    base_rule_version = rti_path_13m_rule_version(asset)
+    interval = str(row.get("interval") or "").upper()
+    original_side = _side(row.get("rti_confirm_original_side"))
+    confirmation_side = _side(row.get("rti_confirm_side"))
+    ask = _num(row.get("entry_ask_cents"))
+    spread = _num(row.get("spread_cents"))
+    depth = _num(row.get("depth_contracts"))
+    quote_age = _num(row.get("quote_age_seconds"))
+    timing_offset = _num(row.get("rti_confirm_timing_offset_s"))
+    evaluation_delay = _num(row.get("rti_confirm_evaluation_delay_s"))
+    path_count = int(_num(row.get("rti_confirm_path_count")) or 0)
+    expected_count = int(_num(row.get("rti_confirm_path_expected_count")) or 0)
+    max_receive_age = _num(row.get("rti_confirm_path_max_receive_age_s"))
+    decision_age = _num(row.get("rti_confirm_path_decision_age_s"))
+    index_id = str(row.get("rti_index_id") or "").upper()
+
+    checks = {
+        "ORIGINAL_STRICT_CONTROL_ACCEPTED": row.get(
+            "rti_confirm_original_strict_accepted"
+        ) is True,
+        "BASE_ROW_ID_FROZEN": int(
+            _num(row.get("rti_confirm_original_row_id")) or 0
+        ) > 0,
+        "ASSET_SUPPORTED": base_rule_version is not None,
+        "BASE_RULE_VERSION_FROZEN": str(row.get("model_version") or "")
+        == base_rule_version,
+        f"INTERVAL_{interval_required}": interval == interval_required,
+        "OFFICIAL_INDEX": expected_index_id is not None
+        and index_id == expected_index_id,
+        f"CONFIRM_PATH_{expected_path_count}_FRESH": bool(
+            row.get("rti_confirm_path_complete")
+        )
+        and path_count == expected_path_count
+        and expected_count == expected_path_count
+        and max_receive_age is not None
+        and decision_age is not None
+        and max_receive_age <= RTI_PATH_13M_MAX_DATA_AGE_SECONDS
+        and decision_age <= RTI_PATH_13M_MAX_DATA_AGE_SECONDS,
+        "CAPTURE_WITHIN_2S": timing_offset is not None
+        and 0.0 <= timing_offset <= RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS,
+        "EVALUATION_WITHIN_2S": evaluation_delay is not None
+        and 0.0 <= evaluation_delay <= RTI_PATH_13M_MAX_TIMING_OFFSET_SECONDS,
+        "ORIGINAL_SIDE_AVAILABLE": original_side in {"YES", "NO"},
+        "RTI_SIDE_STILL_CONFIRMS": confirmation_side is not None
+        and confirmation_side == original_side,
+        "NEW_QUOTE_FRESH": quote_age is not None
+        and 0.0 <= quote_age <= RTI_PATH_13M_MAX_DATA_AGE_SECONDS,
+        "NEW_ASK_MAX_62": ask is not None
+        and ask <= RTI_PATH_13M_DELAYED_CONFIRM_ASK_MAX_CENTS,
+        "NEW_BOOK_NOT_CROSSED": spread is not None and spread >= 0.0,
+        "NEW_SPREAD_MAX_1_5": spread is not None
+        and spread <= RTI_PATH_13M_DELAYED_CONFIRM_SPREAD_MAX_CENTS,
+        "NEW_DEPTH_SUPPORTS_10": depth is not None
+        and depth >= RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS,
+    }
+    failures = [key for key, passed in checks.items() if not passed]
+    accepted = not failures
+    evidence_keys = (
+        "rti_confirm_target_at", "rti_confirm_delay_seconds",
+        "rti_confirm_quote_captured_at",
+        "rti_confirm_evaluated_at", "rti_confirm_recorded_at",
+        "rti_confirm_timing_offset_s", "rti_confirm_evaluation_delay_s",
+        "rti_confirm_storage_delay_s", "rti_confirm_original_row_id",
+        "rti_confirm_original_strict_accepted", "rti_confirm_original_side",
+        "rti_confirm_original_end_px", "rti_confirm_side",
+        "rti_confirm_end_px", "rti_confirm_continuation_bps",
+        "rti_confirm_signed_distance_bps", "rti_confirm_path_status",
+        "rti_confirm_path_missing_reason", "rti_confirm_path_expected_count",
+        "rti_confirm_path_count", "rti_confirm_path_complete",
+        "rti_confirm_path_missing_seconds",
+        "rti_confirm_path_max_receive_age_s",
+        "rti_confirm_path_decision_age_s", "rti_index_id",
+        "quote_age_seconds", "quote_age_source", "entry_ask_cents",
+        "spread_cents", "depth_contracts", "kalshi_depth_status",
+        "kalshi_depth_missing_reason", "rti_market_mid_probability",
+        "rti_opposite_side", "rti_opposite_ask_cents",
+        "rti_opposite_depth_contracts",
+        "spot_depth_status", "spot_depth_missing_reason",
+        "rti_spot_snapshot_age_s", "rti_spot_book_age_s",
+        "spot_depth_imbalance",
+    )
+    evidence = {key: row.get(key) for key in evidence_keys}
+    challenger = {
+        "name": name,
+        "accepted": accepted,
+        "failures": failures,
+        "criteria": {
+            "policy_version": policy_version,
+            "delay_seconds": delay_seconds,
+            "original_strict_control_required": True,
+            "same_rti_side_required": True,
+            "fresh_new_quote_required": True,
+            "reused_13m_entry_quote_forbidden": True,
+            "ask_max_cents": RTI_PATH_13M_DELAYED_CONFIRM_ASK_MAX_CENTS,
+            "spread_max_cents": RTI_PATH_13M_DELAYED_CONFIRM_SPREAD_MAX_CENTS,
+            "displayed_depth_min_contracts": (
+                RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS
+            ),
+        },
+        "entry_ask_cents": ask,
+        "side_override": original_side,
+        "notification_eligible": False,
+        "paper_only": True,
+        "forward_only": True,
+        "historical_credit_allowed": False,
+        "manual_promotion_only": True,
+        "promotion_status": "RESEARCH_ONLY_ACCRUING_TO_30",
+        "review_bars": [30, 60, 150],
+    }
+    profile = {
+        "rule_version": policy_version,
+        "base_rule_version": base_rule_version,
+        "challenger_policy_version": policy_version,
+        "paper_only": True,
+        "forward_only": True,
+        "historical_credit_allowed": False,
+        "notification_eligible": False,
+        "strict_control_unchanged": True,
+        "sim_contracts": 10,
+        "sim_full_fill_supported": depth is not None and depth >= 10.0,
+        "slippage_cents_per_contract": 2.0,
+        "fee_schedule_version": RTI_PATH_13M_FEE_SCHEDULE_VERSION,
+        "execution_cost_model_version": RTI_EXECUTION_COST_MODEL_VERSION,
+        "passed": accepted,
+        **evidence,
+        "challengers": {
+            challenger_id: challenger,
+        },
+        "challenger_review": {
+            "resolved_bars": [30, 60, 150],
+            "manual_promotion_only": True,
+            "automatic_threshold_changes": False,
+            "strict_book_unchanged": True,
+        },
+    }
+    return BotDecision(
+        BOT_RTI_PATH_13M,
+        ACCEPTED if accepted else REJECTED,
+        tuple([reason_prefix, *failures]),
+        threshold_profile=profile,
+        side_override=original_side,
+        original_source_side=original_side,
+        entry_ask_cents=ask,
+        use_entry_ask_override=True,
+    )
+
+
+def rti_path_12m30_confirmation_decision(row: Mapping[str, Any]) -> BotDecision:
+    """Frozen +30s fresh-quote challenger; behavior remains unchanged."""
+    return _rti_delayed_confirmation_decision(
+        row,
+        challenger_id=RTI_PATH_13M_DELAYED_CONFIRM_CHALLENGER_ID,
+        policy_version=RTI_PATH_13M_DELAYED_CONFIRM_POLICY_VERSION,
+        delay_seconds=RTI_PATH_13M_DELAYED_CONFIRM_SECONDS,
+        expected_path_count=RTI_PATH_13M_DELAYED_CONFIRM_EXPECTED_COUNT,
+        interval_required="12M30S",
+        name="30-second fresh-quote RTI confirmation",
+        reason_prefix="RTI_DELAYED_CONFIRM_30S_EVAL",
+    )
+
+
+def rti_path_12m_confirmation_decision(row: Mapping[str, Any]) -> BotDecision:
+    """Independent +60s continuation and hard-flip PAPER challengers."""
+    continuation = _rti_delayed_confirmation_decision(
+        row,
+        challenger_id=RTI_PATH_13M_DELAYED_CONFIRM_60S_CHALLENGER_ID,
+        policy_version=RTI_PATH_13M_DELAYED_CONFIRM_60S_POLICY_VERSION,
+        delay_seconds=RTI_PATH_13M_DELAYED_CONFIRM_60S_SECONDS,
+        expected_path_count=RTI_PATH_13M_DELAYED_CONFIRM_60S_EXPECTED_COUNT,
+        interval_required="12M",
+        name="60-second fresh-quote RTI confirmation",
+        reason_prefix="RTI_DELAYED_CONFIRM_60S_EVAL",
+    )
+    profile = dict(continuation.threshold_profile)
+    challengers = dict(profile.get("challengers") or {})
+    continuation_book = challengers[
+        RTI_PATH_13M_DELAYED_CONFIRM_60S_CHALLENGER_ID
+    ]
+    original_side = _side(row.get("rti_confirm_original_side"))
+    confirmation_side = _side(row.get("rti_confirm_side"))
+    quoted_flip_side = _side(row.get("rti_opposite_side"))
+    flip_ask = _num(row.get("rti_opposite_ask_cents"))
+    flip_depth = _num(row.get("rti_opposite_depth_contracts"))
+    common_failures = [
+        str(failure)
+        for failure in (continuation_book.get("failures") or ())
+        if failure not in {
+            "RTI_SIDE_STILL_CONFIRMS",
+            "NEW_ASK_MAX_62",
+            "NEW_DEPTH_SUPPORTS_10",
+        }
+    ]
+    flip_failures = list(common_failures)
+    if (
+        confirmation_side not in {"YES", "NO"}
+        or original_side not in {"YES", "NO"}
+        or confirmation_side == original_side
+    ):
+        flip_failures.append("RTI_SIDE_FLIPPED_AT_60S")
+    if quoted_flip_side is None or quoted_flip_side != confirmation_side:
+        flip_failures.append("FLIP_QUOTE_SIDE_MATCHES_RTI")
+    if flip_ask is None or flip_ask > RTI_PATH_13M_DELAYED_CONFIRM_ASK_MAX_CENTS:
+        flip_failures.append("FLIP_ASK_MAX_62")
+    if (
+        flip_depth is None
+        or flip_depth < RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS
+    ):
+        flip_failures.append("FLIP_DEPTH_SUPPORTS_10")
+    flip_accepted = not flip_failures
+    challengers[RTI_PATH_13M_DELAYED_FLIP_60S_CHALLENGER_ID] = {
+        "name": "60-second official RTI hard-flip",
+        "accepted": flip_accepted,
+        "failures": flip_failures,
+        "criteria": {
+            "policy_version": RTI_PATH_13M_DELAYED_FLIP_60S_POLICY_VERSION,
+            "delay_seconds": RTI_PATH_13M_DELAYED_CONFIRM_60S_SECONDS,
+            "original_strict_control_required": True,
+            "official_rti_side_must_flip": True,
+            "quoted_side_must_match_flipped_rti": True,
+            "fresh_new_quote_required": True,
+            "reused_13m_or_30s_quote_forbidden": True,
+            "ask_max_cents": RTI_PATH_13M_DELAYED_CONFIRM_ASK_MAX_CENTS,
+            "spread_max_cents": RTI_PATH_13M_DELAYED_CONFIRM_SPREAD_MAX_CENTS,
+            "displayed_depth_min_contracts": (
+                RTI_PATH_13M_DELAYED_CONFIRM_MIN_DEPTH_CONTRACTS
+            ),
+            "selected_after_forward_failure_review": True,
+            "historical_credit_allowed": False,
+        },
+        "entry_ask_cents": flip_ask,
+        "side_override": confirmation_side,
+        "notification_eligible": False,
+        "paper_only": True,
+        "forward_only": True,
+        "historical_credit_allowed": False,
+        "manual_promotion_only": True,
+        "promotion_status": "RESEARCH_ONLY_ACCRUING_TO_30",
+        "review_bars": [30, 60, 150],
+    }
+    profile["challengers"] = challengers
+    profile["delayed_flip_policy_version"] = (
+        RTI_PATH_13M_DELAYED_FLIP_60S_POLICY_VERSION
+    )
+    return BotDecision(
+        bot_name=continuation.bot_name,
+        decision_status=continuation.decision_status,
+        reason_codes=continuation.reason_codes,
+        strategy_version=continuation.strategy_version,
+        tier=continuation.tier,
+        threshold_profile=profile,
+        btc_context=continuation.btc_context,
+        side_override=continuation.side_override,
+        original_source_side=continuation.original_source_side,
+        entry_ask_cents=continuation.entry_ask_cents,
+        use_entry_ask_override=continuation.use_entry_ask_override,
+    )
+
+
+def rti_path_11m30_stability_decision(row: Mapping[str, Any]) -> BotDecision:
+    """Post-loss-selected +90s stability test; prospective PAPER only."""
+    decision = _rti_delayed_confirmation_decision(
+        row,
+        challenger_id=RTI_PATH_13M_DELAYED_CONFIRM_90S_CHALLENGER_ID,
+        policy_version=RTI_PATH_13M_DELAYED_CONFIRM_90S_POLICY_VERSION,
+        delay_seconds=RTI_PATH_13M_DELAYED_CONFIRM_90S_SECONDS,
+        expected_path_count=RTI_PATH_13M_DELAYED_CONFIRM_90S_EXPECTED_COUNT,
+        interval_required="11M30S",
+        name="90-second fresh-quote RTI stability",
+        reason_prefix="RTI_DELAYED_STABILITY_90S_EVAL",
+    )
+    profile = dict(decision.threshold_profile)
+    challengers = dict(profile.get("challengers") or {})
+    raw = dict(
+        challengers[RTI_PATH_13M_DELAYED_CONFIRM_90S_CHALLENGER_ID]
+    )
+    criteria = dict(raw.get("criteria") or {})
+    criteria.update({
+        "selected_after_forward_60s_loss_review": True,
+        "reused_13m_30s_or_60s_quote_forbidden": True,
+        "historical_credit_allowed": False,
+    })
+    raw["criteria"] = criteria
+    raw["historical_credit_allowed"] = False
+    challengers[RTI_PATH_13M_DELAYED_CONFIRM_90S_CHALLENGER_ID] = raw
+    profile["challengers"] = challengers
+    return BotDecision(
+        bot_name=decision.bot_name,
+        decision_status=decision.decision_status,
+        reason_codes=decision.reason_codes,
+        strategy_version=decision.strategy_version,
+        tier=decision.tier,
+        threshold_profile=profile,
+        btc_context=decision.btc_context,
+        side_override=decision.side_override,
+        original_source_side=decision.original_source_side,
+        entry_ask_cents=decision.entry_ask_cents,
+        use_entry_ask_override=decision.use_entry_ask_override,
     )
 
 

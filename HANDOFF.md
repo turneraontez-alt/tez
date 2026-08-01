@@ -1,5 +1,2390 @@
 # Session handoff
 
+## Shipped 2026-07-31 - Full-repo review: secret leak, executor lifecycle, freshness gates
+
+Full audit of the repo (6 parallel reviewers + adversarial verification), then
+every confirmed finding fixed.  Suite: **2729 passed, 5 skipped**; `config_audit
+--check` OK.  The local stack was restarted onto this code and verified healthy
+(7 assets tracked, executor still `DRY_RUN=true` + `KILL=true` on both books).
+
+**SECURITY - ACTION REQUIRED: the Telegram bot token was published.**
+`notifications/telegram_client.py` stored the raw `requests` exception text as
+the delivery error, and that text embeds the request URL - i.e.
+`.../bot<TOKEN>/sendMessage`.  Three such rows sat in `data/q15_ultoim_v1.sqlite3`,
+which `tools/learning_export.py` force-pushes hourly to the **public** repo
+`turneraontez-alt/tez`, branch `learning-snapshots`.  Verified present in the
+published blob.  Local DBs are now scrubbed (UPDATE + `wal_checkpoint(TRUNCATE)`
++ `VACUUM`, so the bytes are gone from the file, not just the rows); a repo-wide
+rescan of 27 DBs / 27.9M text cells is clean.  **The token itself still needs
+rotating in BotFather - that is the only outstanding item.**  Redaction now lives
+in one shared helper (`redact_token`) used by the shared client, the ultoim
+sender and the champion `notifier._redact`; it also scrubs a URL-embedded token
+that is not the configured one, so it keeps working across a rotation.
+
+**Executor (live-money) - position lifecycle.**  `on_exit` now CANCELS a still-
+resting GTC entry before selling (previously the IoC reduce_only sell filled 0,
+we booked ourselves flat, and the original buy kept working).  Positions,
+open-tickers and entry order ids now rehydrate from the store, so a restart no
+longer makes every defensive close return `NO_POSITION`.  An ambiguous POST
+failure (read timeout / mid-flight drop - distinguished from a definite
+rejection, which only `ConnectTimeout` proves) now BOOKS the exposure as
+`ORDER_UNCERTAIN` instead of silently freeing the window budget, and is recorded
+under a new `UNCERTAIN` fill label for reconciliation.  The daily stop persists
+its day-start reference (`executor_meta`) and rolls over on the UTC date, so a
+restart cannot re-arm it and a long-running process is not frozen on a stale
+loss.  Contract count is sized off the price actually PAID (`ask + offset`), not
+the ask, so a full fill can no longer exceed `max_stake_per_pick_cents`.
+`Q15_EXEC_KILL` / `Q15_EXEC_DRY_RUN` are now live switches - only those two
+refresh, so a half-edited environment cannot resize a running book.
+
+**NOT changed, deliberately:** `max_per_window_pct` is still not applied in flat
+/ per-interval sizing.  Enforcing it clamped the owner's chosen $100 10M
+concentration to $80 and broke the flat two-pick budget; the field's docstring
+scopes it to `per_pick_pct * max_picks`.  The docstring is now explicit that
+under flat sizing the real ceiling is `flat_stake_cents * max_picks_per_window`.
+
+**Decision-engine freshness gates that were silently inert.**  `quote_age` was
+resolved from four key names nothing writes, so `stale_kalshi_quote` and the
+liquidity age decay never ran and every ledger row stored
+`quote_age_seconds=None`; it now reads `orderbook_event_ts`, the key
+`v5_hardening` actually writes.  `apply_v95_policy` unconditionally overwrote the
+v5 fail-closed verdict, so a snapshot v5 judged stale could still return
+ENTRY_RECOMMENDED - v9.5 may now narrow a decision but never re-open one v5
+closed.  `_resolve_checkpoint` took `max()` over ALL snapshots including
+`market_state="upcoming"` markets tens of minutes out, pinning the label to 15M
+for whole windows (mis-filing predictions and, since 15M alerts default off,
+suppressing alerts entirely); it now considers only live markets within one
+window (`Q15_V95_MAX_WINDOW_SECONDS`).
+
+**Feed integrity.**  `spot_depth` had no crossed-book guard (both siblings do):
+a crossed book now drops the snapshot, flags a resync, and stops absorbing deltas
+until a full snapshot rebuilds it.  MarketLead's freshness gates all measured the
+transport, never the book - `sample_timestamp` is stamped at read time and
+heartbeats keep `message_age` low after a level2 subscription dies - so a frozen
+book was ingested at quality 1.0; added `Q15_MARKETLEAD_BOOK_STALE_SECONDS`
+(default 60).
+
+**Statistics.**  Isotonic calibration blocks are now shrunk toward the sample base
+rate (`Q15_V95_ISOTONIC_PRIOR_WEIGHT`, default 5): raw PAVA on binary labels ends
+in blocks of ONE whose mean is exactly 0/1, and since prediction clamps beyond the
+outermost anchor, a single settled contract could pin every raw probability above
+it to 0.99.  `_paired_better_test` now clusters by `close_time` before the paired
+t-test - one row per asset per checkpoint meant up to 7 rows shared one settlement,
+understating the standard error ~2x.  Replicating a window no longer changes the
+p-value.  **Standing caveat: the strongest evidence in this repo is still the
+fourth disjoint V15 audit, which failed all 14 gates with the candidate scoring
+identical to the market.  Nothing here establishes the system is +EV.**
+
+**Security / ops.**  Flask now binds loopback by default (`Q15_BIND_HOST`) - all 83
+routes are unauthenticated and `/api/q15-v9/telegram-outbox` returns the verbatim
+text of recent alerts; optional `Q15_API_TOKEN` gates `/api/*` and `/data/*` (the
+dashboard stays open).  **If you viewed the dashboard from another device, set
+`Q15_BIND_HOST=0.0.0.0` to restore it.**  The 455 MB `q15_v91_state.sqlite3` was
+the one DB genuinely inside OneDrive (`data/` and `work/` were already junctions
+since 2026-07-14); copied via SQLite's online backup API to
+`%LOCALAPPDATA%\Q15\state\`, integrity verified, 1,279,433 observations intact,
+and `Q15_V91_SQLITE_PATH` set in `.env.local` - the original is still in the repo
+root and can be deleted after a clean day.  v91 and the settlement index now open
+WAL instead of the rollback journal.  Removed 168 `.pytest_tmp_*` dirs (5.46 GB)
+from the synced folder and gitignored the pattern.  README/CLAUDE.md no longer
+claim the system cannot trade: the executor is called out explicitly, since the
+`place_order(` source guards only cover the decision engine and cannot see it.
+
+**Corrections to earlier findings in this session:** the settlement index is NOT
+corrupt (`integrity_check: ok`, 8.26M rows scan clean) - the "malformed" reading
+was an artifact of opening a live-written DB with `immutable=1`.  And `data/` was
+never OneDrive-synced.
+
+## Shipped 2026-07-26 - V15 rejected; untouched test remains sealed
+
+The third disjoint V15 pretest reservation verified all 288 authorized
+NON_BTC_TRANSFER contracts against finalized Kalshi evidence, then stopped
+before scoring because the architecture rows carried `v15_features` beside
+the wrong feature-name vector.  It produced no result and remains permanently
+ambiguous.  `_with_features` now binds `v15_features` to
+`v15_feature_names` and `v14_features` to `v14_feature_names`; unknown
+feature keys fail closed.  Regression coverage protects the binding.
+
+A fourth protocol was frozen before any fourth-population label access:
+`config/q15_rti_v15_fourth_disjoint_audit_protocol.json`, identity
+`q15-rti-v15-non-btc-fourth-disjoint-audit-v1`, SHA-256
+`baad00d291d83d4992059fd112eb2925b93ac384fb4ad460981dd14a6bb401db`.
+It excluded all 144 close windows / 864 rows previously authorized across the
+three ambiguous reservations, regardless of outcome.  The new earliest-60
+seal is
+`reports/q15_rti_v15_audit_seals/non_btc_transfer-fourth-disjoint-60-v1.json`,
+SHA-256
+`ce0b40c032113b869f1b9918e8d1607d48b40b88237efa242300d0fafc0b9a94`.
+
+The one-shot pretest completed with authoritative Kalshi verification for
+exactly 288 sealed train/calibration contracts.  The expanding walk-forward
+validation covered 24 close windows / 144 rows.  V15 selected zero residual
+trust in every fold and was identical to V14 and the point-in-time market on
+all validation rows: accuracy 70.83% (102/144, Wilson 95% 62.95%-77.64%),
+Brier 0.190433, and log loss 0.565212.  Every required improvement/effect gate
+failed.  Result status is
+`WALK_FORWARD_GATE_FAILED_UNTOUCHED_TEST_REMAINS_SEALED`.
+
+Calibration was not run; its preregistered rows were already part of the
+expanding walk-forward sequence and would not have been an independent sample.
+The untouched-test labels were never read or scored.  No V15 artifact,
+challenger, Telegram notification, promotion, or trading path was created.
+The existing frozen controls remain unchanged.  Focused V15/health coverage
+passed 102/102; this session did not rerun the complete repository suite.
+
+## Shipped 2026-07-23 - V15/V14 audit execution failures quarantined
+
+V14 still has no defensible accuracy result.  The first exclusive
+NON_BTC_TRANSFER V15/V14 pretest reservation was created from the earliest 60
+eligible windows, but its label callback stopped before scoring because one
+authorized XRP row was unresolved in the local settlement cache.  Kalshi later
+reported that exact contract finalized.  The reservation remains permanently
+ambiguous and was not deleted or replayed.
+
+A recovery protocol then excluded all 48 close windows authorized by that
+first reservation, regardless of outcome, and sealed the earliest 60 disjoint
+windows.  Its one-shot pretest also stopped before scoring: nine authorized
+local rows had YES/NO labels but `resolved_at` timestamps between 0.04 and 2.78
+seconds before scheduled close.  That reservation is also permanently
+ambiguous and will never be replayed.  Neither run produced walk-forward,
+calibration, untouched-test, V14 accuracy, V15 accuracy, model, artifact,
+notification, promotion, or trading evidence.
+
+The settlement verifier now treats exact finalized Kalshi result, close time,
+and post-close `settlement_ts` as authoritative.  A resolved local label must
+still agree, but an unresolved or timing-degraded local cache cannot override
+valid Kalshi evidence.  Future strategy-ledger resolution timestamps are
+clamped to at least contract close.  Focused settlement/V15/ledger coverage
+passed 36/36.
+
+`config/q15_rti_v15_final_disjoint_audit_protocol.json` freezes a third audit
+before any of its labels are read.  It excludes the union of all 96 previously
+authorized close windows / 576 NON-BTC rows, with close-time SHA-256
+`406865685aa3295e91d18c9fe1e9c4a3a22d797a4d249474cad638b33c73b1b6`
+and row-ID SHA-256
+`ada9a6471284a2b4a2b6d42d77e12b9ebc440d528e6c90382f21ccde9d5e5672`.
+The frozen protocol identity is
+`q15-rti-v15-non-btc-final-disjoint-audit-v1`, SHA-256
+`04a9dbf0abaf86b9c6e80b7e91efea0dbed8675f55fdb97a231191d04ad32bac`.
+At freeze time 20 complete disjoint windows existed, so 40 additional
+15-minute windows (approximately ten hours) were required.  Features, models,
+thresholds, costs, 36/12/12 folds, gates, BTC isolation, paper-only status,
+and manual promotion rules remain unchanged.
+
+## Shipped 2026-07-23 - outcome-blind V15 prospective PAPER contract
+
+The prospective deployment and review rules are now frozen before any V15
+outcome review in `config/q15_rti_v15_paper_deployment_protocol.json`.
+Identity
+`q15-rti-v15-prospective-paper-deployment-and-review-v1` has canonical
+SHA-256
+`b4ae8b458a5241c289d03d32186fec8ff2f6b6247d00323cca18863a40f82175`.
+`tools/q15_rti_v15_paper_preregister.py` validates the exact protocol without
+database, outcome, model, Telegram, promotion, or order capability.  Focused
+protocol/readiness/health coverage passed 100/100.  After the overlap
+disclosure hardening, the complete repository passed 2,662 tests with 5
+skipped in 269.27 seconds.
+
+The contract permits manual artifact creation only after a ready seal and
+passing finalized pretest plus untouched test with authoritative Kalshi
+settlement evidence.  The deployed model must be the exact passing pretest
+train-plus-calibration model/trust; untouched-test labels cannot enter the
+artifact fit.  The prospective boundary is the first complete close whose
+exact 13-minute decision timestamp is strictly after successful artifact
+load, and no historical row can be reclassified.
+
+The future ledger identity is
+`q15-rti-v15-prospective-paper-ledger-v1`.  It freezes one opportunity row per
+asset/window, immutable decision/source/model/quote evidence, insert-before-
+notification ordering, deterministic decision and Telegram idempotency keys,
+crash recovery without rescore, Kalshi official-result evidence, compare-and-
+set resolution, official fees plus 2-cent slippage for 10 contracts, and zero
+P/L for unaccepted or data-ineligible rows.  Notifications must say
+`V15 PAPER` and remain producer-only through the durable outbox.
+
+Prospective reviews use the earliest 30, 60, and 150 resolved accepted picks
+per cohort without sub-selection.  They require positive adjusted P/L, Wilson
+95% lower accuracy above the cohort's average adjusted break-even rate,
+candidate Brier/log-loss improvement and clustered upper bounds below zero
+versus both the point-in-time market and frozen V14, plus zero timestamp,
+hash, settlement, ledger, or cohort-contamination failures.  Trade frequency
+and rejected counterfactuals are reported but cannot be outcome-tuned.
+Automatic refit, automatic promotion, and real trading remain forbidden.
+No artifact, scorer, ledger database, or V15 notification has been created or
+enabled; this section freezes the later implementation contract only.
+The 07:47 and 08:02 exact captures completed 7/7.  After safe restarts, live
+health returned `status: ok`, 56 source-complete windows, 55 V15-auditable
+windows, one feature-ineligible source window, nine maintenance closes with
+zero credit, source quality PASS, labels unread, and the frozen PAPER protocol
+identity visible.  Artifact creation, V15 scoring, V15 notifications,
+automatic promotion, and real trading all remain false.
+
+## Shipped 2026-07-23 - durable V15 pretest and honest audit-ready counter
+
+`tools/q15_rti_v15_pretest.py` now provides the missing durable one-shot
+development/calibration execution layer.  It reconstructs and hash-checks the
+ready audit seal and its exact feature rows before writing an exclusive
+reservation.  Only after that reservation exists may the supplied callback
+read the exact train/calibration row IDs.  A crash after reservation is
+permanently ambiguous and cannot invoke the callback again.  The result stores
+the authorized labels and exact walk-forward/calibration report hashes, while
+untouched-test labels, paper artifacts, notifications, automatic promotion,
+and real trading remain false.  Walk-forward failure never runs calibration;
+either earlier failure leaves the untouched test sealed.
+
+`tools/q15_rti_v15_pretest_command.py` is the manual database command for this
+layer.  Its read-only SQLite callback selects only the IDs passed by the
+reserved core runner and rejects missing, unresolved, invalid, or duplicate
+rows.  It additionally verifies every returned ticker, asset, and close time
+against the sealed outcome-free evidence and refuses labels whose resolution
+timestamp precedes the contract close.  The production callback now performs
+a fresh, independent check against Kalshi's public market endpoint after the
+exclusive reservation exists.  It fetches exactly the authorized contracts,
+requires the returned ticker and close time to match the seal, requires final
+`finalized` status and a YES/NO result, and fails closed if Kalshi disagrees with
+the local label.  The returned evidence manifest is hash-sealed and bound into
+the append-only audit result.  Train/calibration cannot query untouched-test
+contracts.  The immutable identities are now
+`q15-rti-v15-durable-one-shot-train-calibration-v4` and
+`q15-rti-v15-append-only-train-calibration-state-v4`; live health exposes both.
+
+`tools/q15_rti_v15_untouched_test_command.py` closes the corresponding final
+execution gap.  It accepts only a finalized passing pretest state, revalidates
+that state against the current seal and reconstructed outcome-free evidence,
+and passes the stored train/calibration labels and exact report hashes directly
+to the frozen untouched-test runner.  Its callback receives only the sealed
+test IDs and is invoked only after the exclusive test reservation exists.
+Failed or ambiguous pretests cannot create a test reservation or read a test
+label.  Repeated completed calls return without rereading labels.
+The untouched-test identities are now
+`q15-rti-v15-durable-one-shot-untouched-test-v4` and
+`q15-rti-v15-append-only-untouched-test-state-v4`; that stage applies the same
+exact-contract Kalshi verification and result binding.
+The verifier was exercised live only against a pre-V15 exact DOGE contract
+whose outcome was already in the legacy ledger.  That probe exposed that
+Kalshi's actual terminal status is `finalized`, not `settled`; the old
+assumption would have made the one-shot audit fail permanently before scoring.
+Settlement evidence v2 now requires `finalized`, exact ticker and close-time
+alignment, a YES/NO result, and a settlement timestamp no earlier than close.
+The same pre-V15 probe then passed with an exact close-time match and Kalshi
+settlement 3.957354 seconds after close.  No protected V15 outcome was queried.
+The verifier was then exercised across one complete, already-graded pre-V15
+close containing BNB, BTC, DOGE, ETH, HYPE, SOL, and XRP.  All seven exact
+contracts passed with `finalized` status and exact close-time alignment.
+Focused maintenance, V15 audit, paper-contract, and health coverage passed
+144/144 after this correction.  The subsequent complete repository run passed
+2,663 tests with 5 skipped in 276.79 seconds.
+An adversarial fold audit also made a preregistered dependency explicit:
+the expanding walk-forward validation sequence includes the later 12-window
+calibration partition, and the calibration gate then evaluates that partition
+again.  This is not test leakage and the frozen architecture is not changed
+from the result, but calibration is therefore not a second independent sample.
+Evaluator
+`q15-rti-v15-paired-comparator-walk-forward-v2` now emits and hash-binds the
+exact overlapping close times and row IDs, labels the calibration evidence as
+non-independent, and identifies the one-shot untouched test as the only
+independent final historical confirmation.  Calibration refuses a missing or
+tampered overlap disclosure.
+The audit-seal writer also refuses to persist a `WAITING` state, so an early
+manual command cannot consume the exclusive production path and block the
+later ready seal.  A live 51/60 refusal exited nonzero and created no file.
+
+The readiness monitor now distinguishes source-complete path windows from the
+strict V15 audit population.  `GEOMETRY_30` still uses source-complete path
+evidence, but `NON_BTC_60` and `BTC_150` now use the exact stricter population
+from the audit seal: all seven assets, exact contract identity, every frozen
+V14 feature, and all five independent-path features must pass together.  This
+found one honest exclusion at close 1784798100 (05:15 ET): its 05:02
+post-maintenance capture had complete independent paths but insufficient
+60-second upstream V14 context after restart.  It remains source-health
+evidence but receives no V15 model/audit credit.
+
+Focused V15/readiness coverage passed 138/138 and the latest complete
+repository run passed 2,645 tests with 5 skipped in 263.91 seconds.  The V15
+audit population scan
+now skips all timestamps before the immutable V15 boundary before building
+features; this preserves the exact eligible population while returning cached
+live health in 0.33 seconds after refresh.  After safe restarts, live health
+showed 54 source-complete windows / 378 rows, 53 V15-auditable windows / 371
+rows, one
+feature-ineligible source window, nine maintenance closes with zero audit
+credit, zero degradation events, source quality PASS, labels unread, no model
+fit, scoring disabled, and real trading disabled.  A one-time same-thread
+continuation is active for 09:20 ET, just after the expected 60th auditable
+capture at 09:17, to run the frozen manual non-BTC audit if collection remains
+clean.  The local paper service was safely restarted at 07:37 ET; health
+returned `status: ok`, the readiness thread was alive, the 07:32 capture was
+7/7, and health exposed both v2 one-shot runner identities plus the
+authoritative Kalshi settlement-evidence identity.  Labels remain unread and
+all scoring, promotion, candidate notification, and trading authority remain
+disabled.
+
+## Shipped 2026-07-23 - date-bounded scheduled-maintenance classification
+
+The user confirmed that the missing exact windows from 03:00 through 05:00
+ET on 2026-07-23 were scheduled maintenance.  The outcome-blind readiness
+monitor now classifies exactly those nine close times as scheduled
+maintenance using `config/q15_rti_scheduled_maintenance.json`, version
+`q15-rti-scheduled-maintenance-v1`, canonical SHA-256
+`3e56900ccca6f1e9f970b0eee5f182e6fcf8356486837f857bf84338689204ef`.
+The exception is limited to this date and close-time range.  It changes health
+classification only: all nine windows remain missing, receive zero readiness
+or audit credit, and cannot be backfilled.  It does not change features,
+models, thresholds, gates, labels, scoring, notification eligibility,
+promotion, restart policy, or trading authority.  Missing windows outside the
+frozen range still trigger the prospective-degradation path.
+
+Focused readiness/health coverage passed 78/78 and the complete repository
+passed 2,616 tests with 5 skipped in 379.46 seconds.  The local service was
+restarted safely and returned `status: ok`.  The 06:32 ET capture completed
+7/7 with a 0.884-second offset, zero missed deadlines, zero record failures,
+and all seven independent paths present.  A fresh outcome-blind snapshot then
+showed 50 complete windows / 350 rows, nine maintenance closes, zero
+prospective degradation events, source quality PASS, labels unread, scoring
+disabled, and real trading disabled.
+
+## Shipped 2026-07-23 - V15 paired audit and append-only untouched test
+
+`tools/q15_rti_v15_walk_forward.py` is the pure, in-memory V15 evaluator.  It
+reconstructs the frozen non-BTC and BTC folds, fits V15 and the frozen V14
+architecture separately, selects residual trust only inside earlier
+chronological data, and requires V15 to clear the preregistered Brier/log-loss
+and paired close-window bootstrap gates against both V14 and the point-in-time
+Kalshi prior.  Calibration is a separate gate; only after it passes are the
+final V15/V14 trust factors reselected from development plus calibration.
+Accuracy remains report-only and no test row is used during either stage.
+
+`tools/q15_rti_v15_untouched_test.py` now implements the later manual one-shot
+test.  Before any test label callback it reconstructs the exact seal evidence,
+replays and byte-hash compares the passing walk-forward/calibration reports,
+refits both architectures on the identical pretest population, and writes an
+exclusive append-only reservation.  Reservation and result are separate
+exclusive files: a crash after reservation is permanently ambiguous and can
+never invoke the label callback again.  A finalized run also returns without
+rescoring.  The test requires the frozen proper-score/bootstrap effects versus
+market and V14, at least five executable picks, and positive official-fee plus
+2-cent-slippage P/L at 10 contracts.  It reports accuracy/Wilson, calibration,
+P/L, EV, drawdown, rejected counterfactuals, and fixed asset/side/distance/
+volatility/regime/path-depth/path-spread slices.  Passing is historical
+evidence only; no artifact, notification, automatic promotion, or real order
+is created.
+
+The reporting bins were frozen outcome-blind in
+`config/q15_rti_v15_reporting_protocol.json`, canonical SHA-256
+`57c668865a90be5dc18a301210bff4f77614b3275b414223e8f03aaffa60439d`.
+The audit seal advanced to
+`q15-rti-v15-outcome-blind-audit-execution-seal-v2` and now binds the explicit
+YES/NO depth-availability flags and V14 feature-name identity used by the
+economics simulator, preventing a missing book side from becoming a fake
+fill.  Adversarial tests cover duplicate/resumed callbacks, crash ambiguity,
+feature/report/reporting-protocol tampering, rehashed reservation safety
+tampering, rehashed finalized-result tampering, and the positive-P/L/
+minimum-pick gate.  Focused V15/health coverage passed 57/57 and the complete
+repository passed 2,614 tests with 5 skipped in 400.00 seconds.  The local
+service restarted healthy with exact collection alive, source quality PASS,
+V15 binding verified, the audit-tooling identities visible in health, and no
+outcome or scoring authority.
+
+## Shipped 2026-07-22 - outcome-blind executable V15 feature binding
+
+The first-30 immutable independent-path geometry review passed at exactly 30
+complete seven-asset windows / 210 rows.  Every one of the eleven frozen
+checks passed, source quality was `PASS_ALL_CREDITED_COMPLETE_ROWS`, contract
+and independent-formula mismatches were zero, and outcomes/model/scoring
+remained unread and disabled.  The immutable artifact is
+`reports/q15_rti_independent_path_geometry_freeze_30/geometry-review.json`;
+its payload SHA-256 is
+`d4831b2a68a0af6cb73af721829d2a0a54df2786451063110fa9be4ce58afe7c`,
+its exact selected-evidence SHA-256 is
+`0097294deccc40b845fdc8a0a62a7b697d42f2ada78422482fddb66c8388718a`,
+and its byte SHA-256 is
+`2890fecf1482d8ada40bdeaaed87cdc2a8ad10be727737f3e0298ee60f573eb1`.
+The decision is `PASS_CONTINUE_PROSPECTIVE_COLLECTION_NO_MODEL`; it does not
+authorize outcome access or a fit.
+
+The separately authorized V15 executable **feature** design is now bound at
+`config/q15_rti_microstructure_design_v15.json` as
+`q15-rti-market-anchored-independent-path-augmented-residual-v15`, SHA-256
+`8c6facc23a0a56968c8a24408272f676923e78a7b51111a39122577d902f0ba7`.
+Its first 20 inputs are the frozen V14 vector in identical order and values;
+the final five are the frozen independent-path summaries.  The runtime in
+`q15_upgrade/strategy_bots/rti_microstructure_v15.py` accepts a row only after
+recomputing every added value from its canonical Coinbase/Kraken evidence and
+checking the path design/schema, two-venue availability, exact source cutoff,
+and 0-2 second exact-13M timing.  Missing, partial, non-finite, stale, or
+tampered path evidence fails closed; no path imputation is allowed.
+
+`tools/q15_rti_v15_design_binding.py` verifies the charter/protocol/V14/path
+lineage, exact immutable geometry artifact bytes and payload, binding time,
+feature order, unchanged V14 training/trust/entry policy, cohort isolation,
+chronology, and all safety flags.  A rehashed feature-order tamper and an
+artifact-byte mismatch are both rejected.  The readiness monitor and health
+surface the bound design identity and feature runtime while keeping outcome
+access, fitting, probability scoring, model artifacts, candidate
+notifications, automatic promotion, and real trading false.
+
+The live feature-only preflight accepted 30 complete V15 windows with zero
+timestamp failures before restart; the next 23:32 ET exact capture then
+completed 7/7 at offsets 0.009-0.207 seconds, advancing collection to 31
+complete windows / 217 rows.  Focused binding/health coverage passed 87/87 and
+the complete repository passed 2,582 tests with 5 skipped in 228.72 seconds.
+The local service was restarted and returned `status: ok`, Kalshi websocket
+connected, exact collector thread alive, V15 feature design created, and every
+V15 predictive/trading capability still disabled.  Continue collection to
+60 non-BTC windows and 150 BTC windows; do not open either cohort's labels
+before its independent readiness gate.
+
+## Shipped 2026-07-22 - V15 outcome-blind cohort audit execution seal
+
+`tools/q15_rti_v15_audit_seal.py` now commits the future one-shot audit to the
+exact earliest eligible evidence before any label can be opened.  It validates
+the immutable V15 binding and geometry artifact, accepts only complete
+seven-asset exact windows with valid Kalshi contract identity, independently
+checks the point-in-time market prior, proves V15's first 20 values equal V14,
+and freezes cohort row IDs, feature evidence, development/calibration/test
+partitions, and every outer/inner chronological fold by SHA-256.  V15, frozen
+V14, and the Kalshi market must use identical rows; V14 is explicitly forbidden
+from receiving the five path inputs.
+
+The seal contains no label callback, settlement query, model fitter,
+probability scorer, Telegram sender, promotion path, or order path.  Merely
+becoming ready still leaves train/calibration and untouched-test label access
+false.  A later separate manual action may open only the ready cohort's
+train/calibration IDs; the other cohort stays sealed, and untouched-test IDs
+require all prior gates plus an exclusive one-shot reservation.  The seal
+writer uses exclusive-create semantics and refuses an existing output.
+
+Adversarial synthetic coverage proves 60-window non-BTC and 150-window BTC
+fold geometry independently, keeps all same-close assets together, removes
+credit for one missing asset or a wrong Kalshi contract, shows that changing
+outcome values cannot change the seal/evidence hashes, and rejects rehashed
+safety, minimum, partition, or comparator tampering.  The live command
+correctly returned `WAITING` at 32/60 non-BTC and 32/150 BTC with all outcome,
+fit, scoring, artifact, notification, promotion, and trading flags false.
+The 23:47 ET capture completed 7/7 at offsets 0.093-0.263 seconds.  Focused
+coverage passed 23/23 and the complete repository passed 2,593 tests with 5
+skipped in 238.26 seconds.
+
+## Shipped 2026-07-22 - exact Kalshi contract identity alignment
+
+Audit v7 now refuses readiness credit unless every independent-path row names
+the correct Kalshi asset series and the ticker-encoded local close maps to the
+stored absolute `close_time`.  The validator also checks the redundant ticker
+minute suffix and evaluates both Eastern-time folds on the fall DST boundary,
+so ambiguous 01:xx closes are matched by timestamp rather than guessed.
+Malformed tickers, cross-asset ticker reuse, neighboring-close joins, and
+suffix mismatches all fail closed without reading outcomes.
+
+The outcome-blind live preflight checked all 2,881 exact rows in the strategy
+ledger and found zero contract-identity mismatches.  The frozen review's
+source-quality object now binds the identity version, selected-row count,
+zero-mismatch requirement, asset/close alignment requirements, DST-safe flag,
+and `outcome_labels_read: false`.  The readiness notice requires this object,
+and health exposes it separately from the feature-evidence SHA-256.  Focused
+coverage passed 101/101 and the complete repository passed 2,565 tests with 5
+skipped in 228.57 seconds using a test-only outbox.  The local service was
+restarted and the 23:02 ET capture completed 7/7 with a 0.380-second offset.
+Audit v7 is at 29 windows/203 rows, zero formula or
+contract mismatches, source quality PASS, and no outcome/model/trading access.
+
+The two V15 comparators were refreshed outcome-blind.  The independent Kalshi
+prior preflight checked all 224 path-boundary rows: zero mismatches, maximum
+probability delta `5.55e-17`, maximum exact offset 0.479 seconds, and zero
+Kalshi/source cutoff delta.  The frozen V14 base-feature audit found all 20
+features available across 34 complete executable windows, with zero
+unavailable rows, unusable windows, or timestamp failures.  Its durable report
+is `reports/q15_rti_v15_v14_base_feature_preflight/audit.json`, SHA-256
+`73a657fb0b3b534ef2f00f823e03713b4266b3e2d95fd871c36bded36e200349`;
+the design binding SHA-256 is
+`6c08f4bd3c7991d7abbe1bb8e9af5c983443f114448967e2818e8b54a00dc820`.
+Both preflights report outcomes unread, model fit false, and no artifact,
+automatic refit, promotion, notification, or trading authority.
+
+## Shipped 2026-07-22 - exact first-30 evidence identity and review recomputation
+
+Audit v6 now commits the geometry review to the exact outcome-free feature
+evidence, not only aggregate covariance/source-quality summaries.  The
+earliest review slice receives a canonical, order-stable SHA-256 over asset,
+ticker, side, timestamps, and every `rti_independent_path_*` field.  Outcome
+and P/L columns are excluded by construction and adversarial tests prove that
+changing labels cannot alter the hash while changing a path feature does.
+
+The immutable freeze requires this identity to cover exactly 210 rows at the
+30-window trigger.  It also independently recomputes the complete geometry
+decision from the frozen protocol before accepting either a live report or a
+rehashed artifact.  A forged PASS over failing geometry, changed row-evidence
+hash, duplicate/off-cadence close identity, unsafe source flags, malformed
+timestamp, or altered payload schema now fails closed.  The readiness notice
+requires audit v6, the independent reference verifier, zero formula
+mismatches, and the exact evidence identity before any milestone message can
+be sent.  Health exposes the identity version, row count, SHA-256, and its
+outcome-access flags.
+
+The first post-deploy capture at 22:32 ET completed 7/7 at a 0.078-second
+offset with zero missing paths, failures, or missed deadlines.  Collection is
+at 29 complete windows / 203 credited rows, leaving 1 window to the immutable
+freeze.  The live
+identity SHA-256 is
+`09dcfefa7d140f9805ee3229e21bd23becfa3e5b75c45f221fe018d6c6102a60`;
+source quality is PASS, reference mismatches and prospective degradation
+events are zero, and outcomes/model fit/promotion/trading remain false.
+Focused coverage passed 99/99 and the complete repository passed 2,563 tests
+with 5 skipped in 226.34 seconds using a test-only Telegram outbox.  The local
+service was restarted and health returned audit v6 with the 182-row identity.
+
+## Shipped 2026-07-22 - exact-ticker settlement conflict firewall
+
+Future RTI/V15 grading now fails closed at both settlement reconciliation
+boundaries.  `IntervalResearchLedger.resolved_results_for_tickers` requires
+one unanimous explicit YES/NO label for the exact requested Kalshi ticker; an
+adversarial two-model test now proves that conflicting persisted labels return
+no result.  The live current-event lane also normalizes each source batch
+before touching either ledger.  Duplicate unanimous labels are graded exactly
+once, while a same-batch YES/NO conflict for one ticker is logged and rejected
+everywhere instead of accepting whichever label arrived first.  Outcomes are
+never inferred from spot direction, neighboring closes, or price movement.
+
+The 22:02 ET independent-path capture completed 7/7 at a 0.429-second exact
+offset with zero missing paths, record failures, or missed deadlines.  The
+outcome-blind audit advanced to 25 complete seven-asset windows/175 credited
+rows, leaving 5 windows to the immutable geometry freeze.  Source quality is
+PASS for every credited row, reference-formula mismatches and prospective
+degradation events remain zero, and outcome access/model fit/promotion/trading
+remain false.  Focused settlement coverage passed 180/180 before the final
+hardening, the expanded interval suite passed 38/38, and the complete
+repository passed 2,555 tests with 5 skipped in 237.07 seconds.  The local
+service was restarted and returned healthy with the readiness monitor at
+25/30.
+
+## Shipped 2026-07-22 - immutable first-30 path geometry freeze
+
+The independent-path geometry decision now has a separate immutable manual
+freeze contract, created before the 30-window trigger.  The contract is
+`q15-rti-independent-path-geometry-30-immutable-freeze-v1`, SHA-256
+`0c624e12bf0015188e0b20c1c3b5354f70517f044994a89ee584183e02df6340`.
+It binds the frozen source design, outcome-blind geometry protocol, V15
+charter/evaluation protocol, earliest-30 selection rule, exact seven-asset row
+counts, output schema, and fail-closed behavior.
+
+`tools/q15_rti_independent_path_geometry_freeze.py` is the only writer.  It is
+manual-only: the background readiness monitor reports the milestone but
+cannot create or overwrite the artifact.  Before 30 complete windows it
+returns `WAITING_FOR_30_COMPLETE_WINDOWS` and creates no directory or file.
+At 30 it will select exactly the earliest 30 complete windows (210 rows: 30
+BTC and 180 non-BTC), project feature/source evidence only, and write
+`reports/q15_rti_independent_path_geometry_freeze_30/geometry-review.json`
+with exclusive-create semantics.  Later invocations can only verify the same
+canonical payload and evidence hashes; any mismatch fails closed.
+
+The feature-only database loader is now protected by a SQLite authorizer in
+addition to its explicit SQL allow-list.  SQLite itself denies reads of
+`official_result`, `correct`, `hypothetical_pnl_cents`, or `resolved_at` while
+feature-only evidence is loaded.  This prevents a future query edit from
+silently reading labels and then claiming `outcome_labels_read: false`.
+
+The V15 preregistration validator now semantically enforces the full frozen
+contract in addition to verifying its SHA-256.  Even a newly rehashed manifest
+is rejected if it weakens point-in-time fail-closed evidence, same-close/inner
+fold chronology, the exact market or V14 comparators, close-window bootstrap,
+effect-size bounds, calibration population, fixed reporting, or prospective
+V15/PAPER notification policy.  This closes the gap where an immutable file
+could still be faithfully hashed after its meaning had been weakened.
+
+Audit v5 adds a genuinely independent equation verifier,
+`q15-rti-independent-path-reference-equations-v1`.  The production collector
+and production reconstruction previously shared their feature combiner, so a
+common formula bug could theoretically make both agree.  The reference module
+imports none of the production combiner and separately calculates all five
+frozen features from canonical raw Coinbase/Kraken rows.  Audit credit now
+requires both verifiers to pass.  An adversarial test deliberately injects a
+wrong production combiner: production capture and reconstruction agree, while
+the reference verifier rejects the row as intended.  Live history has zero
+reference-formula mismatches.  Health exposes the audit/reference versions and
+mismatch count after the readiness monitor has a snapshot.
+
+The V15 market comparator now has a repeatable, outcome-blind preflight at
+`tools/q15_rti_market_prior_consistency_audit.py`.  It independently despreads
+the decision-time YES/NO quotes and checks that the stored, side-normalized
+Kalshi probability is identical.  It also requires the source capture to be
+within the existing two-second exact window and the Kalshi/source cutoffs to
+match within `1e-6` seconds.  Across all 196 rows at or after the path
+boundary, 196 were checked, zero mismatched above `1e-9`, and the maximum
+absolute difference was floating-point noise (`5.55e-17`).  The tool uses the
+database-level outcome-column authorizer, cannot fit or score a model, and
+tests cover YES/NO normalization, quote fallback, boundary exclusion, and an
+inconsistent/reused-market-mid or timestamp failure.  The maximum live exact
+offset is 0.440 seconds and every Kalshi/source cutoff delta is zero.
+
+Execution economics were rechecked against Kalshi's official July 7, 2026 fee
+schedule.  The frozen code matches the governing taker equation
+`0.07*C*P*(1-P)` with multiplier 1, rounds fee plus position cost to a
+centicent, evaluates the fee at the 2-cent-worse simulated fill, and applies
+no settlement fee.  All 21 published 100-contract table rows now have
+regression coverage.  The PDF displays their centicent values rounded up to a
+whole cent (for example 173.25c as $1.74); tests verify that presentation layer
+without incorrectly charging the display rounding in paper P/L.  Side-specific
+asks/depth remain required, 10 displayed contracts are mandatory, and no
+historical row is claimed as an actual fill.
+
+The freeze cannot read outcomes, fit or score a model, send candidate picks,
+promote a rule, or trade.  Passing geometry only allows collection to
+continue; failing geometry blocks the 60/150 outcome audits and requires
+manual diagnosis without automatic feature or threshold changes.  The live
+dry-run at 18 windows returned `WAITING` and emitted no artifact.  Collection
+has since reached 29 complete seven-asset windows/203 rows, leaving 1 window
+to the locked review.  All five features remain active, finite, full-rank,
+and below the frozen correlation/conditioning ceilings; source quality is
+PASS.  The most recent exact capture recorded 7/7 paths at a 0.380-second
+offset with zero failures or missed deadlines.  After the database-level
+outcome firewall, semantic validator hardening, and independent reference
+verifier plus market-prior preflight, focused suites passed and the complete
+repository suite passed 2,565 tests with 5 skipped in 228.57 seconds.
+
+## Shipped 2026-07-22 - outcome-blind V15 path successor preregistration
+
+Before opening any independent-path outcome, one successor candidate and its
+entire evaluation contract were frozen.  The charter is
+`q15-rti-v15-independent-path-augmented-nested-safe-residual-preregistration-v1`,
+SHA-256
+`513c240977ee6640b0ebd06f9839dc37b787e5a13930c87eee2d1e4a7407791e`.
+The evaluation protocol is
+`q15-rti-v15-path-augmented-nested-safe-expanding-walk-forward-v1`, SHA-256
+`e4233be29f211e314344d817de296ca3ef99f5026f67edcaadbe2a44d25b3536`.
+Both are validated by
+`tools/q15_rti_independent_path_successor_preregister.py` without database or
+model-execution access.
+
+The sole proposed V15 architecture is a single 25-feature regularized market-
+prior residual: V14's exact 20 features followed by the five frozen path
+features.  V14's optimizer, training config, entry policy, nested training-only
+trust grid `0/0.25/0.5/0.75/1`, and exact factor-zero Kalshi fallback remain
+unchanged.  Interactions, polynomial expansion, feature selection,
+hyperparameter search, partial windows, and missing-path imputation are all
+forbidden.  Frozen V14 and the point-in-time market are parallel controls on
+identical rows.
+
+No executable design can be created unless the first-30-window locked geometry
+review passes and a separate manual action occurs.  Non-BTC remains sealed
+until 60 complete windows and BTC until 150.  The candidate must materially
+beat both market and V14 on Brier and log loss in chronological same-close
+folds, pass paired close-window bootstrap bounds, calibration halves, and the
+one-shot untouched test before a PAPER challenger may be created.  Accuracy is
+report-only.  Economics retain official Kalshi fees, 2-cent slippage, stored
+executable quotes, and 10 contracts; fake fills and reused quotes are
+forbidden.  Any future PAPER ledger starts at the next unseen close with zero
+historical credit and manual reviews only at 30/60/150 resolutions.
+
+At preregistration, feature-only evidence was 16 windows/112 rows with all five
+features active and full-rank in every cohort, source quality PASS, zero
+integrity breaches, and outcomes/model/performance unread.  Collection then
+advanced cleanly to 18 windows/126 rows, leaving 12 to geometry review.  The
+monitor expects all four post-notice-boundary closes, reports zero entirely
+missing closes or degradation events, and now exposes three separate pending
+milestones: `GEOMETRY_30`, `NON_BTC_60`, and `BTC_150`.  A failed geometry
+review can release only the manual geometry notice; it blocks both cohort
+audits.  Health exposes the charter/protocol hashes and keeps executable
+design, model fit, notification, promotion, and trading false.  Focused
+semantic/health tests passed 73/73; the final full suite passed 2,499 tests
+with 5 skipped in 242.50 seconds.
+
+## Shipped 2026-07-22 - prospective independent-path degradation notices
+
+The independent L2/L3 path collector now fails loudly in Telegram when a new
+seven-asset close cannot be reconstructed.  The notice policy was frozen
+before its first eligible close as
+`q15-rti-independent-path-prospective-degradation-notice-v1`, SHA-256
+`e84a3a36ee98a7637a77ac8aa1bb143ddc1e2c97144dc7364d96d599d77a8e91`.
+Historical incomplete windows never generate notices.  The prospective
+boundary is close time `1784763000`; the first eligible close is
+`1784763900` (19:45 ET, exact decision at 19:32 ET).
+
+Every eligible incomplete close gets one durable, policy-hash-bound V3
+Telegram message labeled `PAPER ADMIN`.  It reports the valid row count,
+missing assets, and source-only failure reasons.  The window remains excluded
+from readiness credit and cannot be backfilled.  The notice performs no
+restart, threshold/feature/model change, scoring, promotion, or trading
+action, and it cannot select or read outcomes.  Same-process completion
+tracking plus the SQLite outbox prevents duplicate delivery across repeated
+checks and restarts.  `/api/health -> independent_path_readiness_monitor`
+exposes the policy identity/boundary, prospective event list, completed close
+times, last delivery result, and unchanged safety flags.
+
+The monitor does not rely only on observed ledger rows: it reconstructs the
+expected 900-second close cadence at the immutable close-minus-780-second
+decision instant and waits the pinned five-second capture grace.  A total
+recorder failure with zero rows is therefore reported with all seven assets
+missing instead of disappearing from the audit.  Tests cover the pre-grace
+boundary and the entirely absent-window case.
+
+The first two eligible exact captures were clean: 7/7 independent paths each,
+zero missing rows, record failures, or missed deadlines; the second decision
+offset was 0.230 seconds.  The background monitor advanced from 14 windows/98
+rows to 16 windows/112 rows, expected both due closes, found zero entirely
+missing closes, and reported zero prospective degradation events.  The
+refreshed durable audit has 16 complete windows/112 credited rows, source
+quality PASS, zero integrity breaches, and 14 windows remaining to the frozen
+geometry review.  Coinbase L2, Kraken L3, settlement index, exact capture, and
+the readiness monitor were connected/alive.  Outcome access, model
+fitting/scoring, promotion, and real trading all remained false.  Focused
+policy/audit/health tests passed 63/63.  The final full repository suite passed
+2,476 tests with 5 skipped in 235.64 seconds after deployment.
+
+## Shipped 2026-07-22 - reconstructable pre-decision L2/L3 path evidence
+
+The next outcome-blind data improvement is frozen and collecting separately
+from V14.  The audit found that the local Coinbase L2 and Kraken L3 stores
+retain dense within-minute paths, while V14's 20 learned fields discard nearly
+all of that shape.  A live, label-free benchmark showed 12-13 points per venue
+for every asset over 60 seconds, maximum gaps of 5.28-5.56 seconds, all seven
+assets complete, and 0.032 seconds total query/reconstruction time.
+
+The source design is `q15-rti-independent-venue-path-evidence-v1`, SHA-256
+`ed73729468715279d0d92e1d3beed431cfad416767e4bb92cb88c230d4b904a2`.
+It was preregistered before its first eligible exact capture.  No row through
+the 15:00 ET close receives credit; the first eligible close is 15:15 ET and
+its exact decision timestamp is 15:02 ET.  The benchmark receives no credit.
+V14 outcomes and performance were not opened.
+
+For each asset, the source reads only rows at or before the immutable exact
+13M cutoff, includes the last state at/before the 60-second start, requires
+both venues, at least eight points per venue, top-10 depth, <=10-second start,
+end, transport, and continuity ages, and the versioned Kraken partial-fill
+schema.  It persists canonical raw selected rows plus their SHA-256.  A second
+verifier reconstructs every summary from that evidence and rejects future
+rows, stale transport, gaps, schema changes, fingerprints, or stored-feature
+tampering.
+
+Exactly five hypotheses were frozen: time-weighted independent depth
+imbalance, first-half-to-second-half depth acceleration, cross-venue depth
+direction agreement, transient spread-stress ratio, and Kraken observable
+partial-fill-flow acceleration.  This does not restore V11's 71-dimensional
+design.  A future successor may add only these five fields to V14, must retain
+V14's nested market-anchored trust/fallback, keep BTC separate, and wait for
+30/60/150 outcome-blind/model/review gates.  The source itself cannot fit,
+score, notify, promote, or trade and does not change V14.
+
+The feature-only audit is under
+`reports/q15_rti_independent_path_audit_live/`; it selects no outcome column
+and had zero eligible rows before deployment, as required.  The first live
+collection period produced 77 eligible rows across 11 windows: 71 valid rows,
+six invalid rows, and eight complete seven-asset windows.  Every invalid row
+had the same outcome-blind availability failure: Kraken's
+`cancel_to_add_5s` was NULL when its denominator, `add_count_5s`, was exactly
+zero.  That ratio is retained audit context and is not one of the five frozen
+features.  The validator now accepts NULL only for this mathematically
+undefined zero-denominator case; all other activity fields remain fail-closed.
+No five-feature formula, boundary, label, model, notification, or trading
+surface changed, and the six historical misses were not backfilled.
+
+The ratio repair added reconstruction coverage for the allowed NULL case.
+Focused tests passed 189/189 and the full suite passed 2,430 with 5 skipped in
+236.84 seconds.  The paper service was restarted safely after an exact capture;
+health returned `status=ok`, the exact thread was alive, all seven assets were
+registered, Coinbase L2, Kraken L3, and settlement feeds were connected, and
+post-restart exact/path/failure counters were clean at zero.  The first exact
+post-repair window then captured the 18:15 ET close at 18:02 ET: 7/7 durable
+decisions, 7/7 valid independent paths, zero missing paths, zero record
+failures, and zero missed deadlines.  The separate raw-evidence reconstructor
+also accepted all seven rows and marked close 1784758500 complete, proving the
+runtime counters were not the only source of verification.
+
+The outcome-blind source audit is now v2 and prepares the frozen 30-window
+geometry review without waiting to design it after seeing labels.  For all
+seven assets together, BTC alone, and the six-asset non-BTC transfer cohort it
+reports per-feature variance, active fields, centered standardized numerical
+and stable rank, condition number, singular values, maximum pairwise
+correlation, high-correlation pairs, and exact signed duplicates.  It cannot
+read a settlement column, fit a model, select a feature, or set a predictive
+threshold.  At ten complete windows all five fields were active and full
+rank in every cohort, with no exact signed duplicates; those values are an
+availability preview only, with the
+manual review still locked until 30 complete windows.  The focused path suite
+passed 9/9, the broader path/exact/runtime/health suite passed 179/179, and the
+final repository-wide suite passed 2,431 with 5 skipped in 231.61 seconds.
+
+An outcome-blind independent-path readiness monitor is now deployed.  It
+reconstructs the source audit every five minutes, exposes its design binding,
+credited windows/rows, excluded invalid rows, and cohort geometry under
+`/api/health -> independent_path_readiness_monitor`, and has exactly one
+frozen milestone: `GEOMETRY_30`.  At that milestone it can send one durable,
+idempotent Telegram message labeled `PAPER ADMIN`; the message explicitly says
+that labels are sealed, no model/feature selection/scoring ran, and it is not
+a trade signal.  A deficient geometry still triggers manual review rather
+than silently selecting or removing a field.
+
+The first exact window after deploying this monitor again captured 7/7 valid
+paths with zero misses, record failures, or missed deadlines.  On the second
+background check, live health reported 11 complete reconstructable windows / 77
+credited rows, six older invalid rows excluded from credit, no ready or
+completed milestone, no error, and every label/fit/selection/scoring/trading
+flag false.  Focused monitor/path/app-health verification passed 40/40; the
+final repository-wide suite passed 2,452 with 5 skipped in 232.86 seconds.
+
+The independent-path audit is now v3 and continuously measures source quality
+against the already-frozen collection limits.  For each venue it reports point
+count, effective end age, maximum continuity gap, maximum transport age, and
+remaining integrity margin distributions, plus the minimum margin by asset.
+These are availability diagnostics only; no performance outcome or predictive
+threshold is consulted.  A parse failure or frozen-integrity breach blocks the
+30-window admin notice rather than allowing questionable evidence to advance.
+
+Live credited evidence currently has 12 complete windows / 84 rows.  Coinbase
+has 12-13 points per path and Kraken 12-13; the observed worst continuity gap
+is 6.25 seconds against the frozen 10-second ceiling, worst effective end age
+is 5.39 seconds, and the minimum integrity margin is 3.75 seconds.  The third
+background check reported `PASS_ALL_CREDITED_COMPLETE_ROWS`, zero evidence
+parse failures, zero integrity breaches, `WAITING_FOR_MILESTONE`, and no ready
+or completed notice.  The exact window following deployment was again 7/7
+with zero misses/failures/deadlines.  Focused verification passed 42/42 and the
+final repository-wide suite passed 2,454 with 5 skipped in 235.96 seconds.
+
+The independent-path 30-window geometry decision is now frozen before the
+milestone.  Protocol
+`q15-rti-independent-path-outcome-blind-geometry-review-v1`, SHA-256
+`05ab77d4936fa46870437c3c599f73aea8c41d9e4b81355f10060ba8678f7d1a`,
+was preregistered after an honestly disclosed 12-window outcome-blind preview
+and before any outcome or performance inspection.  Its correlation ceiling
+0.95 and condition-number ceiling 50 reuse the earlier frozen V13 geometry
+standard; activity, rank, duplicate, finiteness, row-count, and source-quality
+checks are structural.  Evaluation is permanently pinned to the earliest 30
+complete reconstructable windows, even if run later.  A pass authorizes only
+continued collection toward non-BTC 60 / BTC 150; a failure authorizes only
+manual diagnosis.  Neither permits outcome access, fitting, feature removal,
+threshold changes, activation, or trading.
+
+At the 18:47 ET exact decision, all seven new independent paths correctly
+failed closed on `coinbase:path_continuity_gap`.  Raw Coinbase timestamps had
+an 11.90-second gap against the frozen 10-second maximum.  The preceding full
+`/api/health` request ran from 18:46:39-18:46:43 and began at the same point the
+normal five-second Coinbase persistence cadence stalled; the first uncached
+health request after a later restart independently took 14.07 seconds.  The
+seven failed rows receive no credit and were not backfilled.
+
+`/api/health` now protects the evidence history: during the 75 seconds before
+an exact decision and five seconds after, a live service returns its most
+recent cached health payload instead of rebuilding the expensive graph.  If no
+cache exists it returns an explicit cache-warming status rather than competing
+with collection.  A controlled request at 19:01:07, 53 seconds before the next
+capture, returned the cached payload in 226 ms.  The 19:02 decision then
+captured 7/7 valid paths with zero miss/failure/deadline; raw Coinbase evidence
+contained 13 points and a 5.59-second maximum gap.  The outcome-blind ledger is
+now 13 complete windows / 91 credited rows, with 17 windows remaining.  Audit
+v4 binds the source design and geometry protocol and reports only the two
+expected incomplete trigger checks at this stage.  Focused verification passed
+48/48; the final repository-wide suite passed 2,460 with 5 skipped in 239.60
+seconds.
+
+All recurring outcome-blind readiness scans now share a second capture guard.
+V13, V14, and independent-path monitor threads cannot begin a heavy evidence
+scan during the 130 seconds before exact capture or five seconds after it.  A
+deferred scan waits beyond the protected interval without counting as a check
+or error; health exposes its deferral count, timestamp, and requested delay.
+The wider 130-second bound covers the required 60-second path plus the observed
+uncached health/audit runtimes and margin.
+
+Focused V13/V14/path-monitor/app-health verification passed 85/85 and the full
+repository suite passed 2,461 with 5 skipped in 237.61 seconds.  In the first
+live protected cycle, V13 woke at epoch 1784762225 (five seconds after the
+19:17 ET exact timestamp) and recorded a one-second deferral instead of
+scanning; V14 and the path monitor woke later and required no deferral.  The
+19:17 decision captured 7/7 valid paths with zero misses, failures, or missed
+deadlines, and raw Coinbase evidence had 12 points with a 5.76-second maximum
+gap.  The feature-only audit is now at 14 complete windows / 98 credited rows,
+zero integrity breaches, and 16 windows remaining to the frozen geometry
+review; outcomes remain unread.
+
+## Shipped 2026-07-22 - V14 applies the honest V11 lesson prospectively
+
+V11's opened non-BTC walk-forward evidence was applied without opening its
+untouched test or any V13/V14 outcomes.  Across 144 rows / 24 same-close
+validation windows, frozen V11 and the market were both 104/144 (72.22%), but
+V11 was worse on Brier (0.1993437300 vs 0.1991637153) and log loss
+(0.5854907859 vs 0.5850803140).  A nested safe blend over the fixed factors
+0/0.25/0.5/0.75/1 selected factor 0 in every chronological fold.  Its honest
+opened-fold result was therefore the exact market baseline: 104/144, 72.22%,
+Wilson 95% 64.40%-78.89%, Brier 0.1991637153, and log loss 0.5850803140.
+This is not a claim of edge or profitability; entry/fill P/L was not inferred
+from a probability-only replay, BTC was not included, and the untouched test
+remains sealed.
+
+That evidence is now encoded as a separate paper-only V14 challenger instead
+of changing V11/V12/V13.  V14 fits the same frozen 20-feature base residual as
+V13, then selects how much of that residual to trust using inner chronological
+OOF predictions from the current outer training period only.  A nonzero trust
+factor must improve both Brier and log loss and pass paired same-close-window
+one-sided bootstrap gates; otherwise it falls back exactly to the stored
+Kalshi market probability.  Validation, calibration, and test labels never
+select the factor, and BTC remains a separate cohort.  V14 never receives
+historical credit.
+
+The preregistration charter SHA-256 is
+`30d1d00af4cd6abac5d1775e8e722a39b49cb2849311eea7f304c1b2bd2ec670`.
+The V14 design SHA-256 is
+`aa5efa9a986dc575ee4e358777cd2394b38550ad7328154b58a7d06bf55c3dda`;
+the nested walk-forward protocol is
+`638db046f638324b1bcf0459c8362a0f0f12cfef35fe9ebbf7d94dd0add87257`.
+The reporting, calibration, and selective-value protocol hashes are,
+respectively, `88609210e20799933e7b860ee701b47127eb5f799b5b9c2d28ffb90b2c7003eb`,
+`72e89f5950b5f70b8603036b0339a35f136421b6051729db7356335c9c6def45`,
+and `5a5a3a703f73a021a04993c26824ec9e998f7a6aae74deded5e61b889a654fa4`.
+The prospective boundary is close time 1784742300 and the first eligible close
+is 1784743200.
+
+The first eligible V14 window captured all seven assets with zero timestamp
+failure and zero neutralized input: 7/7 rows and 1/1 window fully observed,
+exact offsets 0.0641-0.5347 seconds, and maximum evidence assembly lag 0.5226
+seconds.  Outcomes remain unread, no model has been fit, and no artifact,
+prediction alert, promotion, or trade is enabled.  An outcome-blind,
+idempotent PAPER ADMIN monitor now watches the frozen 30/60/150 readiness
+gates and is exposed at `/api/health -> v14_readiness_monitor`.  Focused tests
+passed 140/140 and the final full suite passed 2,422 with 5 skipped in 210.24
+seconds.  After the local restart, health returned `status=ok`, the V14 thread
+was alive with one successful check, 1/1 fully observed windows, zero degraded
+rows, no error, and `WAITING_FOR_MILESTONE`; outcome access, scoring,
+promotion, and trading were all false.  Coinbase Advanced L2, Kraken L3, and
+settlement-index connections were live, and exact-capture record failures
+were zero.
+
+## Shipped 2026-07-22 - V13 soft input integrity is no longer hidden
+
+The outcome-blind V13 numerical audit now distinguishes executable model rows
+from fully observed rows.  Any retained `*_missing` indicator at or above 0.5
+is reported by row, independent close window, asset, and feature.  This is a
+diagnostic only: it does not alter a frozen feature value, executable-window
+eligibility, readiness credit, outcomes, fitting, notifications, promotion, or
+trading.  Exact-capture offset and evidence-assembly lag ranges are also
+reported for every executable row.  The audit version is now
+`q15-rti-microstructure-feature-audit-v3`.
+
+The same integrity block is included in the V13 milestone snapshot and exposed
+continuously at `/api/health -> v13_readiness_monitor`; future 30/60/150 PAPER
+ADMIN messages will state both complete windows and fully observed windows.
+The current feature-only ledger has four executable seven-asset V13 windows
+(28 rows), zero timestamp failures, and zero unusable windows.  Of those, 27
+rows and three windows are fully observed.  The first BNB row alone has
+`spot_flow_missing=1`: its snapshot itself was current, but the local book was
+2.51 seconds old against the frozen 2.0-second limit, so all BNB spot-flow
+values were honestly neutralized.  All later BNB rows are present.  Current
+exact offsets are 0.0135-0.4664 seconds and evidence assembly is
+0.0212-0.4436 seconds.  Cross-asset source ages stayed below 5.68 seconds under
+the pinned 10-second budget.
+
+After restart, Coinbase Advanced L2, Kraken L3, settlement index, exact-13M,
+and the V13 monitor were all connected/alive; settlement freshness was 1.0,
+exact record failures were zero, and health reported the same 27/28 rows and
+3/4 fully observed windows with readiness credit unchanged.  Focused tests
+passed 60/60 and the final full suite passed 2,388 with 5 skipped in 215.62
+seconds.  Durable audit artifacts are under
+`reports/q15_rti_v13_feature_audit_live_integrity/`.
+
+The first genuinely new post-restart close was then captured successfully:
+7/7 quotes, cross-asset contexts, cross-venue contexts, and spot contexts at a
+0.2235-second exact-decision offset, with zero missed deadlines, write
+failures, or collector errors.  The feature-only ledger and refreshed audit
+now contain five executable windows / 35 rows, of which four windows / 34 rows
+are fully observed.  The only degradation remains the original BNB row; the
+new seven-asset window added no missing indicator or timestamp failure.  The
+background `/api/health` cache then refreshed to the same five windows, four
+fully observed windows, 34/35 fully observed rows, one original BNB
+degradation, unchanged readiness credit, and no monitor error.
+
+## Shipped 2026-07-22 - idempotent V13 PAPER readiness milestones
+
+V13 now has an outcome-blind background milestone monitor.  It reads the same
+feature-only SQL projection as preregistration, binds the V13 design plus
+geometry/drift/walk-forward hashes, and fails closed on any timestamp,
+coverage, label-access, fit, artifact, scoring, promotion, or trading flag.
+It sends at most one durable Telegram administrative notice per frozen gate:
+`GEOMETRY_30`, `NON_BTC_60`, and `BTC_150`.  Every message says `V3 V13`,
+`PAPER ADMIN`, outcomes `SEALED / unread`, model fit/scoring not run,
+artifact/promotion/trading disabled, and explicitly that it is not a trade
+signal.  Static design-bound outbox keys make repeated checks and restarts
+idempotent.
+
+Runtime controls are `Q15_V13_READINESS_MONITOR` (default true) and
+`Q15_V13_READINESS_INTERVAL_SECONDS` (default 300, clamped 60-3600).  The
+monitor stays alive until all three gates are proven delivered and exposes
+completed/pending milestones, counts, last status/error, and all safety flags
+at `/api/health -> v13_readiness_monitor`.  The first deployed check saw three
+clean V13 windows, no ready milestone, constructed no delivery, and reported
+`WAITING_FOR_MILESTONE`; outcomes/scoring/promotion/trading were false.
+WebSocket, exact capture, and settlement remained healthy with zero record
+failures and 100% settlement freshness.
+
+Tests cover feature-only loading, every unsafe flag, exact 29/30/59/60/149/150
+boundaries, protocol-hash tampering, PAPER message text, durable outbox
+deduplication, lazy sender construction, partial milestone completion,
+monitor lifecycle/health, app health, and config documentation.  The final
+full suite passed 2,386 tests with 5 skipped in 218.45 seconds.
+
+## Frozen 2026-07-22 - V13 performance and economic reporting before labels
+
+Before any V13 outcome label or performance metric was opened, its entire
+future scorecard was frozen.  The subgroup protocol
+`q15-rti-v13-fixed-subgroup-reporting-v1` has SHA-256
+`ea4a273530cb2a807d091703703d594ec2e7923cfb173fa5acd3de4d13b2a823`.
+It fixes slices by asset, stored point-in-time RTI side, absolute distance,
+realized volatility, and broad-market regime.  Every observed slice must show
+sample size, close-window count, accuracy, Wilson interval, market accuracy,
+Brier score, log loss, trade frequency, 10-contract fee/slippage-adjusted P/L,
+EV/trade, drawdown, and rejected-trade counterfactuals.  Non-executable rows
+receive no P/L and counterfactuals can never be claimed as fills.  The three
+known pre-V13 losses are outside the prospective boundary and cannot be used
+to remove any V13 row or any future similar-looking loss.
+
+The calibration protocol `q15-rti-v13-fixed-calibration-reporting-v1`, SHA-256
+`cc7e8ddcca5d797d6a1407d3acc0b4d20eba02ee7d8897f9af6c346f6a1120ce`,
+fixes six probability bins, equal row weighting, separate BTC/non-BTC cohorts,
+ECE, maximum calibration error, bias, reliability, resolution, and the same
+market-prior comparison.  The selectivity protocol
+`q15-rti-v13-fixed-selective-value-curve-v1`, SHA-256
+`848c0155bcae020c3daf1d7dc34cab2d3663b2f32ceca909b5be05e1f05a25e7`,
+fixes EV thresholds 0/1/2/3/5/8/12 cents while preserving ask <=62c, spread
+<=1.5c, depth >=10, official Kalshi fees, 2c slippage, and 10 contracts.  The
+3c rule remains frozen; untouched-test curves cannot select another threshold
+or promote anything.
+
+The freeze/report implementation now supports this V13 chain and dynamically
+labels the model source as V13.  A future compact-freeze crash was also fixed:
+V12/V13 omit `spread_cents` from the learned feature list, so the freeze now
+reads the preserved point-in-time quote field rather than indexing a missing
+learned feature.  Stored RTI side is carried explicitly into examples.  Tests
+cover hash tampering, cohort mixing, fake-fill guards, fee/slippage invariants,
+stored-side integrity, calibration labels, selectivity monotonicity, and the
+compact spread path.  Focused regressions passed 239; the final full suite
+passed 2,360 with 5 skipped.  Live health exposes all three reporting hashes,
+outcome access/scoring/notifications/trading remain false, and collection was
+healthy at V11=71, V12=33, V13=2 with zero exact-capture failures.
+
+## Frozen 2026-07-22 - V13 outcome-blind review gates before statistics
+
+With exactly one clean V13 window available and before inspecting any V13
+feature, correlation, chronological-split, outcome, or performance statistic,
+two future reviews were frozen.  The 30-window geometry protocol is
+`q15-rti-v13-outcome-blind-geometry-review-v1`, SHA-256
+`550e8dfd3132712020aa90232dab97679cf209a8d5ba5438c6bd7d786b42605b`.
+It requires complete same-close seven-asset windows, clean timestamps, finite
+features, the cohort-conditioned input to be constant zero for BTC, no
+high-correlation or signed-duplicate pairs, bounded condition numbers, full
+active rank, and fixed fit-capacity floors.  Failures require manual diagnosis;
+they cannot remove features, change thresholds, create another design, fit,
+activate, promote, notify, or trade.
+
+The mandatory 60-window volatility review is
+`q15-rti-v13-outcome-blind-60-window-covariate-drift-v1`, SHA-256
+`91589996d48ec047b74b5e8c25c4b92533b220dd4a41729cbc71f91aa14a5856`.
+It keeps each close together, compares chronological 30-window halves within
+separate BTC/non-BTC cohorts, pins standardized mean-shift, dispersion, missing
+rate, and market-prior thresholds, and explicitly rechecks
+`log1p_realized_volatility_bps`.  Drift remains report-only and cannot trigger
+automatic normalization, tuning, refitting, activation, or promotion.
+
+After both hashes were frozen, the one-window plumbing preview correctly
+reported `WAITING_FOR_30_COMPLETE_WINDOWS` and
+`WAITING_FOR_60_COMPLETE_WINDOWS`; BTC's conditioned feature had maximum
+absolute value exactly 0.0.  It read no outcomes and performed no fit or
+automatic change.  Live health exposes both protocol IDs, hashes, and separate
+countdowns.  New protocol, tamper, boundary, synthetic pass/fail, drift,
+ledger, health, and config regressions passed 192/192.  The service was
+restarted cleanly with WebSocket connected, exact capture alive, zero record
+failures, and settlement freshness 100%.
+
+## Shipped 2026-07-22 - prospective V13 BTC-alias successor collection
+
+The manually preregistered V13 successor is now an executable feature design,
+but remains collection-only.  Its design is
+`q15-rti-market-residual-cohort-conditioned-compact-v13`, SHA-256
+`adc900b5882567446cb3d4a8f5fc0cb795e278dd38db2c6179e54cc83fc673ed`.
+It changes exactly one V12 input: the structurally redundant
+`cross_asset_btc_minus_non_btc_median_60s` is replaced with
+`cross_asset_btc_minus_non_btc_median_non_btc_only_60s`, which is exactly zero
+for BTC and preserves the original point-in-time value for non-BTC.  The other
+19 feature formulas, training configuration, entry policy, and all source and
+timestamp integrity requirements remain unchanged.  V11 and V12 remain frozen
+parallel controls.
+
+The design-bound evaluation protocol is
+`q15-rti-v13-expanding-walk-forward-evaluation-v1`, SHA-256
+`8abc35d34ca74bb70b2886913648c6ff4189ba9427eed825b79dddc5955b490c`.
+It retains separate BTC/non-BTC cohorts, same-close fold isolation, expanding
+walk-forward validation, clustered bootstrap gates, sealed untouched tests,
+and market-prior fallback.  No V13 outcome label has been read and no fit,
+artifact, score, alert, promotion, or order path exists.
+
+The charter's first candidate close at 1784737800 was conservatively excluded:
+its exact 13-minute row arrived seconds before the executable design and
+protocol were finalized.  The executable boundary is therefore stricter than
+the charter: after close 1784737800, first eligible close 1784738700.  At
+16:34 UTC the first post-freeze seven-asset window was live and complete with
+zero unavailable rows, zero unusable windows, and zero timestamp failures.
+Health reports V13 1/60 non-BTC readiness windows and 1/150 BTC windows while
+V12 remains at 31 and V11 at 69.  WebSocket and settlement feeds were healthy,
+settlement freshness was 100%, exact capture recorded all seven assets, and
+record failures were zero.
+
+Tests explicitly pin both hashes, reject boundary rows, verify BTC maps to
+zero while non-BTC preserves the original gap, ensure exactly one V12 feature
+changed, validate the walk-forward binding, and keep every runtime authority
+off.  Focused design/protocol tests passed 73; runtime/ledger tests passed 190;
+the final full suite passed 2,351 with 5 skipped in 214.05 seconds.
+
+## Frozen 2026-07-22 - V12 30-window review and V13 successor charter
+
+The first outcome-blind V12 review ran at exactly 30 complete eligible windows.
+The 12:02 ET capture recorded all seven assets with zero write failures and
+fresh settlement coverage.  No outcome, fit, artifact, notification, or trade
+was used.  Non-BTC geometry is healthy: 19 active inputs, full active rank,
+condition number 6.99, 9.47 observed rows per active input, and no pair at or
+above 0.95 correlation.  BTC retained the preregistered structural alias:
+`target_minus_cross_asset_median_momentum_60s_bps` versus
+`cross_asset_btc_minus_non_btc_median_60s` correlated 0.987797.  All other
+fixed geometry checks passed.  Evidence is in
+`reports/q15_rti_v12_feature_audit_30/audit.json` (SHA-256
+`957d935bbd9ea3d87fa6dd3a69cc6f5a0eb5d6508f5bc9ecefd0ee212db90ca3`).
+
+The frozen covariate review also flagged a real regime shift in
+`log1p_realized_volatility_bps` for both cohorts.  It remains report-only: the
+feature was not removed, normalized, tuned, or outcome-conditioned.  A repeat
+review at 60 V13 windows is mandatory.  V12 remains frozen, collection-only,
+and 30 windows short of its non-BTC locked audit; no V12 label has been read.
+
+A diagnosis restricted to V11's already-opened 48 train/calibration windows
+compared its 71-feature control with the independently frozen 20-feature V12
+algebra.  The sealed V11 test contributed zero rows.  Compact V12 reduced the
+Brier degradation versus market from +0.0001800 to +0.0001020 and log-loss
+degradation from +0.0004105 to +0.0002262, but still did not beat the market.
+A nested chronological safe-blend selected residual factor 0.0 in all three
+outer folds, correctly falling back to the point-in-time market prior.  This is
+development evidence only and gives V12 no historical credit.  The durable
+diagnostic is `reports/q15_rti_v11_opened_fold_diagnostic.json` (SHA-256
+`9989855a72fa5aefd62a0f3e4ea22bde27175b61f28e09c2e714860bcb511323`).
+
+The predeclared BTC alias trigger was therefore manually frozen as the V13
+successor charter `q15-rti-v13-btc-alias-successor-preregistration-v1`, SHA-256
+`f55e3772f4b6bced8a2315c94d007bf35eac05b38a27391e071d4dd570abae78`.
+Its only proposed feature change is a cohort-conditioned replacement that is
+zero for BTC and preserves the original gap for non-BTC.  The prospective
+boundary includes every reviewed close (after 1784736900; first eligible close
+1784737800).  V13 is deliberately not executable yet: it still requires a new
+design manifest, feature identity, and design-bound walk-forward protocol.
+V11/V12 remain frozen controls, historical credit is forbidden, and every
+activation/notification/trading flag is false.  Charter/diagnostic safety tests
+passed 28/28.
+
+## Audited 2026-07-22 - V11 non-BTC rejected before untouched test
+
+The requested first locked V11 audit ran after 66 complete design-eligible
+seven-asset windows were available.  The frozen sample used exactly the
+earliest 60; assets in a close stayed together and BTC remained excluded.  A
+readiness mismatch was found and fixed before scoring: `prepare_unlabeled_examples`
+had omitted the same design-scoped model-feature coverage used by the frozen
+preregistration CLI.  The old source-history gate therefore rejected a valid
+design cohort even though no eligible feature/timestamp failure existed.  The
+fix aligns those two gates without changing the design, sample, thresholds, or
+folds.  Regression coverage proves the design-scoped gate is supplied.
+
+Eleven train/calibration rows in three old close windows were then found
+ungraded.  The authoritative interval ledger already contained unanimous
+official results for every exact ticker, but the source-version-scoped side
+handler had skipped some rows.  Contract-scoped, idempotent settlement grading
+and a bounded startup reconciliation were added.  The one-shot repair matched
+41 of 50 pending RTI contracts and graded 444 PAPER side-ledger rows; nine
+unmatched contracts remain unresolved rather than guessed.  No trading or
+notification decisions are affected.  The repair path accepts only explicit
+YES/NO results that are unanimous for the exact ticker.
+
+V11 then failed its preregistered expanding walk-forward gate.  Across 24
+chronological validation close windows / 144 non-BTC rows it was 104/144
+correct (72.22%, Wilson 95% 64.40%-78.89%), exactly matching market-direction
+accuracy.  V11 Brier was 0.19934373 versus market 0.19916372 and log loss was
+0.58549079 versus market 0.58508031, so both proper scores were slightly worse.
+Fold accuracies were 77.08%, 81.25%, and 58.33%.  Because the walk-forward gate
+failed, calibration/final fitting stopped, the 12-window untouched test was
+not read, and no artifact, promotion, scoring service, alert rule, or trading
+path was created.  Durable evidence is in
+`reports/q15_rti_v11_non_btc_freeze_20260722/non_btc_transfer-report.json`.
+
+An outcome-blind V11 readiness monitor is now part of the local app.  It sent
+one idempotent `PAPER ADMIN` notice at the 60-window gate and stopped after
+proven delivery.  Its health explicitly reports zero outcome access,
+automatic scoring, promotion, and real trading.  Safety/idempotency, interval,
+strategy-ledger, and freeze focused suites passed; the final full suite passed
+2,341 tests with 5 skipped.  At 11:48 ET the exact sampler remained healthy and had
+captured all seven assets in the first post-deploy window with zero failures.
+
+## Shipped 2026-07-22 - frozen V11 volume-versus-value curve before outcomes
+
+The first V11 test will now show the volume/accuracy/economics tradeoff without
+using that same untouched result to choose a better-looking threshold.  Before
+any V11 label review, `q15-rti-v11-fixed-selective-value-curve-v1` was frozen
+with SHA-256
+`7f50aa65edfc96ea5181a00114e0c0efb9a26e8eed41d55a1df2600e66b6ad35`.
+It evaluates fixed post-fee/slippage EV thresholds of 0, 1, 2, 3, 5, 8, and
+12 cents while holding ask <=62 cents, spread <=1.5 cents, displayed depth >=10,
+ten simulated contracts, official Kalshi fees, and 2-cent slippage unchanged.
+The existing 3-cent rule remains the frozen policy; the curve cannot replace it.
+
+For every threshold the report includes decision-row coverage, picks per close,
+accuracy, Wilson interval, ten-contract adjusted P/L, EV per trade, maximum
+drawdown, and a digest of the exact selected row IDs.  The evaluator proves
+that every higher-threshold pick set is a subset of the preceding set and that
+pick counts never increase.  All rows use stored decision-time quotes and
+depth, but the curve is explicitly a paper counterfactual and never a claim of
+historical fills.  BTC/non-BTC mixing, threshold selection from the untouched
+test, historical promotion, and automatic feature/rule/activation/notification/
+trading changes are forbidden.  Any future threshold change requires a new
+preregistered prospective challenger.
+
+The one-shot state and future artifact/runtime health now require the exact
+curve identity/hash and `fixed_selective_value_curve_required=true`.  The real
+no-label preview at 08:49 ET advanced to 55 clean V11 windows (5 remaining to
+non-BTC), with zero label reads, model fits, or artifacts.  Focused freeze/
+runtime tests passed 71; broad RTI feature/freeze/runtime/strategy-ledger/app-
+health verification passed 302.  Live health at 08:51 ET showed 98/98 exact
+decisions with complete cross-asset evidence, zero misses/write failures, 17
+clean V12 windows, connected settlement, fresh data, and Telegram configured
+with dead-letter protection.  The service was not restarted because no active
+scoring artifact exists and collection code did not change.
+
+## Shipped 2026-07-22 - V11 fixed calibration reporting before label access
+
+The first V11 score can no longer look convincing from accuracy and P/L while
+hiding systematically overconfident probabilities.  Before the 60-window
+non-BTC label gate, the report-only
+`q15-rti-v11-fixed-calibration-reporting-v1` annex was frozen with SHA-256
+`d10553be7b14c761934bfec82ccd5d87c7e859a4080828d2600deda4c691f27c`.
+It evaluates every untouched-test probability before accepted-pick filtering
+and compares V11 directly with the stored point-in-time Kalshi market prior.
+
+Six immutable probability bins cover 0%-100% and always report empty bins.  For
+both V11 and Kalshi the annex reports row count, mean probability, observed YES
+rate, signed calibration bias, expected and maximum calibration error, binned
+reliability/resolution, and outcome uncertainty.  It also reports model-minus-
+market calibration deltas.  BTC and non-BTC cannot mix; historical calibration
+is explicitly non-promotional, cannot change the deployment gate, and provides
+no activation, notification, promotion, or trading permission.
+
+The one-shot untouched-test reservation, finalized state, emitted artifact,
+runtime scorer, and artifact health must carry the exact annex identity/hash
+and `fixed_calibration_reporting_required=true`.  A missing or modified annex,
+metric table, empty bin, comparison, or artifact guard fails closed.  The real
+design-bound preview at 08:41 ET has 54 clean V11 windows (6 remaining to the
+non-BTC gate) and exposes the exact calibration identity while confirming zero
+label reads, zero model fits, and zero artifacts.  Focused freeze/runtime tests
+passed 67; broad feature/freeze/runtime/strategy-ledger/app-health verification
+passed 298 tests.  No live restart was needed because V11 has no artifact and
+the scoring bridge remains dormant; collection continues unchanged.
+
+## Shipped 2026-07-22 - preregistered V12 chronological covariate-drift audit
+
+V12's feature-only audit now detects a failure mode that aggregate rank and
+correlation checks cannot see: a feed or feature distribution shifting between
+early and late forward collection.  Before inspecting any chronological split
+statistics, `q15-rti-v12-outcome-blind-covariate-drift-v1` was frozen with
+SHA-256 `ced627f34f7d50b8b9a9521bb5ce18bbae939a4008f5a6f37a2a24eda9a66211`.
+It keeps every asset sharing a close in the same half and keeps BTC separate
+from the six-asset transfer cohort.  At 30 complete windows it applies fixed
+limits of 1.0 overall-standard-deviation for mean shift, 0.25x-4.0 for early/
+late dispersion ratio, and 0.25 absolute rate shift for missing indicators;
+the point-in-time Kalshi market prior is audited by the same mean/dispersion
+rules.
+
+Any partial close, timestamp failure, nonfinite value, one-half-only constant
+feature, or threshold breach fails closed for manual root-cause review.  The
+protocol is report-only: it cannot read labels, change a feature or threshold,
+fit/refit, activate, notify, promote, claim historical credit, or trade, and it
+keeps V11/V12 frozen.  Synthetic tests cover stable data, a regime shift,
+missingness changing from 0% to 100%, partial-close leakage, timestamp failure,
+and protocol-threshold tampering.
+
+The first real preview was calculated only after the protocol was hashed.  At
+16 V12 windows, the chronological 8-vs-8 split has zero preview breaches in
+either cohort.  BTC's market-prior standardized mean shift is 0.560 with a
+1.393 dispersion ratio; non-BTC is 0.122 and 1.043.  These are feed-stability
+diagnostics, not predictive-performance evidence, and confirmed drift remains
+false until the frozen 30-window gate.  Broad RTI feature/freeze/runtime/ledger/
+health verification passed 294 tests.  Live health refreshed at 08:35 ET to
+54 clean V11 windows (6 remaining to non-BTC), 16 V12 windows, 91/91 exact
+decisions with complete cross-asset evidence, zero misses or write failures,
+connected settlement, and Telegram with dead-letter protection.  The service
+was not restarted because no live runtime path changed.
+
+## Shipped 2026-07-22 - frozen V12 BTC geometry decision before 30-window review
+
+The 15-window V12 forward feature-only preview remains outcome blind and
+numerically healthy for non-BTC: 90 rows, 19 active inputs, full rank 19,
+stable rank 4.39, condition number 12.63, projected 11.37 training rows per
+active input, and no pair at |r| >= 0.95.  BTC has 15 rows, the maximum possible
+centered rank 14, stable rank 2.95, condition number 20.80, and projected 4.74
+training rows per active input.  It also exposes one credible structural risk:
+`target_minus_cross_asset_median_momentum_60s_bps` and
+`cross_asset_btc_minus_non_btc_median_60s` have correlation 0.989016 because
+both subtract a broad-market center from BTC momentum.  No label, accuracy,
+P/L, settlement, model fit, or artifact was inspected or created.
+
+Before the frozen 30-window feature review, the separate report-only protocol
+`q15-rti-v12-outcome-blind-geometry-review-v1` was preregistered with SHA-256
+`8cab81cec789baf4a9bba316e84bfbb06c7ac6e2c747ed5589b10e9c69778aee`.
+It pins the 30-window integrity, rank, condition-number, correlation, and
+capacity checks.  If and only if the BTC alias remains at |r| >= 0.95 while
+non-BTC has no high-correlation pair, the predeclared successor hypothesis is
+to replace the regime-gap input with a cohort-conditioned version that is zero
+for BTC and unchanged for the six transfer assets.  That action requires a new
+manually frozen design, a prospective boundary after every reviewed close, and
+zero historical credit; V11 and V12 remain controls.  The protocol cannot
+create or activate the successor, read labels, fit, notify, promote, or trade.
+
+Adversarial protocol-hash, wait/trigger/pass, feature-audit, freeze, runtime,
+strategy-ledger, and app-health verification passed 291 tests.  The running
+paper service was not restarted because only the offline audit tool and config
+changed.  Live health at 08:27 ET showed 53 clean V11 folds (7 remaining to the
+non-BTC gate and 97 to BTC), 15 V12 folds, 84/84 exact decisions with complete
+cross-asset context, zero missed deadlines, zero write failures, fresh data,
+connected settlement, and Telegram configured with dead-letter protection.
+
+## Shipped 2026-07-22 - outcome-blind V11 historical-performance reporting contract
+
+V11 can now produce the requested historical performance table without changing
+its frozen model or inspecting outcomes early.  The separately immutable
+`q15-rti-v11-fixed-subgroup-reporting-v1` manifest (SHA-256
+`e4381605acf7039436813ea8feba78df3a3ccf15efa9c84b57a678bae3d98143`)
+fixes the post-score breakdowns before any V11 outcome review: asset, RTI side,
+absolute distance tier, realized-volatility tier, and cross-asset market regime.
+It is report-only and cannot change model features, hyperparameters, entry rules,
+deployment gates, notifications, promotion, or trading permissions.
+
+The one-shot untouched-test path now requires and persists the exact reporting
+protocol identity.  It validates that every observed subgroup contains all
+required accuracy, Wilson-interval, fee/slippage-adjusted P/L, EV, and drawdown
+metrics; that every row partitions exactly once in every dimension; and that
+rejected-trade counterfactuals remain explicitly paper-only.  Counterfactual P/L
+is only computed when the stored decision-time side quote and displayed depth
+could support the ten-contract simulation, and is never claimed as a fill.
+Future V11 runtime artifacts fail closed if this reporting lineage or safety
+guard is missing or altered.
+
+The real design-bound replay at 08:16 ET found 52 clean V11 close windows.  The
+non-BTC cohort is eight windows short of its frozen 60-window label-access gate;
+BTC is 98 windows short of its independent 150-window gate.  The replay read no
+labels, fitted no model, and emitted no artifact.  Coverage is clean with zero
+timestamp-alignment failures.  Seven unavailable rows are the single previously
+audited seven-asset restart-gap window; older rows lack exact V11 evidence and
+cannot be backfilled honestly.  Focused freeze/runtime/ledger/health verification
+passed 214 tests.  Full repository verification passed 2,302 tests with 5 skips
+in 342.03 seconds.  The local paper service remained running and was not
+restarted.
+
+## Shipped 2026-07-22 - exact-capture-safe local restart guard
+
+The sole V11 unusable eligible close was reconstructed outcome-blind: all seven
+rows at the 04:45 ET close failed only because both Coinbase and Kraken had a
+simultaneous collector gap immediately before the 04:32 exact capture.  The
+60-second BNB start snapshots were therefore more than the frozen 10-second lag
+cap, and V11 correctly returned `cross_asset_status_not_ok`.  All subsequent
+eligible windows were clean; there was no timestamp leakage or recurring feed
+defect.
+
+`Start-Q15Local.ps1` now refuses to stop a healthy running app during a
+deterministic protected interval around the epoch-phase-120 exact capture.  The
+window includes the required 60-second lookback, a 60-second observed restart
+budget, a 10-second safety margin, and five seconds for capture commit.  A
+stopped app still starts immediately; `-ForceUnsafeRestart` is explicit and
+emergency-only.  Pure fixed-epoch tests cover both boundaries and the launcher
+safety contract.  This changes no feature, model, threshold, label access,
+notification, promotion, or trading permission.
+
+Full repository verification passed with 2,296 tests and 5 skips.  The running
+paper service was deliberately not restarted for this launcher-only change.
+At 07:47 ET it had recorded ten consecutive post-restart seven-asset folds:
+70/70 exact decisions, 70/70 cross-asset contexts, zero misses, zero write
+failures, and zero missing cross-asset contexts.  Fresh health reported V11 at
+51 clean windows (9 to non-BTC, 99 to BTC), V12 at 13 clean windows with zero
+unavailable or unusable windows, 7/7 fresh settlement coverage, and Telegram
+configured with dead-letter protection.
+
+## Shipped 2026-07-22 - outcome-blind orthogonal compact V12 collection candidate
+
+The 38-window outcome-blind V11 numerical review exposed a credible
+overfitting risk before any labels were read: BTC had 61 active inputs, stable
+rank 4.83, and only 1.48 projected training rows per active input at its frozen
+150-window gate; non-BTC had 70 active inputs, stable rank 7.58, and 3.09
+projected training rows per active input.  V11 and the strict control remain
+unchanged.  A separate `q15-rti-market-residual-orthogonal-compact-v12`
+candidate was preregistered at 04:40:11 ET with design SHA
+`3f878d532c1ba6578e9eeb347ab2025b1c5a14c9ce27cd79a367016238ff854a`.
+Its boundary excludes every inspected close through 04:45 ET and grants no
+historical credit.
+
+V12 uses a fixed 20-feature, domain-balanced projection spanning path/reversal
+risk, Kalshi microstructure, external flow, independent-venue confirmation,
+and cross-asset regime.  It removes asset identity dummies and the duplicated
+market-prior magnitude, retains an explicit spot-flow missing indicator, and
+replaces the collinear target-momentum/broad-momentum pair with
+`target_minus_cross_asset_median_momentum_60s_bps`.  Replaying the pre-boundary
+feature-only allow-list produced full 20/20 numerical rank in both cohorts,
+zero pairs at |r| >= 0.95, no near-zero columns, projected training rows per
+active input of 4.50 BTC and 10.80 non-BTC, and condition numbers 16.07 and
+8.62 respectively.  This is geometry evidence, not predictive evidence.
+
+The separate V12 walk-forward protocol was frozen at 04:54:47 ET before any
+V12 outcome review.  Protocol SHA
+`d69dcfd73805eda398040590eb1271df1e0644b316603eff694b0ddc19d47a4f`
+retains same-close fold isolation, separate BTC/non-BTC folds, 5,000 fixed-seed
+paired close-window resamples, fixed 0.001 Brier/log-loss effect floors,
+one-shot untouched-test scoring, and manual-only promotion.  The first
+genuinely prospective 05:00-close fold captured 7/7 assets with complete
+cross-asset/cross-venue context, zero unavailable features, zero timestamp
+failures, and no model fit or artifact.  V12 readiness is 1 clean window (59
+to non-BTC and 149 to BTC); V11 concurrently advanced to 39 clean windows.
+Runtime/ledger health now exposes V12 independently while keeping it silent,
+paper-only, non-trading, and non-promotable.  Focused feature, readiness,
+freeze, ledger, runtime, and health verification: 258 passed.  Full repository
+verification: 2,287 passed, 5 skipped in 280.18 seconds.
+The local paper service restarted at 05:04 ET.  Its durable snapshot
+repopulated to 40 clean V11 windows and 2 clean V12 windows (58 remaining to
+the non-BTC V12 gate and 148 to BTC), with zero V12 unavailable rows,
+timestamp failures, or unusable windows.  Health returned OK with the exact
+sampler alive, 7/7 fresh settlement coverage, fresh Kalshi/Coinbase/Kraken
+feeds, the exact V12 design SHA/schema, and all V12 label/model/artifact/
+notification/trading flags still disabled.
+
+## Shipped 2026-07-22 - paired close-window prospective uncertainty gate
+
+Future V11 prospective promotion can no longer treat the six non-BTC assets
+sharing one Q15 close as six independent probability trials.  The V11-only
+scorecard now computes deterministic model-minus-Kalshi Brier and log-loss
+deltas after equal-weighting assets inside each close, then resamples entire
+close windows together for 5,000 fixed-seed bootstrap draws.  It reports the
+90% one-sided upper bounds plus central 90% intervals under the immutable
+`q15-rti-paired-close-window-bootstrap-v1` protocol.  Duplicating every asset
+inside a close leaves the observed deltas and uncertainty bounds unchanged.
+
+The manual promotion gate now fails closed unless every prospective prediction
+is paired to its stored decision-time Kalshi probability and both clustered
+one-sided upper bounds demonstrate at least a 0.001 mean improvement in their
+respective proper loss.  Point-estimate improvements alone, tiny negative loss
+deltas, missing bootstrap evidence, altered resample counts/seeds/floors, and
+fabricated pass flags cannot promote V11.  V2/V3 behavior, frozen strict rules,
+features, model fitting, entry criteria, notifications, artifact activation,
+and trading permissions are unchanged.
+
+Adversarial verification covers deterministic replay, same-close row
+replication, zero/tiny skill rejection, exact protocol tampering, and the
+interaction with immutable cohort lineage.  Focused RTI/runtime/health/exact
+verification: 184 passed.  Full repository verification: 2,282 passed, 5
+skipped in 271.17 seconds.  The local paper service restarted at 04:31 ET and
+returned healthy with every watchdog feed fresh, 7/7 settlement coverage, and
+the exact sampler alive.  Its 04:32 fold recorded 7/7 parent decisions with
+zero misses, exhausted retries, or write failures.  Because the restart was
+only about 36 seconds before exact capture, the fold correctly failed closed
+for missing 61-second cross-asset/cross-venue history and was counted as one
+unusable window rather than training evidence.  The 38 prior clean windows
+remain intact; the explicit audit still read zero labels, fit zero models, and
+emitted zero artifacts.  Live health exposes the new 5,000-resample bootstrap
+as unavailable/failing with zero prospective rows, while artifact availability,
+V11 paper recording, notifications, promotion, and real trading all remain
+disabled.
+
+## Shipped 2026-07-22 - cohort-safe immutable prospective lineage gate
+
+A future V11 paper book can no longer satisfy promotion criteria by pooling
+rows from multiple model versions, artifacts, untouched-test states, or test-
+metrics snapshots.  Every prospective record—including unresolved exposure—is
+now assigned to its BTC or non-BTC transfer cohort and contributes to a durable
+lineage summary.  Each cohort must have exactly one model version, one valid
+artifact SHA, a matching stored cohort, and, for V11, one valid test-state SHA,
+one valid test-metrics SHA, the finalized passing test status, and the exact
+frozen design/protocol identities.  BTC and non-BTC may correctly use different
+locked artifacts without contaminating one another.
+
+The existing manual 30/60/150 review remains fail closed.  Positive fee-and-
+slippage-adjusted P/L, a Wilson lower bound above the cohort break-even rate,
+and proper-score improvement over Kalshi are no longer sufficient by
+themselves: the cohort lineage gate must also pass.  Mixed lineage changes the
+health status to `LINEAGE_INTEGRITY_FAILED_REVIEW_REQUIRED` and forces
+`promotion_criteria_met=false`; automatic promotion remains impossible.
+Adversarial tests prove that unresolved rows immediately expose an artifact
+swap, that mixed BTC lineage fails, that an independently consistent non-BTC
+artifact still passes its own lineage gate, and that otherwise excellent 30-
+pick economics/proper scores cannot override a lineage failure.
+
+Focused strategy and supporting verification: 215 passed.  Full repository
+verification: 2,279 passed, 5 skipped in 281.23 seconds.  The live 04:02 fold
+recorded another 7/7 exact captures and decisions with zero retries, misses,
+exhaustion, or write failures and complete cross-asset, cross-venue, and spot
+context.  The explicit outcome-blind audit advanced to 38 clean windows (22 to
+non-BTC; 112 to BTC), with zero labels, test reads, fits, or artifacts.  The
+paper service restarted at 04:08 ET; health returned OK, repopulated the 38-
+window count, kept V11 record activation false and evidence rows at zero, and
+reported fresh 7/7 settlement coverage.
+
+## Shipped 2026-07-22 - dormant prospective V11 paper-ledger bridge
+
+The future locked V11 artifact now has a complete prospective evidence path,
+but that path is explicitly disabled by default through
+`Q15_V3_RTI_MICROSTRUCTURE_V11_PAPER_RECORD=false`.  Merely deploying this code
+does not call V11, add a challenger verdict to current rows, notify Telegram,
+trade, promote, or grant historical credit.  After a cohort passes its locked
+freeze and untouched-test gate, an operator must install the artifact and
+separately enable this record-only flag.  Health exposes the flag and reports
+`DISABLED_MANUAL_ACTIVATION_REQUIRED` until then.
+
+Once manually enabled, the bridge stores the decision-time model version,
+artifact SHA, finalized untouched-test state/metrics SHAs, exact V11 design and
+walk-forward protocol hashes, cohort, prospective cutoff, probability, market
+prior, OOD state, selected side, fresh quote, displayed depth, simulated fill,
+official fee schedule, and 2-cent slippage assumptions inside the existing
+idempotent RTI parent row.  It accepts only evidence after the stored cutoff
+with a passing finalized test, exact lineage, valid probabilities, in-
+distribution features, adequate depth/spread, and at least 3 cents expected
+value after costs.  The derived V11 book reuses automatic official settlement
+grading, reconstructs its own side/entry P&L, scores every stored probability
+against the Kalshi prior, reports rejected counterfactuals, and remains manual-
+review-only at 30/60/150.  It has no notification or order surface.
+
+The V11 design/protocol identity was moved to a dependency-free immutable
+module so rules and feature construction share the same constants without a
+circular import.  Focused strategy/runtime/ledger/health/freeze/exact
+verification: 213 passed; the final focused integration run was 163 passed.
+Full repository verification: 2,277 passed, 5 skipped in 320.05 seconds.  The
+outcome-blind audit advanced to 37 clean windows (23 to non-BTC; 113 to BTC),
+with zero label/test reads, fits, or artifacts.  The paper service restarted at
+03:41 ET; health returned OK, settlement coverage was fresh 7/7, the durable
+V11 count repopulated to 36, both artifacts remained missing, record activation
+was false, and the new V11 scorecard contained zero evidence rows.  The first
+post-deploy 03:47 fold captured and durably recorded 7/7 exact assets with zero
+retries, misses, exhaustion, or write failures, 7/7 cross-asset, cross-venue,
+and spot context, a 0.624-second maximum offset, and 0.128-second-old settlement
+data.  All 21 delayed decisions completed with zero retries, misses, failures,
+or pending work.  Record activation and V11 evidence rows both remained zero.
+
+## Shipped 2026-07-22 - crash-safe one-shot untouched-test lineage
+
+The locked RTI freeze can now survive a process crash after its one allowed
+untouched-test score without ever reading those labels a second time.  Its
+exclusive reservation and finalized result use a self-hashed
+`q15-rti-untouched-test-state-v2` record bound to the exact design, cohort,
+train/test data fingerprint, fitted-model fingerprint, chronological test-fold
+geometry, prospective boundary, fee/cost versions, and V11 walk-forward
+protocol.  A finalized pass stores the full test metrics and gate before an
+artifact is built.  A later run reconstructs the byte-identical paper artifact
+from that state and deterministic training evidence without calling either the
+test-label reader or test-settlement checker.  A finalized rejection is also
+recoverable without a rescore.  An incomplete reservation remains permanently
+ambiguous and fails closed; it can never become an automatic second attempt.
+
+Future V11 artifacts additionally carry the finalized test-state version/SHA,
+test-metrics SHA, and exact passing status.  The dormant runtime rejects
+missing, malformed, altered, or rejected lineage.  No prediction feature,
+training hyperparameter, entry threshold, notification rule, activation state,
+or trading permission changed.  Focused adversarial verification: 48 passed,
+including identical crash recovery, rejected-state recovery, raw-state
+tampering, rehashed model-binding tampering, and ambiguous-reservation refusal.
+Full repository verification: 2,273 passed, 5 skipped in 374.11 seconds.
+
+Both real design-bound V11 freeze previews remained outcome blind and advanced
+to 35 complete executable windows: 25 remain to the non-BTC gate and 115 to the
+BTC gate.  They read zero labels, performed zero fits, and emitted zero
+artifacts.  The local paper service restarted at 03:05 ET.  Its cold health
+cache repopulated the existing 34 durable windows, service health returned OK,
+the exact sampler was alive with no errors or pending work, and settlement-index
+coverage was fresh 7/7 with sub-second messages.  The first post-restart 03:17
+fold then captured and durably recorded 7/7 exact assets with zero retries,
+misses, exhausted retries, or write failures; cross-asset, cross-venue, and spot
+contexts were 7/7, maximum timing offset was 0.218 seconds, and the settlement
+message was 0.406 seconds old.  All 21 delayed 30/60/90-second captures and
+decisions also completed with zero retries, misses, failures, or pending work.
+
+## Shipped 2026-07-22 - signed optimizer numerical-integrity evidence
+
+The fixed V11 residual-logit optimizer now records the exact regularized
+objective consistent with its existing gradients: close-window-weighted log
+loss plus the frozen L2 penalties on weights and bias.  It records the initial
+and final objective, objective improvement, final maximum absolute gradient,
+iterations, learning rate, L2, residual scale, and finite/not-worse proof flags.
+Fitting fails closed on nonfinite inputs/weights/gradients or a final objective
+worse than initialization.  A future locked artifact must carry the exact
+optimizer identity/config and internally consistent finite objective evidence;
+the dormant runtime rejects missing, altered, worsening, negative, or
+arithmetically inconsistent claims.  The update does not change any feature,
+gradient, iteration, hyperparameter, label boundary, probability, entry rule,
+notification, or trading permission.
+
+Focused freeze/runtime verification: 41 passed, including deterministic
+objective reduction, NaN rejection, and rejection of fabricated optimizer
+improvement.  Full repository verification: 2,266 passed, 5 skipped in 275.39
+seconds.  The paper service restarted at 02:41 ET.  Its first 02:47 fold
+recorded 7/7 exact captures and durable decisions with zero retries, misses, or
+write failures, 7/7 cross-asset, cross-venue, and spot contexts, a 0.267-second
+maximum offset, and 0.366-second-old settlement messages.  Explicit V11 audit
+readiness advanced to 33 clean windows (27 to non-BTC freeze; 117 to BTC
+freeze), with zero label reads, model fits, or artifacts.
+
+## Shipped 2026-07-22 - signed equal-window training invariant
+
+The preregistered V11 `window_equal_weighting=true` rule is now executable and
+artifact-bound instead of implicit.  Fitting fails closed if the flag is not
+exactly true or if the derived row weights do not sum to one inside every close
+window.  The fitted model records deterministic weighting diagnostics.  A
+future locked artifact must additionally prove the exact cohort geometry: BTC
+90 train windows / 90 rows / one row per window; non-BTC 36 train windows / 216
+rows / six rows per window.  The dormant runtime rejects any altered row count,
+window count, per-window weight, total sample weight, or verification flag.
+This changes no feature, label, threshold, hyperparameter, model fit, alert, or
+trading permission; it prevents the six non-BTC assets in one crypto-wide move
+from silently receiving six times a BTC window's training weight.
+
+Focused freeze/runtime/output-integrity verification: 43 passed, including
+invariance when every within-window row is duplicated and rejection when equal
+weighting is disabled.  Full repository verification: 2,263 passed, 5 skipped
+in 280.31 seconds.  The paper service restarted at 02:28 ET.  The first 02:32
+fold froze all 7 quotes with zero retries/misses, then durably recorded all 7
+decisions with zero failures and 7/7 cross-asset, cross-venue, and spot
+contexts; maximum offset was 0.493 seconds and settlement messages were 0.031
+seconds old.  The explicit design-bound V11 audit advanced to 32 clean windows
+(28 to non-BTC freeze; 118 to BTC freeze), still with zero label reads, model
+fits, or artifacts.
+
+## Shipped 2026-07-22 - 30-window V11 review and exact retry starvation fix
+
+The first explicit V11 outcome-blind feature review is complete.  The 02:02 ET
+fold raised the design-bound audit to 30 clean executable seven-asset windows
+with zero unavailable feature rows, timestamp failures, nonfinite values, or
+exact duplicate feature pairs.  It read no outcomes, fit no model, emitted no
+artifact, made no design change, sent no notification, and had no trading or
+promotion authority.  Non-BTC has 180 rows across 30 independent close windows,
+70 active features, numerical rank 67, stable rank 7.34, one |r| >= 0.95 pair,
+and projected locked-fit capacity of 216 train rows / 3.09 rows per active
+feature.  BTC has only 30 independent rows, 61 active features, rank 29, stable
+rank 4.51, and ten high-correlation pairs; it is still plainly sample-starved,
+which confirms rather than weakens the separate 150-window BTC gate.  Both
+locked freeze previews remained `WAITING_FOR_COMPLETE_WINDOWS` and proved zero
+label/test reads, fits, or artifacts.
+
+The preceding 01:47 ET fold exposed and correctly rejected an operational
+failure instead of being credited as window 30.  DOGE and BTC froze at +0.027s
+and +0.048s, but five other books entered quote retry.  The exact worker then
+started slower spot/path/enrichment work and did not revisit those retries
+inside the two-second deadline, producing 2 captures / 5 explicit misses.  The
+sampler now drains every due primary quote retry before any spot, path, SQLite,
+or Telegram work.  Injected-time tests retain their deterministic one-attempt-
+per-tick behavior.  Health additionally reports retry-drain cycles, the recent
+missed/exhausted tickers, and the last failure reason per ticker.  The incomplete
+01:47 fold remains permanently excluded; there is no backfill or historical
+credit.
+
+Focused exact/health verification: 29 passed.  Full repository verification:
+2,260 passed, 5 skipped in 279.12 seconds.  The paper service restarted with the
+fix at 02:07 ET.  Its first post-fix 02:17 fold recorded 7/7 captures and 7/7
+decisions, zero retries/misses/write failures, 7/7 cross-asset, cross-venue, and
+spot contexts, a 0.426-second maximum offset, and 0.008-second-old settlement
+messages.  The explicit V11 audit then advanced to 31 clean windows (29 remain
+to non-BTC freeze; 119 to BTC freeze).  The one-time review heartbeat was
+deleted after completion.
+
+## Shipped 2026-07-22 - design-bound audits and compact V11 readiness
+
+All version-sensitive RTI research directories are now exclusively bound to
+one immutable design ID/SHA in `design-binding.json`.  Existing legacy JSON is
+adopted only if every direct report already matches that design.  A different
+design fails before it can reserve an untouched test, overwrite a report, or
+emit an artifact.  JSON/Markdown reports and final test-state replacements are
+written through same-directory, fsynced temporary files and atomically
+replaced; an interrupted replacement preserves the last complete report and
+cleans its temporary file.  The canonical feature-audit and freeze-preview
+directories are bound to V11.  A real V4-to-V11 overwrite attempt exited 1
+with `output_directory_design_binding_mismatch`; the V11 report SHA-256 stayed
+byte-identical before/after.
+
+Live health now has a compact `v11_collection_readiness` headline that accepts
+only the exact V11 design/schema hashes and paper-only/outcome-blind guards.
+It derives 30/60/150 remaining windows from executable V11 folds rather than
+trusting a reported counter, and collapses to zero/unavailable on identity,
+safety, or numeric tampering.  It is health-only and cannot influence feature
+construction, qualification, notifications, promotion, or trading.
+
+Focused output-integrity verification: 69 passed.  Focused compact-health
+verification: 30 passed.  Full repository verification after the final
+runtime change: 2,259 passed, 5 skipped in 248.81 seconds.  The live 01:17 ET
+fold was uninterrupted and recorded 7/7 more exact rows with zero misses or
+failures, advancing explicit V11 readiness to 28 clean windows.  The paper
+service restarted at 01:20 ET, health returned OK, settlement indexes were
+fresh 7/7, and the new headline reported 28 executable windows, 2 to the first
+feature review, 32 to non-BTC freeze, 122 to BTC freeze, zero unavailable rows,
+zero timestamp failures, no model/artifact, and no notification/trading
+authority.
+
+## Shipped 2026-07-22 - fail-closed V11 artifact bridge and audit targeting
+
+Added a dormant, paper-only runtime bridge for the future separately locked
+BTC and non-BTC V11 artifacts.  It has no activation, notification, order,
+automatic-refit, or automatic-promotion surface.  Artifact loading now binds
+the exact V11 design/schema/evaluation-protocol hashes, exact training and
+entry-cost policies, the exact training-data hash in `model_version`, the
+prospective boundary, same-close fold isolation, completed walk-forward and
+one-shot-test guards, finite 71-column parameters, and zero weights on
+inactive features.  A cohort is part of the cache key, so a validated BTC file
+cannot be reused as a non-BTC artifact through cache state.  Live health shows
+both expected cohort files as `WAITING_FOR_LOCKED_ARTIFACT`, paper-only,
+notification-ineligible, trading-disabled, and manual-activation-required.
+
+The generic preregistration, feature-audit, and freeze CLIs now require an
+explicit `--design` manifest.  This removes the stale-default failure mode
+that briefly made a V4 source-window count look like V11 readiness.  The
+authoritative explicit V11 audit is at 27 clean executable seven-asset
+windows, zero unavailable rows, and zero timestamp failures: 3 windows to the
+outcome-blind feature review, 33 to the locked non-BTC freeze, and 123 to the
+locked BTC freeze.  No V11 label was read, model fitted, artifact emitted,
+notification sent, or trade authorized.
+
+Focused runtime, CLI-safety, feature-audit, freeze, preregistration, and health
+verification: 86 passed.  Full repository verification: 2,251 passed, 5
+skipped in 245.88 seconds.  The local paper service restarted at 00:54 ET;
+health returned OK, the exact sampler thread was alive with zero failures,
+settlement indexes were fresh 7/7 with sub-second messages, Telegram remained
+configured, and both dormant V11 cohort health records bound the frozen design
+and protocol hashes.  The first post-restart 01:02 ET fold then captured and
+recorded all 7 assets with zero misses/failures, 7/7 cross-asset, cross-venue,
+and spot contexts, a 0.269-second timing offset, and 0.102-second-old settlement
+messages.  Explicit V11-only audit/freeze commands remained outcome blind,
+read no labels, fit no model, emitted no artifact, and reported 27 windows.
+
+## Shipped 2026-07-21/22 - RTI execution-cost integrity and nonblocking audit
+
+The frozen strict control and every prediction rule remain unchanged.  The
+paper simulator now has one versioned Q15 execution-cost implementation using
+the official 2026-07-07 Kalshi quadratic taker fee, the cohort's declared
+10-contract size, and the required 2-cent-per-contract adverse slippage.  The
+simulated fill is quote plus slippage and the fee is calculated at that fill.
+Resolved rows are dynamically reconstructed from immutable side, result,
+entry, and cost evidence; missing or contradictory evidence fails promotion
+closed.  Same-side challenger overrides always use the challenger's own quote,
+so a delayed challenger cannot silently reuse its parent entry.  Health now
+reports cost-evidence completeness, label-integrity failures, unscoreable
+resolved rows, fee/cost model versions, and audited drawdown/P&L.
+
+The RTI health audit was separated into a compact decision-book read and a
+full exact-feature read.  On the same frozen 5,379-row database snapshot, the
+optimized report was exactly equal to the prior report (matching canonical
+SHA-256) while build time fell from 20.094 seconds to 6.957 seconds.  The live
+stale-while-revalidate endpoint returns the warm health snapshot in about
+1.4-2.2 seconds instead of blocking on the rebuild.  Focused verification:
+144 passed.  Full repository verification: 2,233 passed, 5 skipped in 276.13
+seconds.  The local service restarted successfully after this verification.
+
+At 00:32 ET, V11 had 25 complete executable seven-asset windows, zero feature
+unavailable rows, and zero timestamp-alignment failures.  It remains outcome
+blind with no fitted model, artifact, notification, promotion, or trading
+authority.  Five windows remain to the first 30-window feature review; the
+locked cohort gates remain 60 non-BTC and 150 BTC windows.  The currently
+notifying impulse paper challenger is only 1/2 resolved, -$2.1388 at 10
+contracts, with complete cost evidence; this tiny result is not evidence of an
+edge.  Settlement-index health was connected and fresh for 7/7 assets with
+sub-second messages.  The restart landed just after the 00:02 exact deadline,
+so the sampler correctly recorded seven deadline misses instead of accepting
+late evidence.  The next eligible 00:17 ET fold then recorded 7/7 exact
+captures and 7/7 decisions with zero write failures, 7/7 cross-asset, 7/7
+cross-venue, and 7/7 target-spot contexts, no current error, and a 0.303-second
+maximum timing offset.  The refreshed health snapshot was served in 0.222
+seconds.
+
+The outcome-blind V11 numerical preview was refreshed at 25 windows.  It read
+zero outcome labels, fit no model, emitted no artifact, and found zero exact
+duplicate pairs or nonfinite values.  BTC currently has 61 active features,
+rank 24, stable rank 4.60, and nine |r| >= 0.95 pairs; NON_BTC_TRANSFER has 70
+active features, rank 67, stable rank 7.62, and one |r| >= 0.95 pair.  The
+projected preregistered training capacity at the locked gates is 1.48 BTC and
+3.09 non-BTC rows per currently active feature, so the fixed heavy L2 penalty,
+separate cohorts, proper-score walk-forward gate, and market-prior fallback
+remain mandatory.  This preview is not a performance claim and cannot alter
+V11.  Refreshed artifacts: `q15_rti_v11_feature_audit/`.  Both V11 locked
+freeze previews returned `WAITING_FOR_COMPLETE_WINDOWS` while proving zero
+label reads, zero untouched-test reads, zero fits, and zero artifacts.
+
+Before any V11 outcome review, the separately hashed evaluation protocol was
+hardened to `q15-rti-v11-expanding-walk-forward-evaluation-v2`, SHA-256
+`04600797bfbb2170c36972a32c40a4acccba52df37804f79a45b454603c1408b`.
+Every walk-forward aggregate, calibration segment, and one-shot untouched test
+now reports a deterministic 5,000-resample paired bootstrap over whole close
+windows (90% confidence, fixed seed).  Same-close non-BTC assets are resampled
+together, so one crypto-wide move cannot masquerade as six independent wins.
+Both the Brier and log-loss model-minus-market one-sided upper bounds must
+clear a preregistered 0.001 absolute improvement floor; a merely negative or
+microscopic delta fails closed to the Kalshi market prior.  This changes no V11
+feature, model family, hyperparameter, prospective boundary, notification, or
+trading permission.  Protocol tests include deterministic replay, identical
+results after sixfold same-window replication, tamper rejection, no-skill
+rejection, microscopic-skill rejection, and preservation of untouched-test
+secrecy.  Focused freeze verification: 23 passed.  Canonical readiness reports
+in `q15_rti_v11_freeze_preview/` bind protocol v2 and still prove zero label
+reads, fits, artifacts, or test access.
+
+Full repository verification after protocol-v2 bootstrap/effect-floor
+hardening: 2,236 passed, 5 skipped in 267.61 seconds.  During that run the
+00:32 ET live fold recorded another 7/7 exact decisions with zero write
+failures and 7/7 cross-asset contexts; settlement messages were approximately
+0.04 seconds old and V11 advanced to 25 clean windows.
+
+## Shipped THIS session - cross-asset regime RTI v11
+
+Frozen V10 remains unchanged.  New outcome-blind, paper-only design
+`q15-rti-market-residual-cross-asset-regime-v11`, SHA-256
+`e4a5d65485d7559e2eaa84a82d1aeca63f1f87a42914916438af9034c79b0480`,
+adds eight compact features that distinguish broad crypto-complex momentum
+from isolated asset moves: robust 15s/60s median momentum and signed breadth,
+60s cross-sectional MAD, target relative rank, BTC-versus-alt momentum, and
+target/BTC direction agreement.  This is a pre-outcome mechanism hypothesis,
+not a fitted or retrospectively selected result.
+
+The collector reconstructs all seven assets on both Coinbase and Kraken using
+only local rows at or before the immutable exact cutoff.  It persists all 28
+venue/asset/horizon moves, the 14 corresponding consensus moves, and source
+timing maxima. V11 recomputes each consensus and every selected derivative
+before use.  Any missing asset,
+future endpoint, stale transport, timestamp contradiction, or arithmetic
+mismatch fails the whole fold closed.  Seven-asset live reconstruction takes
+about 0.062 seconds.  All 71 audit fields are present in the durable ledger.
+
+V11 receives no credit through the 17:00 ET close (`1784667600`); first
+eligible capture is 17:02 ET for the 17:15 close (`1784668500`).  It cannot
+read labels, fit, notify, promote, or trade.  Focused collector, runtime,
+manifest, feature, freeze, health, and strategy verification: 230 passed.
+Full repository verification after the final V11 venue-level audit hardening:
+2216 passed, 5 skipped in 274.54 seconds.  The local paper-only service
+restarted cleanly with the health-cache hardening at 16:53 ET.  The deliberately non-eligible 17:00-close
+rehearsal fold captured all seven assets with cross-asset status `ok`, seven
+available assets, approximately 2.3-2.6 second worst-source age, and all 71
+feature values passing consensus/derivative recomputation.  No outcome was
+read and the rehearsal receives no prospective credit.
+
+The first eligible 17:15-close fold captured at 17:02 ET is clean: all seven
+assets produced 71 features, zero feature-unavailable rows, zero timestamp
+failures, and no arithmetic mismatches.  Worst cross-asset source age was
+approximately 4.53-4.81 seconds (within the unchanged 10-second cap);
+Coinbase was approximately 1.07-1.35 seconds and Kraken 4.53-4.81 seconds.
+Readiness is 1 complete window (non-BTC 59 remaining, BTC 149 remaining).
+Durable artifacts: `q15_rti_v11_preregister.json` and
+`q15_rti_v11_feature_audit/`.
+
+Operational health was also hardened: the expensive RTI scoreboard is cached
+by exact mutation generation plus SQLite `data_version`, invalidates on every
+RTI insert/grade, and returns deep copies.  Direct cached scoreboard latency
+fell from about 22.35 seconds to 0.011 seconds; live cached `/api/health` is
+about 1.6 seconds after warm-up.  This does not alter any prediction or
+collector evidence.
+
+Follow-up 17:26-17:33 ET: exact-sampler health now exposes separate durable
+`cross_asset_ok` / `cross_asset_missing` counters, including the no-reader
+fail-closed path.  The focused RTI/strategy/health suite passed 157 tests and
+the full repository suite passed 2216 with 5 skipped in 297.42 seconds.  The
+paper-only stack restarted at 17:26 ET.  Its first post-restart exact capture,
+at 17:32 ET for the 17:45 close, recorded all seven assets with 0 missed
+deadlines and 0 write failures; capture offset was at most 0.210 seconds.
+Cross-asset context was `ok` on 7/7 rows with no missing V11 evidence and a
+4.94-second worst source/message age (inside the frozen 10-second cap).  The
+target-specific HYPE primary spot snapshot was stale on that fold, so the
+older target cross-venue diagnostic correctly reported 6 ok / 1 missing;
+Coinbase and Kraken point-in-time evidence themselves were `ok` for HYPE.
+V11 remains outcome blind and now has 3 complete executable seven-asset
+windows, 0 unavailable rows, and 0 timestamp failures (BTC 147 windows and
+non-BTC 57 windows remain before locked freezes).  It still has no fitted
+model, notifications, promotion, or trading authority.
+
+The latest HYPE target-spot miss was audited against the immutable cutoff and
+was correct, not a collector fault: the last OKX book change was 2.367 seconds
+old just before 17:32, outside the frozen 2-second target-spot rule, and the
+next fresh update arrived after the decision timestamp.  No threshold or
+feature was loosened and no future row was reused.  Separately, the durable
+outcome-blind numerical audit is now
+`q15-rti-microstructure-feature-audit-v2`.  In addition to constants,
+pairwise correlation, and exact duplicates, it standardizes and recenters the
+feature matrix, computes its singular spectrum, numerical/stable rank,
+multivariate rank deficiency, and the preregistered train-row capacity per
+currently active feature.  This closes a real overfitting-observability gap
+without touching V11's frozen hash or reading labels.  The 3-window preview
+projects about 1.64 BTC and 3.09 non-BTC training rows per currently active
+feature at the locked gates, so regularization and untouched-test fallback
+remain essential; these are preliminary geometry diagnostics, not performance
+claims or a basis for automatic feature changes.  Updated artifact:
+`q15_rti_v11_feature_audit/`; 96 probability/microstructure/preregister/freeze/
+cross-asset tests pass.  Full repository verification after the audit-v2
+change: 2217 passed, 5 skipped in 297.80 seconds.  The 17:47 ET exact capture
+advanced V11 to 4 complete executable windows (26 remain to the outcome-blind
+first feature review), still with 0 unavailable rows and 0 timestamp failures.
+Live health at 17:50 ET: service `ok`, exact thread alive, 14/14 post-restart
+asset captures recorded, 0 missed deadlines, 0 write failures, cross-asset
+context 14 ok / 0 missing, and all settlement feeds fresh.  No V11 outcome was
+read, model fit, artifact, notification, promotion, or trading permission was
+created.
+
+Follow-up 19:21-19:22 ET: V11's one-shot freeze now has a separately
+preregistered expanding-window evaluation protocol at
+`config/q15_rti_v11_walk_forward_protocol.json`, ID
+`q15-rti-v11-expanding-walk-forward-evaluation-v1`, SHA-256
+`d7b15d9e241ad00df6a2d716417e13effc12b641e1f0eef11b79879cbcb7a0df`.
+It does not change V11's design hash, features, fixed hyperparameters, entry
+policy, or prospective boundary.  Before the original calibration gate or
+one-shot untouched test can run, non-BTC must pass three expanding folds with
+24/32/40 prior train windows and the next 8-window validation block; BTC must
+pass 60/80/100 prior train windows and the next 20-window block.  Every fold
+and the aggregate must be no worse than the point-in-time Kalshi market prior
+on both Brier and log loss, with strict aggregate improvement on both.  A
+failure prevents the final model, calibration gate, test-label read, and test
+reservation.  Same-close assets remain inseparable, cohorts remain separate,
+temporary fold models cannot become artifacts, and the protocol fingerprint
+is hard-pinned.  Readiness-only freeze reports are durable in
+`q15_rti_v11_freeze_preview/` and prove 0 label reads, 0 fits, and 0 artifacts.
+Focused protocol/freeze/preregister/audit/health verification: 66 passed;
+full repository verification: 2223 passed, 5 skipped in 285.00 seconds.
+
+V11 has now accumulated 10 complete executable seven-asset windows, with 20
+remaining to the outcome-blind feature review, 50 remaining to the non-BTC
+freeze, and 140 remaining to the BTC freeze.  The refreshed 10-window geometry
+has no exact duplicate features; BTC has 61 currently active features and a
+projected 1.48 train rows per active feature, while non-BTC has 70 and 3.09.
+These are feature-only capacity diagnostics, not performance.  Live health at
+19:22 ET remains `ok`: 56/56 post-restart exact asset captures recorded, 0
+missed deadlines, 0 write failures, 56 cross-asset contexts ok / 0 missing,
+and all settlement feeds fresh.  V11 outcomes remain unread.
+
+Follow-up 19:49-19:50 ET closed a latent outcome-leakage channel in the
+offline audit/freeze path.  The SQL column allow-list had excluded
+`official_result`, `correct`, and P/L columns, but it still selected the entire
+`threshold_json` object, which contains display-only historical
+`resolved_accuracy`, `resolved_correct`, Wilson, and net-P/L fields.  Current
+V11 builders did not reference them, but that made the no-outcome boundary
+depend on implementation restraint.  Feature tooling now has an explicit
+425-key decision-time profile allow-list.  The normal CLI query projects only
+approved JSON paths inside SQLite, coalesces approved persisted feature
+columns, reconstructs the 21 legitimate base/path fallbacks, and never returns
+the raw JSON blob to Python.  Programmatic callers are sanitized again before
+coverage, feature construction, or freeze logic.  Nested adversarial
+accuracy/result/P&L poisoning produces the identical feature audit, and the
+durable reports explicitly record `feature_profile_allow_list_enforced=true`
+and `raw_threshold_json_selected_by_cli_loader=false`.  All frozen V1-V11
+lineages remain readable; V11 retained every eligible fold.  Focused leakage,
+freeze, preregistration, and audit tests: 63 passed.  Full repository:
+2225 passed, 5 skipped in 292.10 seconds.
+
+V11 now has 12 complete executable seven-asset windows (18 to the feature-only
+review, 48 to non-BTC freeze, 138 to BTC freeze), with 0 unavailable rows and
+0 timestamp failures.  Live health at 19:50 ET: 70/70 post-restart exact asset
+captures recorded, 0 misses, 0 write failures, 70 cross-asset contexts ok / 0
+missing, all settlement feeds fresh, paper-only.  No V11 label, fit, artifact,
+notification, promotion, or real-trading permission exists.
+
+## Shipped THIS session - compact outcome-blind RTI v10
+
+The formal V8 first-feature review completed at 30 prospective seven-asset
+windows.  It read no outcomes, fit no model, and found exactly two duplicate
+feature pairs: `kalshi_queue_pressure_yes_5s` equals
+`kalshi_book_delta_pressure_yes_5s`, and the corresponding 30-second fields
+are also identical.  Audit artifacts are in `q15_rti_v8_feature_audit/`.
+
+Frozen V9 remains unchanged.  New paper-only design
+`q15-rti-market-residual-independent-microstructure-compact-v10`, SHA-256
+`bc329e1a563a3bb5d7e703ad9584c076bf7ab12db1ce0bc791a1699eaf1a47ce`,
+removes only the two proven duplicates.  Every other V9 value is preserved by
+name, reducing 65 columns to 63 with no information loss.  No settlement
+labels, fitting, historical credit, notification, promotion, or trading are
+allowed.  V10 receives no credit through the 16:15 ET close
+(`1784664900`); its first eligible window is the 16:30 close, captured at
+16:17 ET (`1784665800`).  V9 remains the frozen control.
+
+The local service was restarted at 16:09 ET and is paper-only.  Coinbase L2,
+Kraken L3, and all seven settlement-index feeds are connected and fresh;
+Coinbase and Kraken are both pinned to top-10 depth at five-second archival
+cadence.  V10's first eligible 16:30-close fold was captured at 16:17 ET:
+all seven assets were executable, with zero unavailable rows and zero timestamp
+failures.  Readiness is therefore 1 clean fold (BTC 149 remaining, non-BTC 59
+remaining).  `q15_rti_v10_preregister.json` and
+`q15_rti_v10_feature_audit/` are durable, outcome-blind artifacts.  The focused
+V10/runtime/manifest suite passed 220 tests; the full suite passed 2208 with 5
+skipped in 244.24 seconds.
+
+## Shipped THIS session - independent top-10 venue microstructure RTI v9
+Run time: 2026-07-21 08:09-15:51 ET.
+
+Frozen outcome-blind paper design
+`q15-rti-market-residual-independent-microstructure-v9`, SHA-256
+`d57bb2455f94d1d5fbb75873da23804f78a42137177f3411ac47adab69466f58`.
+It extends V8's 53 fields with 12 scale-stable independent-venue signals:
+mean/disagreement/change in Coinbase/Kraken depth imbalance, mean/max spread,
+mean log top-10 depth notional, venue depth divergence, Coinbase removal share,
+Kraken delete share, observable partial-fill aggressor imbalance/notional, and
+an explicit partial-fill-observed indicator. Total feature count is 65. It is
+paper-only, reads no labels, performs no fit, emits no artifact, cannot notify,
+and cannot trade. V4-V8 remain frozen controls.
+
+Kraken's official L3 contract says `modify` reports remaining quantity after a
+fill, while `delete` can mean either full fill or cancellation. The collector
+now records only the positive prior-minus-remaining quantity from `modify` as
+partial-fill flow. Ambiguous deletes are never fabricated as signed flow. Rows
+carry source schema `kraken-l3-partial-fill-flow-v1`; V9 fails closed on any
+other schema. Independent venue microstructure rows use
+`rti-independent-venue-microstructure-v2` and persist 67 raw/derived audit
+fields as first-class ledger columns.
+
+The pre-eligible source audit caught a structural comparability problem:
+Coinbase archived 250 levels while Kraken exposed 10. Both are now pinned to a
+persisted top-10 basis at five-second cadence. Coinbase projected archive
+growth fell from roughly 1.5 GB/day to 216.87 MB/day. Seven-asset reconstruction
+took 0.077s in the benchmark. The first attempted 16:00-close fold then failed
+closed because the depth-limit fields were computed but omitted from the
+durable allow-list. It received no credit. The allow-list and ledger migration
+were fixed, all 67 fields were verified present, and the boundary was advanced
+again: no credit through the 16:00 close; first eligible close is 16:15 ET
+(exact evidence at 16:02).
+
+Preregistration readiness now scopes integrity to each design's eligible model
+windows. Historical partial windows remain reported but cannot poison every
+future design forever; timestamp corruption inside an eligible window still
+blocks readiness. The test suite explicitly covers this distinction.
+
+V8 reached 29 complete prospective windows during the work, with zero
+timestamp failures; it is one fold from the outcome-blind 30-window feature
+review but remains below the 60-window model gate. Its 29-window preview found
+two exact duplicate pairs: 5s and 30s queue pressure repeat the corresponding
+book-delta pressure fields. Frozen designs are unchanged; this can only inform
+a later preregistered compact challenger. Focused final persistence suite:
+210 passed. Final full suite after the persistence correction: 2,204 passed,
+5 skipped in 254.57 seconds.
+
+## Shipped THIS session - independent-venue RTI v8 and fresh archive cadence
+Run time: 2026-07-21 07:32-08:03 ET.
+
+Frozen a new outcome-blind, paper-only design,
+`q15-rti-market-residual-independent-venue-v8`, SHA-256
+`823d70f8ff658a9476c535b8a1894b42cf6acd694c95db6daea7073a8295f709`.
+V8 branches from frozen v5 and does not require the single primary spot path.
+It requires both Coinbase L2 and Kraken L3 point-in-time histories plus the
+settlement-index path. Its 53 fields are the 46 v5 controls plus independent
+venue/index basis, venue-minus-index 60s momentum, venue consensus 15s/60s
+momentum, momentum dispersion, direction agreement, and current divergence.
+All current and 15s/60s endpoints must be at or before the exact evidence
+cutoff and no more than 10 seconds old. V4-v7 remain untouched controls.
+
+The first eligible 08:00-close fold was honestly rejected on all seven assets:
+the local environment had explicitly archived Coinbase/Kraken summaries every
+15 seconds, so Kraken start endpoints could exceed the frozen 10-second cap.
+No model threshold was loosened. Both archive cadences were changed to five
+seconds and the paper service restarted. The next 08:15-close fold was clean
+for all seven assets: one complete prospective V8 window, zero timestamp
+failures, zero sampler record failures/missed deadlines, and seven cross-venue
+OK captures. Readiness remains `WAITING_FOR_COMPLETE_WINDOWS`: 59 non-BTC and
+149 BTC complete folds remain before the separate locked-freeze minimums.
+V8 reads no outcome labels, performs no fit, emits no artifact, sends no
+notification, and cannot trade.
+
+Focused V8 integration suite: 209 passed; app health suite: 8 passed. Final
+full release suite: 2,189 passed, 5 skipped in 217.93 seconds. At 08:08 ET the
+service was healthy, its cycle age was 0.07s, the settlement-index age was
+0.46s, Coinbase/Kraken record ages were 1.38s/1.39s, and the exact sampler was
+alive with zero record failures or missed deadlines.
+
+The separate frozen-control audit has now reached 100 forward trades: 48/100
+(48.0%, Wilson 38.5%-57.7%), versus a 62.19% average fee-plus-slippage
+break-even rate; ten-contract net is -$141.93 and EV is -14.19c/contract.
+This remains unacceptable. It is preserved as a control and is not used as a
+claim for V8.
+
+## Shipped THIS session - point-in-time cross-venue RTI v7 and feed isolation
+Run time: 2026-07-21 06:08-07:31 ET.
+
+Added `rti-cross-venue-consensus-v1`, which reconstructs Coinbase L2 and
+Kraken L3 current/15s/60s prices using only locally created snapshots at or
+before the immutable exact-13M source timestamp. It rejects stale current or
+start endpoints, effective transport age beyond 10 seconds, crossed/invalid
+books, missing primary spot paths, and future timestamps. The durable exact
+row now stores both venue endpoints, ages, moves, consensus momentum,
+direction agreement, momentum dispersion, current divergence, and the primary
+venue residual as first-class ledger columns. The strict/v4-v6 controls were
+not modified.
+
+Frozen paper-only design `q15-rti-market-residual-cross-venue-v7`, SHA-256
+`1711257f38333fc3075347002ef49ba2fa7e860118507f9df0751acbb0c3658f`.
+It preserves all 53 v6 features and adds seven compact signals: 15s/60s
+cross-venue consensus momentum, primary-minus-consensus 60s momentum,
+log momentum dispersion, 60s direction agreement, log current divergence,
+and primary-versus-consensus basis. No outcomes were used. It gives no credit
+through the 06:30 close; first eligible close is 06:45. It cannot fit, notify,
+promote, or trade before the locked manual process.
+
+Prospective evidence honestly exposed a source bottleneck: first v7 folds were
+unavailable rather than silently credited when Coinbase/Kraken persistence or
+the primary spot book missed frozen freshness limits. Root cause for much of
+the lag was synchronous multi-gigabyte SQLite/WAL work on the websocket
+asyncio threads while holding live-book locks. Coinbase L2, Kraken L3, and
+spot-depth recorders now run disk writes off-loop and release their book locks
+before insert/commit. The first post-fix fold had six of seven assets fully
+clean; BNB remained rejected because its OKX source timestamp was 2.37s old
+against the unchanged 2.0s primary-book cap. No threshold was loosened.
+
+Current outcome-blind coverage: v4=15 complete folds, v5=9, v6=3, v7=0;
+all have zero timestamp failures. V7 has four schema-eligible windows and 17
+unavailable asset rows. The preregistration gate is
+`WAITING_FOR_COMPLETE_WINDOWS`, with zero labels read, fits, or artifacts.
+The frozen strict control is now 45/95 (47.37%, Wilson 37.63%-57.31%),
+-$141.97 at 10 contracts after official fees plus 2c slippage, so it remains
+unacceptable and is not being represented as recovered. Final release suite:
+2,186 passed, 5 skipped. The local paper service was restarted at 07:15 ET and
+remains the active collector.
+
+## Shipped THIS session - point-in-time spot/index lead-lag and RTI v6
+Run time: 2026-07-21 05:38-06:06 ET.
+
+Added a local spot-mid path to `spot_depth.py`. The recorder retains 180
+seconds of five-second mid snapshots per asset and the exact sampler now
+freezes 15s/60s path count, start/end timestamps and prices, maximum gap,
+change/range/realized-volatility bps, and trend efficiency. Completeness fails
+closed unless the path reaches the real window start, has enough samples, has
+no continuity gap beyond twice the configured cadence, and ends at the exact
+current capture. Future rows are excluded. Health exposes per-asset path rows,
+history seconds, schema `spot-mid-path-local-v1`, and local-created-at timing.
+
+The exact parent combines that path with its independent 61-second settlement
+index path to freeze current/start spot-index basis, basis change, index and
+spot momentum, and spot-minus-index momentum under schema
+`rti-spot-index-lead-lag-v1`. It independently rechecks capture/evidence order,
+60-second history and retention, start/end alignment, and continuity before
+granting `status=ok`. All fields persist as first-class strategy-ledger columns.
+
+Frozen the separate paper-only design
+`q15-rti-market-residual-lead-lag-v6`, SHA-256
+`67ee276a06d7a03ad177560a439ce7dda7bcacd8a6c35f33fb7ed310b699256f`.
+It keeps the 46 frozen v5 fields and adds only seven compact signals: current
+spot/index basis, 60s spot-minus-index momentum, spot momentum at 15s/60s,
+log spot range/realized volatility, and spot trend efficiency. Model settings
+are unchanged from v5 so any later comparison isolates the lead-lag block.
+V6 gives no credit through the 06:00 close and first accepts the 06:15 close;
+all v1-v5 designs remain frozen controls.
+
+The first eligible 06:02 capture was clean on all seven assets: both spot
+horizons complete, 14 samples per 60s path, maximum gap 5.252s, about 183s of
+history, valid lead-lag status, and finite basis/momentum values. All 7 exact
+parents and 21 delayed stages recorded with zero misses or failures. V6
+readiness is 1 clean fold, zero unavailable rows or timestamp failures, with
+59 non-BTC and 149 BTC folds remaining. Its numerical preview read no labels
+and had zero nonfinite values; a locked-freeze dry run left an adversarial
+label reader uncalled and emitted no fit or artifact.
+
+Collector/exact/ledger/design focused suite: 216 passed. Full release suite:
+2,178 passed, 5 skipped. The final service restarted at 06:05 ET; health is OK,
+WebSocket connected, exact sampler alive, and reports v4=10, v5=4, v6=1 clean
+folds. V6 is not notification eligible, cannot trade, and has no performance
+claim.
+
+## Shipped THIS session - prospective RTI dynamics v5 design
+Run time: 2026-07-21 04:28-05:29 ET.
+
+Frozen a new secondary, paper-only design,
+`q15-rti-market-residual-dynamics-v5`, at SHA-256
+`1d773697299d67caf136ec3cfc3a8563298e1a48dc36c54f63d8c9ee4e287316`.
+It preserves v4 as the accumulating primary control and compresses the
+additive dynamics extension into 14 scale-stable signals: normalized YES queue
+pressure at 5s/30s and its acceleration, microprice velocity/acceleration,
+signed microprice efficiency and range, trade-price velocity/acceleration,
+signed trade efficiency, current-microprice versus fresh 30s trade VWAP,
+trade/update activity share, and explicit VWAP missingness. Together with the
+32 frozen v4 features the vector has 46 fields.
+
+No outcome was read to choose or validate these features. The design forbids
+all extension rows at or before close time 1784625300 and sets the first
+eligible close to 1784626200 (05:30 ET), ensuring its exact-13M evidence was
+captured after preregistration. It requires extension-v1 on source-v2, local
+receive time, no count cap, complete 5s/15s/30s/60s histories, and fresh VWAP
+whenever trades exist. All earlier v1-v4 manifests and their interpretations
+remain unchanged.
+
+Preregistration, locked-freeze, and numerical feature-audit tooling now support
+v5 explicitly. Ledger and runtime health expose v5 separately as the next
+preregistered design, with no label read, model fit, artifact, notification,
+automatic refit/promotion, or real-trading path. The service restarted at
+05:26 ET. At 05:27 health was OK, WebSocket connected, exact sampler alive,
+v4 had 7 clean folds, and v5 had its first complete seven-asset fold with 59
+non-BTC and 149 BTC folds remaining. A feature-only audit found zero nonfinite
+values; single-fold correlations were treated as uninterpretable and did not
+change the frozen design. A locked-freeze dry run returned
+`WAITING_FOR_COMPLETE_WINDOWS` while an adversarial label reader remained
+uncalled: no train/calibration/test labels, model, or artifact were accessed.
+Focused v5, freeze, ledger, and health regression: 185 passed.
+The first post-restart fold then recorded 7/7 exact parents and all 21 delayed
+stages with zero misses, failures, or retry exhaustion. V4 advanced to 8 clean
+folds and v5 to 2, with zero v5 unavailable rows, unusable windows, or
+timestamp failures. Final release suite: 2,169 passed, 5 skipped.
+
+Final 05:38 performance snapshot for the unchanged strict control is 44/94
+(46.81%, Wilson 37.05%-56.82%) and -$145.61 at 10 contracts with official
+fees plus 2c slippage. Its latest 10 are 7/10 and +$5.83, but the latest 20 are
+12/20 and -$7.26, so the short run is not evidence of recovery. V5 has no
+predictions or performance claim; its folds are feature evidence only.
+
+## Shipped THIS session - additive RTI dynamics capture without resetting v4
+Run time: 2026-07-21 04:00-04:23 ET.
+
+Added the parallel, outcome-blind extension schema
+`rti-exact-microstructure-extension-v1` to source-v2 exact rows. It records
+5s/15s/30s/60s YES/NO queue add/remove volumes, microprice change/range/total
+variation/trend efficiency, and YES trade-price change/range/variation/trend
+efficiency/VWAP. The extension is additive: frozen v4 does not consume these
+fields, its accumulation was not reset, and no decision, alert, notification,
+model fitting, artifact, promotion, or trading path uses the extension.
+
+The WebSocket collector now records microprice after each book delta and
+preserves the correct rolling baseline as old events leave retention. The
+extension fails closed on wrong source schema, non-local time basis, count
+caps, incomplete horizons, missing dynamics, and contradictory VWAP evidence.
+Ledger and health coverage are reported by independent seven-asset close
+window; the coverage path is explicitly outcome-blind.
+
+The service was restarted at 04:11 ET. The first prospective extension window
+at 04:17 ET captured all seven parent rows on source-v2 with complete 61/61
+paths, complete 5s/15s/30s/60s histories, local receive timestamps, and no
+count cap. All 21 delayed +30/+60/+90 captures followed with zero misses or
+record failures. At 04:23 ET the durable ledger contained 3 complete source-v2
+windows (21 rows), zero timestamp-alignment failures, zero partial same-close
+windows, and 1 complete extension window with zero unusable or unavailable
+extension rows. Frozen-v4 research therefore has 3 honest prospective folds;
+the extension has only 1 and is not eligible for an efficacy claim.
+
+Representative BTC extension evidence in the first window included 10,833
+book events and 657 trades over 30 seconds, +1.095c microprice change, 10.542c
+microprice range, 81.913c total variation, and 49.458c trade VWAP. These are raw
+research measurements only, not selected predictors. Focused extension tests
+passed 209 cases; the release suite passed 2,163 tests with 5 skipped, followed
+by 37 focused eviction-state tests after the last test-only assertion update.
+
+## Shipped THIS session - genuine Kalshi horizons and post-fix RTI v4
+Run time: 2026-07-21 03:15-03:43 ET.
+
+An outcome-blind collector audit proved the live BTC feed could exceed the old
+5,000-row deque inside 30 seconds. The latest captured BTC row had exactly
+5,000 events at both 30s and 60s, so those nominal horizons were truncated by
+message count rather than genuine elapsed time. Frozen v1-v3 rows, manifests,
+and designs remain unchanged and retain their original interpretation.
+
+`q15_upgrade/ws_client.py` now retains order-book events for 90 seconds and
+trades for 20 minutes by immutable local `received_at`, with no count cap.
+Window membership uses the decision-available receive timestamp and rejects
+future evidence. A book snapshot or any WebSocket reconnect starts a new
+continuity epoch, clears pre-gap book/trade evidence, and forces every horizon
+to warm again. Each 5s/15s/30s/60s output carries independent book, trade, and
+combined completeness flags plus history start/age, retention, time-basis, and
+count-cap evidence. Zero activity becomes neutral zero only after the relevant
+window is known complete. Health now exposes live per-ticker buffer counts and
+history ages under `kalshi_microstructure_history`.
+
+New exact rows use source schema `rti-exact-microstructure-v2`; the persisted
+columns include every continuity/completeness field. A new outcome-blind
+preregistration, `q15-rti-market-residual-microstructure-v4`, is pinned at
+SHA-256 `b2c240e2a29009b1475be79dd05631fb6ab4fa3bbe85fdc8a97ecf910b7cbee0`.
+It has 32 features, accepts only source-v2/local-receive-time rows, proves the
+history timestamps cover the claimed horizons, forbids count-capped or
+incomplete evidence, and gives zero credit to all pre-fix v1 rows. V1-v3 are
+still visible as frozen diagnostics; v4 is the new primary research design.
+
+Both live preregistration and locked-freeze dry runs start at 0/60 non-BTC and
+0/150 BTC folds and report no labels read, no model fit, no artifact, no
+notification eligibility, and no trading path. Adversarial tests cover >5,000
+events, receive-time rather than exchange-time membership, future evidence,
+time pruning, reconnect invalidation/warm-up, source-schema isolation,
+timestamp contradictions, incomplete horizons, and outcome-field poisoning.
+Focused integration: 238 passed. A final absolute timestamp-integrity stop was
+then added to both offline and live readiness: even 150 later clean folds cannot
+hide a single timestamp-alignment failure. Its focused gate suite passed 158
+tests. The final release suite passed 2,162 tests with 5 skipped.
+
+The paper service was restarted at 03:42 ET. Startup health is OK, WebSocket is
+connected, settlement coverage is fresh 7/7, exact sampler is alive with zero
+misses/failures/error, live history reports `count_capped=false` and
+`time_basis=local_received_at`, and v4 correctly remains at zero pre-fix folds.
+The first untouched source-v2 exact capture at 03:47 ET passed end to end: all
+7 parent rows had complete 61/61 RTI paths, fresh books and spot evidence,
+receive-time continuity >106 seconds, complete 5s/15s/30s/60s windows, and no
+count cap. BTC contained 3,579/8,149/20,485/34,471 real events across the four
+horizons; its 30s/60s book pressures were independently 0.00141/0.00598. All
+21 delayed +30/+60/+90 rows also arrived with complete 31/31, 61/61, and 91/91
+paths, fresh executable books, and maximum timing offset 0.350s. Runtime health
+shows 7 parent + 21 delayed captures, zero exact/delayed misses, record or
+recovery failures, and zero retry exhaustion. V4 now honestly counts 1 clean
+fold (59 remaining non-BTC, 149 BTC), with zero unavailable rows or timestamp
+failures. Its outcome-blind numerical preview and freeze dry-run still read no
+labels, fit no model, emit no artifact, and create no notification/trading path.
+The final gate build was restarted at 03:55 ET; 03:59 health remained OK with
+7/7 fresh settlement assets, receive-time/no-cap collection, one durable v4
+fold, zero timestamp failures, and `timestamp_integrity_clean=true`.
+
+## Shipped THIS session - outcome-blind numerical audit and de-duplicated RTI v3
+Run time: 2026-07-21 02:31-02:54 ET.
+
+Added `tools/q15_rti_microstructure_feature_audit.py`, an outcome-blind audit
+of the exact feature matrix. It uses the same feature-only SQL allow-list and
+executable seven-asset folds as the locked freeze, and reports nonfinite
+values, constant/tiny-variance columns, feature scale, missingness, exact
+signed duplicates, and correlations at |r| >= 0.95 separately for BTC and
+non-BTC. It cannot read outcomes, fit a model, alter a design, emit an
+artifact, notify, trade, refit, or promote. Adversarial tests prove outcome
+fields cannot affect the report.
+
+The first audit found that v1's 5s and 30s trade-imbalance columns were exact
+duplicates of its same-horizon taker-imbalance columns. The pinned v1 manifest
+was preserved. An outcome-blind v2 replaced those columns with 15s/60s book
+pressure, but the next audit caught that BTC's 5,000-event capture cap made its
+30s and 60s book-pressure histories identical. The pinned v2 evidence was
+also preserved rather than silently changed. Raw feature-only checks showed
+15s taker imbalance varied independently of the retained 5s/30s/60s flow and
+15s book-pressure features.
+
+The final primary preregistration is therefore
+`q15-rti-market-residual-microstructure-v3`, SHA-256
+`c7c33dd0e05b2ca3711c5ae0d097350a944b2602f18cf4d217c5b35b8409b3fc`.
+It keeps 33 features and replaces only the bad 60s book-pressure column with
+15s taker imbalance. The live v3 numerical preview has 27 executable
+seven-asset folds / 29 schema-complete folds, 2 unusable stale-book folds, 4
+unavailable rows, and zero timestamp failures. BTC and non-BTC both have zero
+nonfinite values, zero tiny nonzero-variance features, zero exact duplicate
+pairs, and zero |r| >= 0.95 active-feature pairs. BTC's constant spread,
+asset-dummy, and zero-missingness columns are safely disabled later by the
+pinned <=1e-8 standard-deviation guard; non-BTC has no constant columns.
+
+Both v3 cohort freeze dry-runs returned `WAITING_FOR_COMPLETE_WINDOWS` with
+`outcome_labels_read=false`, `untouched_test_labels_read=false`,
+`model_fit_performed=false`, and `artifact_emitted=false`. No runtime model,
+paper picks, notifications, or trading path were created. The first numerical
+review is three clean folds away; locked modeling remains 33 folds away for
+non-BTC and 123 for BTC. Focused RTI/health suite: 207 passed.
+
+The 03:02 post-restart parent window then captured all 7 assets with complete
+61-second paths, fresh spot evidence, quote ages 0.076-0.325s, timing offsets
+0.052-0.168s, zero retries, zero misses, and zero record failures. Its +60 and
++90 checkpoints were also fresh, but all seven +30 quotes failed closed at
+3.25-3.96s old after a heavy health request overlapped the deadline. No stale
+fill was credited. The delayed sampler previously lacked the exact parent's
+bounded retry path; it now retries stale/incomplete books within the genuine
+two-second deadline, freezes the real successful retry timestamp, and persists
+honest missing evidence if retries exhaust. Health exposes delayed retry
+attempt/success/exhausted/pending counters. New stale-to-fresh and exhaustion
+tests plus the RTI/runtime health set: 154 passed. Final full suite: 2,152
+passed, 5 skipped.
+
+The delayed-retry build was deployed at 03:10 ET. Post-restart health recovered
+to 7/7 assets, no stale feeds, zero exact/delayed misses or record/recovery
+failures, and the new delayed retry counters are visible at zero. Final 03:11
+performance snapshot: strict forward control 40/87 (45.98%) and -$140.83;
+guarded probability v3 value book 15/32 (46.88%) and +$16.08 at 10 contracts.
+The v3 all-row scorecard is 116/185 (62.70%) but still worse than Kalshi on
+Brier (0.22180 vs 0.21711) and log loss (0.63409 vs 0.62373), so it remains
+silent, PAPER-only, and unpromoted.
+
+At the status check immediately before this work, the frozen strict forward
+control was 39/86 (45.35%) and -$144.37 per 10-contract simulation. Guarded
+probability v3 was 14/31 (45.16%) but +$12.45 because its average fee+2c
+break-even was 41.15%; its last five resolved accepted picks were wins, with
+one HYPE YES pick for the 02:45 close then unresolved. Its all-row Brier and
+log loss still trailed Kalshi, so it remains silent and unpromoted. Telegram's
+latest messages were SENT on the first attempt; 47 reported dead letters are
+historical. The alert-enabled impulse lane remains zero-volume.
+
 > **OPERATIONAL NOTE (owner, 2026-07-08): the Repl is disconnected — the app now
 > runs on the owner's LOCAL machine.** The local checkout pulls `main` and
 > `tools/learning_export.py` still force-pushes `learning-snapshots` hourly, so
@@ -7,6 +2392,677 @@
 > obsolete: deploys = local `git pull` + restart the local app process. Older
 > references to "the Repl" in this file and CLAUDE.md should be read as "the
 > local host".
+
+## Shipped THIS session - all-evaluation probability audit and v3 forward diagnosis
+Run time: 2026-07-21 00:34-00:50 ET.
+
+Added durable `probability_scorecards` to the RTI challenger ledger and live
+health. Unlike the value-book P/L view, these score every resolved prediction
+with stored point-in-time evidence whether the trade was accepted or rejected.
+They enforce `close_time > stored prospective_after_close_time`, never
+recompute historical predictions, keep BTC and non-BTC transfer cohorts
+separate, and report accuracy/Wilson intervals, Brier score, log loss,
+calibration bias, Kalshi midpoint baselines, per-asset results, OOD/saturation
+counts, and full seven-asset close-window completeness. Regression coverage
+proves that rejected predictions still count, pre-freeze rows do not count,
+unresolved rows do not leak labels, and v2/v3 artifacts remain isolated.
+
+The first honest v3 all-row forward scorecard has 124 resolved predictions
+across 18 chronological close windows (17 complete seven-asset folds): 79/124
+(63.71%, Wilson 54.95%-71.64%), Brier 0.22142, and log loss 0.63378. Kalshi's
+stored midpoint baseline is 65.32%, Brier 0.21179, and log loss 0.61193. Thus
+v3 has -4.55% Brier skill and +0.02185 worse log loss; it is not a probability
+improvement. The failure is concentrated in BTC: 10/18 (55.56%) versus the
+market's 83.33%, Brier 0.20169 versus 0.16669, with an 18.13-point downward YES
+bias. Non-BTC is 69/106 (65.09%) versus market 62.26%, but still has slightly
+worse Brier (0.22477 versus 0.21944) and a 10.66-point downward YES bias.
+
+The executable v3 value book is separately 8/22 and -$12.91 at 10 contracts.
+BTC is 1/6 and -$13.63; non-BTC is 7/16 and +$0.72. These are accepted-trade
+economics, not the all-row probability score. V3 remains frozen, silent,
+PAPER-only, and unpromoted. V2 now also reports an explicit quarantined status
+and `promotion_prohibited=true` in the research-book health view.
+
+Focused RTI/health suite: 158 passed. Full suite: 2,109 passed, 5 skipped.
+The service was restarted once at 00:48 ET. The exact 13M parent captures for
+the active window were already durable and recovered, but the restart occurred
+after the +90-second checkpoint; seven delayed +90 rows were correctly marked
+missed rather than backfilled or fabricated. Main exact capture has zero misses
+or record failures. Settlement coverage is 7/7 and Kalshi/spot/index feeds are
+fresh. Verify the next untouched fold records all 7 parent plus 21 delayed
+captures before treating post-restart delayed coverage as clean.
+
+Follow-up 00:53-01:06 ET: four predeclared static v4 designs were evaluated
+without changing v3: calibration-selected residual shrinkage with exact market
+fallback, stability-gated shrinkage, market-side-only confirmation, and an
+ambiguous-market-only residual. Each selected hyperparameters only on the
+calibration period and then failed the locked final fold, especially BTC. A
+triple-agreement trade filter also retained only 2/22 trades and lost $2.34 at
+10 contracts. These are rejected diagnostics; no v4 artifact or live book was
+created, and none receives prospective or promotion credit.
+
+Promotion health now requires a probability-specific proper-score gate in the
+same transfer cohort. At least 30 paired resolved predictions are required,
+and both Brier score and log loss must strictly beat the stored Kalshi midpoint
+baseline in addition to the existing resolved-trade, P/L, Wilson, and
+fee+slippage break-even gates. V3 now correctly reports
+`ACTIVE_PAPER_RESEARCH_SKILL_NOT_PROVEN` and `promotion_eligible=false` despite
+being numerically valid. Current proper-score gate: 131 paired rows, Brier
+0.22136 vs market 0.21322 and log loss 0.63365 vs 0.61504. BTC is especially
+failed (Brier skill -22.19%); non-BTC is also negative (-1.44%).
+
+The next untouched 01:15 close window was captured cleanly before deployment:
+7 exact 13M parents plus 7 each at +30/+60/+90, all 61-second parents complete,
+maximum parent evaluation delay 0.153s. The service was then restarted safely
+between decision windows. Post-restart health has zero main/delayed misses,
+zero recovery failures, 7 recovered parents/0 recovered stages, 7/7 fresh
+settlement coverage, and fresh Kalshi/spot feeds. Focused suite: 159 passed.
+Full suite: 2,110 passed, 5 skipped.
+
+The outcome-blind feature-coverage audit had one additional audit defect: it
+called 147 correlated per-asset rows "ready" even though they represented only
+21 independent close windows. Readiness now requires complete seven-asset
+chronological folds. Current state is 147 rows / 21 of 21 complete windows,
+zero timestamp failures, zero partial folds, first feature review blocked until
+30 windows, and modeling blocked until 60 windows. Focused suite after this
+correction: 162 passed. Final full suite: 2,111 passed, 5 skipped.
+
+Follow-up 01:16-01:29 ET: preregistered the outcome-blind replacement design
+`q15-rti-market-residual-microstructure-v1` before model readiness. The exact
+33-feature manifest, fixed residual-logit training configuration, 60/20/20
+same-close fold split, entry economics, and calibration/test gates are pinned
+to SHA-256
+`a192895fa61bf365eff21062e47d9dbfd5674020f2fe7213ff85992dada67e61`.
+Any later feature, threshold, cohort, cost, or safety change invalidates the
+pin instead of silently changing the experiment. BTC requires 150 complete
+seven-asset close windows; the separate non-BTC transfer cohort requires 60.
+The readiness command cannot fit a model, emit an artifact, read outcome
+columns, notify, trade, refit, or promote. The later executable-feature audit
+found that schema completeness alone was insufficient: 4 of 182 rich rows had
+no fresh executable Kalshi quote, affecting 2 of 26 otherwise complete folds.
+Readiness therefore counts 24 fully executable seven-asset folds, not 26
+schema-tagged folds: 36 remain for non-BTC and 126 for BTC. Timestamp failures
+and partial/incomplete schema folds remain zero. Added adversarial tests for
+manifest tampering, cohort boundaries, dirty folds, and a feature-only SQLite
+database with no outcome columns. Focused RTI/health suite: 182 passed. Full
+suite at that checkpoint: 2,125 passed, 5 skipped.
+
+Follow-up 01:35-01:56 ET: added deterministic point-in-time construction for
+the pinned 33-feature manifest and a fail-closed one-shot freeze command. The
+command selects no settlement/P&L columns before readiness, deterministically
+uses the first 60 non-BTC or first 150 BTC executable folds, reads only
+train/calibration labels after readiness, requires strict Brier and log-loss
+improvement overall plus non-worsening in both chronological calibration
+halves, and cannot read the untouched test without an explicit confirmation.
+An exclusive durable reservation prevents a second test score. The untouched
+test additionally requires both proper scores to beat Kalshi, at least five
+fee+2c-slippage picks, and positive 10-contract P/L before it can emit an
+unconnected PAPER artifact. No runtime challenger, notification, order path,
+or automatic promotion was added.
+
+The four unavailable feature rows were genuine `book_stale` captures, not an
+audit bug. The exact sampler now retries a stale/incomplete executable Kalshi
+book inside the existing genuine two-second deadline, freezes the actual
+successful retry timestamp, and never substitutes an old quote. If retries
+remain stale it persists an honestly missing row before the deadline. Health
+tracks retry attempts/successes/exhaustion. Focused RTI/health suite: 198
+passed. Full suite: 2,141 passed, 5 skipped. Service restarted at 01:55 ET with
+kill switches preserved; startup recovered to all seven registered assets and
+fresh feeds. The first untouched retry-enabled fold at 02:02 ET captured all
+seven executable books 0.017-0.106s after target, with maximum genuine quote
+age 1.796s, zero retries needed, zero exact misses/failures, and no stale feed.
+
+Follow-up 02:08-02:29 ET: live `/api/health` now exposes the same pinned
+executable-fold readiness used by the offline gate: design ID/fingerprint,
+feature count, schema vs executable windows, unusable windows/rows, timestamp
+failures, cohort-specific 60/150 requirements, and explicit false flags for
+outcome use, model fit, artifact emission, notifications, trading, refit, and
+promotion. One early exact fold stored `evidence_as_of` only in its immutable
+decision profile; the offline audit already recovered it, while the first live
+health implementation did not. Both paths now use the same point-in-time
+fallback and agree at 26 schema / 24 executable folds, 2 unusable stale-book
+folds, and zero timestamp failures. The 02:17 fold was independently clean and
+all +30/+60/+90 stages were durable before deployment. Service restarted at
+02:23 ET and recovered to 7/7 assets with fresh feeds and zero misses/failures.
+Targeted readiness/health suite: 168 passed before the profile fallback and
+146 passed after it. Final full suite: 2,141 passed, 5 skipped.
+
+## Shipped THIS session - v2 numerical quarantine, guarded probability v3, exact microstructure capture
+Run time: 2026-07-20 19:33-20:13 ET.
+
+The first v2 prospective close exposed a model-integrity defect before its
+outcome was known. At the 19:47 ET decision for the 20:00 close, every non-BTC
+row had raw YES probability 0.99 and the same calibrated YES probability
+0.384517. The cause was an invariant historical
+`kalshi_depth_ratio_missing` feature with a tiny nonzero std (~2.4e-15) and an
+active weight. When fresh opposite depth became available live, its
+standardized value exploded to ~4.1e14. The negative Platt slope then collapsed
+all non-BTC ranks to one constant. V2's two accepted rows (BTC NO at 39c and
+SOL NO at 52c) were still unresolved when this diagnosis and the replacement
+rules were frozen. They later resolved 0/2 and -$9.84 at 10 contracts, but those
+outcomes were not used to design v3.
+
+V2 remains byte-for-byte frozen as a diagnostic control, but artifact health
+now reports `QUARANTINED_NUMERICAL_OOD`, `promotion_eligible=false`, and the
+offending cohort/feature/std/weight. Its paper decisions remain measurable; it
+cannot notify, trade, or promote.
+
+Added frozen `rti_probability_value_v3`, model
+`rti-probability-shadow-v3-4492a3eb1e71`, artifact
+`config/q15_rti_probability_v3.json`. It zeros features with std<=1e-8, clips
+standardized inputs to +/-6, records the pre-clip maximum z-score, rejects an
+entry above |z|=8, and constrains Platt calibration to a positive monotone
+slope. Artifact validation refuses v3 artifacts without those guards. The
+prospective cutoff is close time 1784592000 (20:00 ET), which includes every
+decision row inspected during diagnosis even when its outcome was unresolved.
+The v3 ledger starts at 0 and receives no v2 or historical credit.
+
+Seen historical diagnostics only: BTC Brier 0.1923 versus market 0.1973 and
+17 value picks at 9/17 / +$14.09 per 10-lot; non-BTC Brier 0.2117 versus market
+0.2156 and 15 value picks at 6/15 / -$0.82. These folds cannot promote v3.
+BTC/non-BTC reviews remain separate and manual at 30/60/150 prospective
+resolutions. V3 is silent PAPER-only and has no order or Telegram path.
+
+Also added `rti-exact-microstructure-v1` collection. Each exact row now freezes
+Kalshi microprice, event/trade counts, taker YES/NO/net volume, directional book
+pressure, trade imbalance, and best-level depletion/refill at 5/15/30/60s,
+alongside the existing spot aggressive-flow fields. This does not change v2 or
+v3 features; it creates honest point-in-time evidence for a later challenger.
+`tools/q15_rti_feature_coverage_audit.py` never reads outcomes and checks exact
+timestamps plus same-close asset completeness. First live rich window: 7/7
+assets, zero alignment failures, zero partial folds, no backfill.
+
+A dedicated ledger mapping now persists exact `rti_evaluated_at` as
+`evidence_as_of`; the audit can recover pre-fix rows only from their immutable
+stored threshold evidence. Focused suite: 158 passed. Full suite: 2,107 passed,
+5 skipped. Service restarted at 20:13 ET: all seven RTI indexes fresh, Kalshi
+websocket connected, exact thread alive, zero record failures, v2 quarantined,
+v3 active with 0/0/0 evaluated/qualified/resolved, and no missed restart
+deadline.
+
+## Shipped THIS session - corrected RTI probability/value v2 PAPER challenger
+Run time: 2026-07-20 18:53-19:32 ET.
+
+The frozen exact-13M continuation control remains economically failed forward:
+31/73 correct (42.47%, Wilson 31.78%-53.90%) and -$141.78 at 10 contracts
+after official Kalshi fees plus 2c/contract slippage. BTC is 8/18 and -$30.36;
+the non-BTC transfer cohort is 23/55 and -$111.42. Existing countertrend,
++30s, +60s, +90s, spot, wide-spread, and impulse books remain unchanged and
+are not being promoted from small samples.
+
+An adversarial orientation review found a research-only v1 defect:
+`rti_market_mid_probability` is the selected RTI side's probability, but v1
+treated it as a YES probability even when RTI side was NO. No live rule was
+affected because v1 failed its holdout and was never deployed. V2 explicitly
+converts a NO-side midpoint to `1 - p` before fitting/scoring and keeps BTC and
+non-BTC transfer cohorts separate in every global chronological fold.
+
+The corrected frozen artifact is `config/q15_rti_probability_v2.json`, model
+`rti-probability-shadow-v2-d917c64faa3f`, with a strict prospective boundary at
+close time 1784589300 (2026-07-20 19:15 ET). Its already-seen historical fold
+is diagnostic only and receives no promotion credit. It suggested that the
+useful target is executable value rather than blind RTI continuation: the
+frozen scorer estimates final YES/NO settlement probability, evaluates both
+fresh executable sides, subtracts official fees and 2c slippage, and selects a
+side only when expected value is at least 3c/contract, ask<=62c, spread<=1.5c,
+and displayed depth supports 10 contracts.
+
+Added `rti_probability_value_v2` as a silent PAPER-only prospective challenger.
+It records the artifact fingerprint, cohort, market/estimated probabilities,
+selected side, exact entry quote/depth, fee, and expected value in the durable
+decision ledger. It cannot notify or trade, cannot receive historical credit,
+cannot mix BTC/non-BTC cohorts, cannot auto-refit or auto-promote, and requires
+manual reviews only at 30/60/150 resolved picks. The frozen strict control is
+unchanged. Regression tests cover YES/NO orientation, artifact boundary and
+tampering, official-fee/slippage value selection, runtime persistence,
+opposite-side quote grading, and notification isolation. Focused suite: 132
+passed. Full suite: 2,098 passed, 5 skipped.
+
+## Shipped THIS session - +90 stability challenger after observed +60 failures
+Run time: 2026-07-20 18:45-18:52 ET.
+
+Several hours of prospective collection moved the +60 continuation book from
+1/1 to 1/3 and -$7.72 at 10 contracts. Both new losses were BTC and the failure
+was reconstructed from the official per-second RTI feed. The 16:00 ET BTC NO
+crossed against the pick 27 seconds after its +60 capture, crossed the strike
+13 times, and its final-minute average settled 3.21 bps against it. The 17:30 ET
+BTC YES crossed after 13 seconds, also crossed 13 times, and its final-minute
+average settled 3.55 bps against it. The ETH winner's brief adverse crossing
+did not occur until 60 seconds after the +60 capture and recovered.
+
+Added the separate `rti_delayed_stability_90s_v1` PAPER record-only challenger.
+It waits 90 seconds after the original exact 13M decision, freezes a fourth
+genuinely new Kalshi quote/spot context, and requires an independent complete
+91-second official RTI path. It uses the unchanged same-side, ask<=62c,
+spread<=1.5c, depth>=10, and <=2s freshness gates. It cannot reuse the 13M,
++30s, or +60s quote; cannot notify or trade; claims no historical credit; and
+starts manual review at 30/60/150 prospective resolutions. Because it was
+selected after seeing the two +60 losses, it is explicitly marked as such and
+no retrospective result is credited.
+
+Scheduler recovery, durable interval identity (`11M30S`), matched parent
+economics, confirmation ladder, lineage, rejected counterfactuals, and health
+reporting now include +90. Focused suite: 143 passed. Full suite: 2,094 passed,
+5 skipped. Service restarted healthy with all three delayed policies visible,
+all seven RTI feeds fresh, websocket connected, and zero recovery failures.
+Seven immediate active-window recovery rows failed closed because their +90
+deadline had passed during restart; qualified/resolved remain 0/0 and no older
+history was backfilled.
+
+## Shipped THIS session - confirmation ladder, promotion guardrails, rejected probability model
+Run time: 2026-07-20 07:30-18:44 ET.
+
+Added a joint durable confirmation-ladder audit across each strict 13M parent,
+its fresh +30s quote/path, its fresh +60s continuation quote/path, and the +60s
+hard-flip book. Parent/ticker/asset/close lineage is validated and pre-policy
+rows are excluded explicitly instead of mislabeled as broken links. The first
+five common resolved parents produced: strict control -$0.65 at 10 contracts,
++30s policy -$5.87, +60s continuation +$4.13, and the post-flip-policy hard-flip
+book +$3.93 on one taken BTC reversal. Those challenger results are each n=1
+and remain mechanism proofs only, not improvement claims.
+
+Every RTI research book now reports resolved/correct/accuracy, Wilson 95%,
+fee-only and fee+2c-slippage break-even rates, canonical 10-lot P/L, maximum
+drawdown, rejected counterfactuals, BTC/non-BTC cohorts, and manual 30/60/150
+review progress. Cohort mixing and automatic promotion are forbidden. Live
+health correctly refuses to promote the 1/1 hard-flip result: Wilson lower
+20.65% versus 60.72% break-even, with 29 more resolved picks required before
+the first manual review. Focused suite: 142 passed. Full suite: 2,088 passed,
+5 skipped. Service restarted healthy; all seven official RTI feeds, Kalshi
+websocket, exact sampler, restart recovery, and delayed recorder are live.
+
+Built and froze a leakage-resistant market-prior residual-logit experiment in
+`tools/q15_rti_probability_freeze.py`, with runtime-safe JSON feature/artifact
+code in `q15_upgrade/strategy_bots/rti_probability.py`. It uses 800 genuine
+point-in-time exact examples, keeps every same-close asset in the same global
+chronological fold, fits BTC and non-BTC independently, uses train for weights,
+calibration only for Platt calibration, performs no hyperparameter search, and
+scores the final historical fold once. Missing historical opposite depth is an
+explicit feature and forbids opposite-side simulated fills; it is never
+invented. Artifact/report paths are `config/q15_rti_probability_v1.json` and
+`work/rti-probability-freeze/`.
+
+The honest holdout failed the trading bar. BTC improved Brier versus the market
+midpoint (0.2509 vs 0.2667) but its executable policy was only 7/19 and -$1.97
+at 10 contracts. Non-BTC worsened Brier (0.3112 vs 0.2502), was 11/37, and lost
+$29.81. Therefore this artifact is preserved as rejected evidence but is NOT
+connected to the live rule, Telegram, or a paper trade book, and it must not be
+called an improvement. Five regression tests cover fold isolation, artifact
+tampering, prospective-boundary enforcement, path features, and the
+no-fake-depth rule. Final pre-+90 full suite: 2,093 passed, 5 skipped.
+
+## Shipped THIS session - honest forward drift audit + 60s hard-flip book
+Run time: 2026-07-20 06:55-07:29 ET.
+
+Added `tools/q15_rti_forward_drift_audit.py` and durable reports under
+`work/rti-forward-drift/`.  The audit admits only genuine exact records with a
+coherent close-minus-780s capture timestamp, <=2s evaluation/quote freshness,
+complete 61-second official RTI path, coherent settlement grade, and canonical
+official Kalshi fee + 2c slippage economics.  Assets sharing a close cannot
+cross the frozen/forward boundary.  Legacy one-decimal ledger P/L is tolerated
+only within its historical rounding precision and is recomputed canonically.
+
+Honest result at report generation: frozen control 7/10 (70.0%, Wilson
+39.7%-89.2%, +$9.49 at 10 contracts) versus post-freeze 28/61 (45.9%, Wilson
+34.0%-58.3%, -$98.74).  Two-sided Fisher exact p=0.1887: the economic failure
+is real, but ten original picks were too few to prove a stable edge or a secure
+regime break.  Both BTC (7/14, -$16.57) and non-BTC transfer (21/47, -$82.16)
+failed fee/slippage break-even.  >=1bps 61-second momentum was especially bad
+forward (12/37, -$112.54), the opposite of its tiny frozen result.  Because the
+61 forward outcomes have now been inspected, they are diagnosis only and can
+never promote a threshold or be called untouched.
+
+Added the independent `rti_delayed_flip_60s_v1` PAPER record-only challenger.
+It does nothing unless an originally accepted strict parent has crossed to the
+opposite official RTI side at +60s.  It then grades that flipped side at the
+genuinely new +60s opposite-side ask/depth, requiring the same <=62c,
+<=1.5c-spread, depth>=10, exact-path, and <=2s freshness rules.  The quote side
+must exactly match the flipped official side.  It cannot notify or trade,
+forbids reuse of the 13M/+30s quotes, claims no historical credit, starts at
+n=0, and has its own rejected counterfactuals, matched parent economics, and
+manual 30/60/150 reviews.  The frozen control, +30s, and +60s continuation
+policies are unchanged.
+
+Focused suites: 133 and 138 passed.  Full suite: 2,087 passed, 5 skipped.
+Service restarted at 07:29 ET; websocket, all official RTI feeds, exact thread,
+restart recovery, and Telegram health are good.  The new flip book is visible
+at evaluated=0 / qualified=0 / resolved=0 and notification-eligible=false, so
+no old +60s rows were backfilled.
+
+First prospective proof for the 07:45 ET close: 7/7 exact parents, 7/7 +30s,
+and 7/7 +60s rows recorded; 14 delayed quotes, zero delayed misses/failures,
+and no pending work.  The flip policy evaluated all seven and correctly
+qualified zero because none satisfied every strict-parent + hard-flip gate.
+An initial health report called three older strict-parent +60s rows "invalid"
+only because they predated the flip policy and contained no flip decision.
+The matched audit now distinguishes `pre_policy_parent_rows_excluded` from
+malformed post-policy lineage.  After final restart: evaluated=7, qualified=0,
+invalid links=0, pre-policy excluded=3, notification-eligible=false.  The
+lineage correction has a regression test; final full suite remains 2,087
+passed, 5 skipped.
+
+## Shipped THIS session - independent +60s fresh-quote RTI challenger
+Run time: 2026-07-20 06:02-06:13 ET.
+
+The first matched +30s window showed the remaining failure honestly: BTC and
+HYPE still confirmed after 30 seconds and then reversed.  The original research
+plan had already pre-specified a 30-60 second confirmation experiment, so the
+frozen +30s policy was not retuned from that loss.  Instead, a separate
+`rti_delayed_confirm_60s_v1` PAPER record-only challenger now waits exactly 60
+seconds after the 13M decision, captures a genuinely new executable Kalshi
+quote and fresh spot context, and reads the independent 61-second official RTI
+path.  It uses the same pre-registered ask <=62c, spread <=1.5c, depth >=10,
+same-side, strict-parent, and <=2s freshness gates as +30s.
+
+The +30s and +60s rows have distinct interval identities (`12M30S` and `12M`),
+policy versions, qualification/rejection books, rejected-trade
+counterfactuals, and matched parent-control economics.  Both remain silent,
+paper-only, forward-only, ineligible for historical credit, and subject to
+manual 30/60/150 reviews.  The frozen 13M control and Telegram routing were not
+changed.  Scheduler regression coverage proves each stage uses its own quote
+and path; the +60s fill cannot reuse the 13M or +30s price.
+
+Focused RTI/ledger/health suite: 134 passed.  Full suite: 2,080 passed,
+5 skipped.  Local service restarted at 06:12 ET; status, websocket, exact RTI
+thread, and all seven official settlement feeds are healthy.  Health exposes
+both policies.  The +60s book correctly starts at zero prospective examples;
+no historical rows were backfilled.
+
+First live proof for the 06:30 ET close: 7/7 exact parent rows, 7/7 +30s rows,
+and 7/7 +60s rows were durably recorded.  The delayed scheduler captured 14
+new quotes with zero deadline misses, zero record failures, and no pending
+work; 13/14 optional spot contexts were fresh and one failed closed.  The +60s
+book has seven genuine evaluations but zero qualifiers because this cohort had
+no accepted strict parent.  It remains at zero resolved picks, zero historical
+credit, zero invalid parent links, and cannot notify.
+
+Delayed schedules are also restart-durable now.  On registration, a fresh
+process performs a bounded read of the strategy ledger, validates the unique
+exact parent and current per-asset model version, reconstructs its original
+row ID/side/path endpoint, detects completed delayed intervals, and schedules
+only missing stages.  Re-registration is idempotent; an existing parent
+suppresses a false exact-deadline miss, while an overdue missing stage still
+records explicit missing evidence and fails closed.  Recovery errors/counters
+are visible in health.  After the final restart, all seven current parents were
+recovered, both already-completed stages were correctly skipped (zero new
+stages/duplicates), exact misses stayed zero, and recovery failures stayed
+zero.  Updated focused suite: 136 passed.  Updated full suite: 2,082 passed,
+5 skipped.
+
+## Shipped THIS session - matched 13M vs +30s prospective economics
+Run time: 2026-07-20 05:48-06:01 ET.
+
+The RTI challenger scoreboard now pairs every +30s row to its durable strict
+13M parent and validates parent ID, ticker, asset, close time, interval, and
+accepted status.  It reports control P/L, delayed-policy P/L, incremental P/L,
+saved losses, skipped winners, later-ask change, invalid links, BTC/non-BTC
+cohorts, and reversal/settlement-risk groups.  A delayed rejection is modeled
+as zero exposure; a delayed acceptance pays its genuinely later quote.  This is
+paper-only reporting and changes no rule or notification.
+
+First matched live result (06:00 ET close): all three strict YES parents (BTC,
+ETH, HYPE) settled NO.  The control lost $18.21 at 10 contracts.  At +30s the
+policy kept BTC YES 62c and HYPE YES 60c (both wrong) and rejected ETH at 66c /
+2c spread, saving that one loss.  Delayed policy P/L was still -$12.93, but
+incremental P/L versus control was +$5.28.  Average later ask was +5.67c overall
+and +5.5c on trades actually retained.  This is damage reduction from one
+window, NOT profitability evidence and not a basis for promotion or retuning.
+
+Focused suite: 132 passed.  Full suite: 2,078 passed, 5 skipped.  Service was
+restarted; live matched report showed 3/3 resolved pairs, zero invalid links,
+one saved loss, zero skipped winners.
+
+## Shipped THIS session - prospective RTI risk taxonomy
+Run time: 2026-07-20 early morning session.
+
+The refreshed leakage-aware audit covers 1,075 point-in-time examples / 160
+chronological windows and still cannot promote a historical challenger.  Its
+frozen control has only 10 historical qualifiers; high settlement-average-risk
+rows were 1/3 and -$7.32 at 10 contracts, which is useful diagnostic evidence
+but far too small and historically exposed for a gate.
+
+Added `rti-point-in-time-risk-taxonomy-20260720-v1` as telemetry only.  Every
+new exact 13M row now freezes reversal risk (low/medium/high), settlement-average
+risk, path regime, Kalshi/RTI agreement, and explicit reason codes using only
+decision-time evidence.  Missing inputs become `unknown`, never low.  These
+labels cannot notify, trade, or change the frozen control and claim no
+historical credit.  The V3 ledger automatically reports future outcome accuracy
+and fee/slippage-adjusted counterfactual P/L by label for both all exact rows
+and strict-control qualifiers.
+
+Live proof for the 2026-07-20 06:00 ET close: 7/7 exact rows labeled under the
+new policy, zero capture failures, one shared close-time cohort, and three
+strict qualifiers (BTC YES, ETH YES, HYPE YES).  All three were medium reversal
+risk; ETH was also medium settlement-average risk.  The +30s challenger then
+accepted BTC YES at 62c and HYPE YES at 60c, while rejecting ETH at 66c / 2c
+spread.  All are unresolved prospective observations.  The delayed scheduler
+recorded 7/7 with zero failures/misses; one delayed spot context failed closed.
+
+Focused RTI/ledger/health suite: 131 passed.  Full suite: 2,077 passed,
+5 skipped.  Local service restarted; health, websocket, and settlement RTI are
+connected.
+
+## Shipped THIS session - true +30s RTI confirmation challenger
+Run time: 2026-07-20 early session.
+
+The prior `spot_book_confirm_v1` was same-timestamp context and therefore did
+not satisfy the required 30-60 second confirmation experiment.  Added the
+separate forward-only `rti_delayed_confirm_30s_v1` PAPER research book.  It
+keeps the frozen 13M control untouched, waits exactly 30 seconds, captures a
+new Kalshi websocket quote and fresh spot snapshot, reads the independent
+31-second official RTI path, and prices its simulation at that later ask.  It
+requires an originally accepted strict-control row, the same RTI side at +30s,
+ask <=62c, spread <=1.5c, displayed depth >=10, and <=2s quote/path timing.
+It cannot notify or trade, claims no historical credit, and remains subject to
+manual 30/60/150 reviews.
+
+The exact scheduler now freezes every asset's Kalshi quote before making any
+spot-venue call at both the 13M and +30s stages.  Delayed accepted and rejected
+rows are durable and automatically settlement-graded; health includes the
+complete rejection funnel plus rejected-trade counterfactual accuracy/P&L so
+saved losses and skipped winners remain visible.
+
+Live proof for the 2026-07-20 03:15 ET close: 7/7 13M parents and 7/7 delayed
+rows recorded, zero exact/delayed record failures, zero delayed deadline misses,
+and 7/7 fresh delayed spot contexts.  Delayed quote offsets were +0.019s..
++0.226s, RTI evidence completed by +0.334s, and storage by +0.538s.  Each quote
+was genuinely new roughly 29.95-29.98s after its parent; examples were BTC
+77c->63c and XRP 73c->57c.  All seven parents were strict-control rejections,
+so the delayed book correctly recorded 0 qualifiers and 7 rejected
+counterfactuals for this first cohort.
+
+Focused RTI/ledger/health suite: 130 passed.  Full suite: 2,076 passed,
+5 skipped.  Local service restarted and health/websocket/Telegram are OK.
+
+## Shipped THIS session - RTI prospective failure audit + countertrend research
+Run time: 2026-07-19 late session.
+
+The first real audit of `impulse_strength_v1` found 531 exact evaluations and
+zero qualifiers.  Feed infrastructure was healthy (521 fresh point-in-time spot
+captures, 10 fail-closed misses, zero exact record failures); the dominant
+problem was the fixed 25% raw trend-efficiency threshold, which is structurally
+too high for the noisy one-second RTI path.  More importantly, the underlying
+new strict continuation sample was only 18/37 and -$48.08 at 10 contracts after
+fees/slippage.  The impulse rule was therefore NOT loosened into alerts and no
+historical improvement is claimed.
+
+Challenger health now reports evaluated count, qualified count/rate, last
+evaluation, and the complete rejection funnel.  An evaluated>=30/qualified=0
+book is explicitly `ZERO_VOLUME_REVIEW_REQUIRED`, so a dead challenger can no
+longer appear healthy merely because its accepted scoreboard is empty.
+
+The exact sampler now freezes the independent opposite-side ask and displayed
+depth from the same websocket snapshot.  A separate
+`rti_countertrend_value_v1` research-only book buys the frozen opposite side
+only at 41-50c, spread <=2c, and displayed depth >=10.  Its side, entry quote,
+fees, 2c slippage, and settlement result are graded independently in the
+challenger scoreboard.  This rule was created after reviewing outcomes, claims
+no historical credit, cannot notify, cannot trade, and begins prospectively at
+n=0 with manual 30/60/150 reviews.  The retrospective pattern was regime-
+inconsistent, so collection rather than promotion is the only defensible use.
+
+The first live countertrend capture then exposed serial timestamp contamination:
+BTC evidence completed at +0.19s but later assets appeared at +3.6s..+6.9s
+because each row was enriched/persisted before the next asset was processed.
+`ExactRTI13MSampler.tick` is now explicitly three-phase: freeze every due
+Kalshi quote + live spot snapshot, read every exact RTI path, then persist rows.
+`rti_path_evaluation_delay_s` measures immutable evidence completion;
+`rti_storage_delay_s` separately records harmless downstream persistence lag.
+A regression test proves all quotes/paths precede the first recorder call.
+
+Post-restart live proof at the 2026-07-20 02:32 ET capture (02:45 close): all
+7 assets recorded, zero exact failures, and 7/7 fresh spot captures.  Genuine
+Kalshi quote offsets were +0.001s..+0.444s and every 61-second RTI path was read
+by +0.493s.  Persistence completed at +0.493s..+1.275s, confirming storage lag
+is now separated from immutable decision evidence.  The research-only
+countertrend book froze two new independent candidates (BTC NO 47c and ETH YES
+47c); neither is Telegram-eligible or promoted.
+
+Full suite: 2,072 passed, 5 skipped.
+
+## Shipped THIS session - RTI impulse-strength prospective challenger
+Run time: 2026-07-19.
+
+The frozen exact-13M strict RTI control is unchanged and continues to record and
+settle.  Telegram delivery now requires the separate forward-only PAPER
+challenger `impulse_strength_v1`; strict-control-only rows no longer notify.
+The previously independent `strong_path_wide_v1` and `value_price_wide_v1`
+books remain frozen counterfactual ledgers but are notification-muted after
+their forward review.  No real trading or automatic promotion was enabled.
+
+The new challenger was created after inspecting the reviewed losses, explicitly
+claims no historical credit, starts prospectively at n=0, and is manually
+reviewed at 30/60/150 resolved rows with BTC isolated from the non-BTC transfer
+cohort.  It requires every frozen strict gate plus: >=1.0 bps signed strike
+distance, >=0.5 bps 61-second signed move, >=25% trend efficiency, a non-fading
+second half, at most one strike crossing (and >=20s since it), displayed ask
+depth for all 10 simulated contracts, and fresh spot pressure no worse than
+-0.25 in the predicted direction.  Cards say PAPER, identify the challenger
+policy, show the impulse/reversal/fill evidence, and remain idempotent through
+the durable V3 outbox.
+
+The exact path feature record now also freezes distance, path range, realized
+volatility, trend efficiency, first/second-half movement, acceleration, strike
+crossings, time since crossing, and expected-remaining-volatility diagnostics.
+Exact RTI decisions use an on-demand in-memory spot snapshot instead of waiting
+for the five-second research DB write cadence; the evidence is persisted in the
+strategy ledger and freshness still fails closed.  This improves evidence
+coverage without increasing the already-large spot SQLite write rate.
+
+## Shipped THIS session - exact-13M RTI reliability challenger and frozen audit
+Run time: 2026-07-18/19.
+
+The existing seven-asset strict RTI Path 13M system remains the immutable
+control. A leakage-aware audit now lives in `tools/q15_rti_improvement_audit.py`
+and writes `work/rti-improvement/{audit.json,audit.md}`. The historical universe
+is frozen through close `1784432700` (2026-07-18 23:45 local); all assets sharing
+a close remain in one chronological fold. Later outcomes cannot move fold
+boundaries and reconstructed post-freeze rows are explicitly excluded from
+promotion. The report also admits that the historical final fold was viewed
+during exploration, so the durable prospective ledger is the only genuinely
+untouched test.
+
+Current-fee replay of the frozen control is 7/10, 70.0%, Wilson 95% 39.7%-89.2%,
++$9.49 at 10 contracts with 2c/contract slippage. The selected collection-only
+shadow is `spot_book_confirm_v1`: strict control must pass, the local spot-depth
+snapshot must have existed at/before decision and be <=3s old, exchange book age
+must be within the explicit -3s..+2s clock band, and nonzero depth imbalance must
+align with the RTI side. Frozen-history result is only 5/5, +$19.65, Wilson lower
+56.6% versus 58.7% fee-only break-even (60.7% with slippage), so it is NOT
+promotion-eligible. Excluding the three known losses leaves shadow 5/5 versus
+control 7/7: no defensible improvement. Rejected control rows were 2/5 and
+-$10.15, showing both apparent saved losses and the tiny/post-hoc sample risk.
+
+The exact sampler now captures point-in-time spot context with fail-closed
+timestamp checks. Every new decision freezes the challenger verdict and policy
+version in the existing durable strategy ledger; normal official settlement
+reconciliation grades it with current Kalshi July-7-2026 centicent fee rounding,
+10 contracts, and 2c slippage. `/api/health -> rti_path_13m_challenger` exposes
+rows/resolved/accuracy/Wilson/break-even/P&L/drawdown and a non-automatic
+promotion-criteria flag. Review bars are 30/60/150 resolved prospective picks,
+manual only. The shadow cannot independently trigger Telegram, but when it
+overlaps a strict alert, that PAPER card adds `UNPROMOTED PAPER SHADOW` plus the
+shadow rule version. No order-placement surface was added.
+
+Audit coverage includes every requested challenger/signal family, all-candidate
+fee/slippage tables, BTC vs non-BTC transfer cohorts, asset/side/distance/
+volatility/regime/reversal/settlement-average risk breakouts, and rejected-trade
+counterfactuals. A delayed 30-60s confirmation was correctly not backtested:
+there are zero point-in-time stored Kalshi quotes near those timestamps and the
+13M quote is never reused. Config audit: 1,058 variables OK. Final suite: 2,065
+passed, 5 skipped. Local stack restarted on port 8000 with executor dry-run/kill
+defaults, websocket connected, settlement connected, all seven RTI assets
+registered, and the challenger at prospective n=0 by design.
+Post-restart live proof on the 00:45-close window: 7/7 exact quotes and 7/7
+durable rows at +30ms, every RTI path 61/61, zero record failures. Six spot
+contexts passed; BNB's exchange book age was 2.234s and correctly failed closed
+as `spot_depth_book_stale`. No strict or shadow pick qualified, so the prospective
+shadow book correctly remained n=0 and no Telegram card was due.
+
+## Shipped THIS session - seven-asset RTI-path 13M exact-time V3 system
+Run time: 2026-07-15.
+
+Owner selected the strict 62c rule after an exact historical audit and asked to
+measure it on genuinely new data, then extended the same gate to every tracked
+asset. BTC keeps the separately versioned historically audited rule in a clean
+exact-capture forward book (`btc-rti-path-13m-62c-exact-v3`).
+ETH/SOL/XRP/DOGE/BNB/HYPE each use their official settlement RTI and an
+independent `*-transfer-exact-v3` rule identity, explicitly
+labeled as unvalidated transfer cohorts. Exact gate: 13M capture; all 61 RTI
+seconds from 14M through 13M present and <=2s fresh; same side at both endpoints;
+>=80% path persistence; non-negative side-adjusted RTI movement; executable
+RTI-side ask <=62c; spread <=1.5c. Every evaluated market persists as ACCEPTED
+or REJECTED with point-in-time evidence; no missing/stale input fails open and a
+cold restart does not backfill the in-memory path.
+
+The first forward funnel exposed an infrastructure bottleneck rather than a
+reason to weaken the rule: 22/24 v1 candidates missed exact timing, 17/24 had the
+old missing quote age, and the first otherwise-clean window arrived at +2.49s,
+just beyond the 2s gate. Those v1 rows remain honest rejected audit evidence but
+cannot contaminate the new version.
+
+`q15_upgrade/rti_exact_13m.py` is now the owner of RTI decision capture when
+`Q15_V3_RTI_EXACT_SAMPLER=true`. Its read-only 50ms worker freezes both sides of
+the live Kalshi websocket book at the real close-minus-780s instant, then waits
+at most 2s for that exact official RTI second. It never relabels a late quote,
+never backfills after a cold restart, and persists a failure rather than failing
+open. The slow interval/model loop yields ownership while the sampler is on.
+Health is visible at `/api/health -> rti_exact_13m`.
+
+The first exact-v2 live capture proved the scheduler (7/7 rows, 6.9ms final
+offset, 61/61 RTI seconds) and also exposed websocket float-dust ghost levels:
+sub-nanocontract residues survived depletion and appeared as impossible crossed
+books. No card escaped because all seven signal paths independently rejected.
+The feed now removes <=1e-9 contract dust, microstructure filters it, crossed
+books are unavailable, and strict/challenger rules hard-reject negative spread
+with `SPREAD_CROSSED`. The clean v3 identity keeps those seven v2 rows isolated.
+
+Live v3 proof on the 2026-07-15 18:45-close window: 7/7 durable rows, every
+official path 61/61 and fresh, quote ages 0.00s..0.28s, zero crossed/dust/depth
+violations, zero record failures, and a 1.535ms final capture offset. No strict
+row qualified, for genuine signal/price/spread reasons. XRP was the intended
+shadow-volume example: strict rejected a 2c spread, while both pre-registered
+challengers accepted its 100% persistence, positive move, 53c entry and fully
+fresh evidence. It remains notification-disabled pending forward settlement.
+
+Two outcome-blind volume challengers are pre-registered and stored in every
+exact decision's point-in-time threshold JSON: `strong_path_wide_v1` allows a
+2c spread only with >=90% RTI persistence; `value_price_wide_v1` allows a 2c
+spread only at <=58c. Both retain all strict freshness/timing/index/same-side/
+momentum gates, never notify, and require manual promotion reviews at 30/60/150
+resolved rows. Their forward books are exposed under the V3 scoreboard's
+`rti_path_challengers`; thresholds cannot be changed after seeing outcomes.
+
+Accepted rows enqueue an explicit per-asset `V3 <ASSET> RTI PATH 13M | PAPER`
+card through the durable V3 outbox. Settlement grading uses a 10-contract
+simulation with the official order-level fee formula plus 2c/contract slippage,
+matching the audit. Local flags enable notifications and all seven assets. Full
+suite: 2050 passed, 5 skipped. Local app restarted cleanly on port 8000; health
+`ok`, exact sampler thread alive with all seven assets registered, Kalshi
+websocket connected, and every official RTI fresh. Executor dry-run + kill
+switches remain true.
+Each forward book starts at n=0 by design; never aggregate transfer cohorts into
+BTC's validated performance.
 
 ## Shipped THIS session - Drift validated add-ons and settlement repair
 Run time: 2026-07-10.

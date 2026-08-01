@@ -15,6 +15,8 @@ from q15_upgrade.interval_research.config import IntervalResearchConfig, INTERVA
 from q15_upgrade.interval_research.ledger import IntervalResearchLedger
 from q15_upgrade.interval_research.runner import IntervalResearchRunner, get_runner, reset_runner
 from q15_upgrade.interval_research import economics as econ
+from q15_upgrade.rti_path_13m import quote_for_rti_side
+from q15_upgrade.strategy_bots.rules import rti_path_13m_rule_version
 
 
 class _Canon:
@@ -159,6 +161,103 @@ class CaptureResolveTest(unittest.TestCase):
         self.assertEqual(row["correct"], 0)
         self.assertAlmostEqual(row["realized_pnl_cents"], -61.0, places=3)
 
+    def test_current_settlement_batch_conflict_fails_closed_everywhere(self):
+        self._observe("KXBATCH-CONFLICT", 600, side="YES", ask=55.0)
+        self.r._rti_strategy_settlement_backlog_reconciled = True
+        events = [
+            {"ticker": "KXBATCH-CONFLICT", "result": "YES"},
+            {"ticker": "KXBATCH-CONFLICT", "result": "NO"},
+        ]
+        with patch(
+            "q15_upgrade.strategy_bots.runtime.resolve_ticker",
+            return_value=1,
+        ) as resolve_ticker, self.assertLogs(
+            "q15_upgrade.interval_research.runner", level="ERROR",
+        ):
+            self.assertEqual(self.r.resolve_settled(events, now=2000.0), 0)
+
+        resolve_ticker.assert_not_called()
+        self.assertEqual(self.r.ledger.resolved_rows(), [])
+
+    def test_duplicate_unanimous_settlement_batch_is_graded_once(self):
+        self._observe("KXBATCH-YES", 600, side="YES", ask=55.0)
+        self.r._rti_strategy_settlement_backlog_reconciled = True
+        events = [
+            {"ticker": "KXBATCH-YES", "result": "yes"},
+            {"contract": "KXBATCH-YES", "official_result": "YES"},
+        ]
+        with patch(
+            "q15_upgrade.strategy_bots.runtime.resolve_ticker",
+            return_value=1,
+        ) as resolve_ticker:
+            self.assertEqual(self.r.resolve_settled(events, now=2000.0), 1)
+
+        resolve_ticker.assert_called_once_with(
+            ticker="KXBATCH-YES", official_result="YES", now=2000.0,
+        )
+        resolved = self.r.ledger.resolved_rows()
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0]["official_result"], "YES")
+
+    def test_resolved_result_lookup_is_explicit_bounded_and_unanimous(self):
+        self._observe("KXLOOKUP", 600, side="YES", ask=55.0)
+        self.assertEqual(
+            self.r.ledger.resolve("ir-test", "KXLOOKUP", "YES", 2000.0),
+            1,
+        )
+        rows = self.r.ledger.resolved_results_for_tickers(
+            ["KXLOOKUP", "NOT-REQUESTED"]
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ticker"], "KXLOOKUP")
+        self.assertEqual(rows[0]["official_result"], "YES")
+        self.assertEqual(rows[0]["resolved_at"], 2000.0)
+
+    def test_resolved_result_lookup_fails_closed_on_ticker_label_conflict(self):
+        self._observe("KXCONFLICT", 600, side="YES", ask=55.0)
+        other = IntervalResearchRunner(_cfg(
+            self.tmp, model_version="ir-conflicting-source",
+        ))
+        other.observe(
+            analyses={"BTC": _analysis(side="NO", ask=55.0)},
+            canonicals={"BTC": _Canon("KXCONFLICT", 600)},
+            now=1000.0,
+        )
+        self.assertEqual(
+            self.r.ledger.resolve("ir-test", "KXCONFLICT", "YES", 2000.0),
+            1,
+        )
+        self.assertEqual(
+            other.ledger.resolve(
+                "ir-conflicting-source", "KXCONFLICT", "NO", 2001.0,
+            ),
+            1,
+        )
+        self.assertEqual(
+            self.r.ledger.resolved_results_for_tickers(["KXCONFLICT"]), []
+        )
+
+    def test_empty_event_pass_repairs_strategy_backlog_once(self):
+        self._observe("KXBACKLOG", 600, side="YES", ask=55.0)
+        self.assertEqual(
+            self.r.ledger.resolve("ir-test", "KXBACKLOG", "NO", 2000.0),
+            1,
+        )
+        with patch(
+            "q15_upgrade.strategy_bots.runtime.unresolved_rti_tickers",
+            return_value=["KXBACKLOG"],
+        ) as pending, patch(
+            "q15_upgrade.strategy_bots.runtime.resolve_ticker",
+            return_value=1,
+        ) as resolve_ticker:
+            self.assertEqual(self.r.resolve_settled([], now=2001.0), 0)
+            self.assertEqual(self.r.resolve_settled([], now=2002.0), 0)
+
+        pending.assert_called_once_with(now=2001.0, limit=500)
+        resolve_ticker.assert_called_once_with(
+            ticker="KXBACKLOG", official_result="NO", now=2000.0
+        )
+
     def test_restart_safe_no_duplicate(self):
         self._observe("KXs", 600)
         # New ledger instance on the SAME path (simulating a restart) + same capture.
@@ -204,6 +303,157 @@ class CaptureResolveTest(unittest.TestCase):
                 canonicals={"BTC": _Canon("KX13-OFF", 780, settlement_time=9000.0)},
                 now=1000.0,
             )
+        record.assert_not_called()
+
+    def test_rti_path_13m_dispatches_exact_fresh_source_once(self):
+        analysis = _analysis(side="YES", ask=59.0)
+        analysis["quote"].update({
+            "bid_cents": 58.0,
+            "ask_cents": 59.0,
+            "spread_cents": 1.0,
+            "quote_age_seconds": 0.4,
+            "yes_ask_depth_contracts": 25.0,
+        })
+        canonical = _Canon("KXBTC-RTI", 780, settlement_time=1800.0)
+        canonical.threshold = 68000.0
+        path = {
+            "status": "ok",
+            "missing_reason": None,
+            "index_id": "BRTI",
+            "expected_count": 61,
+            "count": 61,
+            "complete": True,
+            "missing_seconds": [],
+            "max_receive_age_s": 0.2,
+            "decision_age_s": 0.5,
+            "rows": [
+                {"index_px": 68001.0 + i, "index_id": "BRTI"}
+                for i in range(61)
+            ],
+        }
+        with patch.dict(os.environ, {
+            "Q15_V3_RTI_PATH_13M": "true",
+            "Q15_V3_TOP_PICK_13M": "false",
+        }):
+            with patch("settlement_index.settlement_index_path", return_value=path) as read_path:
+                with patch(
+                    "q15_upgrade.strategy_bots.runtime.record_rti_path_13m_row",
+                    return_value=123,
+                ) as record:
+                    self.r.observe(
+                        analyses={"BTC": analysis},
+                        canonicals={"BTC": canonical},
+                        now=1019.0,
+                    )
+                    self.r.observe(
+                        analyses={"BTC": analysis},
+                        canonicals={"BTC": canonical},
+                        now=1020.0,
+                    )
+                    self.r.observe(
+                        analyses={"BTC": analysis},
+                        canonicals={"BTC": canonical},
+                        now=1020.5,
+                    )
+
+        record.assert_called_once()
+        read_path.assert_called_once()
+        source = record.call_args.args[0]
+        self.assertEqual(source["rti_index_id"], "BRTI")
+        self.assertEqual(source["rti_path_count"], 61)
+        self.assertEqual(source["rti_side"], "YES")
+        self.assertEqual(source["rti_14m_side"], "YES")
+        self.assertEqual(source["entry_ask_cents"], 59.0)
+        self.assertEqual(source["spread_cents"], 1.0)
+        self.assertEqual(source["rti_timing_offset_s"], 0.0)
+
+    def test_rti_path_quote_inverts_selected_opposite_side_without_relabeling(self):
+        analysis = _analysis(side="NO", ask=41.0)
+        analysis["quote"].update({
+            "bid_cents": 40.0,
+            "ask_cents": 41.0,
+            "spread_cents": 1.0,
+            "quote_age_seconds": 0.2,
+            "yes_ask_depth_contracts": 17.0,
+        })
+        quote = quote_for_rti_side(analysis, rti_side="YES")
+        self.assertTrue(quote["rti_quote_inverted"])
+        self.assertEqual(quote["yes_bid_cents"], 59.0)
+        self.assertEqual(quote["entry_ask_cents"], 60.0)
+        self.assertEqual(quote["spread_cents"], 1.0)
+        self.assertEqual(quote["depth_contracts"], 17.0)
+
+    def test_rti_path_13m_dispatches_non_btc_with_its_official_cohort_version(self):
+        analysis = _analysis(side="YES", ask=60.0)
+        analysis["quote"].update({
+            "bid_cents": 59.0,
+            "ask_cents": 60.0,
+            "spread_cents": 1.0,
+            "yes_ask_depth_contracts": 30.0,
+        })
+        canonical = _Canon("KXETH-RTI", 780, settlement_time=1800.0)
+        canonical.threshold = 2000.0
+        path = {
+            "status": "ok",
+            "missing_reason": None,
+            "index_id": "ETHUSD_RTI",
+            "expected_count": 61,
+            "count": 61,
+            "complete": True,
+            "missing_seconds": [],
+            "max_receive_age_s": 0.2,
+            "decision_age_s": 0.4,
+            "rows": [{"index_px": 2001.0 + i / 10} for i in range(61)],
+        }
+        with patch.dict(os.environ, {
+            "Q15_V3_RTI_PATH_13M": "true",
+            "Q15_V3_RTI_PATH_13M_ASSETS": "ETH",
+            "Q15_V3_TOP_PICK_13M": "false",
+        }):
+            with patch("settlement_index.settlement_index_path", return_value=path) as read_path:
+                with patch(
+                    "q15_upgrade.strategy_bots.runtime.record_rti_path_13m_row",
+                    return_value=456,
+                ) as record:
+                    self.r.observe(
+                        analyses={"ETH": analysis},
+                        canonicals={"ETH": canonical},
+                        now=1020.0,
+                        source_snapshots={"ETH": {
+                            "asset": "ETH",
+                            "orderbook_age_seconds": 0.3,
+                        }},
+                    )
+
+        read_path.assert_called_once()
+        self.assertEqual(read_path.call_args.args[0], "ETH")
+        source = record.call_args.args[0]
+        self.assertEqual(source["asset"], "ETH")
+        self.assertEqual(source["rti_index_id"], "ETHUSD_RTI")
+        self.assertEqual(source["model_version"], rti_path_13m_rule_version("ETH"))
+        self.assertAlmostEqual(source["quote_age_seconds"], 0.3, places=6)
+        self.assertEqual(source["quote_age_source"], "orderbook_age_seconds")
+        self.assertNotIn("quote_age_seconds", analysis["quote"])
+
+    def test_rti_path_slow_loop_yields_ownership_to_exact_sampler(self):
+        canonical = _Canon("KXBTC-EXACT-OWNER", 780, settlement_time=1800.0)
+        canonical.threshold = 68000.0
+        with patch.dict(os.environ, {
+            "Q15_V3_RTI_PATH_13M": "true",
+            "Q15_V3_RTI_EXACT_SAMPLER": "true",
+            "Q15_V3_TOP_PICK_13M": "false",
+        }):
+            with patch("settlement_index.settlement_index_path") as read_path:
+                with patch(
+                    "q15_upgrade.strategy_bots.runtime.record_rti_path_13m_row"
+                ) as record:
+                    self.r.observe(
+                        analyses={"BTC": _analysis(side="YES", ask=60.0)},
+                        canonicals={"BTC": canonical},
+                        now=1020.0,
+                    )
+
+        read_path.assert_not_called()
         record.assert_not_called()
 
     def test_13m_crossing_820_to_742_records_nearest_endpoint_and_full_dispatch(self):

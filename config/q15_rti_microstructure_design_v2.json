@@ -1,0 +1,133 @@
+{
+  "design_id": "q15-rti-market-residual-microstructure-v2",
+  "design_status": "PREREGISTERED_BEFORE_MODEL_READINESS",
+  "preregistered_at": "2026-07-21T06:38:00Z",
+  "supersedes_design_id": "q15-rti-market-residual-microstructure-v1",
+  "change_reason": "outcome-blind numerical audit replaced two exact duplicate taker-imbalance columns with independent 15s and 60s Kalshi book-pressure horizons",
+  "outcome_labels_used_for_change": false,
+  "paper_only": true,
+  "real_trading_allowed": false,
+  "notification_eligible": false,
+  "historical_credit_allowed": false,
+  "automatic_refit": false,
+  "automatic_promotion": false,
+  "decision_interval": "exact_13m",
+  "source_schema": "rti-exact-microstructure-v1",
+  "target": "official_kalshi_yes_settlement",
+  "market_prior": "point_in_time_despread_kalshi_yes_probability",
+  "model_family": "regularized_market_prior_residual_logit",
+  "cohorts": {
+    "BTC": {
+      "minimum_complete_close_windows": 150,
+      "fallback_before_ready": "KALSHI_MARKET_PRIOR",
+      "mixing_with_non_btc_forbidden": true
+    },
+    "NON_BTC_TRANSFER": {
+      "assets": [
+        "BNB",
+        "DOGE",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "XRP"
+      ],
+      "minimum_complete_close_windows": 60,
+      "mixing_with_btc_forbidden": true
+    }
+  },
+  "chronology": {
+    "train_fraction": 0.6,
+    "calibration_fraction": 0.2,
+    "untouched_test_fraction": 0.2,
+    "same_close_assets_must_share_fold": true,
+    "partial_close_windows_forbidden": true,
+    "timestamp_alignment_fail_closed": true,
+    "outcome_labels_forbidden_before_readiness": true,
+    "test_may_be_scored_once": true,
+    "test_may_not_tune_features_or_hyperparameters": true,
+    "prospective_boundary_includes_all_inspected_unresolved_rows": true
+  },
+  "feature_schema_version": "rti-probability-microstructure-features-v2",
+  "feature_names": [
+    "final_side_yes",
+    "yes_signed_distance_bps",
+    "yes_side_move_bps",
+    "yes_acceleration_bps",
+    "log1p_path_range_bps",
+    "log1p_realized_volatility_bps",
+    "trend_efficiency",
+    "yes_persistence_signal",
+    "log1p_strike_crossings",
+    "seconds_since_crossing_fraction",
+    "yes_distance_to_remaining_volatility",
+    "spot_imbalance",
+    "spread_cents",
+    "market_distance_from_half",
+    "asset_bnb",
+    "asset_doge",
+    "asset_eth",
+    "asset_hype",
+    "asset_sol",
+    "asset_xrp",
+    "kalshi_yes_microprice_edge_cents",
+    "kalshi_book_delta_pressure_yes_5s",
+    "kalshi_book_delta_pressure_yes_15s",
+    "kalshi_book_delta_pressure_yes_30s",
+    "kalshi_book_delta_pressure_yes_60s",
+    "kalshi_trade_imbalance_yes_5s",
+    "kalshi_trade_imbalance_yes_30s",
+    "kalshi_taker_imbalance_yes_60s",
+    "kalshi_best_level_flow_pressure_yes_30s",
+    "spot_signed_log_net_notional_15s",
+    "spot_signed_log_net_notional_60s",
+    "kalshi_microstructure_missing",
+    "spot_flow_missing"
+  ],
+  "fixed_training_config": {
+    "model_l2": 100.0,
+    "model_learning_rate": 0.03,
+    "model_iterations": 2000,
+    "standardization_min_std": 1e-08,
+    "standardization_z_clip": 5.0,
+    "out_of_distribution_max_abs_z": 8.0,
+    "residual_logit_scale": 0.25,
+    "hyperparameter_search_performed": false,
+    "missing_numeric_value": 0.0,
+    "explicit_missing_indicators": true,
+    "window_equal_weighting": true
+  },
+  "calibration_activation_gate": {
+    "candidate_brier_must_strictly_beat_market": true,
+    "candidate_log_loss_must_strictly_beat_market": true,
+    "first_half_must_not_worsen_brier_or_log_loss": true,
+    "second_half_must_not_worsen_brier_or_log_loss": true,
+    "fallback_when_not_met": "KALSHI_MARKET_PRIOR"
+  },
+  "untouched_test_deployment_gate": {
+    "candidate_brier_must_strictly_beat_market": true,
+    "candidate_log_loss_must_strictly_beat_market": true,
+    "minimum_simulated_picks": 5,
+    "fee_slippage_adjusted_pnl_must_be_positive": true,
+    "candidate_is_paper_challenger_only_when_met": true,
+    "historical_results_cannot_promote": true
+  },
+  "entry_policy": {
+    "minimum_expected_value_cents_after_costs": 3.0,
+    "maximum_ask_cents": 62.0,
+    "maximum_spread_cents": 1.5,
+    "minimum_displayed_depth_contracts": 10.0,
+    "simulation_contracts": 10,
+    "official_kalshi_fees": true,
+    "slippage_cents_per_contract": 2.0
+  },
+  "prospective_review": {
+    "manual_only": true,
+    "resolved_pick_bars": [
+      30,
+      60,
+      150
+    ],
+    "proper_score_gate_required_for_promotion": true,
+    "btc_and_non_btc_reviewed_separately": true
+  }
+}

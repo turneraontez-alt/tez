@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 import os
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -288,6 +289,53 @@ def _metrics_at(rows: Sequence[Mapping[str, Any]], threshold: float) -> dict[str
     }
 
 
+def _threshold_metric_lookup(rows: Sequence[Mapping[str, Any]]):
+    """Build an O(log n) metrics lookup for repeated threshold candidates.
+
+    ``select_threshold`` evaluates every distinct training probability.  Calling
+    ``_metrics_at`` for each candidate was O(n²) (about 27 seconds for the live
+    13k-row intervals).  Sorting once and keeping a prefix count of true flips
+    yields the identical confusion matrix for ``p > threshold`` without rescans.
+    """
+    ordered: list[tuple[float, bool]] = []
+    for row in rows:
+        probability = _num(row.get("flip_probability"))
+        if probability is not None:
+            ordered.append((probability, bool(row.get("flipped"))))
+    ordered.sort(key=lambda item: item[0])
+    probabilities = [item[0] for item in ordered]
+    positive_prefix = [0]
+    for _probability, flipped in ordered:
+        positive_prefix.append(positive_prefix[-1] + int(flipped))
+    total = len(ordered)
+    positives = positive_prefix[-1]
+
+    def metrics(threshold: float) -> dict[str, Any]:
+        # bisect_right puts p == threshold on the NO side, exactly matching
+        # ``decided_yes = p > threshold`` in _metrics_at.
+        no_n = bisect_right(probabilities, threshold)
+        fn = positive_prefix[no_n]
+        tn = no_n - fn
+        tp = positives - fn
+        fp = (total - no_n) - tp
+        yes_n = tp + fp
+        return {
+            "n": total,
+            "yes_n": yes_n,
+            "yes_precision": round(tp / yes_n, 4) if yes_n else None,
+            "recall": round(tp / positives, 4) if positives else None,
+            "false_positive_rate": round(fp / (fp + tn), 4) if (fp + tn) else None,
+            "false_negative_rate": round(fn / positives, 4) if positives else None,
+            "coverage": round(yes_n / total, 4) if total else None,
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+        }
+
+    return metrics
+
+
 def select_threshold(resolved_rows: Sequence[Mapping[str, Any]], config: FlipConfig) -> dict[str, Any]:
     """Pick the per-interval flip threshold by CHRONOLOGICAL out-of-sample test.
 
@@ -312,10 +360,11 @@ def select_threshold(resolved_rows: Sequence[Mapping[str, Any]], config: FlipCon
     # Candidate thresholds: the distinct probabilities seen in TRAIN (a YES is
     # "p > thr", so use values just below each observed prob).
     cand = sorted({_num(r.get("flip_probability"), 0.0) or 0.0 for r in train})
+    train_metrics = _threshold_metric_lookup(train)
     best = None
     for c in cand:
         thr = max(0.0, c - 1e-9)
-        m = _metrics_at(train, thr)
+        m = train_metrics(thr)
         if (m["yes_n"] or 0) >= config.min_yes_train and m["yes_precision"] is not None \
                 and m["yes_precision"] >= config.target_precision:
             # lowest qualifying threshold = highest coverage at target precision

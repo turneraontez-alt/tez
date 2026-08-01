@@ -1,0 +1,73 @@
+{
+  "protocol_id": "q15-rti-independent-path-outcome-blind-geometry-review-v1",
+  "protocol_status": "PREREGISTERED_AFTER_12_WINDOW_OUTCOME_BLIND_PREVIEW_BEFORE_30_WINDOW_REVIEW",
+  "preregistered_at": "2026-07-22T22:39:01Z",
+  "applies_to_source_design_id": "q15-rti-independent-venue-path-evidence-v1",
+  "applies_to_source_design_sha256": "ed73729468715279d0d92e1d3beed431cfad416767e4bb92cb88c230d4b904a2",
+  "evidence_available_at_preregistration": {
+    "complete_reconstructable_close_windows": 12,
+    "outcome_blind_feature_ranges_inspected": true,
+    "outcome_blind_geometry_inspected": true,
+    "outcome_blind_source_quality_inspected": true,
+    "outcome_labels_read": false,
+    "model_fit_performed": false,
+    "performance_metrics_inspected": false
+  },
+  "threshold_origin": {
+    "uses_outcomes": false,
+    "uses_performance_metrics": false,
+    "pairwise_correlation_ceiling_reuses_prior_frozen_v13_geometry_standard": 0.95,
+    "condition_number_ceiling_reuses_prior_frozen_v13_geometry_standard": 50.0,
+    "rank_duplicate_and_activity_checks_are_structural": true
+  },
+  "review_trigger": {
+    "complete_reconstructable_close_windows": 30,
+    "same_seven_assets_required_per_close": true,
+    "partial_close_windows_forbidden": true,
+    "complete_all_seven_rows_required": 210,
+    "complete_btc_rows_required": 30,
+    "complete_non_btc_transfer_rows_required": 180,
+    "source_quality_status_required": "PASS_ALL_CREDITED_COMPLETE_ROWS",
+    "evidence_parse_failures_must_equal": 0,
+    "source_integrity_breaches_must_equal": 0
+  },
+  "fixed_checks": {
+    "candidate_feature_count_must_equal": 5,
+    "all_seven_active_feature_count_must_equal": 5,
+    "btc_active_feature_count_must_equal": 5,
+    "non_btc_active_feature_count_must_equal": 5,
+    "pairwise_absolute_correlation_ceiling": 0.95,
+    "exact_signed_duplicate_pairs_must_equal": 0,
+    "condition_number_nonzero_subspace_maximum": 50.0,
+    "rank_deficiency_vs_active_features_must_equal": 0,
+    "minimum_source_integrity_margin_seconds_must_be_strictly_positive": true,
+    "all_geometry_values_must_be_finite": true
+  },
+  "pass_policy": {
+    "status": "PASS_CONTINUE_PROSPECTIVE_COLLECTION_NO_MODEL",
+    "model_fit_allowed_at_30_windows": false,
+    "outcome_labels_may_be_opened_at_30_windows": false,
+    "automatic_feature_selection_allowed": false,
+    "automatic_threshold_change_allowed": false,
+    "automatic_activation_allowed": false,
+    "automatic_promotion_allowed": false,
+    "continue_to_non_btc_60_and_btc_150_milestones": true
+  },
+  "failure_policy": {
+    "status": "GEOMETRY_REVIEW_REQUIRED_NO_AUTOMATIC_ACTION",
+    "any_failed_check_requires_manual_diagnosis": true,
+    "new_source_or_feature_design_requires_new_preregistration_and_boundary": true,
+    "existing_source_rows_may_not_be_relabeled_for_a_successor": true,
+    "automatic_feature_removal_allowed": false,
+    "automatic_threshold_change_allowed": false,
+    "automatic_refit_allowed": false,
+    "automatic_activation_allowed": false,
+    "automatic_promotion_allowed": false
+  },
+  "report_only": true,
+  "outcome_labels_forbidden": true,
+  "model_fit_forbidden": true,
+  "entry_policy_changes_forbidden": true,
+  "notification_is_trade_signal": false,
+  "real_trading_allowed": false
+}

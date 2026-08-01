@@ -177,6 +177,11 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     else:
         stake = int(round(cfg.per_pick_pct * bankroll))
         window_cap = int(round(cfg.max_per_window_pct * bankroll))
+    # NOTE: max_per_window_pct is deliberately NOT applied in the flat / per-interval branches.
+    # In those modes the window budget IS stake * max_picks by design, and the per-interval
+    # override is documented to supersede the flat stake and the per-pick cap — clamping it to a
+    # % of bankroll would silently shrink the owner's chosen concentration. The %-of-bankroll
+    # ceiling is scoped to percentage sizing; see the field's docstring in config.py.
     # CONVICTION sizing (owner: "first $150, extras double"): a >=3-co-trigger pick carries
     # stake_multiplier>1 from v2. The LEAD pick of a window always stays at the base stake;
     # only the 2nd-or-later pick of a >=3 window is sized up by that factor (window_count is
@@ -203,16 +208,23 @@ def decide(pick: Pick, state: PortfolioState, cfg) -> Decision:
     # Never stake more than the bankroll actually on hand.
     stake = min(stake, bankroll)
 
-    count = stake // price   # whole contracts only (integer cents)
-    if count < 1:
-        return Decision(False, "SIZE_TOO_SMALL")
-
+    # Resolve the price we will ACTUALLY pay before sizing. A buy goes out at the limit, not at
+    # the signalled ask, so sizing off `price` while posting at `price + limit_offset_cents`
+    # spent count*offset more than the stake — quietly breaching max_stake_per_pick_cents (the
+    # "absolute cap on one trade's risk") and under-crediting window_committed_cents by the same
+    # amount, which let a window fill past its nominal ceiling.
     limit = price + int(cfg.limit_offset_cents)
     limit = max(1, min(99, limit))
     # never let the offset push the limit outside the sanity band
     limit = max(cfg.min_price_cents, min(cfg.max_price_cents, limit))
 
-    return Decision(True, "OK", count=count, limit_price_cents=limit, stake_cents=count * price)
+    count = stake // limit   # whole contracts only (integer cents), at the price we pay
+    if count < 1:
+        return Decision(False, "SIZE_TOO_SMALL")
+
+    # Book the true worst-case cash out (a full fill at the limit) so the per-window budget and
+    # the ledger both reflect money actually committed.
+    return Decision(True, "OK", count=count, limit_price_cents=limit, stake_cents=count * limit)
 
 
 def apply_fill(state: PortfolioState, pick: Pick, decision: Decision) -> PortfolioState:

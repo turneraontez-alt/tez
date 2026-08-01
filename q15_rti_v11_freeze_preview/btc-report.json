@@ -1,0 +1,61 @@
+{
+  "allowed_feature_profile_key_count": 425,
+  "artifact_emitted": false,
+  "audit_version": "q15-rti-microstructure-locked-freeze-v2",
+  "automatic_promotion": false,
+  "cohort": "BTC",
+  "design_id": "q15-rti-market-residual-cross-asset-regime-v11",
+  "design_sha256": "e4a5d65485d7559e2eaa84a82d1aeca63f1f87a42914916438af9034c79b0480",
+  "execution_cost_model_version": "rti-quote-plus-slippage-fee-at-fill-20260721-v2",
+  "feature_profile_allow_list_enforced": true,
+  "fee_schedule_version": "kalshi-fee-schedule-20260707",
+  "final_model_fit_performed": false,
+  "generated_at": "2026-07-22T08:07:53.793949+00:00",
+  "model_fit_performed": false,
+  "outcome_labels_read": false,
+  "paper_only": true,
+  "raw_threshold_json_selected_by_cli_loader": false,
+  "readiness": {
+    "artifact_emitted": false,
+    "audit_version": "q15-rti-microstructure-preregister-readiness-v1",
+    "cohorts": {
+      "BTC": {
+        "complete_close_windows": 38,
+        "minimum_complete_close_windows": 150,
+        "ready_for_locked_freeze": false,
+        "windows_remaining": 112
+      },
+      "NON_BTC_TRANSFER": {
+        "complete_close_windows": 38,
+        "minimum_complete_close_windows": 60,
+        "ready_for_locked_freeze": false,
+        "windows_remaining": 22
+      }
+    },
+    "complete_microstructure_close_windows": 38,
+    "coverage_clean": true,
+    "design_id": "q15-rti-market-residual-cross-asset-regime-v11",
+    "design_sha256": "e4a5d65485d7559e2eaa84a82d1aeca63f1f87a42914916438af9034c79b0480",
+    "feature_count": 71,
+    "feature_schema_version": "rti-probability-microstructure-features-v11",
+    "generated_at": "2026-07-22T08:07:53.793949+00:00",
+    "incomplete_seven_asset_windows": 9,
+    "model_feature_timestamp_failures": 0,
+    "model_feature_unavailable_rows": 0,
+    "model_fit_performed": false,
+    "outcome_labels_read": false,
+    "paper_only": true,
+    "partial_schema_windows": 0,
+    "readiness_integrity_scope": "design_eligible_model_windows",
+    "ready_for_any_locked_freeze": false,
+    "schema_complete_microstructure_close_windows": 88,
+    "status": "WAITING_FOR_COMPLETE_WINDOWS",
+    "timestamp_alignment_failures": 0,
+    "unusable_model_feature_close_windows": 0
+  },
+  "status": "WAITING_FOR_COMPLETE_WINDOWS",
+  "untouched_test_labels_read": false,
+  "walk_forward_protocol_id": "q15-rti-v11-expanding-walk-forward-evaluation-v2",
+  "walk_forward_protocol_sha256": "04600797bfbb2170c36972a32c40a4acccba52df37804f79a45b454603c1408b",
+  "walk_forward_required_before_untouched_test": true
+}

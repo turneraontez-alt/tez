@@ -8,7 +8,36 @@ values rebound after startup (e.g. _last_cycle_ok) stay live. Endpoints keep
 their original function names — the frozen route-table test pins this.
 """
 
+import threading
+
 _app = None
+_health_cache = None
+_health_cache_at = None
+_health_cache_lock = threading.RLock()
+
+
+def _exact_capture_guard_state(now: float) -> dict:
+    """Protect the 60-second independent-path history from health contention."""
+    epoch = int(float(now))
+    phase = (epoch % 900 + 900) % 900
+    capture_phase = 120
+    seconds_until = (capture_phase - phase + 900) % 900
+    seconds_since = (phase - capture_phase + 900) % 900
+    protected_before_seconds = 75
+    protected_after_seconds = 5
+    protected = bool(
+        seconds_until <= protected_before_seconds
+        or seconds_since <= protected_after_seconds
+    )
+    return {
+        "protected": protected,
+        "capture_phase_seconds": capture_phase,
+        "phase_seconds": phase,
+        "seconds_until_exact_capture": seconds_until,
+        "seconds_since_exact_capture": seconds_since,
+        "protected_before_seconds": protected_before_seconds,
+        "protected_after_seconds": protected_after_seconds,
+    }
 
 
 def register(flask_app, host):
@@ -140,7 +169,36 @@ def register(flask_app, host):
     @flask_app.route("/api/health")
     @flask_app.route("/data/health")
     def health():
+        global _health_cache, _health_cache_at
         now = _app.time.time()
+        capture_guard = _exact_capture_guard_state(now)
+        # Building the complete health graph can monopolize the Python process
+        # for several seconds.  During the exact path's required history, serve
+        # the most recent immutable snapshot instead.  Tests do not start the
+        # live refresh loop, so this operational guard cannot mask test state.
+        if bool(getattr(_app, "_refresh_started", False)) and capture_guard[
+            "protected"
+        ]:
+            with _health_cache_lock:
+                cached = _health_cache
+                cached_at = _health_cache_at
+            cache_meta = {
+                **capture_guard,
+                "served_cached": cached is not None,
+                "reason": "EXACT_INDEPENDENT_PATH_COLLECTION_GUARD",
+                "cached_at": cached_at,
+                "cache_age_seconds": (
+                    None if cached_at is None else max(0.0, now - cached_at)
+                ),
+            }
+            if cached is None:
+                return _app.jsonify({
+                    "status": "capture_guard_cache_warming",
+                    "health_cache": cache_meta,
+                })
+            payload = dict(cached)
+            payload["health_cache"] = cache_meta
+            return _app.jsonify(payload)
         with _app.state_lock:
             snaps = list(_app.state.values())
             live = [s for s in snaps if s.get("market_state") == "live"]
@@ -198,6 +256,99 @@ def register(flask_app, host):
             settlement_index_status = {"enabled": False}
 
         try:
+            from q15_upgrade.rti_exact_13m import exact_rti_13m_health
+            exact_rti_13m_status = exact_rti_13m_health()
+        except Exception:
+            exact_rti_13m_status = {"enabled": False}
+
+        try:
+            from q15_upgrade.v11_readiness_monitor import (
+                v11_readiness_monitor_health,
+            )
+            v11_readiness_monitor_status = v11_readiness_monitor_health()
+        except Exception:
+            v11_readiness_monitor_status = {
+                "enabled": False,
+                "paper_only": True,
+                "outcome_labels_read": False,
+                "automatic_scoring": False,
+                "automatic_promotion": False,
+                "real_trading_allowed": False,
+            }
+
+        try:
+            from q15_upgrade.v13_readiness_monitor import (
+                v13_readiness_monitor_health,
+            )
+            v13_readiness_monitor_status = v13_readiness_monitor_health()
+        except Exception:
+            v13_readiness_monitor_status = {
+                "enabled": False,
+                "paper_only": True,
+                "administrative_notices_only": True,
+                "notification_is_trade_signal": False,
+                "outcome_labels_read": False,
+                "automatic_scoring": False,
+                "automatic_promotion": False,
+                "real_trading_allowed": False,
+            }
+
+        try:
+            from q15_upgrade.v14_readiness_monitor import (
+                v14_readiness_monitor_health,
+            )
+            v14_readiness_monitor_status = v14_readiness_monitor_health()
+        except Exception:
+            v14_readiness_monitor_status = {
+                "enabled": False,
+                "paper_only": True,
+                "administrative_notices_only": True,
+                "notification_is_trade_signal": False,
+                "outcome_labels_read": False,
+                "automatic_scoring": False,
+                "automatic_promotion": False,
+                "real_trading_allowed": False,
+            }
+
+        try:
+            from q15_upgrade.independent_path_readiness_monitor import (
+                independent_path_readiness_monitor_health,
+            )
+            independent_path_readiness_monitor_status = (
+                independent_path_readiness_monitor_health()
+            )
+        except Exception:
+            independent_path_readiness_monitor_status = {
+                "enabled": False,
+                "paper_only": True,
+                "administrative_notices_only": True,
+                "notification_is_trade_signal": False,
+                "outcome_labels_read": False,
+                "automatic_scoring": False,
+                "automatic_promotion": False,
+                "real_trading_allowed": False,
+                "feature_selection_performed": False,
+                "thresholds_selected_from_outcomes": False,
+            }
+
+        try:
+            from q15_upgrade.strategy_bots.runtime import (
+                rti_path_13m_challenger_health_cached,
+            )
+            rti_path_13m_challenger_status = (
+                rti_path_13m_challenger_health_cached()
+            )
+        except Exception:
+            rti_path_13m_challenger_status = {
+                "available": False,
+                "paper_only": True,
+                "id": "impulse_strength_v1",
+                "notification_eligible": True,
+                "automatic_promotion": False,
+                "historical_credit_allowed": False,
+            }
+
+        try:
             from ladder_probe import ladder_health
             ladder_probe_status = ladder_health()
         except Exception:
@@ -214,6 +365,12 @@ def register(flask_app, host):
             path_recorder_status = path_recorder_health()
         except Exception:
             path_recorder_status = {"enabled": False}
+
+        try:
+            from q15_upgrade.path_forecast.runtime import path_forecast_health
+            path_forecast_status = path_forecast_health()
+        except Exception:
+            path_forecast_status = {"enabled": False}
 
         try:
             from liq_feed import liq_health
@@ -266,7 +423,7 @@ def register(flask_app, host):
             )
         except Exception as e:
             q15_v95_health = {"available": False, "error": f"{type(e).__name__}: {e}"}
-        return _app.jsonify({
+        payload = {
             "status": "ok",
             "ledger": ledger_health,
             "grading": grading_health,
@@ -295,6 +452,9 @@ def register(flask_app, host):
             "websocket_connected": bool(wsh.get("connected")),
             "websocket_last_message_at": wsh.get("last_message_at"),
             "websocket_book_ages": wsh.get("book_ages"),
+            "kalshi_microstructure_history": wsh.get(
+                "microstructure_history"
+            ),
             "spot_ws": spot_ws_status,
             "spot_depth": spot_depth_status,
             "spot_l3": spot_l3_status,
@@ -302,9 +462,18 @@ def register(flask_app, host):
             "coinbase_adv_l2_snapshot_age_seconds": coinbase_adv_l2_status.get("snapshot_age_seconds"),
             "kraken_l3": kraken_l3_status,
             "settlement_index": settlement_index_status,
+            "rti_exact_13m": exact_rti_13m_status,
+            "v11_readiness_monitor": v11_readiness_monitor_status,
+            "v13_readiness_monitor": v13_readiness_monitor_status,
+            "v14_readiness_monitor": v14_readiness_monitor_status,
+            "independent_path_readiness_monitor": (
+                independent_path_readiness_monitor_status
+            ),
+            "rti_path_13m_challenger": rti_path_13m_challenger_status,
             "ladder_probe": ladder_probe_status,
             "market_activity": market_activity_status,
             "path_recorder": path_recorder_status,
+            "path_forecast": path_forecast_status,
             "liq_feed": liq_feed_status,
             "strangle_shadow": strangle_shadow_status,
             "cycle_watchdog": _app.cycle_watchdog.health(),
@@ -325,4 +494,15 @@ def register(flask_app, host):
             "q15_settings": _app.asdict(_app.upgrade.settings),
             "learning_v4": _app.learner.health_summary(),
             "config": _app.config.as_dict(),
-        })
+            "health_cache": {
+                **capture_guard,
+                "served_cached": False,
+                "reason": None,
+                "cached_at": now,
+                "cache_age_seconds": 0.0,
+            },
+        }
+        with _health_cache_lock:
+            _health_cache = payload
+            _health_cache_at = now
+        return _app.jsonify(payload)

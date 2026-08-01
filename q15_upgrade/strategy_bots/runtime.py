@@ -1,11 +1,13 @@
 """Best-effort runtime hooks for the v3 filtered alert system."""
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import json
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
 from typing import Any, Mapping, Sequence
@@ -18,6 +20,115 @@ from .drift_evidence import enrich_drift_evidence
 from .kraken_l3_depth import enrich_kraken_l3
 from .l2_depth import enrich_coinbase_l2
 from .spot_depth import enrich_spot_depth
+from .rti_probability import (
+    V3_ARTIFACT_PATH,
+    artifact_health as rti_probability_artifact_health,
+    runtime_prediction as rti_probability_prediction,
+)
+from .rti_microstructure_runtime import (
+    artifact_health as rti_v11_artifact_health,
+    runtime_prediction as rti_v11_prediction,
+)
+from .rti_microstructure_v12_runtime import (
+    artifact_health as rti_v12_artifact_health,
+)
+from .rti_microstructure_v4 import (
+    DESIGN_ID as RTI_MICROSTRUCTURE_DESIGN_ID,
+    DESIGN_SHA256 as RTI_MICROSTRUCTURE_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_MICROSTRUCTURE_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_MICROSTRUCTURE_FEATURE_SCHEMA_VERSION,
+)
+from .rti_microstructure_v5 import (
+    DESIGN_ID as RTI_DYNAMICS_DESIGN_ID,
+    DESIGN_SHA256 as RTI_DYNAMICS_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_DYNAMICS_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_DYNAMICS_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_DYNAMICS_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_DYNAMICS_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v6 import (
+    DESIGN_ID as RTI_LEAD_LAG_DESIGN_ID,
+    DESIGN_SHA256 as RTI_LEAD_LAG_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_LEAD_LAG_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_LEAD_LAG_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_LEAD_LAG_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_LEAD_LAG_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v7 import (
+    DESIGN_ID as RTI_CROSS_VENUE_DESIGN_ID,
+    DESIGN_SHA256 as RTI_CROSS_VENUE_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_CROSS_VENUE_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_CROSS_VENUE_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_CROSS_VENUE_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_CROSS_VENUE_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v8 import (
+    DESIGN_ID as RTI_INDEPENDENT_VENUE_DESIGN_ID,
+    DESIGN_SHA256 as RTI_INDEPENDENT_VENUE_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_INDEPENDENT_VENUE_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_INDEPENDENT_VENUE_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_INDEPENDENT_VENUE_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_INDEPENDENT_VENUE_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v9 import (
+    DESIGN_ID as RTI_INDEPENDENT_MICROSTRUCTURE_DESIGN_ID,
+    DESIGN_SHA256 as RTI_INDEPENDENT_MICROSTRUCTURE_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_INDEPENDENT_MICROSTRUCTURE_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_INDEPENDENT_MICROSTRUCTURE_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_INDEPENDENT_MICROSTRUCTURE_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_INDEPENDENT_MICROSTRUCTURE_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v10 import (
+    DESIGN_ID as RTI_COMPACT_MICROSTRUCTURE_DESIGN_ID,
+    DESIGN_SHA256 as RTI_COMPACT_MICROSTRUCTURE_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_COMPACT_MICROSTRUCTURE_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_COMPACT_MICROSTRUCTURE_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_COMPACT_MICROSTRUCTURE_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_COMPACT_MICROSTRUCTURE_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v11 import (
+    DESIGN_ID as RTI_CROSS_ASSET_REGIME_DESIGN_ID,
+    DESIGN_SHA256 as RTI_CROSS_ASSET_REGIME_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_CROSS_ASSET_REGIME_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_CROSS_ASSET_REGIME_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_CROSS_ASSET_REGIME_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_CROSS_ASSET_REGIME_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v11_identity import (
+    PROSPECTIVE_BOOTSTRAP_CLUSTER_KEY as RTI_V11_BOOTSTRAP_CLUSTER_KEY,
+    PROSPECTIVE_BOOTSTRAP_CONFIDENCE_LEVEL as RTI_V11_BOOTSTRAP_CONFIDENCE_LEVEL,
+    PROSPECTIVE_BOOTSTRAP_RANDOM_SEED as RTI_V11_BOOTSTRAP_RANDOM_SEED,
+    PROSPECTIVE_BOOTSTRAP_RESAMPLES as RTI_V11_BOOTSTRAP_RESAMPLES,
+    PROSPECTIVE_BOOTSTRAP_VERSION as RTI_V11_BOOTSTRAP_VERSION,
+    PROSPECTIVE_MIN_MEAN_BRIER_IMPROVEMENT as RTI_V11_MIN_BRIER_IMPROVEMENT,
+    PROSPECTIVE_MIN_MEAN_LOG_LOSS_IMPROVEMENT as RTI_V11_MIN_LOG_LOSS_IMPROVEMENT,
+)
+from .rti_microstructure_v12 import (
+    DESIGN_ID as RTI_ORTHOGONAL_COMPACT_DESIGN_ID,
+    DESIGN_SHA256 as RTI_ORTHOGONAL_COMPACT_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_ORTHOGONAL_COMPACT_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_ORTHOGONAL_COMPACT_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_ORTHOGONAL_COMPACT_FIRST_ELIGIBLE_CLOSE_TIME,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_ORTHOGONAL_COMPACT_PROSPECTIVE_AFTER_CLOSE_TIME,
+)
+from .rti_microstructure_v13 import (
+    CALIBRATION_REPORTING_PROTOCOL_ID as RTI_V13_CALIBRATION_REPORTING_PROTOCOL_ID,
+    CALIBRATION_REPORTING_PROTOCOL_SHA256 as RTI_V13_CALIBRATION_REPORTING_PROTOCOL_SHA256,
+    COVARIATE_DRIFT_PROTOCOL_ID as RTI_V13_COVARIATE_DRIFT_PROTOCOL_ID,
+    COVARIATE_DRIFT_PROTOCOL_SHA256 as RTI_V13_COVARIATE_DRIFT_PROTOCOL_SHA256,
+    DESIGN_ID as RTI_COHORT_CONDITIONED_COMPACT_DESIGN_ID,
+    DESIGN_SHA256 as RTI_COHORT_CONDITIONED_COMPACT_DESIGN_SHA256,
+    FEATURE_NAMES as RTI_COHORT_CONDITIONED_COMPACT_FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION as RTI_COHORT_CONDITIONED_COMPACT_FEATURE_SCHEMA_VERSION,
+    FIRST_ELIGIBLE_CLOSE_TIME as RTI_COHORT_CONDITIONED_COMPACT_FIRST_ELIGIBLE_CLOSE_TIME,
+    GEOMETRY_REVIEW_PROTOCOL_ID as RTI_V13_GEOMETRY_REVIEW_PROTOCOL_ID,
+    GEOMETRY_REVIEW_PROTOCOL_SHA256 as RTI_V13_GEOMETRY_REVIEW_PROTOCOL_SHA256,
+    PROSPECTIVE_AFTER_CLOSE_TIME as RTI_COHORT_CONDITIONED_COMPACT_PROSPECTIVE_AFTER_CLOSE_TIME,
+    REPORTING_PROTOCOL_ID as RTI_V13_REPORTING_PROTOCOL_ID,
+    REPORTING_PROTOCOL_SHA256 as RTI_V13_REPORTING_PROTOCOL_SHA256,
+    SELECTIVE_VALUE_CURVE_PROTOCOL_ID as RTI_V13_SELECTIVE_VALUE_CURVE_PROTOCOL_ID,
+    SELECTIVE_VALUE_CURVE_PROTOCOL_SHA256 as RTI_V13_SELECTIVE_VALUE_CURVE_PROTOCOL_SHA256,
+)
 from .ledger import StrategyBotLedger
 from .rules import (
     ACCEPTED,
@@ -29,6 +140,7 @@ from .rules import (
     BOT_FAV_10M,
     BOT_HVF_DEPTH_FLOW,
     BOT_HYPE_YES,
+    BOT_RTI_PATH_13M,
     BOT_DRIFT_ACCURACY_V91,
     BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_BALANCED_V95,
@@ -45,6 +157,14 @@ from .rules import (
     REJECTED,
     RESEARCH_ONLY,
     DRIFT_CORE_RULE_VERSION,
+    RTI_PATH_13M_INDEX_IDS,
+    RTI_PATH_13M_IMPULSE_CHALLENGER_ID,
+    RTI_PATH_13M_IMPULSE_POLICY_VERSION,
+    RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID,
+    RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID,
+    RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID,
+    RTI_PATH_13M_RULE_VERSION,
+    RTI_EXACT_MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION,
     STRATEGY_VERSION,
     BotDecision,
     decisions_for_row,
@@ -60,6 +180,11 @@ from .rules import (
     drift_no_expansion_decision,
     drift_no_mirror_decision,
     precision13_sized_decision,
+    rti_path_11m30_stability_decision,
+    rti_path_12m_confirmation_decision,
+    rti_path_12m30_confirmation_decision,
+    rti_path_13m_decision,
+    rti_path_13m_rule_version,
     source_side,
     top_pick_13m_decision,
     warn_flip_entry_decision,
@@ -82,6 +207,706 @@ _thirteen_m_stats_warning_logged = False
 _thirteen_m_flow_warning_logged = False
 
 DRIFT_DECISION_FEATURE_SCHEMA_VERSION = "drift-decision-evidence-v2"
+V11_FIRST_FEATURE_REVIEW_WINDOWS = 30
+
+
+def _v11_collection_readiness_headline(
+    exact_feature_coverage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose only design-bound executable V11 windows in compact health."""
+    raw = exact_feature_coverage.get(
+        "cross_asset_regime_v11_model_readiness", {}
+    )
+    if not isinstance(raw, Mapping):
+        raw = {}
+    try:
+        feature_count = int(raw.get("feature_count") or 0)
+        windows = max(0, int(raw.get("complete_executable_close_windows") or 0))
+        schema_windows = max(0, int(raw.get("schema_complete_close_windows") or 0))
+        unavailable = max(0, int(raw.get("feature_unavailable_rows") or 0))
+        timestamp_failures = max(
+            0, int(raw.get("timestamp_alignment_failures") or 0)
+        )
+        unusable = max(0, int(raw.get("unusable_close_windows") or 0))
+    except (TypeError, ValueError):
+        feature_count = 0
+        windows = schema_windows = unavailable = timestamp_failures = unusable = 0
+    identity_ok = bool(
+        raw.get("design_id") == RTI_CROSS_ASSET_REGIME_DESIGN_ID
+        and raw.get("design_sha256") == RTI_CROSS_ASSET_REGIME_DESIGN_SHA256
+        and raw.get("feature_schema_version")
+        == RTI_CROSS_ASSET_REGIME_FEATURE_SCHEMA_VERSION
+        and feature_count == len(RTI_CROSS_ASSET_REGIME_FEATURE_NAMES)
+    )
+    safety_ok = bool(
+        raw.get("paper_only") is True
+        and raw.get("notification_eligible") is False
+        and raw.get("real_trading_allowed") is False
+        and raw.get("readiness_uses_outcome_labels") is False
+        and raw.get("model_fit_performed") is False
+        and raw.get("artifact_emitted") is False
+    )
+    valid = identity_ok and safety_ok
+    if not valid:
+        windows = schema_windows = unavailable = timestamp_failures = unusable = 0
+    cohorts = raw.get("cohorts", {})
+    if not isinstance(cohorts, Mapping):
+        cohorts = {}
+    cohort_headline: dict[str, Any] = {}
+    for cohort, minimum in (("NON_BTC_TRANSFER", 60), ("BTC", 150)):
+        metrics = cohorts.get(cohort, {})
+        if not isinstance(metrics, Mapping):
+            metrics = {}
+        try:
+            reported_minimum = int(
+                metrics.get("minimum_complete_close_windows") or 0
+            )
+        except (TypeError, ValueError):
+            reported_minimum = 0
+        cohort_valid = valid and reported_minimum == minimum
+        remaining = max(0, minimum - windows) if cohort_valid else minimum
+        cohort_headline[cohort] = {
+            "minimum_complete_close_windows": minimum,
+            "windows_remaining": remaining,
+            "ready_for_locked_freeze": bool(cohort_valid and windows >= minimum),
+        }
+    return {
+        "available": valid,
+        "design_id": RTI_CROSS_ASSET_REGIME_DESIGN_ID,
+        "design_sha256": RTI_CROSS_ASSET_REGIME_DESIGN_SHA256,
+        "feature_schema_version": RTI_CROSS_ASSET_REGIME_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_CROSS_ASSET_REGIME_FEATURE_NAMES),
+        "complete_executable_close_windows": windows,
+        "schema_complete_close_windows": schema_windows,
+        "feature_unavailable_rows": unavailable,
+        "timestamp_alignment_failures": timestamp_failures,
+        "unusable_close_windows": unusable,
+        "first_feature_review_windows": V11_FIRST_FEATURE_REVIEW_WINDOWS,
+        "windows_remaining_to_first_feature_review": max(
+            0, V11_FIRST_FEATURE_REVIEW_WINDOWS - windows
+        ),
+        "first_feature_review_ready": bool(
+            valid and windows >= V11_FIRST_FEATURE_REVIEW_WINDOWS
+        ),
+        "cohorts": cohort_headline,
+        "paper_only": True,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "status": (
+            "OUTCOME_BLIND_FIRST_FEATURE_REVIEW_READY"
+            if valid and windows >= V11_FIRST_FEATURE_REVIEW_WINDOWS
+            else "ACCUMULATING_EXECUTABLE_WINDOWS"
+            if valid
+            else "INVALID_OR_UNAVAILABLE_V11_READINESS"
+        ),
+    }
+
+
+def _v12_collection_readiness_headline(
+    exact_feature_coverage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose only design-bound executable V12 windows in compact health."""
+    raw = exact_feature_coverage.get(
+        "orthogonal_compact_v12_model_readiness", {}
+    )
+    if not isinstance(raw, Mapping):
+        raw = {}
+    try:
+        feature_count = int(raw.get("feature_count") or 0)
+        windows = max(0, int(raw.get("complete_executable_close_windows") or 0))
+        schema_windows = max(0, int(raw.get("schema_complete_close_windows") or 0))
+        unavailable = max(0, int(raw.get("feature_unavailable_rows") or 0))
+        timestamp_failures = max(
+            0, int(raw.get("timestamp_alignment_failures") or 0)
+        )
+        unusable = max(0, int(raw.get("unusable_close_windows") or 0))
+    except (TypeError, ValueError):
+        feature_count = 0
+        windows = schema_windows = unavailable = timestamp_failures = unusable = 0
+    identity_ok = bool(
+        raw.get("design_id") == RTI_ORTHOGONAL_COMPACT_DESIGN_ID
+        and raw.get("design_sha256") == RTI_ORTHOGONAL_COMPACT_DESIGN_SHA256
+        and raw.get("feature_schema_version")
+        == RTI_ORTHOGONAL_COMPACT_FEATURE_SCHEMA_VERSION
+        and feature_count == len(RTI_ORTHOGONAL_COMPACT_FEATURE_NAMES)
+    )
+    safety_ok = bool(
+        raw.get("paper_only") is True
+        and raw.get("notification_eligible") is False
+        and raw.get("real_trading_allowed") is False
+        and raw.get("readiness_uses_outcome_labels") is False
+        and raw.get("model_fit_performed") is False
+        and raw.get("artifact_emitted") is False
+    )
+    valid = identity_ok and safety_ok
+    if not valid:
+        windows = schema_windows = unavailable = timestamp_failures = unusable = 0
+    cohorts = raw.get("cohorts", {})
+    if not isinstance(cohorts, Mapping):
+        cohorts = {}
+    cohort_headline: dict[str, Any] = {}
+    for cohort, minimum in (("NON_BTC_TRANSFER", 60), ("BTC", 150)):
+        metrics = cohorts.get(cohort, {})
+        if not isinstance(metrics, Mapping):
+            metrics = {}
+        try:
+            reported_minimum = int(
+                metrics.get("minimum_complete_close_windows") or 0
+            )
+        except (TypeError, ValueError):
+            reported_minimum = 0
+        cohort_valid = valid and reported_minimum == minimum
+        cohort_headline[cohort] = {
+            "minimum_complete_close_windows": minimum,
+            "windows_remaining": (
+                max(0, minimum - windows) if cohort_valid else minimum
+            ),
+            "ready_for_locked_freeze": bool(
+                cohort_valid and windows >= minimum
+            ),
+        }
+    return {
+        "available": valid,
+        "design_id": RTI_ORTHOGONAL_COMPACT_DESIGN_ID,
+        "design_sha256": RTI_ORTHOGONAL_COMPACT_DESIGN_SHA256,
+        "feature_schema_version": (
+            RTI_ORTHOGONAL_COMPACT_FEATURE_SCHEMA_VERSION
+        ),
+        "feature_count": len(RTI_ORTHOGONAL_COMPACT_FEATURE_NAMES),
+        "prospective_after_close_time": (
+            RTI_ORTHOGONAL_COMPACT_PROSPECTIVE_AFTER_CLOSE_TIME
+        ),
+        "first_eligible_close_time": (
+            RTI_ORTHOGONAL_COMPACT_FIRST_ELIGIBLE_CLOSE_TIME
+        ),
+        "complete_executable_close_windows": windows,
+        "schema_complete_close_windows": schema_windows,
+        "feature_unavailable_rows": unavailable,
+        "timestamp_alignment_failures": timestamp_failures,
+        "unusable_close_windows": unusable,
+        "first_feature_review_windows": V11_FIRST_FEATURE_REVIEW_WINDOWS,
+        "windows_remaining_to_first_feature_review": max(
+            0, V11_FIRST_FEATURE_REVIEW_WINDOWS - windows
+        ),
+        "first_feature_review_ready": bool(
+            valid and windows >= V11_FIRST_FEATURE_REVIEW_WINDOWS
+        ),
+        "cohorts": cohort_headline,
+        "paper_only": True,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "v11_remains_frozen_parallel_control": True,
+        "status": (
+            "OUTCOME_BLIND_FIRST_FEATURE_REVIEW_READY"
+            if valid and windows >= V11_FIRST_FEATURE_REVIEW_WINDOWS
+            else "ACCUMULATING_EXECUTABLE_WINDOWS"
+            if valid
+            else "INVALID_OR_UNAVAILABLE_V12_READINESS"
+        ),
+    }
+
+
+def _v13_collection_readiness_headline(
+    exact_feature_coverage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose fail-closed prospective V13 feature collection only."""
+    raw = exact_feature_coverage.get(
+        "cohort_conditioned_compact_v13_model_readiness", {}
+    )
+    if not isinstance(raw, Mapping):
+        raw = {}
+    try:
+        feature_count = int(raw.get("feature_count") or 0)
+        windows = max(0, int(raw.get("complete_executable_close_windows") or 0))
+        schema_windows = max(0, int(raw.get("schema_complete_close_windows") or 0))
+        unavailable = max(0, int(raw.get("feature_unavailable_rows") or 0))
+        timestamp_failures = max(
+            0, int(raw.get("timestamp_alignment_failures") or 0)
+        )
+        unusable = max(0, int(raw.get("unusable_close_windows") or 0))
+    except (TypeError, ValueError):
+        feature_count = 0
+        windows = schema_windows = unavailable = timestamp_failures = unusable = 0
+    identity_ok = bool(
+        raw.get("design_id") == RTI_COHORT_CONDITIONED_COMPACT_DESIGN_ID
+        and raw.get("design_sha256")
+        == RTI_COHORT_CONDITIONED_COMPACT_DESIGN_SHA256
+        and raw.get("feature_schema_version")
+        == RTI_COHORT_CONDITIONED_COMPACT_FEATURE_SCHEMA_VERSION
+        and feature_count == len(RTI_COHORT_CONDITIONED_COMPACT_FEATURE_NAMES)
+    )
+    safety_ok = bool(
+        raw.get("paper_only") is True
+        and raw.get("notification_eligible") is False
+        and raw.get("real_trading_allowed") is False
+        and raw.get("readiness_uses_outcome_labels") is False
+        and raw.get("model_fit_performed") is False
+        and raw.get("artifact_emitted") is False
+        and raw.get("v11_and_v12_remain_frozen_parallel_controls") is True
+    )
+    valid = identity_ok and safety_ok
+    if not valid:
+        windows = schema_windows = unavailable = timestamp_failures = unusable = 0
+    cohorts = raw.get("cohorts", {})
+    if not isinstance(cohorts, Mapping):
+        cohorts = {}
+    cohort_headline: dict[str, Any] = {}
+    for cohort, minimum in (("NON_BTC_TRANSFER", 60), ("BTC", 150)):
+        metrics = cohorts.get(cohort, {})
+        if not isinstance(metrics, Mapping):
+            metrics = {}
+        try:
+            reported_minimum = int(
+                metrics.get("minimum_complete_close_windows") or 0
+            )
+        except (TypeError, ValueError):
+            reported_minimum = 0
+        cohort_valid = valid and reported_minimum == minimum
+        cohort_headline[cohort] = {
+            "minimum_complete_close_windows": minimum,
+            "windows_remaining": (
+                max(0, minimum - windows) if cohort_valid else minimum
+            ),
+            "ready_for_locked_freeze": bool(
+                cohort_valid and windows >= minimum
+            ),
+        }
+    return {
+        "available": valid,
+        "design_id": RTI_COHORT_CONDITIONED_COMPACT_DESIGN_ID,
+        "design_sha256": RTI_COHORT_CONDITIONED_COMPACT_DESIGN_SHA256,
+        "feature_schema_version": (
+            RTI_COHORT_CONDITIONED_COMPACT_FEATURE_SCHEMA_VERSION
+        ),
+        "feature_count": len(RTI_COHORT_CONDITIONED_COMPACT_FEATURE_NAMES),
+        "prospective_after_close_time": (
+            RTI_COHORT_CONDITIONED_COMPACT_PROSPECTIVE_AFTER_CLOSE_TIME
+        ),
+        "first_eligible_close_time": (
+            RTI_COHORT_CONDITIONED_COMPACT_FIRST_ELIGIBLE_CLOSE_TIME
+        ),
+        "complete_executable_close_windows": windows,
+        "schema_complete_close_windows": schema_windows,
+        "feature_unavailable_rows": unavailable,
+        "timestamp_alignment_failures": timestamp_failures,
+        "unusable_close_windows": unusable,
+        "first_outcome_blind_review_windows": 60,
+        "windows_remaining_to_first_outcome_blind_review": max(0, 60 - windows),
+        "first_outcome_blind_review_ready": bool(valid and windows >= 60),
+        "geometry_review_protocol_id": RTI_V13_GEOMETRY_REVIEW_PROTOCOL_ID,
+        "geometry_review_protocol_sha256": (
+            RTI_V13_GEOMETRY_REVIEW_PROTOCOL_SHA256
+        ),
+        "geometry_review_windows": 30,
+        "windows_remaining_to_geometry_review": max(0, 30 - windows),
+        "geometry_review_ready": bool(valid and windows >= 30),
+        "covariate_drift_protocol_id": (
+            RTI_V13_COVARIATE_DRIFT_PROTOCOL_ID
+        ),
+        "covariate_drift_protocol_sha256": (
+            RTI_V13_COVARIATE_DRIFT_PROTOCOL_SHA256
+        ),
+        "covariate_drift_review_windows": 60,
+        "windows_remaining_to_covariate_drift_review": max(0, 60 - windows),
+        "covariate_drift_review_ready": bool(valid and windows >= 60),
+        "subgroup_reporting_protocol_id": RTI_V13_REPORTING_PROTOCOL_ID,
+        "subgroup_reporting_protocol_sha256": RTI_V13_REPORTING_PROTOCOL_SHA256,
+        "calibration_reporting_protocol_id": (
+            RTI_V13_CALIBRATION_REPORTING_PROTOCOL_ID
+        ),
+        "calibration_reporting_protocol_sha256": (
+            RTI_V13_CALIBRATION_REPORTING_PROTOCOL_SHA256
+        ),
+        "selective_value_curve_protocol_id": (
+            RTI_V13_SELECTIVE_VALUE_CURVE_PROTOCOL_ID
+        ),
+        "selective_value_curve_protocol_sha256": (
+            RTI_V13_SELECTIVE_VALUE_CURVE_PROTOCOL_SHA256
+        ),
+        "performance_reporting_outcome_labels_read": False,
+        "performance_reporting_changes_deployment_gate": False,
+        "cohorts": cohort_headline,
+        "paper_only": True,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "runtime_scoring_connected": False,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "historical_credit_allowed": False,
+        "v11_and_v12_remain_frozen_parallel_controls": True,
+        "status": (
+            "OUTCOME_BLIND_60_WINDOW_REVIEW_READY"
+            if valid and windows >= 60
+            else "ACCUMULATING_EXECUTABLE_WINDOWS"
+            if valid
+            else "INVALID_OR_UNAVAILABLE_V13_READINESS"
+        ),
+    }
+
+
+def _empty_rti_exact_feature_coverage() -> dict[str, Any]:
+    readiness = {
+        "design_id": RTI_MICROSTRUCTURE_DESIGN_ID,
+        "design_sha256": RTI_MICROSTRUCTURE_DESIGN_SHA256,
+        "feature_schema_version": RTI_MICROSTRUCTURE_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_MICROSTRUCTURE_FEATURE_NAMES),
+        "paper_only": True,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "automatic_refit": False,
+        "automatic_promotion": False,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "schema_complete_close_windows": 0,
+        "complete_executable_close_windows": 0,
+        "unusable_close_windows": 0,
+        "feature_unavailable_rows": 0,
+        "timestamp_alignment_failures": 0,
+        "timestamp_integrity_clean": True,
+        "cohorts": {
+            "NON_BTC_TRANSFER": {
+                "minimum_complete_close_windows": 60,
+                "windows_remaining": 60,
+                "ready_for_locked_freeze": False,
+            },
+            "BTC": {
+                "minimum_complete_close_windows": 150,
+                "windows_remaining": 150,
+                "ready_for_locked_freeze": False,
+            },
+        },
+        "ready_for_any_locked_freeze": False,
+        "status": "WAITING_FOR_COMPLETE_EXECUTABLE_WINDOWS",
+    }
+    dynamics_readiness = {
+        "design_id": RTI_DYNAMICS_DESIGN_ID,
+        "design_sha256": RTI_DYNAMICS_DESIGN_SHA256,
+        "feature_schema_version": RTI_DYNAMICS_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_DYNAMICS_FEATURE_NAMES),
+        "prospective_after_close_time": RTI_DYNAMICS_PROSPECTIVE_AFTER_CLOSE_TIME,
+        "first_eligible_close_time": RTI_DYNAMICS_FIRST_ELIGIBLE_CLOSE_TIME,
+        "paper_only": True,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "automatic_refit": False,
+        "automatic_promotion": False,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "schema_complete_close_windows": 0,
+        "complete_executable_close_windows": 0,
+        "unusable_close_windows": 0,
+        "feature_unavailable_rows": 0,
+        "timestamp_alignment_failures": 0,
+        "timestamp_integrity_clean": True,
+        "cohorts": {
+            "NON_BTC_TRANSFER": {
+                "minimum_complete_close_windows": 60,
+                "windows_remaining": 60,
+                "ready_for_locked_freeze": False,
+            },
+            "BTC": {
+                "minimum_complete_close_windows": 150,
+                "windows_remaining": 150,
+                "ready_for_locked_freeze": False,
+            },
+        },
+        "ready_for_any_locked_freeze": False,
+        "status": "WAITING_FOR_COMPLETE_EXECUTABLE_WINDOWS",
+    }
+    lead_lag_readiness = {
+        "design_id": RTI_LEAD_LAG_DESIGN_ID,
+        "design_sha256": RTI_LEAD_LAG_DESIGN_SHA256,
+        "feature_schema_version": RTI_LEAD_LAG_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_LEAD_LAG_FEATURE_NAMES),
+        "prospective_after_close_time": RTI_LEAD_LAG_PROSPECTIVE_AFTER_CLOSE_TIME,
+        "first_eligible_close_time": RTI_LEAD_LAG_FIRST_ELIGIBLE_CLOSE_TIME,
+        "paper_only": True,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "automatic_refit": False,
+        "automatic_promotion": False,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "schema_complete_close_windows": 0,
+        "complete_executable_close_windows": 0,
+        "unusable_close_windows": 0,
+        "feature_unavailable_rows": 0,
+        "timestamp_alignment_failures": 0,
+        "timestamp_integrity_clean": True,
+        "cohorts": {
+            "NON_BTC_TRANSFER": {
+                "minimum_complete_close_windows": 60,
+                "windows_remaining": 60,
+                "ready_for_locked_freeze": False,
+            },
+            "BTC": {
+                "minimum_complete_close_windows": 150,
+                "windows_remaining": 150,
+                "ready_for_locked_freeze": False,
+            },
+        },
+        "ready_for_any_locked_freeze": False,
+        "status": "WAITING_FOR_COMPLETE_EXECUTABLE_WINDOWS",
+    }
+    cross_venue_readiness = {
+        "design_id": RTI_CROSS_VENUE_DESIGN_ID,
+        "design_sha256": RTI_CROSS_VENUE_DESIGN_SHA256,
+        "feature_schema_version": RTI_CROSS_VENUE_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_CROSS_VENUE_FEATURE_NAMES),
+        "prospective_after_close_time": RTI_CROSS_VENUE_PROSPECTIVE_AFTER_CLOSE_TIME,
+        "first_eligible_close_time": RTI_CROSS_VENUE_FIRST_ELIGIBLE_CLOSE_TIME,
+        "paper_only": True,
+        "notification_eligible": False,
+        "real_trading_allowed": False,
+        "automatic_refit": False,
+        "automatic_promotion": False,
+        "readiness_uses_outcome_labels": False,
+        "model_fit_performed": False,
+        "artifact_emitted": False,
+        "schema_complete_close_windows": 0,
+        "complete_executable_close_windows": 0,
+        "unusable_close_windows": 0,
+        "feature_unavailable_rows": 0,
+        "timestamp_alignment_failures": 0,
+        "timestamp_integrity_clean": True,
+        "cohorts": {
+            "NON_BTC_TRANSFER": {
+                "minimum_complete_close_windows": 60,
+                "windows_remaining": 60,
+                "ready_for_locked_freeze": False,
+            },
+            "BTC": {
+                "minimum_complete_close_windows": 150,
+                "windows_remaining": 150,
+                "ready_for_locked_freeze": False,
+            },
+        },
+        "ready_for_any_locked_freeze": False,
+        "status": "WAITING_FOR_COMPLETE_EXECUTABLE_WINDOWS",
+    }
+    independent_venue_readiness = {
+        **cross_venue_readiness,
+        "design_id": RTI_INDEPENDENT_VENUE_DESIGN_ID,
+        "design_sha256": RTI_INDEPENDENT_VENUE_DESIGN_SHA256,
+        "feature_schema_version": RTI_INDEPENDENT_VENUE_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_INDEPENDENT_VENUE_FEATURE_NAMES),
+        "prospective_after_close_time": RTI_INDEPENDENT_VENUE_PROSPECTIVE_AFTER_CLOSE_TIME,
+        "first_eligible_close_time": RTI_INDEPENDENT_VENUE_FIRST_ELIGIBLE_CLOSE_TIME,
+    }
+    independent_microstructure_readiness = {
+        **independent_venue_readiness,
+        "design_id": RTI_INDEPENDENT_MICROSTRUCTURE_DESIGN_ID,
+        "design_sha256": RTI_INDEPENDENT_MICROSTRUCTURE_DESIGN_SHA256,
+        "feature_schema_version": (
+            RTI_INDEPENDENT_MICROSTRUCTURE_FEATURE_SCHEMA_VERSION
+        ),
+        "feature_count": len(RTI_INDEPENDENT_MICROSTRUCTURE_FEATURE_NAMES),
+        "prospective_after_close_time": (
+            RTI_INDEPENDENT_MICROSTRUCTURE_PROSPECTIVE_AFTER_CLOSE_TIME
+        ),
+        "first_eligible_close_time": (
+            RTI_INDEPENDENT_MICROSTRUCTURE_FIRST_ELIGIBLE_CLOSE_TIME
+        ),
+    }
+    compact_microstructure_readiness = {
+        **independent_microstructure_readiness,
+        "design_id": RTI_COMPACT_MICROSTRUCTURE_DESIGN_ID,
+        "design_sha256": RTI_COMPACT_MICROSTRUCTURE_DESIGN_SHA256,
+        "feature_schema_version": RTI_COMPACT_MICROSTRUCTURE_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_COMPACT_MICROSTRUCTURE_FEATURE_NAMES),
+        "prospective_after_close_time": RTI_COMPACT_MICROSTRUCTURE_PROSPECTIVE_AFTER_CLOSE_TIME,
+        "first_eligible_close_time": RTI_COMPACT_MICROSTRUCTURE_FIRST_ELIGIBLE_CLOSE_TIME,
+    }
+    cross_asset_regime_readiness = {
+        **compact_microstructure_readiness,
+        "design_id": RTI_CROSS_ASSET_REGIME_DESIGN_ID,
+        "design_sha256": RTI_CROSS_ASSET_REGIME_DESIGN_SHA256,
+        "feature_schema_version": RTI_CROSS_ASSET_REGIME_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_CROSS_ASSET_REGIME_FEATURE_NAMES),
+        "prospective_after_close_time": RTI_CROSS_ASSET_REGIME_PROSPECTIVE_AFTER_CLOSE_TIME,
+        "first_eligible_close_time": RTI_CROSS_ASSET_REGIME_FIRST_ELIGIBLE_CLOSE_TIME,
+    }
+    orthogonal_compact_readiness = {
+        **cross_asset_regime_readiness,
+        "design_id": RTI_ORTHOGONAL_COMPACT_DESIGN_ID,
+        "design_sha256": RTI_ORTHOGONAL_COMPACT_DESIGN_SHA256,
+        "feature_schema_version": RTI_ORTHOGONAL_COMPACT_FEATURE_SCHEMA_VERSION,
+        "feature_count": len(RTI_ORTHOGONAL_COMPACT_FEATURE_NAMES),
+        "prospective_after_close_time": (
+            RTI_ORTHOGONAL_COMPACT_PROSPECTIVE_AFTER_CLOSE_TIME
+        ),
+        "first_eligible_close_time": (
+            RTI_ORTHOGONAL_COMPACT_FIRST_ELIGIBLE_CLOSE_TIME
+        ),
+    }
+    cohort_conditioned_compact_readiness = {
+        **orthogonal_compact_readiness,
+        "design_id": RTI_COHORT_CONDITIONED_COMPACT_DESIGN_ID,
+        "design_sha256": RTI_COHORT_CONDITIONED_COMPACT_DESIGN_SHA256,
+        "feature_schema_version": (
+            RTI_COHORT_CONDITIONED_COMPACT_FEATURE_SCHEMA_VERSION
+        ),
+        "feature_count": len(RTI_COHORT_CONDITIONED_COMPACT_FEATURE_NAMES),
+        "prospective_after_close_time": (
+            RTI_COHORT_CONDITIONED_COMPACT_PROSPECTIVE_AFTER_CLOSE_TIME
+        ),
+        "first_eligible_close_time": (
+            RTI_COHORT_CONDITIONED_COMPACT_FIRST_ELIGIBLE_CLOSE_TIME
+        ),
+        "v11_and_v12_remain_frozen_parallel_controls": True,
+    }
+    return {
+        "dynamics_extension_v1": {
+            "extension_schema_version": (
+                RTI_EXACT_MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION
+            ),
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "outcome_labels_read": False,
+            "model_fit_performed": False,
+            "notification_eligible": False,
+            "paper_only": True,
+        },
+        "model_feature_v1": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+        },
+        "model_feature_v2": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+        },
+        "model_feature_v3": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+        },
+        "model_feature_v4": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": True,
+        },
+        "model_feature_v5": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v6": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v7": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v8": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v9": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v10": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v11": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v12": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": False,
+        },
+        "model_feature_v13": {
+            "schema_complete_close_windows": 0,
+            "complete_executable_close_windows": 0,
+            "unusable_close_windows": 0,
+            "feature_unavailable_rows": 0,
+            "timestamp_alignment_failures": 0,
+            "primary_preregistered_design": False,
+            "next_preregistered_design": True,
+        },
+        "preregistered_model_readiness": readiness,
+        "dynamics_v5_model_readiness": dynamics_readiness,
+        "lead_lag_v6_model_readiness": lead_lag_readiness,
+        "cross_venue_v7_model_readiness": cross_venue_readiness,
+        "independent_venue_v8_model_readiness": independent_venue_readiness,
+        "independent_microstructure_v9_model_readiness": (
+            independent_microstructure_readiness
+        ),
+        "independent_microstructure_compact_v10_model_readiness": (
+            compact_microstructure_readiness
+        ),
+        "cross_asset_regime_v11_model_readiness": cross_asset_regime_readiness,
+        "orthogonal_compact_v12_model_readiness": orthogonal_compact_readiness,
+        "cohort_conditioned_compact_v13_model_readiness": (
+            cohort_conditioned_compact_readiness
+        ),
+    }
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -351,6 +1176,25 @@ def thirteen_m_sniper_notify_enabled() -> bool:
     return _bool("Q15_V3_13M_SNIPER_NOTIFY", False)
 
 
+def rti_path_13m_enabled() -> bool:
+    return _bool("Q15_V3_RTI_PATH_13M", False)
+
+
+def rti_path_13m_notify_enabled() -> bool:
+    return _bool("Q15_V3_RTI_PATH_13M_NOTIFY", False)
+
+
+def rti_microstructure_v11_paper_record_enabled() -> bool:
+    """Explicit manual opt-in for prospective V11 ledger evidence only."""
+    return _bool("Q15_V3_RTI_MICROSTRUCTURE_V11_PAPER_RECORD", False)
+
+
+def rti_path_13m_assets() -> set[str]:
+    raw = os.environ.get("Q15_V3_RTI_PATH_13M_ASSETS", "BTC")
+    requested = {part.strip().upper() for part in raw.split(",") if part.strip()}
+    return requested.intersection(RTI_PATH_13M_INDEX_IDS)
+
+
 # The three 2026-07-05 books default ON (owner directive: "make everything on by
 # default"). Delivery still requires the V3 Telegram channel itself to be enabled.
 def warn_flip_notify_enabled() -> bool:
@@ -560,6 +1404,20 @@ def _drift_delivery_key(
     return ":".join(parts)
 
 
+def _rti_path_13m_delivery_key(
+    window_key: int,
+    ticker: str,
+    *,
+    rule_version: str = RTI_PATH_13M_RULE_VERSION,
+    strategy_version: str = STRATEGY_VERSION,
+) -> str:
+    return (
+        f"{strategy_version}:rti_path_13m:{rule_version}:"
+        f"{BOT_RTI_PATH_13M}:"
+        f"row:{int(window_key)}:{ticker}"
+    )
+
+
 def _stored_drift_delivery_key(row: Mapping[str, Any]) -> str | None:
     """Rebuild the deterministic outbox key from one persisted decision."""
     bot_name = str(row.get("bot_name") or "")
@@ -567,6 +1425,18 @@ def _stored_drift_delivery_key(row: Mapping[str, Any]) -> str | None:
         window_key = int(row.get("window_key"))
     except (TypeError, ValueError):
         return None
+    if bot_name == BOT_RTI_PATH_13M:
+        ticker = str(row.get("ticker") or "")
+        if not ticker:
+            return None
+        return _rti_path_13m_delivery_key(
+            window_key,
+            ticker,
+            rule_version=str(
+                row.get("source_model_version") or RTI_PATH_13M_RULE_VERSION
+            ),
+            strategy_version=str(row.get("strategy_version") or STRATEGY_VERSION),
+        )
     grouped = bot_name in {BOT_DRIFT_NO_EXPANSION, BOT_DRIFT_NO_MIRROR}
     ticker = None if grouped else str(row.get("ticker") or "")
     if not bot_name or (not grouped and not ticker):
@@ -651,6 +1521,90 @@ def _normalize_delivery_result(result: Any) -> dict[str, Any]:
         "message_id": None,
         "error": None if delivered else "telegram_send_failed",
     }
+
+
+def enqueue_v3_outbox_notification(
+    text: str,
+    *,
+    idempotency_key: str,
+    expires_at: float,
+) -> dict[str, Any]:
+    """Persist a generic V3 message without ever doing network I/O inline.
+
+    MarketLead uses this producer-only surface so its data collection loop can
+    share the durable V3 delivery worker while remaining fail-closed if that
+    worker is disabled or unavailable.
+    """
+    try:
+        expiry = float(expires_at)
+    except (TypeError, ValueError):
+        expiry = float("nan")
+    if not math.isfinite(expiry):
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": "v3_expiry_invalid",
+        }
+    if time.time() >= expiry:
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": "outbox:EXPIRED",
+            "outbox_status": "EXPIRED",
+        }
+    if not telegram_enabled():
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": True,
+            "message_id": None,
+            "error": "v3_telegram_disabled",
+        }
+    if not drift_outbox_enabled():
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": "v3_outbox_required",
+        }
+    outbox = get_drift_outbox()
+    if outbox is None:
+        return {
+            "ok": False,
+            "delivered": False,
+            "muted": False,
+            "message_id": None,
+            "error": "outbox_unavailable",
+        }
+    raw_result = outbox.enqueue_with_result(
+        text,
+        idempotency_key=str(idempotency_key),
+        expires_at=expiry,
+    )
+    result = _normalize_delivery_result(raw_result)
+    result["outbox_status"] = (
+        raw_result.get("outbox_status")
+        if isinstance(raw_result, Mapping)
+        else None
+    ) or outbox.status_by_key(str(idempotency_key))
+    return result
+
+
+def v3_outbox_notification_status(idempotency_key: str) -> str | None:
+    """Read one status without constructing an outbox or starting a worker."""
+    outbox = _drift_outbox
+    if outbox is None:
+        return None
+    try:
+        status = outbox.status_by_key(str(idempotency_key))
+    except Exception:  # noqa: BLE001 - health reconciliation is best effort
+        return None
+    return None if status is None else str(status)
 
 
 def _send_drift_notification(
@@ -1140,6 +2094,239 @@ def record_top_pick_row(row: Mapping[str, Any]) -> int | None:
     except Exception:  # noqa: BLE001 - non-critical side ledger
         logger.warning("v3 top-pick record failed (ignored)", exc_info=True)
         return None
+
+
+def record_rti_path_13m_row(row: Mapping[str, Any]) -> int | None:
+    """Persist one isolated asset RTI cohort and notify accepted paper rows."""
+    if not rti_path_13m_enabled():
+        return None
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return None
+        wk = row.get("window_key")
+        ticker = str(row.get("ticker") or "")
+        asset = str(row.get("asset") or "").upper()
+        rule_version = rti_path_13m_rule_version(asset)
+        if (
+            wk is None
+            or not ticker
+            or asset not in rti_path_13m_assets()
+            or rule_version is None
+        ):
+            return None
+        enriched = _with_book_stats_context(
+            ledger,
+            row,
+            bot_name=BOT_RTI_PATH_13M,
+            prefix="rti_path_13m",
+            threshold_rule_version=rule_version,
+        )
+        enriched = dict(enriched)
+        try:
+            enriched["rti_probability_shadow_v2"] = (
+                rti_probability_prediction(enriched)
+            )
+        except Exception as exc:  # noqa: BLE001 - model shadow fails closed
+            enriched["rti_probability_shadow_v2"] = {
+                "available": False,
+                "prospective": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "historical_credit_allowed": False,
+            }
+        try:
+            v3_artifact = os.environ.get(
+                "Q15_RTI_PROBABILITY_V3_ARTIFACT"
+            ) or V3_ARTIFACT_PATH
+            enriched["rti_probability_shadow_v3"] = (
+                rti_probability_prediction(enriched, v3_artifact)
+            )
+        except Exception as exc:  # noqa: BLE001 - model shadow fails closed
+            enriched["rti_probability_shadow_v3"] = {
+                "available": False,
+                "prospective": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "historical_credit_allowed": False,
+            }
+        if rti_microstructure_v11_paper_record_enabled():
+            try:
+                enriched["rti_microstructure_shadow_v11"] = (
+                    rti_v11_prediction(enriched)
+                )
+            except Exception as exc:  # noqa: BLE001 - V11 shadow fails closed
+                enriched["rti_microstructure_shadow_v11"] = {
+                    "available": False,
+                    "prospective": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "paper_only": True,
+                    "notification_eligible": False,
+                    "automatic_promotion": False,
+                    "real_trading_allowed": False,
+                    "historical_credit_allowed": False,
+                }
+        decision = rti_path_13m_decision(enriched)
+        row_id, recorded = _stored_decision(
+            ledger,
+            decision,
+            enriched,
+            source_system="rti_path_13m",
+        )
+        if recorded is None:
+            return row_id
+        durable_id = int(recorded["id"])
+        challengers = decision.threshold_profile.get("challengers")
+        notification_challengers = tuple(
+            str(challenger_id)
+            for challenger_id, challenger in (
+                challengers.items() if isinstance(challengers, Mapping) else ()
+            )
+            if isinstance(challenger, Mapping)
+            and challenger.get("accepted") is True
+            and challenger.get("notification_eligible") is True
+        )
+        if (
+            not notification_challengers
+            or not rti_path_13m_notify_enabled()
+        ):
+            return durable_id
+        delivery_key = _rti_path_13m_delivery_key(
+            int(wk), ticker, rule_version=rule_version,
+        )
+        if not _notification_needs_delivery(
+            ledger,
+            recorded,
+            idempotency_key=delivery_key,
+        ):
+            return durable_id
+        result = enqueue_v3_outbox_notification(
+            build_v3_alert(_with_feed_degraded_stamp(recorded)),
+            idempotency_key=delivery_key,
+            expires_at=float(recorded.get("close_time")),
+        )
+        status, message_id, error = _delivery_fields(result)
+        ledger.mark_notification(
+            durable_id,
+            status=status,
+            message_id=message_id,
+            error=error,
+        )
+        return durable_id
+    except Exception:  # noqa: BLE001 - paper monitor cannot break live capture
+        logger.warning("v3 RTI path 13M record failed (ignored)", exc_info=True)
+        return None
+
+
+def record_rti_delayed_confirmation_row(
+    row: Mapping[str, Any],
+) -> int | None:
+    """Persist a fresh-quote delayed RTI challenger without notification."""
+    if not rti_path_13m_enabled():
+        return None
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return None
+        wk = row.get("window_key")
+        ticker = str(row.get("ticker") or "")
+        asset = str(row.get("asset") or "").upper()
+        if (
+            wk is None
+            or not ticker
+            or asset not in rti_path_13m_assets()
+            or rti_path_13m_rule_version(asset) is None
+        ):
+            return None
+        interval = str(row.get("interval") or "").upper()
+        if interval == "12M30S":
+            decision = rti_path_12m30_confirmation_decision(row)
+        elif interval == "12M":
+            decision = rti_path_12m_confirmation_decision(row)
+        elif interval == "11M30S":
+            decision = rti_path_11m30_stability_decision(row)
+        else:
+            return None
+        row_id, recorded = _stored_decision(
+            ledger,
+            decision,
+            row,
+            source_system="rti_path_13m",
+        )
+        # This forward experiment intentionally has no delivery surface.  The
+        # durable row is settled by the same authoritative ticker resolver as
+        # its frozen 13M parent and appears only in research health/scoreboards.
+        return row_id if recorded is None else int(recorded["id"])
+    except Exception:  # noqa: BLE001 - research cannot break exact capture
+        logger.warning(
+            "v3 RTI delayed confirmation record failed (ignored)", exc_info=True
+        )
+        return None
+
+
+def record_rti_path_12m30_confirmation_row(
+    row: Mapping[str, Any],
+) -> int | None:
+    """Compatibility wrapper for the frozen +30s challenger."""
+    return record_rti_delayed_confirmation_row(row)
+
+
+def rti_delayed_confirmation_recovery_state(
+    *,
+    ticker: str,
+    close_time: float,
+) -> dict[str, Any] | None:
+    """Rebuild delayed-scheduler lineage from its durable exact parent."""
+    ledger = get_ledger()
+    if ledger is None:
+        return None
+    rows = ledger.rti_delayed_recovery_rows(
+        ticker=str(ticker), close_time=float(close_time)
+    )
+    parents = [
+        row for row in rows
+        if str(row.get("interval") or "").upper() == "13M"
+    ]
+    if len(parents) != 1:
+        return None
+    parent = parents[0]
+    asset = str(parent.get("asset") or "").upper()
+    expected_version = rti_path_13m_rule_version(asset)
+    if (
+        expected_version is None
+        or str(parent.get("source_model_version") or "") != expected_version
+    ):
+        return None
+    raw_profile = parent.get("threshold_json")
+    try:
+        profile = json.loads(str(raw_profile)) if raw_profile else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        profile = {}
+    if not isinstance(profile, Mapping):
+        profile = {}
+    original_side = str(
+        profile.get("rti_side")
+        or parent.get("original_source_side")
+        or parent.get("side")
+        or ""
+    ).upper()
+    if original_side not in {"YES", "NO"}:
+        return None
+    completed_intervals = sorted({
+        str(row.get("interval") or "").upper()
+        for row in rows
+        if str(row.get("interval") or "").upper() in {
+            "12M30S", "12M", "11M30S"
+        }
+    })
+    return {
+        "parent_row_id": int(parent["id"]),
+        "parent_strict_accepted": parent.get("decision_status") == ACCEPTED,
+        "completed_intervals": completed_intervals,
+        "original_source": {
+            "model_version": str(parent.get("source_model_version") or ""),
+            "rti_side": original_side,
+            "rti_path_end_px": profile.get("rti_path_end_px"),
+        },
+    }
 
 
 def record_drift_pick_row(row: Mapping[str, Any]) -> int | None:
@@ -1668,6 +2855,49 @@ def resolve(
         return 0
 
 
+def resolve_ticker(
+    *,
+    ticker: str,
+    official_result: str,
+    now: float | None = None,
+) -> int:
+    """Grade all pending strategy rows for one officially settled contract."""
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return 0
+        return ledger.resolve_ticker(
+            ticker=ticker,
+            official_result=official_result,
+            now=now,
+        )
+    except Exception:  # noqa: BLE001 - non-critical side ledger
+        logger.warning(
+            "v3 strategy-bot contract settlement failed (ignored)",
+            exc_info=True,
+        )
+        return 0
+
+
+def unresolved_rti_tickers(
+    *,
+    now: float | None = None,
+    limit: int = 500,
+) -> list[str]:
+    """Read-only bounded backlog used by the authoritative settlement lane."""
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return []
+        return ledger.unresolved_rti_tickers(now=now, limit=limit)
+    except Exception:  # noqa: BLE001 - health repair cannot block capture
+        logger.warning(
+            "v3 strategy-bot settlement backlog read failed (ignored)",
+            exc_info=True,
+        )
+        return []
+
+
 def reconcile_drift_settlements(events: Any) -> int:
     """Backfill or grade Drift strategy rows from the authoritative Drift ledger."""
     total = 0
@@ -1696,3 +2926,962 @@ def scoreboard() -> dict[str, Any]:
     if ledger is None:
         return {"available": False, "strategy_version": STRATEGY_VERSION, "enabled": False}
     return ledger.scoreboard(STRATEGY_VERSION)
+
+
+def _rti_probability_skill_gate(
+    metrics: Mapping[str, Any] | None,
+    *,
+    min_predictions: int = 30,
+    require_clustered_uncertainty: bool = False,
+) -> dict[str, Any]:
+    """Require proper-score improvement before a probability model can promote."""
+    values = dict(metrics or {})
+    predictions = int(values.get("n") or 0)
+    market_n = int(values.get("market_n") or 0)
+    brier = _drift_num(values.get("brier_score"))
+    market_brier = _drift_num(values.get("market_brier_score"))
+    log_loss = _drift_num(values.get("log_loss"))
+    market_log_loss = _drift_num(values.get("market_log_loss"))
+    paired_complete = predictions > 0 and market_n == predictions
+    brier_improved = bool(
+        brier is not None
+        and market_brier is not None
+        and brier < market_brier
+    )
+    log_loss_improved = bool(
+        log_loss is not None
+        and market_log_loss is not None
+        and log_loss < market_log_loss
+    )
+    raw_bootstrap = values.get("paired_close_window_bootstrap")
+    bootstrap = (
+        dict(raw_bootstrap) if isinstance(raw_bootstrap, Mapping) else {}
+    )
+    brier_delta = (
+        dict(bootstrap.get("brier_delta", {}))
+        if isinstance(bootstrap.get("brier_delta"), Mapping)
+        else {}
+    )
+    log_loss_delta = (
+        dict(bootstrap.get("log_loss_delta", {}))
+        if isinstance(bootstrap.get("log_loss_delta"), Mapping)
+        else {}
+    )
+    brier_upper = _drift_num(brier_delta.get("one_sided_upper"))
+    log_loss_upper = _drift_num(log_loss_delta.get("one_sided_upper"))
+    bootstrap_rows = int(bootstrap.get("rows") or 0)
+    bootstrap_close_windows = int(bootstrap.get("close_windows") or 0)
+    bootstrap_checks = {
+        "available": bootstrap.get("available") is True,
+        "version_exact": (
+            bootstrap.get("version") == RTI_V11_BOOTSTRAP_VERSION
+        ),
+        "cluster_key_exact": (
+            bootstrap.get("cluster_key") == RTI_V11_BOOTSTRAP_CLUSTER_KEY
+        ),
+        "resamples_exact": (
+            bootstrap.get("resamples") == RTI_V11_BOOTSTRAP_RESAMPLES
+        ),
+        "confidence_level_exact": (
+            bootstrap.get("confidence_level")
+            == RTI_V11_BOOTSTRAP_CONFIDENCE_LEVEL
+        ),
+        "random_seed_exact": (
+            bootstrap.get("random_seed") == RTI_V11_BOOTSTRAP_RANDOM_SEED
+        ),
+        "same_close_assets_resampled_together": (
+            bootstrap.get("same_close_assets_resampled_together") is True
+        ),
+        "within_close_assets_equal_weighted": (
+            bootstrap.get("within_close_assets_equal_weighted") is True
+        ),
+        "close_windows_equal_weighted": (
+            bootstrap.get("close_windows_equal_weighted") is True
+        ),
+        "loss_delta_direction_exact": (
+            bootstrap.get("loss_delta_direction") == "MODEL_MINUS_MARKET"
+        ),
+        "minimum_brier_improvement_exact": (
+            bootstrap.get("minimum_mean_brier_improvement")
+            == RTI_V11_MIN_BRIER_IMPROVEMENT
+        ),
+        "minimum_log_loss_improvement_exact": (
+            bootstrap.get("minimum_mean_log_loss_improvement")
+            == RTI_V11_MIN_LOG_LOSS_IMPROVEMENT
+        ),
+        "all_predictions_paired": (
+            predictions > 0 and bootstrap_rows == predictions
+        ),
+        "close_windows_present": bootstrap_close_windows > 0,
+        "brier_one_sided_bound_clears_floor": bool(
+            brier_upper is not None
+            and brier_upper <= -RTI_V11_MIN_BRIER_IMPROVEMENT
+        ),
+        "log_loss_one_sided_bound_clears_floor": bool(
+            log_loss_upper is not None
+            and log_loss_upper <= -RTI_V11_MIN_LOG_LOSS_IMPROVEMENT
+        ),
+        "bootstrap_gate_met": bootstrap.get("gate_met") is True,
+    }
+    clustered_uncertainty_met = all(bootstrap_checks.values())
+    return {
+        "required": True,
+        "min_predictions": int(min_predictions),
+        "predictions": predictions,
+        "market_paired_predictions": market_n,
+        "paired_complete": paired_complete,
+        "brier_score": brier,
+        "market_brier_score": market_brier,
+        "brier_skill_vs_market": values.get("brier_skill_vs_market"),
+        "brier_improved": brier_improved,
+        "log_loss": log_loss,
+        "market_log_loss": market_log_loss,
+        "log_loss_delta_vs_market": values.get(
+            "log_loss_delta_vs_market"
+        ),
+        "log_loss_improved": log_loss_improved,
+        "clustered_uncertainty_required": bool(
+            require_clustered_uncertainty
+        ),
+        "clustered_uncertainty_met": clustered_uncertainty_met,
+        "clustered_uncertainty_checks": bootstrap_checks,
+        "paired_close_window_bootstrap": bootstrap,
+        "met": bool(
+            predictions >= int(min_predictions)
+            and paired_complete
+            and brier_improved
+            and log_loss_improved
+            and (
+                clustered_uncertainty_met
+                if require_clustered_uncertainty
+                else True
+            )
+        ),
+    }
+
+
+def _rti_probability_lineage_gate(
+    scorecard: Mapping[str, Any],
+    *,
+    cohort: str,
+    challenger_id: str,
+) -> dict[str, Any]:
+    """Require one immutable prospective lineage inside each cohort."""
+    by_cohort = scorecard.get("prospective_lineage_by_transfer_cohort", {})
+    summary = (
+        dict(by_cohort.get(cohort, {}))
+        if isinstance(by_cohort, Mapping)
+        and isinstance(by_cohort.get(cohort), Mapping)
+        else {}
+    )
+    expected_probability_field = (
+        "yes_probability"
+        if challenger_id == RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID
+        else "calibrated_yes_probability"
+    )
+    checks = {
+        "point_in_time_stored_evidence_only": scorecard.get(
+            "point_in_time_stored_evidence_only"
+        ) is True,
+        "historical_recomputation_forbidden": scorecard.get(
+            "historical_recomputation_allowed"
+        ) is False,
+        "stored_probability_field_exact": scorecard.get(
+            "stored_probability_field"
+        ) == expected_probability_field,
+        "prospective_rows_present": int(
+            summary.get("prospective_evidence_rows") or 0
+        ) > 0,
+        "single_model_version": summary.get("single_model_version") is True,
+        "single_artifact_sha256": summary.get(
+            "single_artifact_sha256"
+        ) is True,
+        "artifact_sha256_valid": summary.get("artifact_sha256_valid") is True,
+        "evidence_cohort_matches_row_cohort": summary.get(
+            "evidence_cohort_matches_row_cohort"
+        ) is True,
+        "lineage_summary_met": summary.get("met") is True,
+    }
+    if challenger_id == RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID:
+        checks.update({
+            "single_test_state_sha256": summary.get(
+                "single_test_state_sha256"
+            ) is True,
+            "single_test_metrics_sha256": summary.get(
+                "single_test_metrics_sha256"
+            ) is True,
+            "test_state_sha256_valid": summary.get(
+                "test_state_sha256_valid"
+            ) is True,
+            "test_metrics_sha256_valid": summary.get(
+                "test_metrics_sha256_valid"
+            ) is True,
+            "exact_test_design_protocol_lineage": summary.get(
+                "v11_exact_test_design_protocol_lineage"
+            ) is True,
+        })
+    failures = [name for name, passed in checks.items() if not passed]
+    return {
+        "met": not failures,
+        "cohort": cohort,
+        "challenger_id": challenger_id,
+        "checks": checks,
+        "failures": failures,
+        "prospective_evidence_rows": int(
+            summary.get("prospective_evidence_rows") or 0
+        ),
+        "observed_model_versions": summary.get(
+            "observed_model_versions", []
+        ),
+        "observed_artifact_sha256": summary.get(
+            "observed_artifact_sha256", []
+        ),
+        "observed_test_state_sha256": summary.get(
+            "observed_test_state_sha256", []
+        ),
+    }
+
+
+def _v11_locked_artifact_health(cohort: str) -> dict[str, Any]:
+    health = dict(rti_v11_artifact_health(cohort))
+    record_enabled = rti_microstructure_v11_paper_record_enabled()
+    if not record_enabled:
+        ledger_status = "DISABLED_MANUAL_ACTIVATION_REQUIRED"
+    elif health.get("available") is True:
+        ledger_status = "ENABLED_PROSPECTIVE_PAPER_RECORD_ONLY"
+    else:
+        ledger_status = "ENABLED_WAITING_FOR_LOCKED_ARTIFACT"
+    return {
+        **health,
+        "paper_record_enabled": record_enabled,
+        "prospective_ledger_status": ledger_status,
+        "prospective_ledger_notification_eligible": False,
+        "prospective_ledger_real_trading_allowed": False,
+        "prospective_ledger_automatic_promotion": False,
+    }
+
+
+def _v12_locked_artifact_health(cohort: str) -> dict[str, Any]:
+    """Expose validation readiness without an activation or recording path."""
+    health = dict(rti_v12_artifact_health(cohort))
+    return {
+        **health,
+        "paper_record_enabled": False,
+        "prospective_ledger_status": (
+            "DISABLED_COLLECTION_AND_TEST_GATES_REQUIRED"
+        ),
+        "prospective_ledger_notification_eligible": False,
+        "prospective_ledger_real_trading_allowed": False,
+        "prospective_ledger_automatic_promotion": False,
+        "artifact_installation_manual": True,
+        "runtime_scoring_connected": False,
+    }
+
+
+def rti_path_13m_challenger_health() -> dict[str, Any]:
+    """Cheap live status for the notifying exact-13M impulse challenger."""
+    v2_model_health = rti_probability_artifact_health()
+    v3_artifact_health = rti_probability_artifact_health(
+        os.environ.get("Q15_RTI_PROBABILITY_V3_ARTIFACT")
+        or V3_ARTIFACT_PATH
+    )
+    v3_model_health = {
+        **v3_artifact_health,
+        "artifact_numerically_eligible": bool(
+            v3_artifact_health.get("promotion_eligible")
+        ),
+        "promotion_eligible": False,
+        "status": (
+            "INVALID_ARTIFACT"
+            if not v3_artifact_health.get("available")
+            else "ACTIVE_PAPER_RESEARCH_SKILL_NOT_PROVEN"
+        ),
+        "performance_skill_gate": _rti_probability_skill_gate(None),
+        "performance_skill_gate_by_cohort": {},
+    }
+    probability_models = {
+        "v2_quarantined_control": v2_model_health,
+        "v3_challenger": v3_model_health,
+    }
+    v11_locked_artifacts = {
+        cohort: _v11_locked_artifact_health(cohort)
+        for cohort in ("BTC", "NON_BTC_TRANSFER")
+    }
+    v12_locked_artifacts = {
+        cohort: _v12_locked_artifact_health(cohort)
+        for cohort in ("BTC", "NON_BTC_TRANSFER")
+    }
+    empty_probability_scorecards = {
+        challenger_id: {
+            "challenger_id": challenger_id,
+            "available": False,
+            "paper_only": True,
+            "point_in_time_stored_evidence_only": True,
+            "accepted_trade_filter_applied": False,
+            "promotion_prohibited": challenger_id
+            == RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID,
+            "evaluated_evidence_rows": 0,
+            "scoreable_resolved_rows": 0,
+        }
+        for challenger_id in (
+            RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID,
+            RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID,
+            RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID,
+        )
+    }
+    empty_exact_feature_coverage = _empty_rti_exact_feature_coverage()
+    empty_v11_collection_readiness = _v11_collection_readiness_headline(
+        empty_exact_feature_coverage
+    )
+    ledger = get_ledger()
+    if ledger is None:
+        return {
+            "available": False,
+            "paper_only": True,
+            "id": RTI_PATH_13M_IMPULSE_CHALLENGER_ID,
+            "policy_version": RTI_PATH_13M_IMPULSE_POLICY_VERSION,
+            "notification_eligible": True,
+            "automatic_promotion": False,
+            "historical_credit_allowed": False,
+            "strict_control_unchanged": True,
+            "probability_model": v2_model_health,
+            "probability_models": probability_models,
+            "probability_scorecards": empty_probability_scorecards,
+            "v11_locked_artifacts": v11_locked_artifacts,
+            "v12_locked_artifacts": v12_locked_artifacts,
+            "v11_collection_readiness": empty_v11_collection_readiness,
+            "v12_collection_readiness": _v12_collection_readiness_headline(
+                empty_exact_feature_coverage
+            ),
+            "v13_collection_readiness": _v13_collection_readiness_headline(
+                empty_exact_feature_coverage
+            ),
+            "exact_feature_coverage": empty_exact_feature_coverage,
+        }
+    return _rti_path_13m_challenger_health_with_ledger(
+        ledger=ledger,
+        v2_model_health=v2_model_health,
+        v3_model_health=v3_model_health,
+        probability_models=probability_models,
+        v11_locked_artifacts=v11_locked_artifacts,
+        v12_locked_artifacts=v12_locked_artifacts,
+        empty_v11_collection_readiness=empty_v11_collection_readiness,
+        empty_probability_scorecards=empty_probability_scorecards,
+        empty_exact_feature_coverage=empty_exact_feature_coverage,
+    )
+
+
+def _reset_rti_health_snapshot_for_tests() -> None:
+    global _rti_health_snapshot
+    global _rti_health_snapshot_built_monotonic
+    global _rti_health_snapshot_built_epoch
+    global _rti_health_snapshot_refreshing
+    global _rti_health_snapshot_error
+    with _rti_health_snapshot_lock:
+        _rti_health_snapshot = None
+        _rti_health_snapshot_built_monotonic = 0.0
+        _rti_health_snapshot_built_epoch = 0.0
+        _rti_health_snapshot_refreshing = False
+        _rti_health_snapshot_error = None
+        _rti_health_snapshot_event.clear()
+
+
+_RTI_HEALTH_SNAPSHOT_TTL_SECONDS = max(
+    5.0,
+    float(os.environ.get("Q15_RTI_HEALTH_SNAPSHOT_TTL_SECONDS", "60")),
+)
+_rti_health_snapshot_lock = threading.Lock()
+_rti_health_snapshot: dict[str, Any] | None = None
+_rti_health_snapshot_built_monotonic = 0.0
+_rti_health_snapshot_built_epoch = 0.0
+_rti_health_snapshot_refreshing = False
+_rti_health_snapshot_error: str | None = None
+_rti_health_snapshot_event = threading.Event()
+
+
+def _rti_health_warming_snapshot() -> dict[str, Any]:
+    """Return a complete fail-closed shape while the first snapshot builds."""
+    v2 = rti_probability_artifact_health()
+    v3_artifact = rti_probability_artifact_health(
+        os.environ.get("Q15_RTI_PROBABILITY_V3_ARTIFACT")
+        or V3_ARTIFACT_PATH
+    )
+    v3 = {
+        **v3_artifact,
+        "artifact_numerically_eligible": bool(
+            v3_artifact.get("promotion_eligible")
+        ),
+        "promotion_eligible": False,
+        "status": "SCOREBOARD_SNAPSHOT_WARMING",
+        "performance_skill_gate": _rti_probability_skill_gate({}),
+        "performance_skill_gate_by_cohort": {},
+    }
+    probability_scorecards = {
+        challenger_id: {
+            "challenger_id": challenger_id,
+            "available": False,
+            "paper_only": True,
+            "point_in_time_stored_evidence_only": True,
+            "accepted_trade_filter_applied": False,
+            "promotion_prohibited": challenger_id
+            == RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID,
+            "evaluated_evidence_rows": 0,
+            "scoreable_resolved_rows": 0,
+        }
+        for challenger_id in (
+            RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID,
+            RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID,
+            RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID,
+        )
+    }
+    v11_locked_artifacts = {
+        cohort: _v11_locked_artifact_health(cohort)
+        for cohort in ("BTC", "NON_BTC_TRANSFER")
+    }
+    v12_locked_artifacts = {
+        cohort: _v12_locked_artifact_health(cohort)
+        for cohort in ("BTC", "NON_BTC_TRANSFER")
+    }
+    empty_exact_feature_coverage = _empty_rti_exact_feature_coverage()
+    return {
+        "available": False,
+        "paper_only": True,
+        "id": RTI_PATH_13M_IMPULSE_CHALLENGER_ID,
+        "policy_version": RTI_PATH_13M_IMPULSE_POLICY_VERSION,
+        "status": "SCOREBOARD_SNAPSHOT_WARMING",
+        "notification_eligible": True,
+        "automatic_promotion": False,
+        "historical_credit_allowed": False,
+        "strict_control_unchanged": True,
+        "probability_model": v2,
+        "probability_models": {
+            "v2_quarantined_control": v2,
+            "v3_challenger": v3,
+        },
+        "probability_scorecards": probability_scorecards,
+        "v11_locked_artifacts": v11_locked_artifacts,
+        "v12_locked_artifacts": v12_locked_artifacts,
+        "v11_collection_readiness": _v11_collection_readiness_headline(
+            empty_exact_feature_coverage
+        ),
+        "v12_collection_readiness": _v12_collection_readiness_headline(
+            empty_exact_feature_coverage
+        ),
+        "v13_collection_readiness": _v13_collection_readiness_headline(
+            empty_exact_feature_coverage
+        ),
+        "exact_feature_coverage": empty_exact_feature_coverage,
+    }
+
+
+def _refresh_rti_health_snapshot() -> None:
+    global _rti_health_snapshot
+    global _rti_health_snapshot_built_monotonic
+    global _rti_health_snapshot_built_epoch
+    global _rti_health_snapshot_refreshing
+    global _rti_health_snapshot_error
+    try:
+        snapshot = rti_path_13m_challenger_health()
+    except Exception as exc:  # noqa: BLE001 - health must retain last good truth
+        with _rti_health_snapshot_lock:
+            _rti_health_snapshot_error = f"{type(exc).__name__}: {exc}"
+            _rti_health_snapshot_refreshing = False
+            _rti_health_snapshot_event.set()
+        return
+    with _rti_health_snapshot_lock:
+        _rti_health_snapshot = copy.deepcopy(snapshot)
+        _rti_health_snapshot_built_monotonic = time.monotonic()
+        _rti_health_snapshot_built_epoch = time.time()
+        _rti_health_snapshot_error = None
+        _rti_health_snapshot_refreshing = False
+        _rti_health_snapshot_event.set()
+
+
+def _decorate_rti_health_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    now_monotonic: float,
+) -> dict[str, Any]:
+    with _rti_health_snapshot_lock:
+        age = (
+            None
+            if _rti_health_snapshot_built_monotonic <= 0.0
+            else max(
+                0.0,
+                now_monotonic - _rti_health_snapshot_built_monotonic,
+            )
+        )
+        built_at = _rti_health_snapshot_built_epoch or None
+        refreshing = _rti_health_snapshot_refreshing
+        error = _rti_health_snapshot_error
+    out = copy.deepcopy(dict(snapshot))
+    out["health_snapshot"] = {
+        "generated_at": built_at,
+        "age_seconds": age,
+        "ttl_seconds": _RTI_HEALTH_SNAPSHOT_TTL_SECONDS,
+        "stale": age is None or age >= _RTI_HEALTH_SNAPSHOT_TTL_SECONDS,
+        "refreshing": refreshing,
+        "last_refresh_error": error,
+        "stale_while_revalidate": True,
+    }
+    return out
+
+
+def rti_path_13m_challenger_health_cached() -> dict[str, Any]:
+    """Bounded-latency health snapshot with background revalidation.
+
+    The full RTI audit intentionally reconstructs thousands of point-in-time
+    records.  It must never hold the operator's liveness endpoint hostage.  A
+    stale, timestamped snapshot is therefore returned immediately while one
+    daemon refreshes it; predictive decisions and collectors never read this
+    cache.
+    """
+    global _rti_health_snapshot_refreshing
+    now_monotonic = time.monotonic()
+    start_refresh = False
+    with _rti_health_snapshot_lock:
+        snapshot = (
+            None
+            if _rti_health_snapshot is None
+            else copy.deepcopy(_rti_health_snapshot)
+        )
+        age = (
+            math.inf
+            if _rti_health_snapshot_built_monotonic <= 0.0
+            else now_monotonic - _rti_health_snapshot_built_monotonic
+        )
+        if age >= _RTI_HEALTH_SNAPSHOT_TTL_SECONDS and not (
+            _rti_health_snapshot_refreshing
+        ):
+            _rti_health_snapshot_refreshing = True
+            _rti_health_snapshot_event.clear()
+            start_refresh = True
+    if start_refresh:
+        threading.Thread(
+            target=_refresh_rti_health_snapshot,
+            name="q15-rti-health-snapshot",
+            daemon=True,
+        ).start()
+    if snapshot is None:
+        # Give a tiny in-memory/test ledger a chance to produce the full shape,
+        # but keep production health bounded even when the historical DB is big.
+        _rti_health_snapshot_event.wait(timeout=0.25)
+        with _rti_health_snapshot_lock:
+            snapshot = (
+                None
+                if _rti_health_snapshot is None
+                else copy.deepcopy(_rti_health_snapshot)
+            )
+    if snapshot is None:
+        snapshot = _rti_health_warming_snapshot()
+    return _decorate_rti_health_snapshot(
+        snapshot,
+        now_monotonic=time.monotonic(),
+    )
+
+
+def _rti_path_13m_challenger_health_with_ledger(
+    *,
+    ledger: StrategyBotLedger,
+    v2_model_health: Mapping[str, Any],
+    v3_model_health: Mapping[str, Any],
+    probability_models: dict[str, Any],
+    v11_locked_artifacts: Mapping[str, Any],
+    empty_v11_collection_readiness: Mapping[str, Any],
+    empty_probability_scorecards: Mapping[str, Any],
+    empty_exact_feature_coverage: Mapping[str, Any],
+    v12_locked_artifacts: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        system = ledger.rti_path_challenger_scoreboard(STRATEGY_VERSION, min_n=30)
+        probability_scorecards = dict(
+            system.get("probability_scorecards", {})
+        )
+        v3_scorecard = dict(
+            probability_scorecards.get(
+                RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID, {}
+            )
+        )
+        v3_skill_overall = _rti_probability_skill_gate(
+            dict(v3_scorecard.get("overall", {}))
+        )
+        v3_skill_by_cohort = {
+            str(cohort): _rti_probability_skill_gate(dict(metrics))
+            for cohort, metrics in dict(
+                v3_scorecard.get("by_transfer_cohort", {})
+            ).items()
+            if isinstance(metrics, Mapping)
+        }
+        any_v3_skill = any(
+            bool(gate.get("met"))
+            for gate in v3_skill_by_cohort.values()
+        )
+        probability_models["v3_challenger"] = {
+            **v3_model_health,
+            "promotion_eligible": bool(
+                v3_model_health.get("artifact_numerically_eligible")
+                and any_v3_skill
+            ),
+            "status": (
+                "INVALID_ARTIFACT"
+                if not v3_model_health.get("available")
+                else "PAPER_SKILL_GATE_PASSED_MANUAL_REVIEW_REQUIRED"
+                if any_v3_skill
+                else "ACTIVE_PAPER_RESEARCH_SKILL_NOT_PROVEN"
+            ),
+            "performance_skill_gate": v3_skill_overall,
+            "performance_skill_gate_by_cohort": v3_skill_by_cohort,
+        }
+        book = dict(
+            system.get("books", {}).get(RTI_PATH_13M_IMPULSE_CHALLENGER_ID, {})
+        )
+        overall = dict(book.get("overall", {}))
+        resolved = int(overall.get("resolved") or 0)
+        net_pnl = overall.get("fee_adjusted_net_pnl_cents")
+        wilson_low = overall.get("wilson_95_low")
+        fee_breakeven = overall.get("avg_fee_adjusted_breakeven_rate")
+        by_transfer_cohort = dict(book.get("by_transfer_cohort", {}))
+
+        def _criteria(metrics: Mapping[str, Any]) -> bool:
+            cohort_resolved = int(metrics.get("resolved") or 0)
+            cohort_pnl = metrics.get("fee_adjusted_net_pnl_cents")
+            cohort_wilson = metrics.get("wilson_95_low")
+            cohort_breakeven = metrics.get(
+                "avg_fee_slippage_adjusted_breakeven_rate"
+            )
+            return bool(
+                cohort_resolved >= 30
+                and metrics.get("cost_evidence_complete") is True
+                and cohort_pnl is not None
+                and float(cohort_pnl) > 0.0
+                and cohort_wilson is not None
+                and cohort_breakeven is not None
+                and float(cohort_wilson) > float(cohort_breakeven)
+            )
+
+        criteria_by_cohort = {
+            cohort: _criteria(dict(metrics))
+            for cohort, metrics in by_transfer_cohort.items()
+            if isinstance(metrics, Mapping)
+        }
+        promotion_criteria_met = any(criteria_by_cohort.values())
+        exact_feature_coverage = system.get(
+            "exact_feature_coverage", empty_exact_feature_coverage
+        )
+        if not isinstance(exact_feature_coverage, Mapping):
+            exact_feature_coverage = empty_exact_feature_coverage
+        v11_collection_readiness = _v11_collection_readiness_headline(
+            exact_feature_coverage
+        )
+        v12_collection_readiness = _v12_collection_readiness_headline(
+            exact_feature_coverage
+        )
+        v13_collection_readiness = _v13_collection_readiness_headline(
+            exact_feature_coverage
+        )
+        evaluated = int(book.get("evaluated") or 0)
+        qualified = int(book.get("qualified") or 0)
+        challenger_status = (
+            "ZERO_VOLUME_REVIEW_REQUIRED"
+            if evaluated >= 30 and qualified == 0
+            else "ACTIVE"
+            if qualified > 0
+            else "ACCRUING"
+        )
+        review_bars = (30, 60, 150)
+
+        def _compact_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+            resolved_count = int(metrics.get("resolved") or 0)
+            pnl_cents = metrics.get("fee_adjusted_net_pnl_cents")
+            drawdown_cents = metrics.get("max_cumulative_drawdown_cents")
+            return {
+                "resolved": resolved_count,
+                "pnl_scoreable_resolved": int(
+                    metrics.get("pnl_scoreable_resolved") or 0
+                ),
+                "unscoreable_resolved": int(
+                    metrics.get("unscoreable_resolved") or 0
+                ),
+                "cost_evidence_complete": bool(
+                    metrics.get("cost_evidence_complete")
+                ),
+                "label_integrity_failures": int(
+                    metrics.get("label_integrity_failures") or 0
+                ),
+                "correct": int(metrics.get("correct") or 0),
+                "accuracy": metrics.get("accuracy"),
+                "wilson_95_low": metrics.get("wilson_95_low"),
+                "wilson_95_high": metrics.get("wilson_95_high"),
+                "avg_fee_adjusted_breakeven_rate": metrics.get(
+                    "avg_fee_adjusted_breakeven_rate"
+                ),
+                "avg_fee_slippage_adjusted_breakeven_rate": metrics.get(
+                    "avg_fee_slippage_adjusted_breakeven_rate"
+                ),
+                "ten_contract_net_pnl_dollars": (
+                    None
+                    if pnl_cents is None
+                    else float(pnl_cents) * 10.0 / 100.0
+                ),
+                "max_cumulative_drawdown_cents": drawdown_cents,
+                "max_cumulative_drawdown_cents_per_contract": drawdown_cents,
+                "ten_contract_max_drawdown_dollars": (
+                    None
+                    if drawdown_cents is None
+                    else float(drawdown_cents) * 10.0 / 100.0
+                ),
+                "fee_schedule_version": metrics.get("fee_schedule_version"),
+                "execution_cost_model_version": metrics.get(
+                    "execution_cost_model_version"
+                ),
+                "provisional": metrics.get("provisional", True),
+            }
+
+        research_books: dict[str, Any] = {}
+        for book_id, raw_details in dict(system.get("books", {})).items():
+            if not isinstance(raw_details, Mapping):
+                continue
+            details = dict(raw_details)
+            promotion_prohibited = (
+                str(book_id) == RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID
+            )
+            probability_book = str(book_id) in {
+                RTI_PATH_13M_PROBABILITY_V2_CHALLENGER_ID,
+                RTI_PATH_13M_PROBABILITY_V3_CHALLENGER_ID,
+                RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID,
+            }
+            scorecard = dict(
+                probability_scorecards.get(str(book_id), {})
+            )
+            scorecard_cohorts = dict(
+                scorecard.get("by_transfer_cohort", {})
+            )
+            lineage_gates_by_cohort: dict[str, Any] = {}
+            compact_overall = _compact_metrics(
+                dict(details.get("overall", {}))
+            )
+            resolved_count = int(compact_overall["resolved"] or 0)
+            cohort_details: dict[str, Any] = {}
+            for cohort, metrics in dict(
+                details.get("by_transfer_cohort", {})
+            ).items():
+                if not isinstance(metrics, Mapping):
+                    continue
+                compact_cohort = _compact_metrics(dict(metrics))
+                probability_skill_gate = _rti_probability_skill_gate(
+                    dict(scorecard_cohorts.get(str(cohort), {})),
+                    require_clustered_uncertainty=(
+                        str(book_id)
+                        == RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID
+                    ),
+                )
+                lineage_gate = _rti_probability_lineage_gate(
+                    scorecard,
+                    cohort=str(cohort),
+                    challenger_id=str(book_id),
+                )
+                if probability_book:
+                    lineage_gates_by_cohort[str(cohort)] = lineage_gate
+                if probability_book:
+                    compact_cohort["probability_skill_gate"] = (
+                        probability_skill_gate
+                    )
+                    compact_cohort["lineage_integrity_gate"] = lineage_gate
+                compact_cohort["promotion_criteria_met"] = (
+                    False
+                    if promotion_prohibited
+                    else _criteria(metrics)
+                    and (
+                        bool(probability_skill_gate["met"])
+                        if probability_book
+                        else True
+                    )
+                    and (
+                        bool(lineage_gate["met"])
+                        if probability_book
+                        else True
+                    )
+                )
+                cohort_details[str(cohort)] = compact_cohort
+            next_review = next(
+                (bar for bar in review_bars if resolved_count < bar), None
+            )
+            reached = [bar for bar in review_bars if resolved_count >= bar]
+            rejected = _compact_metrics(
+                dict(details.get("rejected_counterfactual", {}))
+            )
+            evaluated_lineage_gates = [
+                gate for gate in lineage_gates_by_cohort.values()
+                if int(gate.get("prospective_evidence_rows") or 0) > 0
+            ]
+            lineage_integrity_failed = bool(
+                probability_book
+                and evaluated_lineage_gates
+                and any(not bool(gate.get("met")) for gate in evaluated_lineage_gates)
+            )
+            research_books[str(book_id)] = {
+                "policy_version": details.get("policy_version"),
+                "notification_eligible": details.get(
+                    "notification_eligible", False
+                ),
+                "automatic_promotion": False,
+                "promotion_prohibited": promotion_prohibited,
+                "probability_skill_gate_required": probability_book,
+                "lineage_integrity_gate_required": probability_book,
+                "lineage_integrity_by_cohort": lineage_gates_by_cohort,
+                "probability_skill_gate": (
+                    _rti_probability_skill_gate(
+                        dict(scorecard.get("overall", {})),
+                        require_clustered_uncertainty=(
+                            str(book_id)
+                            == RTI_PATH_13M_MICROSTRUCTURE_V11_CHALLENGER_ID
+                        ),
+                    )
+                    if probability_book
+                    else None
+                ),
+                "status": (
+                    "QUARANTINED_NUMERICAL_OOD"
+                    if promotion_prohibited
+                    else "LINEAGE_INTEGRITY_FAILED_REVIEW_REQUIRED"
+                    if lineage_integrity_failed
+                    else "ACTIVE_PAPER_RESEARCH"
+                ),
+                "historical_credit_allowed": False,
+                "evaluated": int(details.get("evaluated") or 0),
+                "qualified": int(details.get("qualified") or 0),
+                "rejected": int(details.get("rejected") or 0),
+                "qualification_rate": details.get("qualification_rate"),
+                "failure_counts": details.get("failure_counts", {}),
+                **compact_overall,
+                "by_transfer_cohort": cohort_details,
+                "cohort_mixing_for_promotion_forbidden": True,
+                "pooled_promotion_criteria_ignored": True,
+                "manual_review_bars": list(review_bars),
+                "highest_review_bar_reached": (
+                    None if not reached else max(reached)
+                ),
+                "next_manual_review_bar": next_review,
+                "resolved_until_next_review": (
+                    None
+                    if next_review is None
+                    else max(0, next_review - resolved_count)
+                ),
+                "any_cohort_promotion_criteria_met": any(
+                    bool(metrics.get("promotion_criteria_met"))
+                    for metrics in cohort_details.values()
+                ),
+                "rejected_counterfactual": rejected,
+            }
+        return {
+            "available": True,
+            "paper_only": True,
+            "id": RTI_PATH_13M_IMPULSE_CHALLENGER_ID,
+            "policy_version": book.get("policy_version"),
+            "notification_eligible": True,
+            "automatic_promotion": False,
+            "manual_review_bars": [30, 60, 150],
+            "rows": overall.get("rows", 0),
+            "status": challenger_status,
+            "evaluated": evaluated,
+            "qualified": qualified,
+            "qualification_rate": book.get("qualification_rate"),
+            "failure_counts": book.get("failure_counts", {}),
+            "last_evaluated_close_time": book.get("last_evaluated_close_time"),
+            "resolved": resolved,
+            "correct": overall.get("correct", 0),
+            "accuracy": overall.get("accuracy"),
+            "wilson_95_low": wilson_low,
+            "avg_fee_adjusted_breakeven_rate": fee_breakeven,
+            "avg_fee_slippage_adjusted_breakeven_rate": overall.get(
+                "avg_fee_slippage_adjusted_breakeven_rate"
+            ),
+            "fee_slippage_adjusted_net_pnl_cents": overall.get(
+                "fee_adjusted_net_pnl_cents"
+            ),
+            "ten_contract_net_pnl_dollars": (
+                None if net_pnl is None else float(net_pnl) * 10.0 / 100.0
+            ),
+            "max_cumulative_drawdown_cents": overall.get(
+                "max_cumulative_drawdown_cents"
+            ),
+            "ten_contract_max_drawdown_dollars": (
+                None
+                if overall.get("max_cumulative_drawdown_cents") is None
+                else float(overall["max_cumulative_drawdown_cents"])
+                * 10.0
+                / 100.0
+            ),
+            "pnl_scoreable_resolved": overall.get("pnl_scoreable_resolved"),
+            "unscoreable_resolved": overall.get("unscoreable_resolved"),
+            "cost_evidence_complete": overall.get("cost_evidence_complete"),
+            "label_integrity_failures": overall.get(
+                "label_integrity_failures"
+            ),
+            "fee_schedule_version": overall.get("fee_schedule_version"),
+            "execution_cost_model_version": overall.get(
+                "execution_cost_model_version"
+            ),
+            "provisional": overall.get("provisional", True),
+            "promotion_criteria_met": promotion_criteria_met,
+            "promotion_criteria_by_cohort": criteria_by_cohort,
+            "by_transfer_cohort": by_transfer_cohort,
+            "cohort_mixing_for_promotion_forbidden": True,
+            "research_books": research_books,
+            "probability_model": v2_model_health,
+            "probability_models": probability_models,
+            "probability_scorecards": system.get(
+                "probability_scorecards", empty_probability_scorecards
+            ),
+            "v11_locked_artifacts": dict(v11_locked_artifacts),
+            "v12_locked_artifacts": dict(v12_locked_artifacts or {}),
+            "v11_collection_readiness": v11_collection_readiness,
+            "v12_collection_readiness": v12_collection_readiness,
+            "v13_collection_readiness": v13_collection_readiness,
+            "exact_feature_coverage": exact_feature_coverage,
+            "point_in_time_risk_diagnostics": system.get(
+                "point_in_time_risk_diagnostics", {}
+            ),
+            "delayed_confirmation_matched": system.get(
+                "delayed_confirmation_matched", {}
+            ),
+            "delayed_confirmation_60s_matched": system.get(
+                "delayed_confirmation_60s_matched", {}
+            ),
+            "delayed_flip_60s_matched": system.get(
+                "delayed_flip_60s_matched", {}
+            ),
+            "delayed_confirmation_ladder": system.get(
+                "delayed_confirmation_ladder", {}
+            ),
+            "historical_credit_allowed": False,
+            "strict_control_unchanged": True,
+        }
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        logger.warning("RTI path challenger health failed", exc_info=True)
+        return {
+            "available": False,
+            "paper_only": True,
+            "id": RTI_PATH_13M_IMPULSE_CHALLENGER_ID,
+            "policy_version": RTI_PATH_13M_IMPULSE_POLICY_VERSION,
+            "notification_eligible": True,
+            "automatic_promotion": False,
+            "historical_credit_allowed": False,
+            "strict_control_unchanged": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "probability_model": v2_model_health,
+            "probability_models": probability_models,
+            "probability_scorecards": empty_probability_scorecards,
+            "v11_locked_artifacts": dict(v11_locked_artifacts),
+            "v12_locked_artifacts": dict(v12_locked_artifacts or {}),
+            "v11_collection_readiness": dict(
+                empty_v11_collection_readiness
+            ),
+            "v12_collection_readiness": _v12_collection_readiness_headline(
+                empty_exact_feature_coverage
+            ),
+            "v13_collection_readiness": _v13_collection_readiness_headline(
+                empty_exact_feature_coverage
+            ),
+            "exact_feature_coverage": empty_exact_feature_coverage,
+        }

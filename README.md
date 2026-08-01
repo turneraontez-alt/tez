@@ -17,9 +17,9 @@ Telegram alerts at the 15m, 10m, and 7m checkpoints — plus a between-checkpoin
 - Checkpoint alerts at 15m / 10m / 7m before contract close
 - Between-checkpoint DIP alert when conservative edge ≥ 6¢ appears
 - Reliable Telegram outbox with idempotency keys, retry, and dead-letter
-- Shadow learning engine (read-only — never executes real trades)
+- Shadow learning engine (observational — never executes real trades)
 - Live dashboard at `/`; JSON API at `/api/snapshot`
-- 315+ passing tests across 31 test files
+- 2690+ passing tests across 219 test files
 
 ---
 
@@ -101,16 +101,26 @@ Coinbase/OKX    ──►      │
                    ShadowLearning (read-only, never executes)
 ```
 
-All alert logic is **strictly read-only and paper-only** — no real orders are
-ever placed or submitted.
+The prediction and alert path is **strictly read-only and paper-only** — the model
+chain never places, modifies, or cancels an order.
+
+> **One exception, and it is real money.** `q15_upgrade/executor/` is a separate,
+> default-OFF, opt-in layer that turns v2's paper fire signals into REAL Kalshi
+> orders. It is triple-gated — `Q15_EXEC_ENABLED` (default `false`), `Q15_EXEC_DRY_RUN`
+> (default `true`, logs the order it *would* send), and `Q15_EXEC_KILL` (panic button,
+> blocks all placement). There is a second, independently gated "YES bot"
+> (`Q15_EXEC_YES_*`). Nothing else in the repo can submit an order; the guard tests in
+> `tests/test_q15_v9*.py` enforce that for the decision engine, and the executor has its
+> own coverage in `tests/test_executor.py` and `tests/test_executor_lifecycle.py`.
+> **Do not read "read-only" as "cannot trade" — check the executor env before running.**
 
 ---
 
 ## Tests
 
 ```bash
-python3 -m pytest -q
-# 275 passed, 2 known pre-existing failures in test_q15_self_review_real.py
+python3 -m pytest tests/ -q
+# 2690 passed, 5 skipped
 ```
 
 ---
@@ -136,5 +146,6 @@ q15_upgrade/
   runtime.py            Entry candidate lifecycle
   model.py              Core edge/probability model
   professional_v7.py    Message formatting + diagnostics
-tests/                  25 test files, 275 tests
+q15_upgrade/executor/   OPT-IN live-order layer (default OFF — see the note above)
+tests/                  219 test files, 2690 tests
 ```

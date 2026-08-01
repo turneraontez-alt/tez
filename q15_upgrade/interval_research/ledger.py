@@ -412,6 +412,35 @@ class IntervalResearchLedger:
         with self._lock, closing(self._connect()) as conn:
             return [dict(r) for r in conn.execute(q, args).fetchall()]
 
+    def resolved_results_for_tickers(
+        self, tickers: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """Return only unanimous official results for explicit contracts.
+
+        The bounded caller supplies pending strategy-side tickers.  Grouping
+        and the HAVING clause fail closed if the source ledger ever contains
+        conflicting labels for a contract.
+        """
+        requested = tuple(sorted({str(value) for value in tickers if value}))
+        if not self._available or not requested:
+            return []
+        output: list[dict[str, Any]] = []
+        with self._lock, closing(self._connect()) as conn:
+            for start in range(0, len(requested), 400):
+                chunk = requested[start:start + 400]
+                marks = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT ticker, MIN(official_result) AS official_result, "
+                    "MAX(resolved_at) AS resolved_at "
+                    "FROM interval_captures "
+                    f"WHERE ticker IN ({marks}) "
+                    "AND official_result IN ('YES','NO') GROUP BY ticker "
+                    "HAVING COUNT(DISTINCT official_result)=1",
+                    chunk,
+                ).fetchall()
+                output.extend(dict(row) for row in rows)
+        return sorted(output, key=lambda row: str(row.get("ticker") or ""))
+
     def counts(self) -> dict[str, Any]:
         """Row counts by interval and a captured-vs-missing split, for the report."""
         if not self._available:

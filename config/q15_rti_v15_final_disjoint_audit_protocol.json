@@ -1,0 +1,39 @@
+{
+  "protocol_id": "q15-rti-v15-non-btc-final-disjoint-audit-v1",
+  "protocol_status": "FROZEN_BEFORE_ANY_FINAL_DISJOINT_POPULATION_LABEL_ACCESS",
+  "frozen_at": "2026-07-23T23:22:00-04:00",
+  "cohort": "NON_BTC_TRANSFER",
+  "applies_to_design_id": "q15-rti-market-anchored-independent-path-augmented-residual-v15",
+  "applies_to_design_sha256": "8c6facc23a0a56968c8a24408272f676923e78a7b51111a39122577d902f0ba7",
+  "applies_to_evaluation_protocol_id": "q15-rti-v15-path-augmented-nested-safe-expanding-walk-forward-v1",
+  "applies_to_evaluation_protocol_sha256": "e4233be29f211e314344d817de296ca3ef99f5026f67edcaadbe2a44d25b3536",
+  "ambiguous_parent_audit_seal_sha256": [
+    "4dc62ef1c00ddee075d033b1d7131bee1d17480232c36be27fe2ec9bcf1ac5a3",
+    "6a501bf7bc40c4b1e202c031b4712565756a4bb9af73c337865d22207bd60617"
+  ],
+  "ambiguous_parent_pretest_reservation_sha256": [
+    "9ab88d455978b62b2d4c1d90f5b694f53f189cac3350bd449cfb9dbf4e9e8e79",
+    "bf7e3da82dbb1008bd96dd82c82819d4d3240302e1fe88f7ed9070dd2b27f3cf"
+  ],
+  "ambiguous_parent_result_files_must_be_absent": true,
+  "ambiguous_parent_scoring_performed": false,
+  "excluded_authorized_close_windows": 96,
+  "excluded_authorized_rows": 576,
+  "excluded_authorized_close_times_sha256": "406865685aa3295e91d18c9fe1e9c4a3a22d797a4d249474cad638b33c73b1b6",
+  "excluded_authorized_row_ids_sha256": "ada9a6471284a2b4a2b6d42d77e12b9ebc440d528e6c90382f21ccde9d5e5672",
+  "all_previously_authorized_close_windows_excluded_regardless_of_outcome": true,
+  "selection_rule": "EARLIEST_60_COMPLETE_V15_WINDOWS_DISJOINT_FROM_ALL_96_PREVIOUSLY_AUTHORIZED_CLOSE_WINDOWS",
+  "minimum_complete_close_windows": 60,
+  "development_train_windows": 36,
+  "calibration_windows": 12,
+  "untouched_test_windows": 12,
+  "same_close_assets_share_every_fold": true,
+  "features_models_thresholds_costs_and_gates_unchanged": true,
+  "outcome_values_used_for_selection": false,
+  "final_disjoint_population_labels_read_before_freeze": false,
+  "authoritative_kalshi_finalized_result_and_settlement_ts_required": true,
+  "resolved_local_label_must_agree_with_kalshi": true,
+  "local_cache_timing_cannot_override_kalshi_settlement_ts": true,
+  "automatic_promotion": false,
+  "real_trading_allowed": false
+}

@@ -6,10 +6,13 @@ import sqlite3
 import sys
 import time
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
 from spot_depth import SpotDepthRecorder, _configured_assets, spot_depth_health
+import spot_depth as spot_depth_module
 
 
 def _row(path):
@@ -51,6 +54,102 @@ def test_coinbase_depth_and_trade_are_recorded(tmp_path):
     assert row["trade_sell_qty_60s"] == 0.4
     assert row["last_trade_side"] == "sell"
     assert row["trade_side_semantics"] == "aggressor"
+
+
+def test_live_capture_does_not_wait_for_periodic_database_write(tmp_path):
+    db = str(tmp_path / "depth.sqlite3")
+    feed = SpotDepthRecorder(assets=["BTC"], db_path=db)
+    feed._handle_coinbase(json.dumps({
+        "type": "snapshot",
+        "product_id": "BTC-USD",
+        "bids": [["100.0", "2.0"]],
+        "asks": [["100.5", "1.5"]],
+    }))
+
+    snapshot = feed.capture_current("BTC")
+    assert snapshot is not None
+    assert snapshot["best_bid"] == 100.0
+    assert snapshot["best_ask"] == 100.5
+    assert snapshot["created_at"] <= time.time()
+    assert snapshot["spot_mid_path_schema_version"] == "spot-mid-path-local-v1"
+    assert snapshot["spot_mid_window_complete_60s"] is False
+    assert not os.path.exists(db)
+
+
+def test_spot_mid_path_is_local_complete_and_excludes_future_rows(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("Q15_SPOT_DEPTH_RECORD_SECONDS", "5")
+    clock = [1000.0]
+    monkeypatch.setattr(spot_depth_module.time, "time", lambda: clock[0])
+    feed = SpotDepthRecorder(
+        assets=["BTC"], db_path=str(tmp_path / "mid-path.sqlite3")
+    )
+    for step in range(13):
+        clock[0] = 1000.0 + step * 5.0
+        bid = 100.0 + step
+        feed._replace_book(
+            "BTC",
+            provider="coinbase",
+            symbol="BTC-USD",
+            bids=[[bid, 2.0]],
+            asks=[[bid + 1.0, 2.0]],
+            ts=clock[0],
+        )
+        assert feed.record_once() == 1
+
+    # A future row must never enter a decision-time path.
+    feed._mid_history["BTC"].append({"created_at": 1065.0, "mid": 999.0})
+    snapshot = feed.capture_current("BTC")
+    assert snapshot is not None
+    assert snapshot["spot_mid_path_time_basis"] == "local_created_at"
+    assert snapshot["spot_mid_window_complete_15s"] is True
+    assert snapshot["spot_mid_window_complete_60s"] is True
+    assert snapshot["spot_mid_path_count_60s"] == 13
+    assert snapshot["spot_mid_path_start_at_60s"] == 1000.0
+    assert snapshot["spot_mid_path_end_at_60s"] == 1060.0
+    assert snapshot["spot_mid_start_60s"] == 100.5
+    assert snapshot["spot_mid_end_60s"] == 112.5
+    assert snapshot["spot_mid_change_bps_60s"] == pytest.approx(
+        (112.5 / 100.5 - 1.0) * 10_000.0
+    )
+    assert snapshot["spot_mid_range_bps_60s"] > 0.0
+    assert snapshot["spot_mid_realized_volatility_bps_60s"] > 0.0
+    assert snapshot["spot_mid_trend_efficiency_60s"] == 1.0
+    assert snapshot["spot_mid_path_max_gap_seconds_60s"] == 5.0
+    assert feed.health()["mid_history_rows"]["BTC"] == 14
+    feed.close()
+
+
+def test_spot_mid_path_fails_closed_on_restart_or_continuity_gap(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("Q15_SPOT_DEPTH_RECORD_SECONDS", "5")
+    clock = [2000.0]
+    monkeypatch.setattr(spot_depth_module.time, "time", lambda: clock[0])
+    feed = SpotDepthRecorder(
+        assets=["BTC"], db_path=str(tmp_path / "mid-gap.sqlite3")
+    )
+    feed._replace_book(
+        "BTC", provider="coinbase", symbol="BTC-USD",
+        bids=[[100.0, 1.0]], asks=[[101.0, 1.0]], ts=clock[0],
+    )
+    assert feed.record_once() == 1
+    clock[0] = 2060.0
+    feed._replace_book(
+        "BTC", provider="coinbase", symbol="BTC-USD",
+        bids=[[101.0, 1.0]], asks=[[102.0, 1.0]], ts=clock[0],
+    )
+    snapshot = feed.capture_current("BTC")
+    assert snapshot is not None
+    assert snapshot["spot_mid_window_complete_60s"] is False
+    assert "INSUFFICIENT_PATH_SAMPLES" in (
+        snapshot["spot_mid_path_missing_reason_60s"]
+    )
+    assert "PATH_CONTINUITY_GAP" in (
+        snapshot["spot_mid_path_missing_reason_60s"]
+    )
+    feed.close()
 
 
 def test_coinbase_last_match_and_errors_are_recorded(tmp_path):

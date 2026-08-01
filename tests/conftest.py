@@ -35,6 +35,30 @@ def _ultoim_off_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _marketlead_off_in_unrelated_tests(monkeypatch):
+    """Keep generic run-cycle tests out of the live prospective audit DB.
+
+    MarketLead unit tests construct an explicit runner with a temporary DB, so
+    disabling only the process-global ``get_runner`` path preserves their
+    coverage while preventing test-created rule registrations or observations.
+    """
+    monkeypatch.setenv("Q15_MARKETLEAD_ENABLED", "false")
+    try:
+        from q15_upgrade.marketlead.runner import reset_runner
+
+        reset_runner()
+    except Exception:  # pragma: no cover - package may be absent in a partial env
+        pass
+    yield
+    try:
+        from q15_upgrade.marketlead.runner import reset_runner
+
+        reset_runner()
+    except Exception:  # pragma: no cover
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _windows_tempdir_ignores_sqlite_cleanup_locks(monkeypatch):
     """Keep Windows local pytest runs from failing on open SQLite temp files.
 

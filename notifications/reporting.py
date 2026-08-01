@@ -8,6 +8,7 @@ store.claim_event so the chat only ever gets one report per hour.
 """
 import logging
 import os
+import threading
 from datetime import datetime, timezone, timedelta
 
 try:  # stdlib on 3.9+; needs the `tzdata` wheel on a bare container.
@@ -490,13 +491,24 @@ class HourlyReporter:
         # frequently-restarting host could delay/drop reports.)
         if first_call and utc.minute >= _env_int("Q15_HOURLY_CATCHUP_MINUTES", 5, 0, 59):
             return
+        # Report construction scans several large research ledgers. Keep that
+        # display-only work off the freshness-critical refresh loop; the durable
+        # outbox and cross-instance claim still protect delivery exactly once.
+        threading.Thread(
+            target=self._send_hourly_report,
+            args=(hour, utc.minute),
+            name=f"hourly-report-{hour}",
+            daemon=True,
+        ).start()
+
+    def _send_hourly_report(self, hour, minute):
         if not self.store.claim_event(f"hourly:{hour}"):
             return  # another instance already sent this hour's report
         try:
             self.notifier.send(self.build_report())
             # Surface how far past the hour delivery actually happened, so a
             # recurring lateness (e.g. a sleeping/ restarting host) is visible.
-            logger.info("Hourly report sent for %s at :%02d past the hour", hour, utc.minute)
+            logger.info("Hourly report sent for %s at :%02d past the hour", hour, minute)
         except Exception as e:
             logger.error(f"hourly report failed: {e}")
 

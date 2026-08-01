@@ -90,9 +90,19 @@ class ExecutorConfig:
     # n=47) but its edge lives entirely at ask>=60 (82.9%, +10.7c/bet, n=41); the sub-60 cheap-NO band
     # is the loss zone (50%, -3.5c/bet, n=6). 60 is the clean cut. Set Q15_EXEC_SECOND_PICK_MIN_ASK.
     second_pick_min_ask: int = field(default_factory=lambda: _int("Q15_EXEC_SECOND_PICK_MIN_ASK", 0))
-    # Hard ceiling on TOTAL stake committed to one (settlement) window, as a fraction of
-    # bankroll — the correlation guard (picks in a window co-settle ~76%). Never exceeded
-    # even if per_pick_pct * max_picks would.
+    # Ceiling on TOTAL stake committed to one (settlement) window, as a fraction of bankroll —
+    # the correlation guard (picks in a window co-settle ~76%), applied when per_pick_pct *
+    # max_picks would exceed it.
+    #
+    # SCOPE — this field binds ONLY in PERCENTAGE sizing mode (flat_stake_cents=0 and no
+    # stake_by_interval entry). In the modes actually shipped today (flat, per-interval) the
+    # window budget is stake * max_picks_per_window and this value is not consulted, because a
+    # per-interval override is defined to supersede the flat stake and the per-pick cap — see
+    # risk.py. So with FLAT sizing the real per-window ceiling is
+    # flat_stake_cents * max_picks_per_window (x the conviction multiplier on an extra pick),
+    # bounded by max_stake_per_pick_cents and the bankroll on hand — NOT this percentage.
+    # If you want a hard %-of-bankroll window ceiling under flat sizing, that is a deliberate
+    # policy change to risk.decide(), not a config tweak.
     max_per_window_pct: float = field(default_factory=lambda: _float("Q15_EXEC_MAX_PER_WINDOW_PCT", 0.08))
     # Stop opening NEW entries once the day's realized P&L is down this fraction of the
     # day-start bankroll (the daily circuit breaker, %-based). Exits still allowed.

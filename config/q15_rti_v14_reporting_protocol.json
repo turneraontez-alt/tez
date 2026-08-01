@@ -1,0 +1,109 @@
+{
+  "protocol_id": "q15-rti-v14-fixed-subgroup-reporting-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_ANY_V14_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-22T17:50:00Z",
+  "applies_to_design_id": "q15-rti-market-anchored-nested-safe-residual-v14",
+  "applies_to_design_sha256": "aa5efa9a986dc575ee4e358777cd2394b38550ad7328154b58a7d06bf55c3dda",
+  "outcome_labels_used_for_protocol": false,
+  "performance_metrics_inspected_before_preregistration": false,
+  "changes_features_model_hyperparameters_entry_policy_or_gates": false,
+  "report_only": true,
+  "paper_only": true,
+  "notification_eligible": false,
+  "real_trading_allowed": false,
+  "automatic_promotion": false,
+  "cohort_pooling_forbidden": true,
+  "same_close_assets_remain_in_same_chronological_fold": true,
+  "untouched_test_scored_once": true,
+  "dimensions": {
+    "asset": {
+      "source": "asset",
+      "categories": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"]
+    },
+    "rti_side": {
+      "source": "stored_point_in_time_side",
+      "categories": ["YES", "NO"]
+    },
+    "absolute_distance_tier": {
+      "source_feature": "yes_signed_distance_bps",
+      "transform": "absolute_value",
+      "unit": "bps",
+      "bins": [
+        {"label": "LT_1_BPS", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+        {"label": "1_TO_LT_3_BPS", "minimum_inclusive": 1.0, "maximum_exclusive": 3.0},
+        {"label": "3_TO_LT_5_BPS", "minimum_inclusive": 3.0, "maximum_exclusive": 5.0},
+        {"label": "5_TO_LT_10_BPS", "minimum_inclusive": 5.0, "maximum_exclusive": 10.0},
+        {"label": "GE_10_BPS", "minimum_inclusive": 10.0, "maximum_exclusive": null}
+      ]
+    },
+    "realized_volatility_tier": {
+      "source_feature": "log1p_realized_volatility_bps",
+      "transform": "expm1",
+      "unit": "bps",
+      "bins": [
+        {"label": "LT_1_BPS", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+        {"label": "1_TO_LT_2_BPS", "minimum_inclusive": 1.0, "maximum_exclusive": 2.0},
+        {"label": "2_TO_LT_4_BPS", "minimum_inclusive": 2.0, "maximum_exclusive": 4.0},
+        {"label": "4_TO_LT_8_BPS", "minimum_inclusive": 4.0, "maximum_exclusive": 8.0},
+        {"label": "GE_8_BPS", "minimum_inclusive": 8.0, "maximum_exclusive": null}
+      ]
+    },
+    "market_regime": {
+      "target_side_source": "stored_point_in_time_side",
+      "median_momentum_feature": "cross_asset_median_momentum_60s",
+      "breadth_feature": "cross_asset_breadth_signed_60s",
+      "broad_projected_breadth_threshold": 0.5,
+      "categories_in_priority_order": [
+        "BROAD_ALIGNED",
+        "THIN_OR_ISOLATED_ALIGNED",
+        "BROAD_OPPOSED",
+        "MIXED_OR_FLAT"
+      ],
+      "rules": {
+        "BROAD_ALIGNED": "target_signed_median_momentum_gt_zero_and_target_signed_breadth_gte_threshold",
+        "THIN_OR_ISOLATED_ALIGNED": "target_signed_median_momentum_gt_zero_otherwise",
+        "BROAD_OPPOSED": "target_signed_median_momentum_lt_zero_and_target_signed_breadth_lte_negative_threshold",
+        "MIXED_OR_FLAT": "otherwise"
+      }
+    }
+  },
+  "required_metrics_per_observed_slice": {
+    "all_rows": [
+      "rows", "close_windows", "accuracy", "wilson_95_low", "wilson_95_high",
+      "market_accuracy", "brier_score", "market_brier_score", "log_loss", "market_log_loss"
+    ],
+    "accepted_picks": [
+      "picks", "pick_frequency_per_close_window", "pick_accuracy",
+      "pick_wilson_95_low", "pick_wilson_95_high", "ten_contract_net_pnl_dollars",
+      "fee_slippage_adjusted_ev_cents_per_trade", "max_drawdown_dollars_at_sim_size"
+    ],
+    "rejected_counterfactual": [
+      "rejected_rows", "predicted_side_accuracy", "predicted_side_wilson_95_low",
+      "predicted_side_wilson_95_high", "quote_executable_rows", "non_executable_rows",
+      "ten_contract_net_pnl_dollars", "fee_slippage_adjusted_ev_cents_per_trade",
+      "max_drawdown_dollars_at_sim_size", "rejection_reason_counts"
+    ]
+  },
+  "rejected_counterfactual_policy": {
+    "paper_counterfactual_only": true,
+    "never_claimed_as_fill": true,
+    "probability_side_rule": "YES_IF_YES_PROBABILITY_GTE_0_5_ELSE_NO",
+    "requires_point_in_time_side_ask": true,
+    "requires_displayed_depth_at_least_simulation_contracts": true,
+    "uses_official_kalshi_fee_schedule": true,
+    "uses_same_two_cent_slippage_per_contract": true,
+    "non_executable_rows_have_no_pnl": true,
+    "rejection_reasons_are_not_mutually_exclusive": true
+  },
+  "known_loss_sensitivity": {
+    "all_pre_v14_known_losses_are_outside_v14_prospective_boundary": true,
+    "known_losses_may_not_be_removed_from_any_v14_metric": true,
+    "no_post_boundary_row_may_be_excluded_by_similarity_to_a_known_loss": true
+  },
+  "residual_trust_reporting": {
+    "selected_factor_reported_for_every_outer_fold": true,
+    "inner_candidate_metrics_reported": true,
+    "market_fallback_frequency_reported": true,
+    "outer_validation_and_test_labels_never_select_factor": true
+  }
+}

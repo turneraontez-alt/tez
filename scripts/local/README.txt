@@ -1,5 +1,12 @@
 Local Windows runner scripts live in this directory.
 
+Start-Q15Local.ps1 protects exact-13M evidence when it detects an already
+running app.  It refuses a voluntary warm restart during the interval where
+the required 60-second history plus the observed cold-start budget overlaps an
+exact capture, and reports when to retry.  A genuinely stopped app still starts
+immediately.  -ForceUnsafeRestart is an emergency-only override and will make
+the affected exact window ineligible when history is incomplete.
+
 Storage maintenance runs automatically before Start-Q15Local.ps1 launches the
 services. Run it manually with:
 

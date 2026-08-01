@@ -15,7 +15,12 @@ import types
 
 import pytest
 
-from notifications.telegram_client import API_URL_TEMPLATE, TelegramSendClient, muted_result
+from notifications.telegram_client import (
+    API_URL_TEMPLATE,
+    TelegramSendClient,
+    muted_result,
+    redact_token,
+)
 
 
 class _Resp:
@@ -106,6 +111,48 @@ def test_undeclared_error_types_with_injected_transport_still_captured():
     result = client.send("x")
     assert result["ok"] is False
     assert result["error"] == "RuntimeError: socket down"
+
+
+# ------------------------------------------------------- bot-token redaction
+# A transport exception's text is built from the request URL, so it embeds
+# ".../bot<TOKEN>/sendMessage". Callers persist result["error"] into their
+# ledgers and those ledgers get exported off-box, so the token must never
+# survive into the result dict.
+
+_REAL_TOKEN = "123456789:AAFake_Token_Value_For_Test_Only"
+
+
+def test_transport_exception_does_not_leak_token_into_result():
+    exc = ValueError(
+        "HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries "
+        f"exceeded with url: /bot{_REAL_TOKEN}/sendMessage (Caused by "
+        "NewConnectionError('failed to resolve'))"
+    )
+    result = _client(_Post([exc]), token=_REAL_TOKEN, retries=0).send("x")
+
+    assert _REAL_TOKEN not in result["error"]
+    assert "/bot***/sendMessage" in result["error"]
+    assert result["error"].startswith("ValueError: ")
+
+
+def test_redact_token_strips_a_token_the_client_was_not_built_with():
+    # Defence in depth: a stale/rotated token in the string still gets scrubbed
+    # even though it does not match the configured one.
+    other = "987654321:BBSomeOtherBotToken"
+    scrubbed = redact_token(f"ConnectionError: url /bot{other}/sendMessage", "tok")
+    assert other not in scrubbed
+    assert "/bot***/sendMessage" in scrubbed
+
+
+@pytest.mark.parametrize("value", [None, "", 0])
+def test_redact_token_passes_falsy_through_unchanged(value):
+    assert redact_token(value, "tok") is value
+
+
+def test_redact_token_replaces_verbatim_token_outside_a_url():
+    assert redact_token(f"auth failed for {_REAL_TOKEN}", _REAL_TOKEN) == (
+        "auth failed for ***"
+    )
 
 
 # ------------------------------------------------------------------ mute gates

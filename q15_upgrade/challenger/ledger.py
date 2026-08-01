@@ -113,8 +113,15 @@ class ShadowLedger:
         # SQLite's default thread affinity would raise on those cross-thread
         # reads/writes, so allow shared access here and rely on the runner's
         # existing serialization around ledger operations.
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, timeout=15.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # The live recorder writes one paired shadow row per asset while the
+        # reporting/refit paths read the same growing ledger.  WAL keeps those
+        # reads from blocking writes; NORMAL durability avoids a full filesystem
+        # sync per observational row while retaining crash-safe WAL commits.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=15000")
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._conn.commit()

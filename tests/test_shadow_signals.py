@@ -15,6 +15,7 @@ import os
 import random
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from q15_upgrade import shadow_signals
@@ -210,6 +211,18 @@ class EvaluationTests(unittest.TestCase):
         rows = self._rows(lambda y, rng: 0.0, n=5)
         scores = shadow_signals.evaluate(rows, shadow_signals.SignalConfig.from_env())
         self.assertTrue(scores["order_flow_persistence"].insufficient)
+
+    def test_numpy_offset_fit_matches_dependency_free_fallback(self):
+        if shadow_signals._np is None:
+            self.skipTest("NumPy fast path is not installed")
+        offsets = [(-1.5 + i * 0.03) for i in range(100)]
+        signals = [((i * 13) % 29 - 14) / 14.0 for i in range(100)]
+        labels = [int((i * 17) % 31 < 15) for i in range(100)]
+        fast = shadow_signals._fit_logistic_offset(offsets, signals, labels, iters=80)
+        with mock.patch.object(shadow_signals, "_np", None):
+            fallback = shadow_signals._fit_logistic_offset(offsets, signals, labels, iters=80)
+        for actual, expected in zip(fast, fallback):
+            self.assertAlmostEqual(actual, expected, places=11)
 
 
 class ReportingAndGatingTests(unittest.TestCase):

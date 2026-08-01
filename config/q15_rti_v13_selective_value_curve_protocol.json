@@ -1,0 +1,60 @@
+{
+  "protocol_id": "q15-rti-v13-fixed-selective-value-curve-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_ANY_V13_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-22T16:49:00Z",
+  "applies_to_design_id": "q15-rti-market-residual-cohort-conditioned-compact-v13",
+  "applies_to_design_sha256": "adc900b5882567446cb3d4a8f5fc0cb795e278dd38db2c6179e54cc83fc673ed",
+  "applies_to_evaluation_protocol_id": "q15-rti-v13-expanding-walk-forward-evaluation-v1",
+  "applies_to_evaluation_protocol_sha256": "8abc35d34ca74bb70b2886913648c6ff4189ba9427eed825b79dddc5955b490c",
+  "applies_to_subgroup_reporting_protocol_id": "q15-rti-v13-fixed-subgroup-reporting-v1",
+  "applies_to_subgroup_reporting_protocol_sha256": "ea4a273530cb2a807d091703703d594ec2e7923cfb173fa5acd3de4d13b2a823",
+  "applies_to_calibration_reporting_protocol_id": "q15-rti-v13-fixed-calibration-reporting-v1",
+  "applies_to_calibration_reporting_protocol_sha256": "cc7e8ddcca5d797d6a1407d3acc0b4d20eba02ee7d8897f9af6c346f6a1120ce",
+  "outcome_labels_used_for_protocol": false,
+  "performance_metrics_inspected_before_preregistration": false,
+  "changes_features_model_hyperparameters_entry_policy_or_gates": false,
+  "curve_population": "every untouched-test row with stored point-in-time quotes",
+  "fixed_expected_value_thresholds_cents": [0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0],
+  "frozen_entry_policy_threshold_cents": 3.0,
+  "all_other_entry_rules_remain_fixed": {
+    "maximum_ask_cents": 62.0,
+    "maximum_spread_cents": 1.5,
+    "minimum_displayed_depth_contracts": 10.0,
+    "simulation_contracts": 10,
+    "official_kalshi_fees": true,
+    "slippage_cents_per_contract": 2.0
+  },
+  "required_metrics_per_threshold": [
+    "decision_rows",
+    "picks",
+    "decision_row_coverage",
+    "pick_frequency_per_close_window",
+    "pick_correct",
+    "pick_accuracy",
+    "pick_wilson_95_low",
+    "pick_wilson_95_high",
+    "ten_contract_net_pnl_dollars",
+    "fee_slippage_adjusted_ev_cents_per_trade",
+    "max_drawdown_dollars_at_sim_size",
+    "selected_row_ids_sha256"
+  ],
+  "curve_invariants": {
+    "higher_threshold_pick_set_must_be_subset": true,
+    "higher_threshold_pick_count_must_not_increase": true,
+    "same_quote_cost_and_depth_rules_at_every_threshold": true,
+    "btc_and_non_btc_never_mixed": true
+  },
+  "interpretation": {
+    "counterfactual_paper_curve_only": true,
+    "never_claimed_as_historical_fills": true,
+    "untouched_test_curve_cannot_select_or_change_the_live_threshold": true,
+    "historical_curve_cannot_promote": true,
+    "future_threshold_change_requires_new_preregistered_prospective_challenger": true
+  },
+  "report_only": true,
+  "changes_deployment_gate": false,
+  "automatic_promotion": false,
+  "notification_eligible": false,
+  "paper_only": true,
+  "real_trading_allowed": false
+}

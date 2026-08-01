@@ -9,6 +9,7 @@ events the champion already produces.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -38,6 +39,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _rti_path_assets() -> set[str]:
+    raw = os.environ.get("Q15_V3_RTI_PATH_13M_ASSETS", "BTC")
+    return {part.strip().upper() for part in raw.split(",") if part.strip()}
+
+
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -46,6 +52,81 @@ def _analysis_value(analysis: Mapping[str, Any], quote: Mapping[str, Any], key: 
     if quote.get(key) is not None:
         return quote.get(key)
     return analysis.get(key)
+
+
+def _unanimous_settlement_events(
+    events: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
+    """Normalize one source batch and fail closed on ticker conflicts."""
+    accepted: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for event in events or ():
+        if not isinstance(event, Mapping):
+            continue
+        ticker = str(event.get("ticker") or event.get("contract") or "").strip()
+        result = str(
+            event.get("result") or event.get("official_result") or ""
+        ).strip().upper()
+        if not ticker or result not in {"YES", "NO"} or ticker in conflicted:
+            continue
+        previous = accepted.get(ticker)
+        if previous is not None and previous != result:
+            accepted.pop(ticker, None)
+            conflicted.add(ticker)
+            continue
+        accepted[ticker] = result
+    return list(accepted.items()), tuple(sorted(conflicted))
+
+
+def _research_analysis_with_quote_freshness(
+    *,
+    asset: str,
+    analysis: Mapping[str, Any],
+    source_snapshots: Mapping[str, Mapping[str, Any]] | None,
+    now: float,
+) -> Mapping[str, Any]:
+    """Attach trusted book-event age to a research-only analysis copy.
+
+    The frozen champion does not currently expose its already-captured
+    ``orderbook_event_ts`` as ``quote_age_seconds``.  RTI and interval research
+    still need the real executable-quote age, so this adapter recomputes it at
+    observation time without mutating the champion analysis or canonical.
+    """
+    quote = _mapping(analysis.get("quote"))
+    if _num(quote.get("quote_age_seconds")) is not None:
+        return analysis
+    snapshot: Mapping[str, Any] | None = None
+    wanted = str(asset).upper()
+    for key, candidate in (source_snapshots or {}).items():
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_asset = str(candidate.get("asset") or key).upper()
+        if candidate_asset == wanted:
+            snapshot = candidate
+            break
+    if snapshot is None:
+        return analysis
+    event_ts = _num(snapshot.get("orderbook_event_ts"))
+    if event_ts is not None and event_ts <= now + 1.0:
+        age = max(0.0, now - event_ts)
+        age_source = "orderbook_event_ts"
+    else:
+        # The app computes this from the same book event and the same cycle
+        # ``now`` before enrichment. Some frozen enrichment layers retain the
+        # age but intentionally omit the underlying event timestamp.
+        age = _num(snapshot.get("orderbook_age_seconds"))
+        if age is None or age < 0.0:
+            return analysis
+        age_source = "orderbook_age_seconds"
+    research_analysis = dict(analysis)
+    research_quote = dict(quote)
+    research_quote.update({
+        "quote_age_seconds": age,
+        "quote_age_source": age_source,
+        "quote_timestamp": event_ts,
+    })
+    research_analysis["quote"] = research_quote
+    return research_analysis
 
 
 @dataclass(frozen=True)
@@ -60,6 +141,7 @@ class _PreparedCapture:
     seconds_remaining: float
     observed_at: float
     close_time: float | None
+    strike: float | None
     missing_reason: str | None
     row: dict[str, Any] | None
     capture_analysis: dict[str, Any]
@@ -97,6 +179,10 @@ class IntervalResearchRunner:
         # explicitly asks for another idempotent checkpoint replay.
         self._drift_checkpoint_replayed: set[tuple[str, int]] = set()
         self._drift_strategy_reconciled = False
+        self._rti_strategy_settlement_backlog_reconciled = False
+        # ticker -> decision timestamp. The durable strategy-ledger uniqueness
+        # is authoritative; this only avoids repeated lookups within one window.
+        self._rti_path_13m_done: dict[str, float] = {}
 
     @property
     def model_version(self) -> str:
@@ -160,6 +246,11 @@ class IntervalResearchRunner:
             seconds_remaining=seconds_remaining,
             observed_at=observed_at,
             close_time=_num(getattr(canonical, "settlement_time", None)),
+            strike=(
+                _num(getattr(canonical, "threshold", None))
+                if _num(getattr(canonical, "threshold", None)) is not None
+                else _num(_mapping(capture_analysis.get("quote")).get("target"))
+            ),
             missing_reason=reason,
             row=row,
             capture_analysis=capture_analysis,
@@ -226,6 +317,80 @@ class IntervalResearchRunner:
         return selected
 
     @staticmethod
+    def _nominal_close_time(candidate: _PreparedCapture) -> float:
+        raw_close = candidate.close_time
+        if raw_close is None:
+            raw_close = candidate.observed_at + candidate.seconds_remaining
+        nearest = round(raw_close / 900.0) * 900.0
+        if abs(raw_close - nearest) <= 2.0:
+            return nearest
+        return math.ceil(raw_close / 900.0) * 900.0
+
+    def _record_rti_path_13m(self, candidate: _PreparedCapture) -> int | None:
+        """Freeze the exact 14M→13M BRTI path and executable RTI-side quote."""
+        if _env_bool("Q15_V3_RTI_EXACT_SAMPLER", False):
+            # The independent scheduler owns this ticker when enabled. Letting
+            # the slower model loop race it could persist a late row first and
+            # mask the exact-time evidence via ledger uniqueness.
+            return None
+        try:
+            from settlement_index import settlement_index_path
+            from q15_upgrade.rti_path_13m import (
+                build_rti_path_features,
+                classify_rti_point_in_time_risk,
+                quote_for_rti_side,
+            )
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+            from q15_upgrade.strategy_bots.rules import rti_path_13m_rule_version
+
+            asset = candidate.asset.upper()
+            rule_version = rti_path_13m_rule_version(asset)
+            if rule_version is None:
+                return None
+            nominal_close = self._nominal_close_time(candidate)
+            decision_ts = nominal_close - float(INTERVAL_MARKS["13M"])
+            # ``seconds_remaining`` can be integer-truncated and report 780 up
+            # to almost two seconds early. Never lock a ticker or query a future
+            # path endpoint before the real wall-clock 13M decision instant.
+            if candidate.observed_at < decision_ts:
+                return None
+            path = settlement_index_path(
+                asset,
+                start_ts=decision_ts - 60.0,
+                end_ts=decision_ts,
+                now=candidate.observed_at,
+                max_age_s=2.0,
+            )
+            features = build_rti_path_features(path, strike=candidate.strike)
+            quote = quote_for_rti_side(
+                candidate.capture_analysis,
+                rti_side=str(features.get("rti_side") or "") or None,
+            )
+            risk = classify_rti_point_in_time_risk({**features, **quote})
+            source_row = {
+                "created_at": candidate.observed_at,
+                "source_captured_at": candidate.observed_at,
+                "model_version": rule_version,
+                "asset": asset,
+                "ticker": candidate.ticker,
+                "interval": "13M",
+                "window_key": candidate.window_key,
+                "close_time": candidate.close_time or nominal_close,
+                "record_kind": "RTI_PATH_13M_PROSPECTIVE",
+                "rule_code": rule_version,
+                "delivery_status": "PAPER_PROSPECTIVE",
+                "predicted_side": features.get("rti_side"),
+                "rti_timing_offset_s": candidate.observed_at - decision_ts,
+                **features,
+                **quote,
+                **risk,
+            }
+            return strategy_bots_runtime.record_rti_path_13m_row(source_row)
+        except Exception:  # noqa: BLE001 - paper cohort cannot break capture
+            logger.warning("RTI path 13M prospective record failed (ignored)", exc_info=True)
+            return None
+
+    @staticmethod
     def _slate_close_time(
         slate: Sequence[Mapping[str, Any]], fallback: float | None
     ) -> float | None:
@@ -236,7 +401,8 @@ class IntervalResearchRunner:
         return fallback
 
     def observe(self, *, analyses: Mapping[str, Mapping[str, Any]],
-                canonicals: Mapping[str, Any], now: float) -> None:
+                canonicals: Mapping[str, Any], now: float,
+                source_snapshots: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         """Capture every (asset, interval) whose seconds_remaining is in-band.
 
         Read-only and exception-isolated: a capture failure must never disturb the
@@ -262,6 +428,12 @@ class IntervalResearchRunner:
                     wk = window_key(getattr(canonical, "settlement_time", None), now)
                     analysis = analyses.get(asset) if isinstance(analyses, Mapping) else None
                     analysis = analysis if isinstance(analysis, Mapping) else {}
+                    analysis = _research_analysis_with_quote_freshness(
+                        asset=str(asset),
+                        analysis=analysis,
+                        source_snapshots=source_snapshots,
+                        now=now,
+                    )
 
                     # 13M is crossing-aware. Retain only the immediately prior
                     # compact point, then choose the endpoint nearest 780s when a
@@ -279,6 +451,15 @@ class IntervalResearchRunner:
                             mark_seconds=mark_13m, seconds_remaining=sr, observed_at=now,
                         )
                         selected_13m = self._select_13m_capture(str(asset), current_13m)
+                        if (
+                            str(asset).upper() in _rti_path_assets()
+                            and sr <= float(mark_13m)
+                            and _env_bool("Q15_V3_RTI_PATH_13M", False)
+                            and str(ticker) not in self._rti_path_13m_done
+                        ):
+                            recorded_id = self._record_rti_path_13m(current_13m)
+                            if recorded_id is not None:
+                                self._rti_path_13m_done[str(ticker)] = now
                         if selected_13m is not None:
                             self._record_prepared(selected_13m)
                             drift_13m_targets.setdefault(
@@ -308,6 +489,9 @@ class IntervalResearchRunner:
                 self._maybe_drift_checkpoints(
                     canonicals, now, drift_checkpoint_targets
                 )
+                for done_ticker, done_at in list(self._rti_path_13m_done.items()):
+                    if now - done_at > 1800.0:
+                        self._rti_path_13m_done.pop(done_ticker, None)
         except Exception:  # never break the live loop
             logger.debug("interval-research observe failed (ignored)", exc_info=True)
 
@@ -1128,17 +1312,57 @@ class IntervalResearchRunner:
     def resolve_settled(self, result_events: Sequence[Mapping[str, Any]] | None,
                         now: float) -> int:
         """Resolve captures from the champion's settlement events (read-only)."""
-        if not self.config.enabled or not self.ledger.available or not result_events:
+        if not self.config.enabled or not self.ledger.available:
             return 0
         n = 0
+        settlements, conflicted_tickers = _unanimous_settlement_events(
+            result_events,
+        )
+        if conflicted_tickers:
+            logger.error(
+                "interval-research rejected conflicting settlement labels for %s",
+                ",".join(conflicted_tickers),
+            )
         try:
-            for ev in result_events:
-                if not isinstance(ev, Mapping):
-                    continue
-                ticker = ev.get("ticker") or ev.get("contract")
-                result = ev.get("result") or ev.get("official_result")
-                if ticker and result:
-                    n += self.ledger.resolve(self.config.model_version, str(ticker), str(result), now)
+            from q15_upgrade.strategy_bots import runtime as strategy_bots_runtime
+
+            # Current events use the contract-scoped resolver so one source
+            # version cannot be graded while another is accidentally skipped.
+            # A duplicated source batch must be unanimous per exact contract;
+            # conflicting labels are rejected before either ledger is touched.
+            for ticker, result in settlements:
+                strategy_bots_runtime.resolve_ticker(
+                    ticker=ticker,
+                    official_result=result,
+                    now=now,
+                )
+
+            # Startup/backlog repair is bounded to unresolved RTI contracts and
+            # accepts only unanimous results already persisted by this
+            # authoritative settlement lane.  It is idempotent by construction.
+            if not self._rti_strategy_settlement_backlog_reconciled:
+                pending = strategy_bots_runtime.unresolved_rti_tickers(
+                    now=now, limit=500,
+                )
+                for settled in self.ledger.resolved_results_for_tickers(pending):
+                    strategy_bots_runtime.resolve_ticker(
+                        ticker=str(settled["ticker"]),
+                        official_result=str(settled["official_result"]),
+                        now=settled.get("resolved_at") or now,
+                    )
+                self._rti_strategy_settlement_backlog_reconciled = True
+        except Exception:  # noqa: BLE001 - side-ledger repair cannot block settle
+            logger.debug(
+                "strategy-bot settlement backlog reconcile failed (ignored)",
+                exc_info=True,
+            )
+        if not settlements:
+            return n
+        try:
+            for ticker, result in settlements:
+                n += self.ledger.resolve(
+                    self.config.model_version, ticker, result, now,
+                )
         except Exception:
             logger.debug("interval-research resolve failed (ignored)", exc_info=True)
         rec = None
@@ -1173,6 +1397,18 @@ class IntervalResearchRunner:
                     official_result=str(event["official_result"]),
                     now=event.get("resolved_at"),
                 )
+                # The RTI path book has its own frozen source version so future
+                # policy revisions cannot contaminate this forward cohort.
+                from q15_upgrade.strategy_bots.rules import RTI_PATH_13M_RULE_VERSIONS
+
+                for rule_version in RTI_PATH_13M_RULE_VERSIONS.values():
+                    strategy_bots_runtime.resolve(
+                        source_system="rti_path_13m",
+                        source_model_version=rule_version,
+                        ticker=str(event["ticker"]),
+                        official_result=str(event["official_result"]),
+                        now=event.get("resolved_at"),
+                    )
             if (
                 not self._drift_strategy_reconciled
                 and rec is not None

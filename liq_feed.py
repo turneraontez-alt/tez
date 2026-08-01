@@ -360,6 +360,19 @@ class LiquidationFeed:
             last_message_at = self._last_message_at
             connected_at = self._connected_at
         latest_age = min(ages.values()) if ages else None
+        # Liquidations are event-driven: minutes of silence can mean there were
+        # simply no forced orders.  Transport liveness is independently enforced
+        # by websocket keepalive pings, so the feed watchdog should monitor the
+        # open transport instead of treating the age of the last market event as
+        # evidence that the collector stalled.
+        if self._connected:
+            watchdog_age = 0.0
+        elif last_message_at is not None:
+            watchdog_age = max(0.0, now - last_message_at)
+        elif connected_at is not None:
+            watchdog_age = max(0.0, now - connected_at)
+        else:
+            watchdog_age = None
         if not self.enabled:
             status = "disabled"
         elif not self._connected:
@@ -380,6 +393,7 @@ class LiquidationFeed:
             "latest_age_seconds": latest_age,
             "age_by_asset_seconds": ages,
             "last_message_age_seconds": None if last_message_at is None else round(max(0.0, now - last_message_at), 3),
+            "watchdog_age_seconds": None if watchdog_age is None else round(watchdog_age, 3),
             "connected_age_seconds": None if connected_at is None else round(max(0.0, now - connected_at), 3),
             "messages_seen": self._messages_seen,
             "stream_scope": "all_market_filtered",

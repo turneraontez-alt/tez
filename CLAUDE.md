@@ -97,7 +97,14 @@ Only merge when tests are green and the data-safety guard passes; otherwise stay
 on the branch and report why.
 
 ## Invariants (do not break)
-- Read-only. Nothing touches a real exchange order.
+- The prediction/alert path is read-only: the model chain never submits an order.
+  **The one exception is `q15_upgrade/executor/`** — a separate, default-OFF, opt-in
+  layer that places REAL Kalshi orders, triple-gated on `Q15_EXEC_ENABLED` (default
+  false), `Q15_EXEC_DRY_RUN` (default true) and `Q15_EXEC_KILL`, with a second
+  independently gated YES book (`Q15_EXEC_YES_*`). Never add an order-submission path
+  anywhere else. The `place_order(` source guards in `tests/test_q15_v9*.py` cover the
+  decision engine only — they cannot see the executor, so they are not proof the system
+  cannot trade.
 - Production "champion" model weights are FROZEN. Only the observational shadow
   challenger learns; promotion is manual and significance-tested.
 - Telegram messages are HTML. Preserve suppression markers

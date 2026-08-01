@@ -1,0 +1,55 @@
+{
+  "protocol_id": "q15-rti-v14-fixed-calibration-reporting-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_ANY_V14_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-22T17:51:00Z",
+  "applies_to_design_id": "q15-rti-market-anchored-nested-safe-residual-v14",
+  "applies_to_design_sha256": "aa5efa9a986dc575ee4e358777cd2394b38550ad7328154b58a7d06bf55c3dda",
+  "applies_to_evaluation_protocol_id": "q15-rti-v14-nested-safe-residual-expanding-walk-forward-v1",
+  "applies_to_evaluation_protocol_sha256": "638db046f638324b1bcf0459c8362a0f0f12cfef35fe9ebbf7d94dd0add87257",
+  "applies_to_subgroup_reporting_protocol_id": "q15-rti-v14-fixed-subgroup-reporting-v1",
+  "applies_to_subgroup_reporting_protocol_sha256": "88609210e20799933e7b860ee701b47127eb5f799b5b9c2d28ffb90b2c7003eb",
+  "outcome_labels_used_for_protocol": false,
+  "performance_metrics_inspected_before_preregistration": false,
+  "changes_features_model_hyperparameters_entry_policy_or_gates": false,
+  "population": "every untouched-test probability row before the accepted-pick filter",
+  "weighting": {
+    "row_weighting": "equal",
+    "same_close_assets_are_complete_and_equal_count": true,
+    "btc_and_non_btc_never_mixed": true
+  },
+  "probability_bins": [
+    {"label": "0.00_to_lt_0.20", "minimum_inclusive": 0.0, "maximum_exclusive": 0.2},
+    {"label": "0.20_to_lt_0.35", "minimum_inclusive": 0.2, "maximum_exclusive": 0.35},
+    {"label": "0.35_to_lt_0.50", "minimum_inclusive": 0.35, "maximum_exclusive": 0.5},
+    {"label": "0.50_to_lt_0.65", "minimum_inclusive": 0.5, "maximum_exclusive": 0.65},
+    {"label": "0.65_to_lt_0.80", "minimum_inclusive": 0.65, "maximum_exclusive": 0.8},
+    {"label": "0.80_to_1.00", "minimum_inclusive": 0.8, "maximum_inclusive": 1.0}
+  ],
+  "reported_for": ["v14_model", "kalshi_market_prior"],
+  "required_overall_metrics": [
+    "rows", "mean_probability", "observed_yes_rate",
+    "calibration_bias_probability_minus_observed", "expected_calibration_error",
+    "maximum_calibration_error", "binned_reliability", "binned_resolution",
+    "outcome_uncertainty"
+  ],
+  "required_per_observed_bin_metrics": [
+    "rows", "mean_probability", "observed_yes_rate", "absolute_calibration_gap"
+  ],
+  "empty_bins_must_be_reported": true,
+  "comparisons": [
+    "model_minus_market_expected_calibration_error",
+    "model_minus_market_maximum_calibration_error",
+    "model_minus_market_absolute_calibration_bias"
+  ],
+  "small_sample_interpretation": {
+    "minimum_rows_for_promotional_claim": 30,
+    "empty_or_small_bins_may_not_be_claimed_as_calibrated": true,
+    "historical_calibration_cannot_promote": true
+  },
+  "report_only": true,
+  "changes_deployment_gate": false,
+  "automatic_promotion": false,
+  "notification_eligible": false,
+  "paper_only": true,
+  "real_trading_allowed": false
+}

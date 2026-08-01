@@ -1,0 +1,48 @@
+{
+  "notice_policy_id": "q15-rti-independent-path-prospective-degradation-notice-v1",
+  "policy_status": "PREREGISTERED_BEFORE_FIRST_ELIGIBLE_WINDOW",
+  "preregistered_at": "2026-07-22T23:19:38Z",
+  "applies_to_source_design_id": "q15-rti-independent-venue-path-evidence-v1",
+  "applies_to_source_design_sha256": "ed73729468715279d0d92e1d3beed431cfad416767e4bb92cb88c230d4b904a2",
+  "prospective_after_close_time": 1784763000.0,
+  "first_eligible_close_time": 1784763900.0,
+  "historical_incomplete_windows_receive_notices": false,
+  "trigger": {
+    "same_seven_assets_expected_per_close": true,
+    "valid_reconstructable_rows_required": 7,
+    "missing_asset_or_invalid_evidence_triggers": true,
+    "complete_window_does_not_trigger": true,
+    "outcome_or_settlement_state_is_not_consulted": true
+  },
+  "delivery": {
+    "channel": "V3_TELEGRAM",
+    "label": "PAPER ADMIN",
+    "one_idempotency_key_per_close": true,
+    "idempotency_key_includes_policy_sha256": true,
+    "expiration_seconds": 31536000,
+    "notification_is_trade_signal": false
+  },
+  "message_fields": [
+    "close_time",
+    "valid_row_count",
+    "missing_assets",
+    "source_missing_reasons",
+    "source_design_id",
+    "notice_policy_id"
+  ],
+  "effect": {
+    "window_remains_excluded_from_credit": true,
+    "backfill_allowed": false,
+    "automatic_source_threshold_change_allowed": false,
+    "automatic_feature_change_allowed": false,
+    "automatic_model_change_allowed": false,
+    "automatic_restart_allowed": false,
+    "automatic_trading_action_allowed": false
+  },
+  "outcome_columns_forbidden": true,
+  "outcome_labels_read": false,
+  "model_fit_performed": false,
+  "automatic_scoring": false,
+  "automatic_promotion": false,
+  "real_trading_allowed": false
+}

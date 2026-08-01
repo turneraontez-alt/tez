@@ -122,15 +122,24 @@ def fast_canonical_candles(
 ) -> list[dict[str, float]]:
     """Drop-in, behaviour-identical fast equivalent of ``_canonical_candles``."""
     candidates: list[Sequence[Any]] = []
+    candidate_ids: set[int] = set()
+
+    def append_candidate(candidate: Sequence[Any]) -> None:
+        marker = id(candidate)
+        if marker in candidate_ids:
+            return
+        candidate_ids.add(marker)
+        candidates.append(candidate)
+
     if cached:
-        candidates.append(cached)
+        append_candidate(cached)
     for key in _CANDLE_KEYS:
         value = snapshot.get(key)
         if isinstance(value, (list, tuple)):
-            candidates.append(value)
+            append_candidate(value)
     for key, value in _walk(snapshot):
         if isinstance(value, (list, tuple)) and any(token in key for token in ("candle", "ohlc", "bar")):
-            candidates.append(value)
+            append_candidate(value)
 
     merged: dict[float, dict[str, float]] = {}
     for candidate in candidates:

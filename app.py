@@ -1,3 +1,4 @@
+import hmac
 import os
 import sys
 import shutil
@@ -53,7 +54,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 
 from q15_upgrade.kalshi_rest import KalshiClient
 from market_cache import MarketResultCache
@@ -253,6 +254,7 @@ def _observe_ladder_probe(asset, close_time_epoch, seconds_remaining, now):
 
 
 def _observe_path_recorder(asset, snap, close_time_epoch, now):
+    index_px = None
     try:
         from path_recorder import get_path_recorder
         from settlement_index import settlement_index_context
@@ -262,11 +264,12 @@ def _observe_path_recorder(asset, snap, close_time_epoch, now):
             spot_px=snap.get("underlying_current"),
             now=now,
         )
+        index_px = index_ctx.get("index_px")
         get_path_recorder().observe(
             asset=asset,
             close_time=close_time_epoch,
             seconds_remaining=snap.get("seconds_remaining"),
-            index_px=index_ctx.get("index_px"),
+            index_px=index_px,
             spot_px=snap.get("underlying_current"),
             yes_bid=snap.get("yes_bid"),
             yes_ask=snap.get("yes_ask"),
@@ -274,6 +277,22 @@ def _observe_path_recorder(asset, snap, close_time_epoch, now):
         )
     except Exception:
         logger.debug("path recorder observe skipped", exc_info=True)
+    try:
+        from q15_upgrade.path_forecast.runtime import get_path_forecast_runner
+
+        get_path_forecast_runner().observe(
+            asset=asset,
+            close_time=close_time_epoch,
+            seconds_remaining=snap.get("seconds_remaining"),
+            target_px=snap.get("target_value"),
+            index_px=index_px,
+            spot_px=snap.get("underlying_current"),
+            yes_bid=snap.get("yes_bid"),
+            yes_ask=snap.get("yes_ask"),
+            now=now,
+        )
+    except Exception:
+        logger.debug("path forecast observe skipped", exc_info=True)
 
 
 def _observe_strangle_shadow(asset, snap, close_time_epoch, now):
@@ -299,6 +318,19 @@ def _feed_watchdog_age(status, age_key, now):
     if status.get("enabled") and status.get("status") != "disabled":
         return max(0.0, now - SERVER_STARTED_AT)
     return None
+
+
+def _max_feed_age(value):
+    """Return the worst numeric age from a scalar or per-venue/product map."""
+    if isinstance(value, dict):
+        ages = [_max_feed_age(item) for item in value.values()]
+        ages = [age for age in ages if age is not None]
+        return max(ages) if ages else None
+    try:
+        age = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, age)
 
 
 def _flush_path_recorder(asset, close_time_str, now):
@@ -811,6 +843,18 @@ def refresh_loop(max_cycles=None):
                     snap = apply_snapshot_freshness(
                         snap, r, now, market_data.health(), config
                     )
+                    try:
+                        from q15_upgrade.rti_exact_13m import register_exact_rti_13m_market
+
+                        register_exact_rti_13m_market(
+                            asset=a,
+                            ticker=str(market.get("ticker") or ""),
+                            close_time=close_epoch,
+                            strike=snap.get("target_value"),
+                            now=now,
+                        )
+                    except Exception:
+                        logger.debug("exact RTI 13M market registration skipped", exc_info=True)
                     _observe_ladder_probe(a, close_epoch, snap.get("seconds_remaining"), now)
                     _observe_path_recorder(a, snap, close_epoch, now)
                     _observe_strangle_shadow(a, snap, close_epoch, now)
@@ -873,20 +917,69 @@ def refresh_loop(max_cycles=None):
             with state_lock:
                 snaps = dict(state)
             ws_health = market_data.health()
-            feed_ages = {}
+            feed_ages = {
+                "kalshi_ws": _feed_watchdog_age(
+                    ws_health, "orderbook_age_seconds", now
+                )
+            }
             try:
                 from coinbase_adv_l2 import coinbase_adv_l2_health
                 _coinbase_l2_health = coinbase_adv_l2_health()
-                feed_ages["coinbase_adv_l2"] = _coinbase_l2_health.get("snapshot_age_seconds")
+                feed_ages["coinbase_adv_l2"] = _feed_watchdog_age(
+                    _coinbase_l2_health, "snapshot_age_seconds", now
+                )
+                feed_ages["coinbase_adv_l2_transport"] = _coinbase_l2_health.get(
+                    "last_message_age_seconds"
+                )
             except Exception:
                 logger.debug("coinbase L2 feed freshness monitor skipped", exc_info=True)
+            try:
+                from kraken_l3 import kraken_l3_health
+                _kraken_l3_health = kraken_l3_health()
+                feed_ages["kraken_l3"] = _feed_watchdog_age(
+                    _kraken_l3_health, "last_record_age_seconds", now
+                )
+                feed_ages["kraken_l3_transport"] = _kraken_l3_health.get(
+                    "last_message_age_seconds"
+                )
+            except Exception:
+                logger.debug("Kraken L3 feed freshness monitor skipped", exc_info=True)
+            try:
+                from spot_ws import spot_ws_health
+                _spot_ws_health = spot_ws_health()
+                feed_ages["spot_ws_transport"] = _max_feed_age(
+                    _spot_ws_health.get("last_message_age_seconds")
+                )
+            except Exception:
+                logger.debug("spot websocket freshness monitor skipped", exc_info=True)
+            try:
+                from spot_depth import spot_depth_health
+                _spot_depth_health = spot_depth_health()
+                feed_ages["spot_depth"] = _feed_watchdog_age(
+                    _spot_depth_health, "last_record_age_seconds", now
+                )
+                feed_ages["spot_depth_books"] = _max_feed_age(
+                    _spot_depth_health.get("book_age_seconds")
+                )
+            except Exception:
+                logger.debug("spot depth freshness monitor skipped", exc_info=True)
+            try:
+                from q15_upgrade.marketlead.runner import get_runner as _marketlead_runner
+                _marketlead = _marketlead_runner()
+                if _marketlead is not None:
+                    _marketlead_sources = _marketlead.source_health()
+                    feed_ages["marketlead_sources"] = _feed_watchdog_age(
+                        _marketlead_sources, "latest_age_seconds", now
+                    )
+            except Exception:
+                logger.debug("MarketLead source freshness monitor skipped", exc_info=True)
             for feed_name, age_key in (
-                ("settlement_index", "latest_age_seconds"),
-                ("ladder_probe", "last_capture_age_seconds"),
+                ("settlement_index", "watchdog_age_seconds"),
+                ("ladder_probe", "watchdog_age_seconds"),
                 ("market_activity", "latest_age_seconds"),
                 ("path_recorder", "latest_point_age_seconds"),
-                ("liq_feed", "latest_age_seconds"),
-                ("strangle_shadow", "latest_age_seconds"),
+                ("liq_feed", "watchdog_age_seconds"),
+                ("strangle_shadow", "watchdog_age_seconds"),
             ):
                 try:
                     if feed_name == "settlement_index":
@@ -1032,6 +1125,36 @@ def refresh_loop(max_cycles=None):
             detail_executor.shutdown(wait=False)
             return
         time.sleep(max(0.0, REFRESH_INTERVAL - elapsed))
+
+
+@app.before_request
+def _require_api_token():
+    """Optional shared-token gate on the data surface.
+
+    OFF by default (no Q15_API_TOKEN set) so local use and the existing tests are
+    byte-identical. When set, every /api/* and /data/* request must present the token
+    as `Authorization: Bearer <token>` or an `X-Q15-Token` header. This exists because
+    the routes are otherwise entirely unauthenticated: with a non-loopback bind, the
+    outbox endpoint alone discloses the full text of recent trading alerts.
+
+    The dashboard itself (/) stays open — it is a rendering shell, and gating it would
+    lock the owner out of their own browser view without a login flow to replace it.
+    """
+    token = (os.environ.get("Q15_API_TOKEN") or "").strip()
+    if not token:
+        return None
+    path = request.path or ""
+    if not (path.startswith("/api/") or path.startswith("/data/")):
+        return None
+    presented = (request.headers.get("X-Q15-Token") or "").strip()
+    if not presented:
+        auth = (request.headers.get("Authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            presented = auth[7:].strip()
+    # Constant-time compare so the token cannot be recovered by timing.
+    if not presented or not hmac.compare_digest(presented, token):
+        return jsonify({"error": "unauthorized"}), 401
+    return None
 
 
 @app.after_request
@@ -1216,6 +1339,42 @@ def _start_refresh():
             except Exception as exc:
                 logger.warning("Settlement index collector did not start: %s", exc)
             try:
+                from q15_upgrade.rti_exact_13m import start_exact_rti_13m_sampler
+                start_exact_rti_13m_sampler()
+            except Exception as exc:
+                logger.warning("Exact RTI 13M sampler did not start: %s", exc)
+            try:
+                from q15_upgrade.v11_readiness_monitor import (
+                    start_v11_readiness_monitor,
+                )
+                start_v11_readiness_monitor()
+            except Exception as exc:
+                logger.warning("V11 PAPER readiness monitor did not start: %s", exc)
+            try:
+                from q15_upgrade.v13_readiness_monitor import (
+                    start_v13_readiness_monitor,
+                )
+                start_v13_readiness_monitor()
+            except Exception as exc:
+                logger.warning("V13 PAPER readiness monitor did not start: %s", exc)
+            try:
+                from q15_upgrade.v14_readiness_monitor import (
+                    start_v14_readiness_monitor,
+                )
+                start_v14_readiness_monitor()
+            except Exception as exc:
+                logger.warning("V14 PAPER readiness monitor did not start: %s", exc)
+            try:
+                from q15_upgrade.independent_path_readiness_monitor import (
+                    start_independent_path_readiness_monitor,
+                )
+                start_independent_path_readiness_monitor()
+            except Exception as exc:
+                logger.warning(
+                    "Independent-path PAPER readiness monitor did not start: %s",
+                    exc,
+                )
+            try:
                 from ladder_probe import start_ladder_probe
                 start_ladder_probe()
             except Exception as exc:
@@ -1257,5 +1416,17 @@ if os.environ.get("Q15_AUTOSTART_REFRESH", "1") != "0":
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    logger.info(f"Starting Kalshi 15-Min Monitor on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    # BIND HOST — defaults to loopback. Every route is unauthenticated, and some return
+    # sensitive state: /api/q15-v9/telegram-outbox serves the verbatim text of recent
+    # trading alerts, and /api/health returns the full config including every tuned
+    # threshold. Binding 0.0.0.0 by default published all of that to anyone who could
+    # reach the port — a real exposure on a shared or untrusted network. Set
+    # Q15_BIND_HOST=0.0.0.0 to restore LAN/container access (the cloud unit does this
+    # deliberately, behind its own firewall); prefer also setting Q15_API_TOKEN.
+    host = os.environ.get("Q15_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    logger.info("Starting Kalshi 15-Min Monitor on %s:%s", host, port)
+    if host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("Q15_API_TOKEN"):
+        logger.warning(
+            "Q15_BIND_HOST=%s exposes ALL routes with no authentication — set "
+            "Q15_API_TOKEN to require a token on /api/* and /data/*", host)
+    app.run(host=host, port=port, debug=False, threaded=True)

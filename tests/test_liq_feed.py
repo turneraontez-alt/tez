@@ -116,3 +116,16 @@ def test_liq_feed_uses_current_all_market_stream(tmp_path, monkeypatch):
     health = feed.health()
     assert health["stream_scope"] == "all_market_filtered"
     assert health["messages_seen"] == 0
+
+
+def test_liq_watchdog_tracks_transport_not_sparse_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q15_FEED_LIQ", "true")
+    feed = LiquidationFeed(db_path=str(tmp_path / "liq.sqlite3"), symbols={"BTC": "BTCUSDT"})
+    feed._connected = True
+    feed._connected_at = time.time() - 600.0
+    feed._last_message_at = time.time() - 300.0
+
+    health = feed.health()
+
+    assert health["last_message_age_seconds"] >= 299.0
+    assert health["watchdog_age_seconds"] == 0.0

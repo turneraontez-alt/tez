@@ -213,6 +213,18 @@ class _Persistence:
         self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.sqlite_path), timeout=10)
         conn.row_factory = sqlite3.Row
+        # WAL instead of the default rollback journal. In "delete" mode every write
+        # transaction creates and then removes a sibling `-journal` file next to the
+        # database; a file-sync client (this repo lives under OneDrive by default) can
+        # capture or restore those two out of step, and SQLite's recovery path will then
+        # apply a journal that does not match the database header — corrupting it. WAL
+        # keeps a stable sidecar instead of churning one per transaction, and also lets
+        # readers run concurrently with the writer. Best-effort: a filesystem that cannot
+        # support WAL (some network shares) just keeps the previous mode.
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.DatabaseError:
+            _LOG.debug("v91 sqlite: WAL unavailable; keeping default journal mode")
         try:
             yield conn
         finally:

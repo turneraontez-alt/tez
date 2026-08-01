@@ -5,6 +5,7 @@ import base64
 import inspect
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -31,6 +32,19 @@ except Exception:  # pragma: no cover - optional dependency guard
 PROD_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 DEMO_URL = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 WS_PATH = "/trade-api/ws/v2"
+
+# Microstructure research must describe genuine time horizons, not the most
+# recent N messages.  BTC can exceed 5,000 order-book deltas well inside a
+# minute, so a count-bounded deque silently shortened the nominal 30s/60s
+# windows.  Retain book events by local receive time with enough guard room for
+# the longest 60-second feature.  Trades are retained for the full 15-minute
+# market lifecycle because get_trades(min_ts=...) has non-microstructure users.
+MICROSTRUCTURE_BOOK_EVENT_RETENTION_SECONDS = 90.0
+TRADE_RETENTION_SECONDS = 20.0 * 60.0
+MICROSTRUCTURE_TIME_BASIS = "local_received_at"
+MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION = (
+    "rti-exact-microstructure-extension-v1"
+)
 
 
 def _read_private_key() -> bytes | None:
@@ -70,8 +84,14 @@ class KalshiWebSocketFeed:
         self._desired: Set[str] = set()
         self._subscribed: Set[str] = set()
         self._books: Dict[str, dict] = {}
-        self._book_events: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5000))
-        self._trades: Dict[str, deque] = defaultdict(lambda: deque(maxlen=5000))
+        # These deques are time-bounded explicitly in the append/read paths.
+        # A maxlen would make a busy market's horizon depend on message rate.
+        self._book_events: Dict[str, deque] = defaultdict(deque)
+        self._trades: Dict[str, deque] = defaultdict(deque)
+        self._book_history_started_at: Dict[str, float] = {}
+        self._trade_history_started_at: Dict[str, float] = {}
+        self._book_history_initial_microprice: Dict[str, float | None] = {}
+        self._book_retention_baseline_microprice: Dict[str, float | None] = {}
         self._market_status: Dict[str, dict] = {}
         self._connected = False
         self._last_message_at: float | None = None
@@ -111,7 +131,16 @@ class KalshiWebSocketFeed:
             # desired set (never age) so an active book is never dropped; these
             # structures are read fresh-or-None, so dropping non-desired tickers
             # loses nothing.
-            for cache in (self._books, self._book_events, self._trades, self._market_status):
+            for cache in (
+                self._books,
+                self._book_events,
+                self._trades,
+                self._book_history_started_at,
+                self._trade_history_started_at,
+                self._book_history_initial_microprice,
+                self._book_retention_baseline_microprice,
+                self._market_status,
+            ):
                 for ticker in [t for t in cache if t not in wanted]:
                     del cache[ticker]
         if changed:
@@ -124,6 +153,46 @@ class KalshiWebSocketFeed:
     def health(self) -> dict:
         now = time.time()
         with self._lock:
+            microstructure_buffers = {}
+            for ticker in sorted(
+                set(self._books)
+                | set(self._book_events)
+                | set(self._trades)
+            ):
+                events = self._book_events.get(ticker, ())
+                trades = self._trades.get(ticker, ())
+                book_started = self._book_history_started_at.get(ticker)
+                trade_started = self._trade_history_started_at.get(ticker)
+                microstructure_buffers[ticker] = {
+                    "book_event_rows": len(events),
+                    "trade_rows": len(trades),
+                    "book_history_seconds": (
+                        None
+                        if book_started is None
+                        else max(0.0, now - float(book_started))
+                    ),
+                    "trade_history_seconds": (
+                        None
+                        if trade_started is None
+                        else max(0.0, now - float(trade_started))
+                    ),
+                    "book_oldest_receive_age_seconds": (
+                        None
+                        if not events
+                        else max(
+                            0.0,
+                            now - self._observed_at(events[0]),
+                        )
+                    ),
+                    "trade_oldest_receive_age_seconds": (
+                        None
+                        if not trades
+                        else max(
+                            0.0,
+                            now - self._observed_at(trades[0]),
+                        )
+                    ),
+                }
             return {
                 "connected": self._connected,
                 "enabled": self.enabled,
@@ -137,6 +206,18 @@ class KalshiWebSocketFeed:
                 "last_error": self._last_error,
                 "settlement_feed": False,
                 "mode": "websocket" if self._connected else "rest-fallback",
+                "microstructure_history": {
+                    "time_basis": MICROSTRUCTURE_TIME_BASIS,
+                    "extension_schema_version": (
+                        MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION
+                    ),
+                    "count_capped": False,
+                    "book_event_retention_seconds": (
+                        MICROSTRUCTURE_BOOK_EVENT_RETENTION_SECONDS
+                    ),
+                    "trade_retention_seconds": TRADE_RETENTION_SECONDS,
+                    "buffers": microstructure_buffers,
+                },
             }
 
     def book_ages(self) -> dict:
@@ -158,6 +239,7 @@ class KalshiWebSocketFeed:
     def get_trades(self, ticker: str, min_ts: float | None = None, max_age: float = 10.0) -> List[dict]:
         now = time.time()
         with self._lock:
+            self._prune_ticker_history_locked(ticker, now)
             rows = list(self._trades.get(ticker, ()))
         out = []
         for row in rows:
@@ -185,9 +267,19 @@ class KalshiWebSocketFeed:
         """
         now = time.time() if now is None else float(now)
         with self._lock:
+            self._prune_ticker_history_locked(ticker, now)
             book = deepcopy(self._books.get(ticker))
-            events = [dict(row) for row in self._book_events.get(ticker, ())]
-            trades = [dict(row) for row in self._trades.get(ticker, ())]
+            # Rows are immutable after append.  A tuple snapshot is sufficient
+            # and avoids deep-copying tens of thousands of BTC deltas at the
+            # exact decision timestamp.
+            events = tuple(self._book_events.get(ticker, ()))
+            trades = tuple(self._trades.get(ticker, ()))
+            book_history_started_at = self._book_history_started_at.get(ticker)
+            trade_history_started_at = self._trade_history_started_at.get(ticker)
+            initial_microprice = self._book_retention_baseline_microprice.get(
+                ticker,
+                self._book_history_initial_microprice.get(ticker),
+            )
         if not book:
             return {"available": False, "reason": "book_missing"}
         book_age = max(0.0, now - float(book.get("updated_at", 0.0)))
@@ -200,8 +292,16 @@ class KalshiWebSocketFeed:
 
         yes = book.get("yes") if isinstance(book.get("yes"), dict) else {}
         no = book.get("no") if isinstance(book.get("no"), dict) else {}
-        yes_levels = [(float(price), float(qty)) for price, qty in yes.items() if float(qty) > 0]
-        no_levels = [(float(price), float(qty)) for price, qty in no.items() if float(qty) > 0]
+        yes_levels = [
+            (float(price), float(qty))
+            for price, qty in yes.items()
+            if float(qty) > 1e-9
+        ]
+        no_levels = [
+            (float(price), float(qty))
+            for price, qty in no.items()
+            if float(qty) > 1e-9
+        ]
         yes_best = max(yes_levels, default=(None, None), key=lambda row: row[0])
         no_best = max(no_levels, default=(None, None), key=lambda row: row[0])
         yes_bid, yes_bid_qty = yes_best
@@ -219,9 +319,21 @@ class KalshiWebSocketFeed:
                     + yes_bid * float(no_bid_qty or 0.0)
                 ) / total_top
 
+        two_sided = yes_bid is not None and no_bid is not None
+        non_crossed = bool(
+            two_sided
+            and yes_ask is not None
+            and no_ask is not None
+            and yes_ask >= yes_bid
+            and no_ask >= no_bid
+        )
         out = {
-            "available": yes_bid is not None and no_bid is not None,
-            "reason": None if yes_bid is not None and no_bid is not None else "two_sided_book_missing",
+            "available": two_sided and non_crossed,
+            "reason": (
+                None
+                if two_sided and non_crossed
+                else "crossed_orderbook" if two_sided else "two_sided_book_missing"
+            ),
             "book_age_seconds": book_age,
             "yes_bid_cents": yes_bid,
             "yes_ask_cents": yes_ask,
@@ -235,6 +347,27 @@ class KalshiWebSocketFeed:
                 None if yes_mid is None or yes_microprice is None else yes_microprice - yes_mid
             ),
             "paper_limit_cents": float(paper_limit_cents),
+            "microstructure_time_basis": MICROSTRUCTURE_TIME_BASIS,
+            "microstructure_extension_schema_version": (
+                MICROSTRUCTURE_EXTENSION_SCHEMA_VERSION
+            ),
+            "history_count_capped": False,
+            "book_event_retention_seconds": (
+                MICROSTRUCTURE_BOOK_EVENT_RETENTION_SECONDS
+            ),
+            "trade_retention_seconds": TRADE_RETENTION_SECONDS,
+            "book_history_started_at": book_history_started_at,
+            "trade_history_started_at": trade_history_started_at,
+            "book_history_seconds": (
+                None
+                if book_history_started_at is None
+                else max(0.0, now - float(book_history_started_at))
+            ),
+            "trade_history_seconds": (
+                None
+                if trade_history_started_at is None
+                else max(0.0, now - float(trade_history_started_at))
+            ),
             "yes_bid_queue_at_or_above_limit": sum(
                 qty for price, qty in yes_levels if price >= float(paper_limit_cents)
             ),
@@ -242,22 +375,49 @@ class KalshiWebSocketFeed:
                 qty for price, qty in no_levels if price >= float(paper_limit_cents)
             ),
             "event_age_seconds": (
-                None if not events else max(0.0, now - float(events[-1].get("ts", now)))
+                None
+                if not events
+                else max(0.0, now - self._observed_at(events[-1]))
             ),
         }
         for horizon in sorted({max(1, int(value)) for value in horizons}):
             cutoff = now - horizon
-            selected_events = [row for row in events if float(row.get("ts", 0.0)) >= cutoff]
-            selected_trades = [row for row in trades if float(row.get("ts", 0.0)) >= cutoff]
+            book_window_complete = bool(
+                book_history_started_at is not None
+                and float(book_history_started_at) <= cutoff
+            )
+            trade_window_complete = bool(
+                trade_history_started_at is not None
+                and float(trade_history_started_at) <= cutoff
+            )
+            selected_events = [
+                row
+                for row in events
+                if cutoff <= self._observed_at(row) <= now
+            ]
+            selected_trades = [
+                row
+                for row in trades
+                if cutoff <= self._observed_at(row) <= now
+            ]
             signed_delta = 0.0
             absolute_delta = 0.0
             yes_depletion = no_depletion = 0.0
             yes_refill = no_refill = 0.0
+            yes_add = yes_remove = no_add = no_remove = 0.0
             for row in selected_events:
                 delta = float(row.get("delta", 0.0) or 0.0)
                 side_sign = 1.0 if row.get("side") == "yes" else -1.0
                 signed_delta += side_sign * delta
                 absolute_delta += abs(delta)
+                if row.get("side") == "yes" and delta > 0.0:
+                    yes_add += delta
+                elif row.get("side") == "yes" and delta < 0.0:
+                    yes_remove += -delta
+                elif row.get("side") == "no" and delta > 0.0:
+                    no_add += delta
+                elif row.get("side") == "no" and delta < 0.0:
+                    no_remove += -delta
                 if row.get("at_best_before") and delta < 0:
                     if row.get("side") == "yes":
                         yes_depletion += -delta
@@ -277,20 +437,211 @@ class KalshiWebSocketFeed:
                 elif side == "NO":
                     no_taker += count
             total_taker = yes_taker + no_taker
+            prior_microprice = next((
+                self._finite_or_none(row.get("yes_microprice_after_cents"))
+                for row in reversed(events)
+                if self._observed_at(row) < cutoff
+                and self._observed_at(row) <= now
+                and self._finite_or_none(
+                    row.get("yes_microprice_after_cents")
+                ) is not None
+            ), None)
+            # When the full horizon is not yet warm, the snapshot baseline
+            # still makes the partial observed path descriptive.  The separate
+            # completeness flag prevents a model from treating it as full.
+            if prior_microprice is None:
+                prior_microprice = self._finite_or_none(initial_microprice)
+            microprice_path = [
+                value
+                for row in selected_events
+                for value in [self._finite_or_none(
+                    row.get("yes_microprice_after_cents")
+                )]
+                if value is not None
+            ]
+            if prior_microprice is not None:
+                microprice_path.insert(0, prior_microprice)
+            current_microprice = self._finite_or_none(yes_microprice)
+            if current_microprice is not None:
+                if not microprice_path or microprice_path[-1] != current_microprice:
+                    microprice_path.append(current_microprice)
+            microprice_change, microprice_range, microprice_variation, (
+                microprice_efficiency
+            ) = self._path_dynamics(
+                microprice_path,
+                complete=book_window_complete,
+            )
+
+            prior_trade_price = next((
+                self._finite_or_none(row.get("yes_cents"))
+                for row in reversed(trades)
+                if self._observed_at(row) < cutoff
+                and self._observed_at(row) <= now
+                and self._finite_or_none(row.get("yes_cents")) is not None
+            ), None)
+            selected_trade_prices = [
+                price
+                for row in selected_trades
+                for price in [self._finite_or_none(row.get("yes_cents"))]
+                if price is not None
+            ]
+            trade_price_path = list(selected_trade_prices)
+            if prior_trade_price is not None:
+                trade_price_path.insert(0, prior_trade_price)
+            trade_change, trade_range, trade_variation, trade_efficiency = (
+                self._path_dynamics(
+                    trade_price_path,
+                    complete=trade_window_complete,
+                )
+            )
+            trade_volume = sum(
+                max(0.0, float(row.get("count", 0.0) or 0.0))
+                for row in selected_trades
+            )
+            trade_vwap = (
+                None
+                if trade_volume <= 0.0
+                else sum(
+                    max(0.0, float(row.get("count", 0.0) or 0.0))
+                    * float(row.get("yes_cents", 0.0) or 0.0)
+                    for row in selected_trades
+                ) / trade_volume
+            )
             suffix = f"_{horizon}s"
+            out[f"book_window_complete{suffix}"] = book_window_complete
+            out[f"trade_window_complete{suffix}"] = trade_window_complete
+            out[f"microstructure_window_complete{suffix}"] = bool(
+                book_window_complete and trade_window_complete
+            )
             out[f"event_count{suffix}"] = len(selected_events)
             out[f"trade_count{suffix}"] = len(selected_trades)
             out[f"book_delta_pressure_yes{suffix}"] = (
-                None if absolute_delta <= 0 else signed_delta / absolute_delta
+                0.0
+                if book_window_complete and absolute_delta <= 0
+                else None
+                if absolute_delta <= 0
+                else signed_delta / absolute_delta
             )
             out[f"trade_imbalance_yes{suffix}"] = (
-                None if total_taker <= 0 else (yes_taker - no_taker) / total_taker
+                0.0
+                if trade_window_complete and total_taker <= 0
+                else None
+                if total_taker <= 0
+                else (yes_taker - no_taker) / total_taker
             )
+            out[f"taker_yes_volume{suffix}"] = yes_taker
+            out[f"taker_no_volume{suffix}"] = no_taker
+            out[f"taker_net_yes_volume{suffix}"] = yes_taker - no_taker
             out[f"yes_best_depletion{suffix}"] = yes_depletion
             out[f"no_best_depletion{suffix}"] = no_depletion
             out[f"yes_best_refill{suffix}"] = yes_refill
             out[f"no_best_refill{suffix}"] = no_refill
+            out[f"book_add_volume_yes{suffix}"] = yes_add
+            out[f"book_remove_volume_yes{suffix}"] = yes_remove
+            out[f"book_add_volume_no{suffix}"] = no_add
+            out[f"book_remove_volume_no{suffix}"] = no_remove
+            out[f"microprice_change_cents{suffix}"] = microprice_change
+            out[f"microprice_range_cents{suffix}"] = microprice_range
+            out[f"microprice_variation_cents{suffix}"] = microprice_variation
+            out[f"microprice_trend_efficiency{suffix}"] = (
+                microprice_efficiency
+            )
+            out[f"trade_yes_price_change_cents{suffix}"] = trade_change
+            out[f"trade_yes_price_range_cents{suffix}"] = trade_range
+            out[f"trade_yes_price_variation_cents{suffix}"] = trade_variation
+            out[f"trade_yes_price_trend_efficiency{suffix}"] = (
+                trade_efficiency
+            )
+            out[f"trade_yes_vwap_cents{suffix}"] = trade_vwap
         return out
+
+    @staticmethod
+    def _observed_at(row: dict) -> float:
+        """Decision-available timestamp for an already received WS row."""
+        try:
+            return float(row.get("received_at", row.get("ts", 0.0)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _finite_or_none(value) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _path_dynamics(
+        values: List[float], *, complete: bool,
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        if not values:
+            neutral = 0.0 if complete else None
+            return neutral, neutral, neutral, neutral
+        first = float(values[0])
+        last = float(values[-1])
+        change = last - first
+        value_range = max(values) - min(values)
+        variation = sum(
+            abs(float(right) - float(left))
+            for left, right in zip(values, values[1:])
+        )
+        efficiency = 0.0 if variation <= 0.0 else abs(change) / variation
+        return change, value_range, variation, efficiency
+
+    @staticmethod
+    def _yes_microprice_from_sides(
+        yes: dict, no: dict,
+    ) -> float | None:
+        yes_best = max(yes, default=None)
+        no_best = max(no, default=None)
+        if yes_best is None or no_best is None:
+            return None
+        yes_qty = max(0.0, float(yes.get(yes_best, 0.0) or 0.0))
+        no_qty = max(0.0, float(no.get(no_best, 0.0) or 0.0))
+        total = yes_qty + no_qty
+        if total <= 0.0:
+            return None
+        yes_ask = 100.0 - float(no_best)
+        return (
+            yes_ask * yes_qty + float(yes_best) * no_qty
+        ) / total
+
+    def _prune_ticker_history_locked(self, ticker: str, now: float) -> None:
+        event_cutoff = float(now) - MICROSTRUCTURE_BOOK_EVENT_RETENTION_SECONDS
+        events = self._book_events.get(ticker)
+        last_pruned_microprice = None
+        while events and self._observed_at(events[0]) < event_cutoff:
+            removed = events.popleft()
+            candidate = self._finite_or_none(
+                removed.get("yes_microprice_after_cents")
+            )
+            if candidate is not None:
+                last_pruned_microprice = candidate
+        if last_pruned_microprice is not None:
+            self._book_retention_baseline_microprice[ticker] = (
+                last_pruned_microprice
+            )
+        trade_cutoff = float(now) - TRADE_RETENTION_SECONDS
+        trades = self._trades.get(ticker)
+        while trades and self._observed_at(trades[0]) < trade_cutoff:
+            trades.popleft()
+
+    def _invalidate_microstructure_history_locked(self) -> None:
+        """Fail closed across transport gaps until a new snapshot warms up."""
+        tickers = (
+            set(self._desired)
+            | set(self._books)
+            | set(self._book_events)
+            | set(self._trades)
+        )
+        for ticker in tickers:
+            self._book_events[ticker].clear()
+            self._trades[ticker].clear()
+            self._book_history_started_at.pop(ticker, None)
+            self._trade_history_started_at.pop(ticker, None)
+            self._book_history_initial_microprice.pop(ticker, None)
+            self._book_retention_baseline_microprice.pop(ticker, None)
 
     def _headers(self) -> dict:
         timestamp = str(int(time.time() * 1000))
@@ -355,6 +706,7 @@ class KalshiWebSocketFeed:
                 with self._lock:
                     self._connected = False
                     self._subscribed = set()
+                    self._invalidate_microstructure_history_locked()
             if self._stop.is_set():
                 break
             await asyncio.sleep(backoff)
@@ -425,8 +777,24 @@ class KalshiWebSocketFeed:
         yes = self._level_map(yes_levels)
         no = self._level_map(no_levels)
         with self._lock:
-            self._books[ticker] = {"yes": yes, "no": no, "updated_at": now}
+            self._books[ticker] = {
+                "yes": yes,
+                "no": no,
+                "_best_yes": max(yes, default=None),
+                "_best_no": max(no, default=None),
+                "updated_at": now,
+            }
             self._book_events[ticker].clear()
+            # A reconnect or repeated snapshot creates a new continuity epoch.
+            # Clear trades too: the trade channel has no replay snapshot, so
+            # retaining pre-snapshot rows would falsely span a transport gap.
+            self._trades[ticker].clear()
+            self._book_history_started_at[ticker] = now
+            self._trade_history_started_at[ticker] = now
+            self._book_history_initial_microprice[ticker] = (
+                self._yes_microprice_from_sides(yes, no)
+            )
+            self._book_retention_baseline_microprice.pop(ticker, None)
             self._last_orderbook_at = now
 
     def _handle_book_delta(self, message: dict, now: float) -> None:
@@ -445,14 +813,33 @@ class KalshiWebSocketFeed:
             book = self._books.setdefault(ticker, {"yes": {}, "no": {}, "updated_at": now})
             side_book = book[side]
             previous_qty = float(side_book.get(price, 0.0))
-            best_before = max(side_book, default=None)
+            best_key = f"_best_{side}"
+            best_before = book.get(best_key)
+            if best_before is None and side_book:
+                best_before = max(side_book)
             new_qty = previous_qty + delta
-            if new_qty <= 0:
+            # Decimal fixed-point quantities are stored as floats here. Exact
+            # depletion can leave sub-nanocontract positive dust, which would
+            # survive as a ghost best bid and manufacture a crossed book.
+            if new_qty <= 1e-9:
                 side_book.pop(price, None)
             else:
                 side_book[price] = new_qty
-            best_after = max(side_book, default=None)
+            if not side_book:
+                best_after = None
+            elif new_qty > 1e-9 and (
+                best_before is None or price > best_before
+            ):
+                best_after = price
+            elif best_before == price and new_qty <= 1e-9:
+                best_after = max(side_book, default=None)
+            else:
+                best_after = best_before
+            book[best_key] = best_after
             book["updated_at"] = now
+            microprice_after = self._yes_microprice_from_sides(
+                book["yes"], book["no"]
+            )
             self._book_events[ticker].append({
                 "ts": float(event_ts),
                 "received_at": now,
@@ -463,7 +850,9 @@ class KalshiWebSocketFeed:
                 "quantity_after": max(0.0, new_qty),
                 "at_best_before": best_before is not None and price == best_before,
                 "at_best_after": best_after is not None and price == best_after,
+                "yes_microprice_after_cents": microprice_after,
             })
+            self._prune_ticker_history_locked(ticker, now)
             self._last_orderbook_at = now
 
     def _handle_trade(self, message: dict, now: float) -> None:
@@ -480,6 +869,7 @@ class KalshiWebSocketFeed:
         row = {
             "id": trade_id,
             "ts": ts,
+            "received_at": now,
             "created_time": message.get("created_time", ""),
             "yes_cents": round(float(yes_cents), 4),
             "count": count,
@@ -490,6 +880,7 @@ class KalshiWebSocketFeed:
             trades = self._trades[ticker]
             if not trades or trades[-1].get("id") != trade_id:
                 trades.append(row)
+            self._prune_ticker_history_locked(ticker, now)
             self._last_trade_at = now
 
     @staticmethod

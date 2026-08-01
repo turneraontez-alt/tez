@@ -1,0 +1,52 @@
+{
+  "protocol_id": "q15-rti-v12-outcome-blind-covariate-drift-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_CHRONOLOGICAL_SPLIT_STATISTICS",
+  "preregistered_at": "2026-07-22T12:29:51Z",
+  "applies_to_design_id": "q15-rti-market-residual-orthogonal-compact-v12",
+  "applies_to_design_sha256": "3f878d532c1ba6578e9eeb347ab2025b1c5a14c9ce27cd79a367016238ff854a",
+  "evidence_available_at_preregistration": {
+    "aggregate_feature_audit_complete_windows": 15,
+    "chronological_split_statistics_inspected": false,
+    "outcome_labels_read": false,
+    "model_fit_performed": false,
+    "performance_metrics_inspected": false
+  },
+  "review_trigger": {
+    "minimum_complete_executable_close_windows": 30,
+    "same_close_assets_must_share_half": true,
+    "chronological_halves": true,
+    "odd_middle_close_assigned_to_late_half": true,
+    "minimum_close_windows_per_half": 15,
+    "partial_close_windows_forbidden": true,
+    "timestamp_alignment_failures_must_equal": 0,
+    "nonfinite_feature_values_must_equal": 0
+  },
+  "fixed_metrics": {
+    "standardized_mean_shift_formula": "(late_mean - early_mean) / max(overall_population_std, standardization_min_std)",
+    "absolute_standardized_mean_shift_maximum": 1.0,
+    "dispersion_ratio_formula": "late_population_std / early_population_std",
+    "dispersion_ratio_minimum": 0.25,
+    "dispersion_ratio_maximum": 4.0,
+    "both_halves_constant_dispersion_ratio": 1.0,
+    "one_half_constant_other_active_is_breach": true,
+    "missing_indicator_absolute_rate_shift_maximum": 0.25,
+    "market_prior_is_audited_with_same_mean_and_dispersion_thresholds": true,
+    "constant_features_excluded_from_mean_shift_breaches": true
+  },
+  "breach_policy": {
+    "any_feature_or_market_prior_breach_marks_drift_detected": true,
+    "automatic_feature_removal_allowed": false,
+    "automatic_threshold_change_allowed": false,
+    "automatic_refit_allowed": false,
+    "automatic_activation_allowed": false,
+    "automatic_promotion_allowed": false,
+    "historical_credit_allowed": false,
+    "manual_root_cause_review_required": true,
+    "v11_and_v12_remain_frozen": true
+  },
+  "report_only": true,
+  "outcome_labels_forbidden": true,
+  "model_fit_forbidden": true,
+  "notification_eligible": false,
+  "real_trading_allowed": false
+}

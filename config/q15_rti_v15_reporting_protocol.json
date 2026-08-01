@@ -1,0 +1,84 @@
+{
+  "protocol_id": "q15-rti-v15-fixed-subgroup-and-economics-reporting-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_ANY_V15_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-23T06:33:17Z",
+  "applies_to_design_id": "q15-rti-market-anchored-independent-path-augmented-residual-v15",
+  "applies_to_design_sha256": "8c6facc23a0a56968c8a24408272f676923e78a7b51111a39122577d902f0ba7",
+  "applies_to_evaluation_protocol_id": "q15-rti-v15-path-augmented-nested-safe-expanding-walk-forward-v1",
+  "applies_to_evaluation_protocol_sha256": "e4233be29f211e314344d817de296ca3ef99f5026f67edcaadbe2a44d25b3536",
+  "outcome_labels_used_for_protocol": false,
+  "performance_metrics_inspected_before_preregistration": false,
+  "changes_features_model_hyperparameters_trust_entry_policy_or_gates": false,
+  "report_only": true,
+  "paper_only": true,
+  "notification_eligible": false,
+  "automatic_promotion": false,
+  "real_trading_allowed": false,
+  "cohort_pooling_forbidden": true,
+  "untouched_test_scored_once": true,
+  "calibration_bins": 10,
+  "dimensions": {
+    "asset": {
+      "source": "asset",
+      "categories": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"]
+    },
+    "rti_side": {
+      "source": "stored_point_in_time_side",
+      "categories": ["YES", "NO"]
+    },
+    "absolute_distance_tier": {
+      "source_feature": "yes_signed_distance_bps",
+      "transform": "absolute_value",
+      "bins": [
+        {"label": "LT_1_BPS", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+        {"label": "1_TO_LT_3_BPS", "minimum_inclusive": 1.0, "maximum_exclusive": 3.0},
+        {"label": "3_TO_LT_5_BPS", "minimum_inclusive": 3.0, "maximum_exclusive": 5.0},
+        {"label": "5_TO_LT_10_BPS", "minimum_inclusive": 5.0, "maximum_exclusive": 10.0},
+        {"label": "GE_10_BPS", "minimum_inclusive": 10.0, "maximum_exclusive": null}
+      ]
+    },
+    "realized_volatility_tier": {
+      "source_feature": "log1p_realized_volatility_bps",
+      "transform": "expm1",
+      "bins": [
+        {"label": "LT_1_BPS", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+        {"label": "1_TO_LT_2_BPS", "minimum_inclusive": 1.0, "maximum_exclusive": 2.0},
+        {"label": "2_TO_LT_4_BPS", "minimum_inclusive": 2.0, "maximum_exclusive": 4.0},
+        {"label": "4_TO_LT_8_BPS", "minimum_inclusive": 4.0, "maximum_exclusive": 8.0},
+        {"label": "GE_8_BPS", "minimum_inclusive": 8.0, "maximum_exclusive": null}
+      ]
+    },
+    "market_regime": {
+      "median_momentum_feature": "cross_asset_median_momentum_60s",
+      "breadth_feature": "cross_asset_breadth_signed_60s",
+      "broad_projected_breadth_threshold": 0.5,
+      "categories_in_priority_order": ["BROAD_ALIGNED", "THIN_OR_ISOLATED_ALIGNED", "BROAD_OPPOSED", "MIXED_OR_FLAT"]
+    },
+    "path_depth_agreement": {
+      "source_feature": "rti_independent_path_depth_direction_agreement_60s",
+      "transform": "identity",
+      "bins": [
+        {"label": "OPPOSED", "minimum_inclusive": -1.0, "maximum_exclusive": -0.25},
+        {"label": "MIXED", "minimum_inclusive": -0.25, "maximum_exclusive": 0.25},
+        {"label": "ALIGNED", "minimum_inclusive": 0.25, "maximum_exclusive": null}
+      ]
+    },
+    "path_spread_stress_tier": {
+      "source_feature": "rti_independent_path_log1p_max_spread_stress_ratio_60s",
+      "transform": "expm1",
+      "bins": [
+        {"label": "LOW_LT_1_25X", "minimum_inclusive": 0.0, "maximum_exclusive": 1.25},
+        {"label": "MODERATE_1_25_TO_LT_2X", "minimum_inclusive": 1.25, "maximum_exclusive": 2.0},
+        {"label": "HIGH_GE_2X", "minimum_inclusive": 2.0, "maximum_exclusive": null}
+      ]
+    }
+  },
+  "accepted_pick_economics": {
+    "official_kalshi_fee_schedule_required": true,
+    "slippage_cents_per_contract": 2.0,
+    "simulation_contracts": 10,
+    "rejected_counterfactuals_required": true,
+    "non_executable_rejected_rows_have_no_pnl": true,
+    "fake_fills_forbidden": true
+  }
+}

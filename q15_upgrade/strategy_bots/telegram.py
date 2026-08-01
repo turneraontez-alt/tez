@@ -46,6 +46,7 @@ def _bot_label(name: str) -> str:
         "hvf_depth_flow_wrapper": "HVF Depth/Flow Wrapper",
         "v3_15m_depth_formula_research": "15M Depth Formula Research",
         "thirteen_m_sniper": "13M Early Sniper",
+        "rti_path_13m": "RTI Path 13M",
         "warn_flip_entry": "Warn-Flip Entry",
         "fav_10m": "Favorite 10M",
         "top_pick_13m": "Top Pick 13M",
@@ -88,6 +89,10 @@ def _is_depth_formula(row: Mapping[str, Any]) -> bool:
 
 def _is_thirteen_m_sniper(row: Mapping[str, Any]) -> bool:
     return str(row.get("bot_name") or "") == "thirteen_m_sniper"
+
+
+def _is_rti_path_13m(row: Mapping[str, Any]) -> bool:
+    return str(row.get("bot_name") or "") == "rti_path_13m"
 
 
 def _thresholds(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1166,11 +1171,220 @@ def build_v3_auto_mute_alert(row: Mapping[str, Any], *, header: str | None = Non
     return "\n".join(parts)
 
 
+def build_rti_path_13m_alert(row: Mapping[str, Any]) -> str:
+    """Action-readable paper card for the frozen prospective RTI cohort."""
+    thresholds = _thresholds(row)
+    asset = str(row.get("asset") or thresholds.get("asset_cohort") or "").upper()
+    index_id = str(thresholds.get("rti_index_id") or thresholds.get("index_required") or "RTI")
+    side = str(row.get("side") or thresholds.get("rti_side") or "").upper()
+    ask = row.get("entry_ask_cents")
+    persistence = thresholds.get("rti_path_persistence")
+    move_bps = thresholds.get("rti_side_move_bps")
+    path_count = thresholds.get("rti_path_count")
+    expected = thresholds.get("rti_path_expected_count")
+    n = int(float(thresholds.get("resolved_n") or 0))
+    acc = thresholds.get("resolved_accuracy")
+    pnl_per_contract = thresholds.get("resolved_net_pnl_cents_per_contract")
+    try:
+        ten_lot_dollars = float(pnl_per_contract) * 10.0 / 100.0
+    except (TypeError, ValueError):
+        ten_lot_dollars = None
+    raw_challengers = thresholds.get("challengers")
+    impulse = (
+        raw_challengers.get("impulse_strength_v1", {})
+        if isinstance(raw_challengers, Mapping)
+        else {}
+    )
+    impulse = impulse if isinstance(impulse, Mapping) else {}
+    impulse_accepted = impulse.get("accepted") is True
+    impulse_evidence = impulse.get("evidence")
+    impulse_evidence = (
+        impulse_evidence if isinstance(impulse_evidence, Mapping) else {}
+    )
+    impulse_criteria = impulse.get("criteria")
+    impulse_criteria = (
+        impulse_criteria if isinstance(impulse_criteria, Mapping) else {}
+    )
+    accepted_challengers = [
+        str(challenger.get("name") or challenger_id)
+        for challenger_id, challenger in (
+            raw_challengers.items() if isinstance(raw_challengers, Mapping) else ()
+        )
+        if isinstance(challenger, Mapping)
+        and challenger.get("accepted") is True
+        and challenger.get("notification_eligible") is True
+    ]
+    accepted_record_only_shadows = [
+        challenger
+        for challenger in (
+            raw_challengers.values() if isinstance(raw_challengers, Mapping) else ()
+        )
+        if isinstance(challenger, Mapping)
+        and challenger.get("accepted") is True
+        and challenger.get("notification_eligible") is not True
+        and not str(challenger.get("notification_status") or "").startswith("MUTED_")
+        and not challenger.get("side_override")
+    ]
+    decision_status = str(row.get("decision_status") or "").upper()
+    strict_accepted = (
+        decision_status == "ACCEPTED"
+        or (not decision_status and thresholds.get("passed") is True)
+    )
+    header_kind = (
+        "RTI IMPULSE" if impulse_accepted
+        else "RTI CONTROL" if strict_accepted
+        else "RTI CHALLENGER"
+    )
+    parts = [
+        f"<b>V3 {html.escape(asset)} {header_kind} 13M | PAPER</b>",
+        f"BUY {html.escape(side)} @ {_whole(ask, 'c')} simulated",
+        f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>",
+        (
+            f"{html.escape(index_id)} path: "
+            f"{_pct(persistence)} persistence · "
+            f"14M {html.escape(str(thresholds.get('rti_14m_side') or 'n/a'))} → "
+            f"13M {html.escape(side or 'n/a')} · "
+            f"move {_fmt(move_bps, 'bps')}"
+        ),
+        (
+            "Freshness: "
+            f"{_whole(path_count)}/{_whole(expected)} seconds · "
+            f"RTI {_fmt(thresholds.get('rti_decision_age_s'), 's')} · "
+            f"quote {_fmt(thresholds.get('quote_age_seconds'), 's')}"
+        ),
+        (
+            f"Market: spread {_fmt(row.get('spread_cents'), 'c')} · "
+            f"ask depth {_fmt(row.get('depth_contracts'))}"
+        ),
+        (
+            f"Forward book: n={n}, acc={_pct(acc)}, "
+            f"10-lot net ${_fmt(ten_lot_dollars)}"
+        ),
+        f"Rule: <code>{html.escape(str(thresholds.get('rule_version') or ''))}</code>",
+        "Costs: official fee + 2c/contract slippage; 10-contract simulation",
+        "Mode: prospective paper-only monitor; no order placed",
+    ]
+    if impulse_accepted:
+        parts.insert(
+            2,
+            (
+                "Impulse evidence: distance "
+                f"{_fmt(impulse_evidence.get('signed_distance_bps'), 'bps')} Â· "
+                f"move {_fmt(impulse_evidence.get('side_move_bps'), 'bps')} Â· "
+                f"efficiency {_pct(impulse_evidence.get('trend_efficiency'))} Â· "
+                "second half "
+                f"{_fmt(impulse_evidence.get('second_half_side_move_bps'), 'bps')}"
+            ),
+        )
+        parts.insert(
+            3,
+            (
+                "Reversal/fill check: crossings "
+                f"{_whole(impulse_evidence.get('strike_crossings'))} Â· "
+                f"depth {_fmt(impulse_evidence.get('displayed_depth_contracts'))} Â· "
+                "signed spot "
+                f"{_fmt(impulse_evidence.get('spot_signed_imbalance'))}"
+            ),
+        )
+        parts.insert(
+            4,
+            "<b>UNPROMOTED PAPER CHALLENGER:</b> forward results start at zero",
+        )
+        policy_version = str(impulse_criteria.get("policy_version") or "")
+        if policy_version:
+            parts.insert(5, f"Challenger rule: <code>{html.escape(policy_version)}</code>")
+    qualified = accepted_challengers
+    if qualified:
+        parts.insert(1, "Qualified: " + html.escape(" + ".join(qualified)))
+    if accepted_challengers and not strict_accepted:
+        parts.insert(2, "Strict book: rejected; challenger paper alert only")
+    for shadow in reversed(accepted_record_only_shadows):
+        criteria = shadow.get("criteria")
+        criteria = criteria if isinstance(criteria, Mapping) else {}
+        policy_version = str(criteria.get("policy_version") or "")
+        parts.insert(
+            2,
+            "<b>UNPROMOTED PAPER SHADOW:</b> "
+            + html.escape(str(shadow.get("name") or "record-only challenger")),
+        )
+        if policy_version:
+            parts.insert(3, f"Shadow rule: <code>{html.escape(policy_version)}</code>")
+    if thresholds.get("prospective_transfer"):
+        parts.insert(
+            1,
+            "<b>TRANSFER COHORT:</b> same BTC-derived gates; no historical validation yet",
+        )
+    degraded = _degraded_line(row)
+    if degraded:
+        parts.insert(1, degraded)
+    return "\n".join(parts)
+
+
+def build_marketlead_alert(row: Mapping[str, Any]) -> str:
+    """Render a monitoring-only card for one strict-fresh MarketLead row."""
+    asset = html.escape(str(row.get("asset") or ""))
+    side = html.escape(str(row.get("predicted_side") or "").upper())
+    touched = bool(row.get("paper_limit_touched"))
+    touch_text = "limit available now" if touched else "waiting for paper limit"
+    candidate: Mapping[str, Any] = {}
+    try:
+        features = json.loads(str(row.get("features_json") or "{}"))
+        raw_candidate = features.get("candidate") if isinstance(features, Mapping) else None
+        if isinstance(raw_candidate, Mapping):
+            candidate = raw_candidate
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    pressure_gate = row.get("notification_kalshi_pressure_max")
+    if pressure_gate is None:
+        pressure_gate = candidate.get("kalshi_pressure_side_max", -0.10)
+    rule_version = html.escape(str(
+        row.get("notification_rule_version") or "marketlead-prospective-audit-v2"
+    ))
+    parts = [
+        f"\U0001f6a6 <b>V3 MARKETLEAD PROSPECTIVE AUDIT 13M</b> — {asset} {side}",
+        (
+            f"<b>PAPER WATCH {side} &le; {_whole(row.get('paper_limit_cents'), 'c')}</b>"
+            f" · current ask {_whole(row.get('entry_ask_cents'), 'c')} · {touch_text}"
+        ),
+        (
+            "Freshness: READY · Kalshi book "
+            f"{_fmt(row.get('kalshi_book_age_seconds'), 's')} · event "
+            f"{_fmt(row.get('kalshi_event_age_seconds'), 's')}"
+        ),
+        (
+            "External lead: proxy distance "
+            f"{_fmt(row.get('proxy_distance_side_bps'), 'bps')} · venue impulse "
+            f"{_fmt(row.get('venue_impulse_side'))}"
+        ),
+        (
+            f"Sources: {_whole(row.get('rti_proxy_source_count'))} proxy · "
+            f"{_whole(row.get('venue_source_count'))} venue"
+        ),
+        (
+            "Kalshi lag: side pressure "
+            f"{_fmt(row.get('kalshi_pressure_side'))} "
+            f"(gate &le; {_fmt(pressure_gate)})"
+        ),
+        (
+            "Frozen gates: proxy &ge; "
+            f"{_fmt(row.get('notification_proxy_distance_min'), 'bps')} · "
+            "venue &ge; "
+            f"{_fmt(row.get('notification_venue_impulse_min'))}"
+        ),
+        f"Rule: <code>{rule_version}</code>",
+        f"Ticker: <code>{html.escape(str(row.get('ticker') or ''))}</code>",
+        "Mode: prospective paper-only monitor; no order placed",
+    ]
+    return "\n".join(parts)
+
+
 def build_v3_alert(row: Mapping[str, Any]) -> str:
     if _is_bnb_combined(row):
         return build_bnb_combined_alert(row)
     if _is_thirteen_m_sniper(row):
         return build_thirteen_m_sniper_alert(row)
+    if _is_rti_path_13m(row):
+        return build_rti_path_13m_alert(row)
     if _is_warn_flip(row):
         return build_warn_flip_alert(row)
     if _is_fav_10m(row):

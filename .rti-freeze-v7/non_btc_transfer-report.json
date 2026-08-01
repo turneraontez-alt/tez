@@ -1,0 +1,51 @@
+{
+  "artifact_emitted": false,
+  "audit_version": "q15-rti-microstructure-locked-freeze-v1",
+  "automatic_promotion": false,
+  "cohort": "NON_BTC_TRANSFER",
+  "design_id": "q15-rti-market-residual-cross-venue-v7",
+  "design_sha256": "1711257f38333fc3075347002ef49ba2fa7e860118507f9df0751acbb0c3658f",
+  "generated_at": "2026-07-21T11:24:06.945410+00:00",
+  "model_fit_performed": false,
+  "outcome_labels_read": false,
+  "paper_only": true,
+  "readiness": {
+    "artifact_emitted": false,
+    "audit_version": "q15-rti-microstructure-preregister-readiness-v1",
+    "cohorts": {
+      "BTC": {
+        "complete_close_windows": 0,
+        "minimum_complete_close_windows": 150,
+        "ready_for_locked_freeze": false,
+        "windows_remaining": 150
+      },
+      "NON_BTC_TRANSFER": {
+        "complete_close_windows": 0,
+        "minimum_complete_close_windows": 60,
+        "ready_for_locked_freeze": false,
+        "windows_remaining": 60
+      }
+    },
+    "complete_microstructure_close_windows": 0,
+    "coverage_clean": true,
+    "design_id": "q15-rti-market-residual-cross-venue-v7",
+    "design_sha256": "1711257f38333fc3075347002ef49ba2fa7e860118507f9df0751acbb0c3658f",
+    "feature_count": 60,
+    "feature_schema_version": "rti-probability-microstructure-features-v7",
+    "generated_at": "2026-07-21T11:24:06.945410+00:00",
+    "incomplete_seven_asset_windows": 0,
+    "model_feature_timestamp_failures": 0,
+    "model_feature_unavailable_rows": 17,
+    "model_fit_performed": false,
+    "outcome_labels_read": false,
+    "paper_only": true,
+    "partial_schema_windows": 0,
+    "ready_for_any_locked_freeze": false,
+    "schema_complete_microstructure_close_windows": 15,
+    "status": "WAITING_FOR_COMPLETE_WINDOWS",
+    "timestamp_alignment_failures": 0,
+    "unusable_model_feature_close_windows": 4
+  },
+  "status": "WAITING_FOR_COMPLETE_WINDOWS",
+  "untouched_test_labels_read": false
+}

@@ -11,6 +11,11 @@ from typing import Sequence
 
 from .mathx import clamp, logit, sigmoid
 
+try:  # Keep the dependency-free fallback for minimal deployments.
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised by fallback-specific tests
+    _np = None
+
 
 class IdentityCalibrator:
     name = "identity"
@@ -41,6 +46,20 @@ class PlattCalibrator:
         n = len(xs)
         if n < 5:
             self.a, self.b, self.fitted = 1.0, 0.0, False
+            return self
+        if _np is not None:
+            x_arr = _np.asarray(xs, dtype=_np.float64)
+            y_arr = _np.asarray(ys, dtype=_np.float64)
+            a, b = 1.0, 0.0
+            for _ in range(self.max_iter):
+                scores = a * x_arr + b
+                pred = 1.0 / (1.0 + _np.exp(-_np.clip(scores, -709.0, 709.0)))
+                err = pred - y_arr
+                ga = float(err @ x_arr) / n + self.l2 / n * (a - 1.0)
+                gb = float(err.sum()) / n + self.l2 / n * b
+                a -= self.lr * ga
+                b -= self.lr * gb
+            self.a, self.b, self.fitted = a, b, True
             return self
         a, b = 1.0, 0.0
         for _ in range(self.max_iter):

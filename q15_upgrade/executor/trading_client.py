@@ -90,8 +90,16 @@ class KalshiTradingClient:
         try:
             resp = self._session.request(method, url, json=body, headers=headers, timeout=timeout)
         except requests.RequestException as exc:  # type: ignore[union-attr]
-            logger.error("kalshi %s %s failed: %s", method, suffix, exc)
-            return {"ok": False, "error": f"request_failed: {exc.__class__.__name__}"}
+            # A transport failure is NOT proof the order was rejected. Only a
+            # ConnectTimeout guarantees nothing was ever sent; a ReadTimeout or a
+            # mid-flight ConnectionError can mean Kalshi accepted and filled the
+            # order while we never saw the ack. Flag that ambiguity so the caller
+            # books the exposure instead of silently freeing the risk budget.
+            certain_not_sent = isinstance(exc, requests.exceptions.ConnectTimeout)
+            logger.error("kalshi %s %s failed: %s (uncertain=%s)",
+                         method, suffix, exc, not certain_not_sent)
+            return {"ok": False, "uncertain": not certain_not_sent,
+                    "error": f"request_failed: {exc.__class__.__name__}"}
         if resp.status_code >= 400:
             logger.error("kalshi %s %s -> %s: %s", method, suffix, resp.status_code, resp.text[:300])
             return {"ok": False, "status": resp.status_code, "error": resp.text[:300]}

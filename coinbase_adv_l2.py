@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS coinbase_adv_l2_snapshots (
     remove_count_15s INTEGER,
     update_count_60s INTEGER,
     remove_count_60s INTEGER,
-    snapshot_loaded INTEGER DEFAULT 0
+    snapshot_loaded INTEGER DEFAULT 0,
+    summary_level_limit INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_coinbase_adv_l2_product_time
     ON coinbase_adv_l2_snapshots(product_id, created_at);
@@ -121,7 +122,9 @@ def _record_seconds() -> float:
 
 
 def _summary_levels() -> int:
-    return _env_int("Q15_COINBASE_ADV_L2_SUMMARY_LEVELS", 250, minimum=1)
+    # Keep the persisted depth basis comparable with Kraken L3's default
+    # ten-level subscription.  The in-memory Coinbase book remains full L2.
+    return _env_int("Q15_COINBASE_ADV_L2_SUMMARY_LEVELS", 10, minimum=1)
 
 
 def _jwt_refresh_seconds() -> float:
@@ -364,6 +367,7 @@ class CoinbaseAdvancedL2Collector:
                 "records_written": self._records_written,
                 "updates_seen": self._updates_seen,
                 "summary_levels": self.summary_levels,
+                "record_seconds": self.record_seconds,
                 "retention_days": self.retention_days,
                 "estimated_summary_rows_per_day": self._estimated_summary_rows_per_day(),
                 "estimated_summary_mb_per_day": self._estimated_summary_mb_per_day(),
@@ -481,11 +485,15 @@ class CoinbaseAdvancedL2Collector:
         if not rows:
             return 0
         conn = self._connect()
+        # SQLite on the local/OneDrive ledger can occasionally take seconds.
+        # Never hold the live-book lock across disk I/O: doing so starves the
+        # websocket consumer and makes a persisted "current" row stale by the
+        # time it commits.
+        for row in rows:
+            self._insert_row_locked(conn, row)
+        self._prune_locked(conn, now)
+        conn.commit()
         with self._lock:
-            for row in rows:
-                self._insert_row_locked(conn, row)
-            self._prune_locked(conn, now)
-            conn.commit()
             self._records_written += len(rows)
             self._last_record_at = now
         return len(rows)
@@ -593,6 +601,7 @@ class CoinbaseAdvancedL2Collector:
             "bid_levels_json": json.dumps(bids, separators=(",", ":")),
             "ask_levels_json": json.dumps(asks, separators=(",", ":")),
             "snapshot_loaded": 1,
+            "summary_level_limit": self.summary_levels,
         }
         row.update(self._update_sums(history, now, 5.0, "5s"))
         row.update(self._update_sums(history, now, 15.0, "15s"))
@@ -628,6 +637,16 @@ class CoinbaseAdvancedL2Collector:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            columns = {
+                row[1] for row in self._conn.execute(
+                    "PRAGMA table_info(coinbase_adv_l2_snapshots)"
+                )
+            }
+            if "summary_level_limit" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE coinbase_adv_l2_snapshots ADD COLUMN "
+                    "summary_level_limit INTEGER"
+                )
             self._conn.commit()
             return self._conn
 
@@ -641,7 +660,7 @@ class CoinbaseAdvancedL2Collector:
             "ask_notional_levels", "depth_imbalance", "bid_levels_json",
             "ask_levels_json", "update_count_5s", "remove_count_5s",
             "update_count_15s", "remove_count_15s", "update_count_60s",
-            "remove_count_60s", "snapshot_loaded",
+            "remove_count_60s", "snapshot_loaded", "summary_level_limit",
         )
         conn.execute(
             f"INSERT INTO coinbase_adv_l2_snapshots({','.join(cols)}) "
@@ -676,7 +695,7 @@ class CoinbaseAdvancedL2Collector:
     async def _recorder_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.record_once()
+                await asyncio.to_thread(self.record_once)
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self._last_error["recorder"] = str(exc)[:200]

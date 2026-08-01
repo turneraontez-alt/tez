@@ -1,0 +1,55 @@
+{
+  "protocol_id": "q15-rti-v12-outcome-blind-geometry-review-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_30_WINDOW_FEATURE_REVIEW",
+  "preregistered_at": "2026-07-22T12:21:56Z",
+  "applies_to_design_id": "q15-rti-market-residual-orthogonal-compact-v12",
+  "applies_to_design_sha256": "3f878d532c1ba6578e9eeb347ab2025b1c5a14c9ce27cd79a367016238ff854a",
+  "evidence_available_at_preregistration": {
+    "complete_executable_close_windows": 15,
+    "outcome_labels_read": false,
+    "model_fit_performed": false,
+    "performance_metrics_inspected": false,
+    "btc_observed_pair_absolute_correlation": 0.9890160274775156,
+    "non_btc_pairs_at_or_above_0_95": 0
+  },
+  "review_trigger": {
+    "complete_executable_close_windows": 30,
+    "same_seven_assets_required_per_close": true,
+    "partial_close_windows_forbidden": true,
+    "timestamp_alignment_failures_must_equal": 0,
+    "nonfinite_feature_values_must_equal": 0
+  },
+  "fixed_checks": {
+    "pairwise_absolute_correlation_ceiling": 0.95,
+    "exact_signed_duplicate_pairs_must_equal": 0,
+    "condition_number_nonzero_subspace_maximum": 50.0,
+    "btc_numerical_rank_must_equal_centered_rank_limit": true,
+    "non_btc_rank_deficiency_vs_active_features_must_equal": 0,
+    "btc_projected_train_rows_per_active_feature_minimum": 4.0,
+    "non_btc_projected_train_rows_per_active_feature_minimum": 10.0
+  },
+  "predeclared_btc_alias_pair": {
+    "left": "target_minus_cross_asset_median_momentum_60s_bps",
+    "right": "cross_asset_btc_minus_non_btc_median_60s",
+    "structural_reason": "for the BTC cohort both features subtract a broad-market center from BTC momentum and can become near aliases"
+  },
+  "predeclared_successor_hypothesis_if_alias_persists": {
+    "trigger": "at 30 complete windows, the BTC alias pair has absolute correlation greater than or equal to 0.95 while the non-BTC cohort has no pair at or above 0.95",
+    "replacement_feature_name": "cross_asset_btc_minus_non_btc_median_non_btc_only_60s",
+    "replacement_formula": "0 for BTC; otherwise preserve cross_asset_btc_minus_non_btc_median_60s",
+    "purpose": "remove the redundant BTC degree of freedom without discarding the broad BTC-versus-non-BTC regime signal from the transfer cohort",
+    "new_design_required": true,
+    "v11_and_v12_remain_frozen_parallel_controls": true,
+    "historical_credit_allowed": false,
+    "prospective_boundary_must_include_every_reviewed_close": true,
+    "automatic_design_creation_allowed": false,
+    "automatic_activation_allowed": false,
+    "automatic_promotion_allowed": false
+  },
+  "report_only": true,
+  "outcome_labels_forbidden": true,
+  "model_fit_forbidden": true,
+  "entry_policy_changes_forbidden": true,
+  "notification_eligible": false,
+  "real_trading_allowed": false
+}

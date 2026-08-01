@@ -1,0 +1,64 @@
+{
+  "protocol_id": "q15-rti-v12-expanding-walk-forward-evaluation-v1",
+  "protocol_status": "PREREGISTERED_BEFORE_ANY_V12_OUTCOME_REVIEW",
+  "preregistered_at": "2026-07-22T08:54:47Z",
+  "applies_to_design_id": "q15-rti-market-residual-orthogonal-compact-v12",
+  "applies_to_design_sha256": "3f878d532c1ba6578e9eeb347ab2025b1c5a14c9ce27cd79a367016238ff854a",
+  "source_feature_audit_version": "q15-rti-microstructure-feature-audit-v2",
+  "source_projection_review_version": "q15-rti-v12-outcome-blind-projection-review-v1",
+  "outcome_labels_used_for_protocol": false,
+  "performance_metrics_inspected_before_preregistration": false,
+  "feature_rows_may_be_inspected_without_labels": true,
+  "changes_features_model_or_hyperparameters": false,
+  "paper_only": true,
+  "real_trading_allowed": false,
+  "notification_eligible": false,
+  "automatic_promotion": false,
+  "automatic_hyperparameter_search": false,
+  "fold_policy": "EXPANDING_TRAIN_NEXT_CONTIGUOUS_BLOCK",
+  "same_close_assets_must_share_fold": true,
+  "btc_and_non_btc_must_be_evaluated_separately": true,
+  "uses_only_preregistered_train_and_calibration_windows": true,
+  "untouched_test_windows_forbidden": true,
+  "temporary_fold_models_are_not_deployable_artifacts": true,
+  "paired_close_window_bootstrap": {
+    "version": "q15-rti-paired-close-window-bootstrap-v1",
+    "cluster_key": "close_time",
+    "resamples": 5000,
+    "confidence_level": 0.9,
+    "random_seed": 2026072201,
+    "minimum_mean_brier_improvement": 0.001,
+    "minimum_mean_log_loss_improvement": 0.001,
+    "model_minus_market_loss_delta": true,
+    "same_close_assets_resampled_together": true,
+    "one_sided_upper_bound_reported": true,
+    "two_sided_interval_reported": true
+  },
+  "cohorts": {
+    "BTC": {
+      "initial_train_windows": 60,
+      "validation_block_windows": 20,
+      "fold_count": 3
+    },
+    "NON_BTC_TRANSFER": {
+      "initial_train_windows": 24,
+      "validation_block_windows": 8,
+      "fold_count": 3
+    }
+  },
+  "gate": {
+    "aggregate_brier_must_strictly_beat_market": true,
+    "aggregate_log_loss_must_strictly_beat_market": true,
+    "every_fold_brier_must_not_worsen": true,
+    "every_fold_log_loss_must_not_worsen": true,
+    "aggregate_brier_bootstrap_upper_must_be_strictly_negative": true,
+    "aggregate_log_loss_bootstrap_upper_must_be_strictly_negative": true,
+    "aggregate_bootstrap_upper_must_clear_fixed_effect_floor": true,
+    "calibration_bootstrap_upper_must_be_strictly_negative": true,
+    "calibration_bootstrap_upper_must_clear_fixed_effect_floor": true,
+    "untouched_test_bootstrap_upper_must_be_strictly_negative": true,
+    "untouched_test_bootstrap_upper_must_clear_fixed_effect_floor": true,
+    "fallback_when_not_met": "KALSHI_MARKET_PRIOR",
+    "untouched_test_may_be_read_when_not_met": false
+  }
+}

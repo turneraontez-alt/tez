@@ -1,0 +1,45 @@
+{
+  "audit_version": "q15-rti-v12-outcome-blind-projection-review-v1",
+  "documented_at": "2026-07-22T08:49:00Z",
+  "candidate_preregistered_at": "2026-07-22T08:40:11Z",
+  "source_design_id": "q15-rti-market-residual-cross-asset-regime-v11",
+  "source_design_sha256": "e4a5d65485d7559e2eaa84a82d1aeca63f1f87a42914916438af9034c79b0480",
+  "candidate_design_id": "q15-rti-market-residual-orthogonal-compact-v12",
+  "candidate_design_sha256": "3f878d532c1ba6578e9eeb347ab2025b1c5a14c9ce27cd79a367016238ff854a",
+  "source_complete_close_windows": 38,
+  "source_rows_after_candidate_boundary_credited": 0,
+  "outcome_labels_read": false,
+  "performance_metrics_read": false,
+  "model_fit_performed": false,
+  "artifact_emitted": false,
+  "automatic_feature_selection": false,
+  "candidate_feature_count": 20,
+  "pairwise_absolute_correlation_threshold": 0.95,
+  "cohorts": {
+    "BTC": {
+      "rows": 38,
+      "independent_close_windows": 38,
+      "active_features": 20,
+      "numerical_rank": 20,
+      "stable_rank": 4.140726400234502,
+      "condition_number_nonzero_subspace": 16.072439951792816,
+      "projected_train_rows": 90,
+      "projected_train_rows_per_active_feature": 4.5,
+      "near_zero_variance_features": [],
+      "high_absolute_correlation_pairs": []
+    },
+    "NON_BTC_TRANSFER": {
+      "rows": 228,
+      "independent_close_windows": 38,
+      "active_features": 20,
+      "numerical_rank": 20,
+      "stable_rank": 4.9723935138241595,
+      "condition_number_nonzero_subspace": 8.620500726265725,
+      "projected_train_rows": 216,
+      "projected_train_rows_per_active_feature": 10.8,
+      "near_zero_variance_features": [],
+      "high_absolute_correlation_pairs": []
+    }
+  },
+  "interpretation": "This is feature-geometry evidence only. It cannot establish predictive improvement and grants no historical or prospective performance credit. V11 remains frozen in parallel."
+}

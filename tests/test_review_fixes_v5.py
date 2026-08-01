@@ -101,6 +101,37 @@ class TimingExperimentLedgerTests(unittest.TestCase):
         self.assertEqual(row["accuracy"], 1.0)
         self.assertAlmostEqual(row["minutes"], 13.0)
 
+    def test_batch_records_all_assets_and_keeps_first_write(self):
+        led = self._ledger()
+        rows = [
+            {
+                "contract": "KXBTC-A", "mark_seconds": 780, "asset": "BTC",
+                "predicted_side": "YES", "yes_probability": 0.7,
+                "selected_probability": 0.7, "confidence_grade": "B",
+                "created_at": NOW, "close_time": NOW + 780,
+                "snapshot_id": "batch-1",
+            },
+            {
+                "contract": "KXETH-A", "mark_seconds": 780, "asset": "ETH",
+                "predicted_side": "NO", "yes_probability": 0.3,
+                "selected_probability": 0.7, "confidence_grade": "A",
+                "created_at": NOW, "close_time": NOW + 780,
+                "snapshot_id": "batch-1",
+            },
+        ]
+
+        self.assertEqual(led.record_timing_observations(rows), 2)
+        flipped = dict(rows[0], predicted_side="NO", created_at=NOW + 5)
+        self.assertEqual(led.record_timing_observations([flipped]), 0)
+
+        stored = list(led._connect().execute(
+            "SELECT contract,predicted_side,snapshot_id FROM timing_experiment ORDER BY contract"
+        ))
+        self.assertEqual(
+            [tuple(row) for row in stored],
+            [("KXBTC-A", "YES", "batch-1"), ("KXETH-A", "NO", "batch-1")],
+        )
+
     def test_observation_never_touches_official_record(self):
         led = self._ledger()
         led.record_timing_observation(

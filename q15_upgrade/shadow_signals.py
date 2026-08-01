@@ -42,6 +42,11 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+try:  # Native arrays keep the hourly A/B report off the Python hot path.
+    import numpy as _np
+except ImportError:  # pragma: no cover - fallback is covered explicitly
+    _np = None
+
 SIGNAL_NAMES: tuple[str, ...] = (
     "order_flow_persistence",
     "book_resiliency",
@@ -339,6 +344,19 @@ def _fit_logistic_offset(offsets: Sequence[float], signals: Sequence[float], y: 
     xs = [(s - mean) / std for s in signals]
     a = 0.0
     b = 0.0
+    if _np is not None and n:
+        offsets_arr = _np.asarray(offsets, dtype=_np.float64)
+        xs_arr = _np.asarray(xs, dtype=_np.float64)
+        y_arr = _np.asarray(y, dtype=_np.float64)
+        for _ in range(iters):
+            scores = offsets_arr + a + b * xs_arr
+            pred = 1.0 / (1.0 + _np.exp(-_np.clip(scores, -709.0, 709.0)))
+            err = pred - y_arr
+            ga = float(err.mean())
+            gb = float(err @ xs_arr) / n + ridge * b / n
+            a -= lr * ga
+            b -= lr * gb
+        return a, b, mean, std
     for _ in range(iters):
         ga = 0.0
         gb = 0.0

@@ -16,6 +16,7 @@ from collections import deque
 from datetime import datetime
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -37,6 +38,10 @@ except Exception:  # pragma: no cover - optional dependency guard
 COINBASE_WS = "wss://ws-feed.exchange.coinbase.com"
 OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
 COINBASE_BOOK_CHANNEL = "level2_50"
+SPOT_MID_PATH_SCHEMA_VERSION = "spot-mid-path-local-v1"
+SPOT_MID_PATH_TIME_BASIS = "local_created_at"
+SPOT_MID_PATH_HORIZONS = (15, 60)
+SPOT_MID_PATH_RETENTION_SECONDS = 180.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS spot_depth_snapshots (
@@ -211,7 +216,15 @@ class SpotDepthRecorder:
         self._max_book_age = _max_book_age()
         self._lock = threading.Lock()
         self._books: dict[str, dict[str, Any]] = {}
+        # Crossed-book detection state. `_resync_assets` is drained by the provider loop,
+        # which drops the corrupt book so the next snapshot message rebuilds it from scratch;
+        # `_crossed_books` is a diagnostic counter surfaced in health output.
+        self._resync_assets: set[str] = set()
+        self._crossed_books: dict[str, int] = {}
         self._trades: dict[str, deque[dict[str, Any]]] = {asset: deque() for asset in self.assets}
+        self._mid_history: dict[str, deque[dict[str, float]]] = {
+            asset: deque() for asset in self.assets
+        }
         self._latest_snapshot: dict[str, dict[str, Any]] = {}
         self._connected = {"coinbase": False, "okx": False}
         self._last_error: dict[str, str] = {}
@@ -260,6 +273,24 @@ class SpotDepthRecorder:
             return None
         return dict(snap)
 
+    def capture_current(self, asset: str) -> dict[str, Any] | None:
+        """Freeze the live in-memory book without waiting for the DB cadence.
+
+        Exact-time decision systems persist the returned evidence in their own
+        ledgers.  Keeping this read path separate from ``record_once`` avoids a
+        five-second sampling blind spot without multiplying SQLite write load.
+        """
+        asset_key = str(asset or "").upper()
+        now = time.time()
+        with self._lock:
+            book = self._books.get(asset_key)
+            if not book:
+                return None
+            row = self._snapshot_locked(asset_key, book, now)
+            if row is not None:
+                row.update(self._mid_path_features_locked(asset_key, row, now))
+        return None if row is None else dict(row)
+
     def health(self) -> dict[str, Any]:
         now = time.time()
         with self._lock:
@@ -271,6 +302,16 @@ class SpotDepthRecorder:
             for asset, rows in self._trades.items():
                 if rows:
                     trades[asset] = round(now - float(rows[-1].get("ts") or 0.0), 3)
+            mid_history_rows = {
+                asset: len(rows) for asset, rows in self._mid_history.items()
+            }
+            mid_history_seconds = {
+                asset: round(
+                    max(0.0, now - float(rows[0].get("created_at") or now)), 3
+                )
+                for asset, rows in self._mid_history.items()
+                if rows
+            }
             return {
                 "enabled": _enabled(),
                 "have_ws": _HAVE_WS,
@@ -283,6 +324,11 @@ class SpotDepthRecorder:
                 "connected": dict(self._connected),
                 "book_age_seconds": books,
                 "trade_age_seconds": trades,
+                "mid_path_schema_version": SPOT_MID_PATH_SCHEMA_VERSION,
+                "mid_path_time_basis": SPOT_MID_PATH_TIME_BASIS,
+                "mid_path_retention_seconds": SPOT_MID_PATH_RETENTION_SECONDS,
+                "mid_history_rows": mid_history_rows,
+                "mid_history_seconds": mid_history_seconds,
                 "last_record_age_seconds": (
                     round(now - self._last_record_at, 3) if self._last_record_at else None
                 ),
@@ -398,6 +444,8 @@ class SpotDepthRecorder:
                 "asks": ask_map,
                 "orderbook_ts": ts,
             }
+            # A full snapshot is exactly what a flagged resync was waiting for.
+            self._resync_assets.discard(asset)
 
     def _update_book(
         self,
@@ -409,6 +457,13 @@ class SpotDepthRecorder:
         ts: float,
     ) -> None:
         with self._lock:
+            # A book flagged as crossed is known-corrupt: patching more deltas onto it only
+            # propagates the error, and every delta refreshes orderbook_ts so it keeps looking
+            # fresh. Drop it and stay dark until a full snapshot rebuilds it (fail-closed —
+            # the same posture kraken_l3 takes when it detects a crossed book).
+            if asset in self._resync_assets:
+                self._books.pop(asset, None)
+                return
             book = self._books.setdefault(
                 asset,
                 {"provider": provider, "symbol": symbol, "bids": {}, "asks": {}, "orderbook_ts": ts},
@@ -484,26 +539,178 @@ class SpotDepthRecorder:
             for asset, book in self._books.items():
                 row = self._snapshot_locked(asset, book, now)
                 if row:
+                    self._append_mid_history_locked(asset, row, now)
                     self._latest_snapshot[asset] = dict(row)
                     rows.append(row)
         if not rows:
             return 0
         conn = self._connect()
+        pruned = 0
+        did_prune = False
+        # Disk latency must not block Coinbase/OKX message handling; otherwise
+        # BNB/HYPE books can appear stale exactly when the RTI sampler fires.
+        for row in rows:
+            self._insert_row_locked(conn, row)
+        if self._retention_days > 0 and now - self._last_prune_at >= 600.0:
+            cutoff = now - (self._retention_days * 86400.0)
+            cur = conn.execute(
+                "DELETE FROM spot_depth_snapshots WHERE created_at < ?",
+                (cutoff,),
+            )
+            pruned = max(0, int(cur.rowcount or 0))
+            did_prune = True
+        conn.commit()
         with self._lock:
-            for row in rows:
-                self._insert_row_locked(conn, row)
-            if self._retention_days > 0 and now - self._last_prune_at >= 600.0:
-                cutoff = now - (self._retention_days * 86400.0)
-                cur = conn.execute(
-                    "DELETE FROM spot_depth_snapshots WHERE created_at < ?",
-                    (cutoff,),
-                )
-                self._records_pruned += max(0, int(cur.rowcount or 0))
+            if did_prune:
+                self._records_pruned += pruned
                 self._last_prune_at = now
-            conn.commit()
             self._last_record_at = now
             self._records_written += len(rows)
         return len(rows)
+
+    def _append_mid_history_locked(
+        self, asset: str, row: dict[str, Any], now: float,
+    ) -> None:
+        created_at = _f(row.get("created_at"))
+        mid = _f(row.get("mid"))
+        if created_at is None or mid is None or mid <= 0.0:
+            return
+        history = self._mid_history.setdefault(asset, deque())
+        history.append({"created_at": created_at, "mid": mid})
+        cutoff = now - SPOT_MID_PATH_RETENTION_SECONDS
+        while history and float(history[0].get("created_at") or 0.0) < cutoff:
+            history.popleft()
+
+    def _mid_path_features_locked(
+        self, asset: str, current_row: dict[str, Any], now: float,
+    ) -> dict[str, Any]:
+        """Summarize locally available spot-mid paths without future rows."""
+        history = [
+            dict(row) for row in self._mid_history.get(asset, ())
+            if _f(row.get("created_at")) is not None
+            and float(row["created_at"]) <= now
+            and _f(row.get("mid")) is not None
+            and float(row["mid"]) > 0.0
+        ]
+        current_at = _f(current_row.get("created_at"))
+        current_mid = _f(current_row.get("mid"))
+        if current_at is not None and current_mid is not None and current_mid > 0.0:
+            if not history or abs(float(history[-1]["created_at"]) - current_at) > 1e-9:
+                history.append({"created_at": current_at, "mid": current_mid})
+        history.sort(key=lambda row: float(row["created_at"]))
+        started_at = _f(history[0].get("created_at")) if history else None
+        output: dict[str, Any] = {
+            "spot_mid_path_schema_version": SPOT_MID_PATH_SCHEMA_VERSION,
+            "spot_mid_path_time_basis": SPOT_MID_PATH_TIME_BASIS,
+            "spot_mid_path_captured_at": current_at,
+            "spot_mid_history_started_at": started_at,
+            "spot_mid_history_seconds": (
+                None if started_at is None else max(0.0, now - started_at)
+            ),
+            "spot_mid_history_retention_seconds": (
+                SPOT_MID_PATH_RETENTION_SECONDS
+            ),
+            "spot_mid_record_interval_seconds": self._record_seconds,
+        }
+        start_tolerance = max(2.0, self._record_seconds * 1.75)
+        max_allowed_gap = max(3.0, self._record_seconds * 2.0)
+        for horizon in SPOT_MID_PATH_HORIZONS:
+            cutoff = now - float(horizon)
+            prior = next(
+                (
+                    row for row in reversed(history)
+                    if float(row["created_at"]) <= cutoff
+                ),
+                None,
+            )
+            after = [
+                row for row in history if float(row["created_at"]) > cutoff
+            ]
+            selected = ([] if prior is None else [prior]) + after
+            deduplicated: list[dict[str, Any]] = []
+            for row in selected:
+                if (
+                    deduplicated
+                    and abs(
+                        float(deduplicated[-1]["created_at"])
+                        - float(row["created_at"])
+                    ) <= 1e-9
+                ):
+                    deduplicated[-1] = row
+                else:
+                    deduplicated.append(row)
+            selected = deduplicated
+            timestamps = [float(row["created_at"]) for row in selected]
+            prices = [float(row["mid"]) for row in selected]
+            gaps = [right - left for left, right in zip(timestamps, timestamps[1:])]
+            max_gap = max(gaps) if gaps else None
+            required_count = max(3, int(float(horizon) / self._record_seconds))
+            reasons: list[str] = []
+            if prior is None:
+                reasons.append("HISTORY_DOES_NOT_REACH_WINDOW_START")
+            elif cutoff - float(prior["created_at"]) > start_tolerance:
+                reasons.append("WINDOW_START_SAMPLE_TOO_OLD")
+            if len(selected) < required_count:
+                reasons.append("INSUFFICIENT_PATH_SAMPLES")
+            if max_gap is None or max_gap > max_allowed_gap:
+                reasons.append("PATH_CONTINUITY_GAP")
+            if current_at is None or abs(current_at - now) > 2.0:
+                reasons.append("CURRENT_CAPTURE_NOT_EXACT")
+            complete = not reasons
+            start_mid = prices[0] if prices else None
+            end_mid = prices[-1] if prices else None
+            change_bps = (
+                None
+                if start_mid is None or end_mid is None or start_mid <= 0.0
+                else (end_mid / start_mid - 1.0) * 10_000.0
+            )
+            range_bps = (
+                None
+                if not prices or end_mid is None or end_mid <= 0.0
+                else (max(prices) - min(prices)) / end_mid * 10_000.0
+            )
+            returns = [
+                10_000.0 * math.log(right / left)
+                for left, right in zip(prices, prices[1:])
+                if left > 0.0 and right > 0.0
+            ]
+            realized = (
+                None
+                if not returns
+                else math.sqrt(sum(value * value for value in returns))
+            )
+            variation = sum(
+                abs(right - left) for left, right in zip(prices, prices[1:])
+            )
+            efficiency = (
+                None
+                if start_mid is None or end_mid is None
+                else 1.0
+                if variation == 0.0
+                else abs(end_mid - start_mid) / variation
+            )
+            suffix = f"_{horizon}s"
+            output.update({
+                f"spot_mid_window_complete{suffix}": complete,
+                f"spot_mid_path_missing_reason{suffix}": (
+                    None if complete else ",".join(reasons)
+                ),
+                f"spot_mid_path_count{suffix}": len(selected),
+                f"spot_mid_path_start_at{suffix}": (
+                    timestamps[0] if timestamps else None
+                ),
+                f"spot_mid_path_end_at{suffix}": (
+                    timestamps[-1] if timestamps else None
+                ),
+                f"spot_mid_path_max_gap_seconds{suffix}": max_gap,
+                f"spot_mid_start{suffix}": start_mid,
+                f"spot_mid_end{suffix}": end_mid,
+                f"spot_mid_change_bps{suffix}": change_bps,
+                f"spot_mid_range_bps{suffix}": range_bps,
+                f"spot_mid_realized_volatility_bps{suffix}": realized,
+                f"spot_mid_trend_efficiency{suffix}": efficiency,
+            })
+        return output
 
     def _snapshot_locked(self, asset: str, book: dict[str, Any], now: float) -> dict[str, Any] | None:
         orderbook_ts = _f(book.get("orderbook_ts"))
@@ -515,6 +722,20 @@ class SpotDepthRecorder:
             return None
         best_bid = bids[0][0]
         best_ask = asks[0][0]
+        # CROSSED-BOOK GUARD. Both sibling collectors (coinbase_adv_l2, kraken_l3) refuse to
+        # publish a crossed book; this one did not, so a delta stream that lost a cancel during
+        # a reconnect gap could emit best_bid > best_ask with a NEGATIVE spread and a bogus mid.
+        # That mid feeds spot_mid_change_bps_* / realized-vol features consumed by the rti
+        # microstructure models, so a corrupt book became a model input rather than an error.
+        # Drop the snapshot and force a resync instead of publishing nonsense.
+        if best_bid > 0 and best_ask > 0 and best_bid >= best_ask:
+            self._crossed_books[asset] = self._crossed_books.get(asset, 0) + 1
+            self._resync_assets.add(asset)
+            logger.warning(
+                "spot_depth crossed book for %s (%s): bid %.8f >= ask %.8f — dropping "
+                "snapshot and flagging resync", asset, book.get("provider"),
+                best_bid, best_ask)
+            return None
         mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else None
         spread_bps = ((best_ask - best_bid) / mid * 10_000.0) if mid else None
         bid_depth = sum(level[1] for level in bids)
@@ -653,7 +874,7 @@ class SpotDepthRecorder:
     async def _recorder_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.record_once()
+                await asyncio.to_thread(self.record_once)
             except Exception as exc:  # noqa: BLE001 - recorder must not kill feed
                 with self._lock:
                     self._last_error["recorder"] = str(exc)[:200]
@@ -743,6 +964,23 @@ def get_latest_spot_depth(asset: str, max_age: float | None = None) -> dict[str,
         return get_feed().get_latest(asset, max_age=max_age)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("spot depth lookup failed for %s: %s", asset, exc)
+        return None
+
+
+def capture_current_spot_depth(asset: str, max_age: float | None = None) -> dict[str, Any] | None:
+    """Return an on-demand live snapshot for a point-in-time decision.
+
+    ``max_age`` remains accepted for drop-in reader compatibility; book age is
+    frozen in the result and the strategy's explicit freshness gate decides
+    whether it is usable.
+    """
+    del max_age
+    if not _enabled():
+        return None
+    try:
+        return get_feed().capture_current(asset)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("spot depth live capture failed for %s: %s", asset, exc)
         return None
 
 

@@ -1,0 +1,577 @@
+{
+  "artifact_version": "q15-rti-independent-path-geometry-review-artifact-v1",
+  "contract_id": "q15-rti-independent-path-geometry-30-immutable-freeze-v1",
+  "contract_sha256": "0c624e12bf0015188e0b20c1c3b5354f70517f044994a89ee584183e02df6340",
+  "payload": {
+    "automatic_promotion": false,
+    "automatic_scoring": false,
+    "consequences": {
+      "automatic_activation_allowed": false,
+      "automatic_feature_or_threshold_change_allowed": false,
+      "automatic_promotion_allowed": false,
+      "continue_to_non_btc_60_and_btc_150": true,
+      "manual_diagnosis_required": false,
+      "model_fit_allowed_at_30": false,
+      "outcome_access_allowed_at_30": false,
+      "real_trading_allowed": false
+    },
+    "decision": "PASS_CONTINUE_PROSPECTIVE_COLLECTION_NO_MODEL",
+    "feature_selection_performed": false,
+    "frozen_at": "2026-07-23T03:17:54.103565+00:00",
+    "geometry_protocol_id": "q15-rti-independent-path-outcome-blind-geometry-review-v1",
+    "geometry_protocol_sha256": "05ab77d4936fa46870437c3c599f73aea8c41d9e4b81355f10060ba8678f7d1a",
+    "geometry_review": {
+      "all_checks_met": true,
+      "automatic_action_allowed": false,
+      "checks": {
+        "all_active_feature_counts_exact": true,
+        "all_active_matrices_full_rank": true,
+        "all_condition_numbers_within_ceiling": true,
+        "all_geometry_finite": true,
+        "all_pairwise_correlations_within_ceiling": true,
+        "candidate_feature_count_exact": true,
+        "no_exact_signed_duplicates": true,
+        "source_integrity_margin_positive": true,
+        "source_quality_pass": true,
+        "trigger_complete_row_counts_exact": true,
+        "trigger_complete_window_count_exact": true
+      },
+      "failed_checks": [],
+      "model_fit_performed": false,
+      "outcome_labels_read": false,
+      "pass_does_not_authorize_model_fit": true,
+      "pass_does_not_authorize_outcome_access": true,
+      "protocol_id": "q15-rti-independent-path-outcome-blind-geometry-review-v1",
+      "protocol_sha256": "05ab77d4936fa46870437c3c599f73aea8c41d9e4b81355f10060ba8678f7d1a",
+      "review_ready": true,
+      "review_window": 30,
+      "status": "PASS_CONTINUE_PROSPECTIVE_COLLECTION_NO_MODEL"
+    },
+    "model_fit_performed": false,
+    "outcome_columns_selected": false,
+    "outcome_labels_read": false,
+    "real_trading_allowed": false,
+    "selected_close_times_sha256": "ae0ebc372e6cd593ddbc97a79022f700dc33d07b699ce3f9cbf43f237a26ebfe",
+    "selected_complete_close_times": [
+      1784747700.0,
+      1784748600.0,
+      1784749500.0,
+      1784750400.0,
+      1784751300.0,
+      1784752200.0,
+      1784753100.0,
+      1784754000.0,
+      1784757600.0,
+      1784758500.0,
+      1784759400.0,
+      1784760300.0,
+      1784762100.0,
+      1784763000.0,
+      1784763900.0,
+      1784764800.0,
+      1784765700.0,
+      1784766600.0,
+      1784767500.0,
+      1784768400.0,
+      1784769300.0,
+      1784770200.0,
+      1784771100.0,
+      1784772000.0,
+      1784772900.0,
+      1784773800.0,
+      1784774700.0,
+      1784775600.0,
+      1784776500.0,
+      1784777400.0
+    ],
+    "selected_geometry": {
+      "ALL_SEVEN": {
+        "active_feature_count": 5,
+        "active_feature_names": [
+          "rti_independent_path_mean_depth_imbalance_60s",
+          "rti_independent_path_mean_depth_imbalance_half_delta_60s",
+          "rti_independent_path_depth_direction_agreement_60s",
+          "rti_independent_path_log1p_max_spread_stress_ratio_60s",
+          "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s"
+        ],
+        "condition_number_nonzero_subspace": 1.3408077018606626,
+        "exact_signed_duplicate_pairs": [],
+        "feature_count": 5,
+        "feature_statistics": {
+          "rti_independent_path_depth_direction_agreement_60s": {
+            "active": true,
+            "max": 1.0,
+            "mean": 0.5523809523809524,
+            "min": 0.0,
+            "n": 210,
+            "population_std": 0.49724866598882334,
+            "unique_6dp": 2
+          },
+          "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s": {
+            "active": true,
+            "max": 1.7610552729271287,
+            "mean": 0.010327513795975789,
+            "min": -1.7354753388298882,
+            "n": 210,
+            "population_std": 0.5722357360327179,
+            "unique_6dp": 192
+          },
+          "rti_independent_path_log1p_max_spread_stress_ratio_60s": {
+            "active": true,
+            "max": 3.1842565956120126,
+            "mean": 0.8411871648370656,
+            "min": 2.7729193703350138e-05,
+            "n": 210,
+            "population_std": 0.6568069714161344,
+            "unique_6dp": 210
+          },
+          "rti_independent_path_mean_depth_imbalance_60s": {
+            "active": true,
+            "max": 0.6046985038246704,
+            "mean": -0.046289737605626616,
+            "min": -0.5916013335803978,
+            "n": 210,
+            "population_std": 0.17763675295707795,
+            "unique_6dp": 210
+          },
+          "rti_independent_path_mean_depth_imbalance_half_delta_60s": {
+            "active": true,
+            "max": 0.6649719669539846,
+            "mean": 0.010338789946189258,
+            "min": -0.5672952155104294,
+            "n": 210,
+            "population_std": 0.15996473740078046,
+            "unique_6dp": 210
+          }
+        },
+        "finite": true,
+        "high_absolute_correlation_pairs": [],
+        "high_absolute_correlation_threshold": 0.95,
+        "maximum_absolute_correlation": 0.2453167401238193,
+        "maximum_absolute_correlation_pair": {
+          "correlation": -0.2453167401238193,
+          "left": "rti_independent_path_mean_depth_imbalance_60s",
+          "right": "rti_independent_path_depth_direction_agreement_60s"
+        },
+        "minimum_active_population_std": 1e-12,
+        "model_fit_performed": false,
+        "numerical_rank": 5,
+        "outcome_labels_read": false,
+        "rank_deficiency_vs_active_features": 0,
+        "rows": 210,
+        "singular_value_tolerance": 7.675609434913559e-13,
+        "singular_values": [
+          16.46089132900865,
+          15.462946471022688,
+          14.345272546061349,
+          13.54357857452854,
+          12.27684723630807
+        ],
+        "stable_rank": 3.875097226323932
+      },
+      "BTC": {
+        "active_feature_count": 5,
+        "active_feature_names": [
+          "rti_independent_path_mean_depth_imbalance_60s",
+          "rti_independent_path_mean_depth_imbalance_half_delta_60s",
+          "rti_independent_path_depth_direction_agreement_60s",
+          "rti_independent_path_log1p_max_spread_stress_ratio_60s",
+          "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s"
+        ],
+        "condition_number_nonzero_subspace": 1.6927619341050002,
+        "exact_signed_duplicate_pairs": [],
+        "feature_count": 5,
+        "feature_statistics": {
+          "rti_independent_path_depth_direction_agreement_60s": {
+            "active": true,
+            "max": 1.0,
+            "mean": 0.6,
+            "min": 0.0,
+            "n": 30,
+            "population_std": 0.4898979485566357,
+            "unique_6dp": 2
+          },
+          "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s": {
+            "active": true,
+            "max": 1.4075675570151827,
+            "mean": 0.07256619509042207,
+            "min": -1.5669099472868981,
+            "n": 30,
+            "population_std": 0.5354461959806016,
+            "unique_6dp": 30
+          },
+          "rti_independent_path_log1p_max_spread_stress_ratio_60s": {
+            "active": true,
+            "max": 3.1842565956120126,
+            "mean": 1.4202951211106871,
+            "min": 2.7729193703350138e-05,
+            "n": 30,
+            "population_std": 1.1094135284632816,
+            "unique_6dp": 30
+          },
+          "rti_independent_path_mean_depth_imbalance_60s": {
+            "active": true,
+            "max": 0.6046985038246704,
+            "mean": -0.12048268771159303,
+            "min": -0.5916013335803978,
+            "n": 30,
+            "population_std": 0.25631295319022407,
+            "unique_6dp": 30
+          },
+          "rti_independent_path_mean_depth_imbalance_half_delta_60s": {
+            "active": true,
+            "max": 0.6649719669539846,
+            "mean": -0.02119286571754349,
+            "min": -0.5672952155104294,
+            "n": 30,
+            "population_std": 0.29318778925802946,
+            "unique_6dp": 30
+          }
+        },
+        "finite": true,
+        "high_absolute_correlation_pairs": [],
+        "high_absolute_correlation_threshold": 0.95,
+        "maximum_absolute_correlation": 0.38078504287147347,
+        "maximum_absolute_correlation_pair": {
+          "correlation": 0.38078504287147347,
+          "left": "rti_independent_path_mean_depth_imbalance_60s",
+          "right": "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s"
+        },
+        "minimum_active_population_std": 1e-12,
+        "model_fit_performed": false,
+        "numerical_rank": 5,
+        "outcome_labels_read": false,
+        "rank_deficiency_vs_active_features": 0,
+        "rows": 30,
+        "singular_value_tolerance": 4.611326864909419e-14,
+        "singular_values": [
+          6.922523316829872,
+          6.317983775019359,
+          5.340157433800851,
+          4.113464338529199,
+          4.089484278537938
+        ],
+        "stable_rank": 3.1301302135102302
+      },
+      "NON_BTC_TRANSFER": {
+        "active_feature_count": 5,
+        "active_feature_names": [
+          "rti_independent_path_mean_depth_imbalance_60s",
+          "rti_independent_path_mean_depth_imbalance_half_delta_60s",
+          "rti_independent_path_depth_direction_agreement_60s",
+          "rti_independent_path_log1p_max_spread_stress_ratio_60s",
+          "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s"
+        ],
+        "condition_number_nonzero_subspace": 1.404762393199988,
+        "exact_signed_duplicate_pairs": [],
+        "feature_count": 5,
+        "feature_statistics": {
+          "rti_independent_path_depth_direction_agreement_60s": {
+            "active": true,
+            "max": 1.0,
+            "mean": 0.5444444444444444,
+            "min": 0.0,
+            "n": 180,
+            "population_std": 0.4980207740225549,
+            "unique_6dp": 2
+          },
+          "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s": {
+            "active": true,
+            "max": 1.7610552729271287,
+            "mean": -4.5599753098600634e-05,
+            "min": -1.7354753388298882,
+            "n": 180,
+            "population_std": 0.5774879900631072,
+            "unique_6dp": 162
+          },
+          "rti_independent_path_log1p_max_spread_stress_ratio_60s": {
+            "active": true,
+            "max": 2.7874222072306414,
+            "mean": 0.7446691721247954,
+            "min": 8.25327760103993e-05,
+            "n": 180,
+            "population_std": 0.4826505023040048,
+            "unique_6dp": 180
+          },
+          "rti_independent_path_mean_depth_imbalance_60s": {
+            "active": true,
+            "max": 0.3909578900853589,
+            "mean": -0.033924245921298876,
+            "min": -0.48691931867955385,
+            "n": 180,
+            "population_std": 0.1574618238821959,
+            "unique_6dp": 180
+          },
+          "rti_independent_path_mean_depth_imbalance_half_delta_60s": {
+            "active": true,
+            "max": 0.4782386533836499,
+            "mean": 0.015594065890144717,
+            "min": -0.3810719540299545,
+            "n": 180,
+            "population_std": 0.12382917524525128,
+            "unique_6dp": 180
+          }
+        },
+        "finite": true,
+        "high_absolute_correlation_pairs": [],
+        "high_absolute_correlation_threshold": 0.95,
+        "maximum_absolute_correlation": 0.2280116640409335,
+        "maximum_absolute_correlation_pair": {
+          "correlation": -0.2280116640409335,
+          "left": "rti_independent_path_mean_depth_imbalance_60s",
+          "right": "rti_independent_path_depth_direction_agreement_60s"
+        },
+        "minimum_active_population_std": 1e-12,
+        "model_fit_performed": false,
+        "numerical_rank": 5,
+        "outcome_labels_read": false,
+        "rank_deficiency_vs_active_features": 0,
+        "rows": 180,
+        "singular_value_tolerance": 6.52443163693339e-13,
+        "singular_values": [
+          16.32412660494305,
+          13.874638240526785,
+          12.803542402993836,
+          11.918438493832458,
+          11.620560661335327
+        ],
+        "stable_rank": 3.377400790553641
+      }
+    },
+    "selected_geometry_sha256": "e12d6a074b56c2c2254f62431dbe9014a6d79cbc53c4fe5c826847f18d73080d",
+    "selected_rows": 210,
+    "selected_source_quality": {
+      "contract_identity": {
+        "dst_fold_safe": true,
+        "mismatch_rows": 0,
+        "outcome_labels_read": false,
+        "rows": 210,
+        "ticker_asset_alignment_required": true,
+        "ticker_close_time_alignment_required": true,
+        "version": "q15-rti-exact-kalshi-contract-identity-alignment-v1"
+      },
+      "credited_complete_rows": 210,
+      "evidence_parse_failures": 0,
+      "integrity_breaches": 0,
+      "minimum_integrity_margin_by_asset": {
+        "BNB": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        },
+        "BTC": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        },
+        "DOGE": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        },
+        "ETH": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        },
+        "HYPE": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        },
+        "SOL": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        },
+        "XRP": {
+          "max": 4.529367446899414,
+          "median": 4.269699692726135,
+          "min": 3.719222068786621,
+          "n": 30,
+          "p10": 3.9669002532958983,
+          "p90": 4.464266467094421
+        }
+      },
+      "minimum_integrity_margin_seconds": 3.719222068786621,
+      "outcome_labels_read": false,
+      "selected_feature_evidence_identity": {
+        "outcome_columns_selected": false,
+        "outcome_labels_read": false,
+        "rows": 210,
+        "sha256": "0097294deccc40b845fdc8a0a62a7b697d42f2ada78422482fddb66c8388718a",
+        "version": "q15-rti-independent-path-selected-feature-evidence-sha256-v1"
+      },
+      "source_thresholds_from_frozen_design": true,
+      "status": "PASS_ALL_CREDITED_COMPLETE_ROWS",
+      "thresholds_selected_from_outcomes": false,
+      "venues": {
+        "coinbase": {
+          "metrics": {
+            "end_age_seconds": {
+              "max": 5.217251300811768,
+              "median": 1.833244800567627,
+              "min": 0.0890810489654541,
+              "n": 210,
+              "p10": 0.5268791437149047,
+              "p90": 4.937093472480774
+            },
+            "end_effective_age_seconds": {
+              "max": 5.389838842391968,
+              "median": 1.8440542221069336,
+              "min": 0.3630810489654541,
+              "n": 210,
+              "p10": 0.7070104400634766,
+              "p90": 5.0490214595794685
+            },
+            "latest_message_age_seconds": {
+              "max": 0.375,
+              "median": 0.016,
+              "min": 0.0,
+              "n": 210,
+              "p10": 0.0,
+              "p90": 0.229
+            },
+            "max_gap_seconds": {
+              "max": 6.280777931213379,
+              "median": 5.608677506446838,
+              "min": 5.4059436321258545,
+              "n": 210,
+              "p10": 5.498858022689819,
+              "p90": 6.011983180046082
+            },
+            "max_message_age_seconds": {
+              "max": 0.818,
+              "median": 0.452,
+              "min": 0.133,
+              "n": 210,
+              "p10": 0.19490000000000002,
+              "p90": 0.6472999999999994
+            },
+            "minimum_integrity_margin_seconds": {
+              "max": 4.5940563678741455,
+              "median": 4.391322493553162,
+              "min": 3.719222068786621,
+              "n": 210,
+              "p10": 3.9880168199539185,
+              "p90": 4.501141977310181
+            },
+            "point_count": {
+              "max": 13.0,
+              "median": 13.0,
+              "min": 12.0,
+              "n": 210,
+              "p10": 12.0,
+              "p90": 13.0
+            },
+            "start_age_seconds": {
+              "max": 5.191096544265747,
+              "median": 3.3598955869674683,
+              "min": 0.13869976997375488,
+              "n": 210,
+              "p10": 0.8333971023559572,
+              "p90": 4.969765591621399
+            }
+          },
+          "rows": 210
+        },
+        "kraken": {
+          "metrics": {
+            "end_age_seconds": {
+              "max": 5.085012435913086,
+              "median": 2.012909173965454,
+              "min": 0.12019658088684082,
+              "n": 210,
+              "p10": 0.3096365213394166,
+              "p90": 4.309013938903808
+            },
+            "end_effective_age_seconds": {
+              "max": 5.141458463668823,
+              "median": 2.0269964818954467,
+              "min": 0.12019658088684082,
+              "n": 210,
+              "p10": 0.31446659488677975,
+              "p90": 4.327003335952758
+            },
+            "latest_message_age_seconds": {
+              "max": 0.232,
+              "median": 0.001,
+              "min": 0.0,
+              "n": 210,
+              "p10": 0.0,
+              "p90": 0.1666999999999998
+            },
+            "max_gap_seconds": {
+              "max": 6.245014190673828,
+              "median": 5.612020015716553,
+              "min": 5.202540874481201,
+              "n": 210,
+              "p10": 5.29687910079956,
+              "p90": 5.813217687606811
+            },
+            "max_message_age_seconds": {
+              "max": 4.397,
+              "median": 0.3825,
+              "min": 0.1,
+              "n": 210,
+              "p10": 0.16830000000000003,
+              "p90": 1.0469999999999984
+            },
+            "minimum_integrity_margin_seconds": {
+              "max": 4.797459125518799,
+              "median": 4.387979984283447,
+              "min": 3.754985809326172,
+              "n": 210,
+              "p10": 4.186782312393189,
+              "p90": 4.70312089920044
+            },
+            "point_count": {
+              "max": 13.0,
+              "median": 13.0,
+              "min": 12.0,
+              "n": 210,
+              "p10": 12.0,
+              "p90": 13.0
+            },
+            "start_age_seconds": {
+              "max": 5.083544969558716,
+              "median": 3.016876459121704,
+              "min": 0.010901927947998047,
+              "n": 210,
+              "p10": 0.4423393249511723,
+              "p90": 4.632337832450867
+            }
+          },
+          "rows": 210
+        }
+      }
+    },
+    "selected_source_quality_sha256": "bf9c45bf4318569b866334a6b1d82951652711f4403fc4084727f335ff77e016",
+    "selection": "EARLIEST_30_COMPLETE_RECONSTRUCTABLE_WINDOWS",
+    "source_design_id": "q15-rti-independent-venue-path-evidence-v1",
+    "source_design_sha256": "ed73729468715279d0d92e1d3beed431cfad416767e4bb92cb88c230d4b904a2",
+    "successor_charter_id": "q15-rti-v15-independent-path-augmented-nested-safe-residual-preregistration-v1",
+    "successor_charter_sha256": "513c240977ee6640b0ebd06f9839dc37b787e5a13930c87eee2d1e4a7407791e",
+    "successor_evaluation_protocol_id": "q15-rti-v15-path-augmented-nested-safe-expanding-walk-forward-v1",
+    "successor_evaluation_protocol_sha256": "e4233be29f211e314344d817de296ca3ef99f5026f67edcaadbe2a44d25b3536"
+  },
+  "payload_sha256": "d4831b2a68a0af6cb73af721829d2a0a54df2786451063110fa9be4ce58afe7c"
+}

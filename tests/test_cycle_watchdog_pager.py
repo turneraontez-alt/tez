@@ -18,6 +18,7 @@ _ENV = [
     "Q15_WATCHDOG_ALERT_COOLDOWN_SECONDS",
     "Q15_FEED_WATCHDOG_ENABLED",
     "Q15_FEED_WATCHDOG_STALE_SECONDS",
+    "Q15_FEED_WATCHDOG_THRESHOLDS",
     "Q15_FEED_WATCHDOG_GRACE_SECONDS",
     "Q15_FEED_WATCHDOG_COOLDOWN_SECONDS",
     "Q15_HEARTBEAT_ENABLED",
@@ -110,6 +111,24 @@ class TestWatchdogPager(unittest.TestCase):
         cw.observe_feed_ages({"coinbase_adv_l2": 901.0}, now=2000.0)
         cw.observe_feed_ages({"coinbase_adv_l2": 902.0}, now=2601.0)
         self.assertIsNotNone(cw.feed_alert_message(now=2601.0))
+
+    def test_feed_watchdog_uses_per_feed_thresholds(self):
+        os.environ["Q15_FEED_WATCHDOG_STALE_SECONDS"] = "300"
+        os.environ["Q15_FEED_WATCHDOG_THRESHOLDS"] = (
+            "kalshi_ws=5,coinbase_adv_l2=20,bad,ignored=nan"
+        )
+
+        health = cw.observe_feed_ages(
+            {"kalshi_ws": 6.0, "coinbase_adv_l2": 19.0, "other": 250.0},
+            now=1000.0,
+        )["feeds"]
+
+        self.assertTrue(health["kalshi_ws"]["stale"])
+        self.assertEqual(health["kalshi_ws"]["stale_seconds"], 5.0)
+        self.assertFalse(health["coinbase_adv_l2"]["stale"])
+        self.assertEqual(health["coinbase_adv_l2"]["stale_seconds"], 20.0)
+        self.assertFalse(health["other"]["stale"])
+        self.assertEqual(health["other"]["stale_seconds"], 300.0)
 
     def test_heartbeat_file_reports_age_and_staleness(self):
         with tempfile.TemporaryDirectory() as td:

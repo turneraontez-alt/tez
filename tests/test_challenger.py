@@ -6,6 +6,7 @@ import random
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -13,10 +14,12 @@ sys.path.insert(0, ROOT)
 from q15_upgrade import challenger as ch
 from q15_upgrade.challenger import features as featmod
 from q15_upgrade.challenger.calibration import IsotonicCalibrator, PlattCalibrator
+from q15_upgrade.challenger import calibration as calibration_mod
 from q15_upgrade.challenger.config import ChallengerConfig
 from q15_upgrade.challenger.decision import evaluate
 from q15_upgrade.challenger.mathx import normal_cdf
 from q15_upgrade.challenger.models import LogisticRegression
+from q15_upgrade.challenger import models as models_mod
 from q15_upgrade.challenger.validation import purged_walk_forward
 
 
@@ -104,6 +107,17 @@ class ModelTest(unittest.TestCase):
         c = m.contributions(X[0])
         self.assertEqual(set(c.keys()), set(featmod.FEATURE_NAMES))
 
+    def test_numpy_fit_matches_dependency_free_fallback(self):
+        if models_mod._np is None:
+            self.skipTest("NumPy fast path is not installed")
+        _, feats, y = synth_dataset(120, seed=19)
+        X = [ch.ordered_vector(f) for f in feats]
+        fast = LogisticRegression(l2=1.0, lr=0.08, max_iter=80).fit(X, y)
+        with mock.patch.object(models_mod, "_np", None):
+            fallback = LogisticRegression(l2=1.0, lr=0.08, max_iter=80).fit(X, y)
+        for actual, expected in zip(fast.predict_proba(X), fallback.predict_proba(X)):
+            self.assertAlmostEqual(actual, expected, places=11)
+
 
 class CalibrationTest(unittest.TestCase):
     def test_platt_improves_biased_probs(self):
@@ -123,6 +137,17 @@ class CalibrationTest(unittest.TestCase):
         outs = [cal.transform(x) for x in [0.05, 0.25, 0.5, 0.95]]
         for a, b in zip(outs, outs[1:]):
             self.assertLessEqual(a, b + 1e-9)
+
+    def test_numpy_platt_matches_dependency_free_fallback(self):
+        if calibration_mod._np is None:
+            self.skipTest("NumPy fast path is not installed")
+        probs = [0.05 + 0.9 * (i / 99.0) for i in range(100)]
+        labels = [int((i * 17) % 31 < 15) for i in range(100)]
+        fast = PlattCalibrator(l2=2.0, lr=0.07, max_iter=80).fit(probs, labels)
+        with mock.patch.object(calibration_mod, "_np", None):
+            fallback = PlattCalibrator(l2=2.0, lr=0.07, max_iter=80).fit(probs, labels)
+        self.assertAlmostEqual(fast.a, fallback.a, places=11)
+        self.assertAlmostEqual(fast.b, fallback.b, places=11)
 
 
 class ValidationTest(unittest.TestCase):

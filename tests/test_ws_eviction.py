@@ -69,6 +69,15 @@ def _seed_ticker(feed: KalshiWebSocketFeed, ticker: str, now: float) -> None:
     """Populate every leaked per-ticker dict for ``ticker``."""
     feed._books[ticker] = {"yes": {0.5: 10.0}, "no": {0.5: 10.0}, "updated_at": now}
     feed._trades[ticker].append({"id": f"{ticker}-1", "ts": now, "yes_cents": 50.0, "count": 1.0})
+    feed._book_events[ticker].append({
+        "ts": now,
+        "received_at": now,
+        "yes_microprice_after_cents": 50.0,
+    })
+    feed._book_history_started_at[ticker] = now
+    feed._trade_history_started_at[ticker] = now
+    feed._book_history_initial_microprice[ticker] = 50.0
+    feed._book_retention_baseline_microprice[ticker] = 49.5
     feed._market_status[ticker] = {"market_ticker": ticker, "status": "open"}
 
 
@@ -89,12 +98,22 @@ class TestWsClientEviction(unittest.TestCase):
         for ticker in ("A", "B"):
             self.assertNotIn(ticker, feed._books)
             self.assertNotIn(ticker, feed._trades)
+            self.assertNotIn(ticker, feed._book_events)
+            self.assertNotIn(ticker, feed._book_history_started_at)
+            self.assertNotIn(ticker, feed._trade_history_started_at)
+            self.assertNotIn(ticker, feed._book_history_initial_microprice)
+            self.assertNotIn(
+                ticker, feed._book_retention_baseline_microprice,
+            )
             self.assertNotIn(ticker, feed._market_status)
 
         # C is still desired -> its populated state is retained untouched.
         self.assertIn("C", feed._books)
         self.assertEqual(feed._books["C"]["yes"], {0.5: 10.0})
         self.assertIn("C", feed._trades)
+        self.assertIn("C", feed._book_events)
+        self.assertIn("C", feed._book_history_started_at)
+        self.assertIn("C", feed._book_history_initial_microprice)
         self.assertEqual(len(feed._trades["C"]), 1)
         self.assertIn("C", feed._market_status)
 

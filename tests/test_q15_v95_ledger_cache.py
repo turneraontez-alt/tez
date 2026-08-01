@@ -143,5 +143,20 @@ class ChallengerWeightsCacheTest(unittest.TestCase):
         self.assertNotEqual(b.get("intercept"), 999.0)
 
 
+class MetricsCacheTest(unittest.TestCase):
+    def test_cache_returns_copy_and_resolution_invalidates(self):
+        led = _mk_ledger()
+        _seed(led, n=12)
+        first = led.metrics()
+        hit = led.metrics()
+        self.assertEqual(first, hit)
+        hit["overall"]["resolved"] = -1
+        self.assertEqual(led.metrics()["overall"]["resolved"], 12)
+
+        _record_resolve(led, "METRICS-NEW", "YES", 0.65, "YES")
+        refreshed = led.metrics()
+        self.assertEqual(refreshed["overall"]["resolved"], 13)
+
+
 if __name__ == "__main__":
     unittest.main()

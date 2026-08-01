@@ -10,11 +10,14 @@ import sys
 import time
 from urllib.parse import urlencode
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
 from kraken_l3 import (
     KrakenL3Collector,
+    PARTIAL_FILL_FLOW_SCHEMA_VERSION,
     _configured_symbols,
     kraken_l3_health,
     kraken_l3_subscribe_payload,
@@ -117,6 +120,67 @@ def test_kraken_l3_snapshot_update_and_summary(tmp_path, monkeypatch):
         assert row["add_count_60s"] == 1
         assert row["delete_count_60s"] == 1
         assert conn.execute("SELECT count(*) FROM kraken_l3_events").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_kraken_l3_modify_records_only_observed_partial_fill_delta(tmp_path):
+    db = str(tmp_path / "kraken_l3.sqlite3")
+    feed = KrakenL3Collector(symbols=["BTC/USD"], db_path=db)
+    feed.summary_levels = 2
+    feed.depth = 10
+    feed.handle_message(json.dumps({
+        "channel": "level3",
+        "type": "snapshot",
+        "data": [{
+            "symbol": "BTC/USD",
+            "checksum": 100,
+            "bids": [
+                {"order_id": "bid1", "limit_price": 100.0, "order_qty": 1.0},
+            ],
+            "asks": [
+                {"order_id": "ask1", "limit_price": 101.0, "order_qty": 1.0},
+                {"order_id": "ask2", "limit_price": 102.0, "order_qty": 1.0},
+            ],
+        }],
+    }))
+    feed.handle_message(json.dumps({
+        "channel": "level3",
+        "type": "update",
+        "data": [{
+            "symbol": "BTC/USD",
+            "checksum": 101,
+            "bids": [{
+                "event": "modify",
+                "order_id": "bid1",
+                "limit_price": 100.0,
+                "order_qty": 0.6,
+            }],
+            # A delete is ambiguous (full fill or cancel) and must not be
+            # fabricated as signed trade flow.
+            "asks": [{
+                "event": "delete",
+                "order_id": "ask1",
+                "limit_price": 101.0,
+                "order_qty": 1.0,
+            }],
+        }],
+    }))
+
+    assert feed._orders["BTC/USD"]["bid1"].size == pytest.approx(0.6)
+    assert feed.record_once() == 1
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM kraken_l3_summaries").fetchone()
+        assert row["partial_fill_flow_schema_version"] == (
+            PARTIAL_FILL_FLOW_SCHEMA_VERSION
+        )
+        assert row["trade_count_60s"] == 1
+        assert row["matched_buy_notional_60s"] == pytest.approx(40.0)
+        assert row["matched_sell_notional_60s"] == pytest.approx(0.0)
+        assert row["net_matched_buy_notional_60s"] == pytest.approx(40.0)
+        assert row["delete_count_60s"] == 1
     finally:
         conn.close()
 

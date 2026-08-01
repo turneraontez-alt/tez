@@ -1,0 +1,117 @@
+{
+  "design_id": "q15-rti-independent-venue-path-evidence-v1",
+  "design_status": "PREREGISTERED_BEFORE_FIRST_ELIGIBLE_CAPTURE",
+  "preregistered_at": "2026-07-22T18:19:03Z",
+  "objective": "preserve low-dimensional within-minute Coinbase L2 and Kraken L3 path evidence that is available before the exact 13M decision but discarded by endpoint-only RTI features",
+  "source_schema": "rti-independent-venue-path-v1",
+  "source_time_basis": "local_created_at",
+  "source_horizon_seconds": 60.0,
+  "source_tables": {
+    "coinbase": {
+      "database_environment": "Q15_COINBASE_ADV_L2_DB",
+      "default_database": "data/q15_coinbase_adv_l2_v1.sqlite3",
+      "table": "coinbase_adv_l2_snapshots",
+      "symbol_column": "product_id"
+    },
+    "kraken": {
+      "database_environment": "Q15_KRAKEN_L3_DB",
+      "default_database": "data/q15_kraken_l3_v1.sqlite3",
+      "table": "kraken_l3_summaries",
+      "symbol_column": "symbol"
+    }
+  },
+  "assets": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+  "prospective_after_close_time": 1784746800.0,
+  "first_eligible_close_time": 1784747700.0,
+  "pre_boundary_rows_receive_credit": false,
+  "benchmark_capture_receive_credit": false,
+  "historical_credit_allowed": false,
+  "outcome_labels_read_before_freeze": false,
+  "source_v14_outcome_labels_read": false,
+  "source_v14_performance_metrics_inspected": false,
+  "feature_hypotheses_selected_from_v14_outcomes": false,
+  "paper_only": true,
+  "notification_eligible": false,
+  "automatic_scoring": false,
+  "automatic_refit": false,
+  "automatic_promotion": false,
+  "real_trading_allowed": false,
+  "required_integrity": {
+    "evidence_cutoff_equals_exact_source_captured_at": true,
+    "future_source_rows_forbidden": true,
+    "source_query_upper_bound_inclusive_at_cutoff": true,
+    "path_horizon_seconds": 60.0,
+    "minimum_points_per_venue": 8,
+    "maximum_start_age_seconds": 10.0,
+    "maximum_end_effective_age_seconds": 10.0,
+    "maximum_internal_gap_seconds": 10.0,
+    "maximum_message_age_seconds": 10.0,
+    "summary_depth_levels": 10,
+    "coinbase_and_kraken_both_required": true,
+    "kraken_partial_fill_flow_schema_required": "kraken-l3-partial-fill-flow-v1",
+    "raw_selected_rows_persisted_as_canonical_json": true,
+    "canonical_evidence_sha256_required": true,
+    "continuity_failure_fails_closed": true,
+    "stale_transport_fails_closed": true,
+    "schema_mismatch_fails_closed": true
+  },
+  "fixed_candidate_features": [
+    {
+      "name": "independent_path_mean_depth_imbalance_60s",
+      "source_key": "rti_independent_path_mean_depth_imbalance_60s",
+      "formula": "mean(time_weighted_coinbase_depth_imbalance_60s,time_weighted_kraken_depth_imbalance_60s)",
+      "range": [-1.0, 1.0],
+      "hypothesis": "persistent independent-venue displayed depth pressure can identify continuation or reversal pressure that a noisy endpoint discards"
+    },
+    {
+      "name": "independent_path_mean_depth_imbalance_half_delta_60s",
+      "source_key": "rti_independent_path_mean_depth_imbalance_half_delta_60s",
+      "formula": "mean(second_half_minus_first_half_time_weighted_depth_imbalance_across_coinbase_and_kraken)",
+      "range": [-2.0, 2.0],
+      "hypothesis": "fresh acceleration in displayed depth pressure may distinguish a continuing move from a late reversal"
+    },
+    {
+      "name": "independent_path_depth_direction_agreement_60s",
+      "source_key": "rti_independent_path_depth_direction_agreement_60s",
+      "formula": "1_if_venue_time_weighted_mean_depth_signs_agree_0_if_opposed_0.5_if_either_is_zero",
+      "range": [0.0, 1.0],
+      "hypothesis": "cross-venue agreement separates broad pressure from venue-specific book noise"
+    },
+    {
+      "name": "independent_path_log1p_max_spread_stress_ratio_60s",
+      "source_key": "rti_independent_path_log1p_max_spread_stress_ratio_60s",
+      "formula": "max_across_venues(log1p(max(0,max_spread_bps_60s/time_weighted_mean_spread_bps_60s-1)))",
+      "range": [0.0, null],
+      "hypothesis": "transient liquidity stress can flag fragile RTI moves whose endpoint spread has already normalized"
+    },
+    {
+      "name": "independent_path_kraken_partial_fill_imbalance_acceleration_60s",
+      "source_key": "rti_independent_path_kraken_partial_fill_imbalance_acceleration_60s",
+      "formula": "time_weighted_aggressor_imbalance_last_15s_minus_prior_45s_using_only_versioned_partial_fills",
+      "range": [-2.0, 2.0],
+      "hypothesis": "acceleration in observable aggressive partial-fill flow can identify a newly starting reversal earlier than a 60-second endpoint aggregate"
+    }
+  ],
+  "dimensionality_guard": {
+    "new_candidate_feature_count": 5,
+    "maximum_allowed_candidate_feature_count": 5,
+    "v11_71_feature_design_must_not_be_restored": true,
+    "endpoint_duplicate_features_forbidden": true,
+    "feature_search_from_outcomes_forbidden": true,
+    "automatic_feature_selection_forbidden": true
+  },
+  "future_successor_constraints": {
+    "v11_v12_v13_v14_controls_remain_frozen": true,
+    "v14_twenty_features_remain_the_base": true,
+    "v14_nested_market_anchored_residual_trust_remains_required": true,
+    "factor_zero_must_equal_exact_kalshi_market_prior": true,
+    "same_close_assets_must_share_chronological_fold": true,
+    "btc_and_non_btc_cohorts_must_remain_separate": true,
+    "non_btc_minimum_complete_windows": 60,
+    "btc_minimum_complete_windows": 150,
+    "outcome_blind_geometry_review_at_windows": 30,
+    "untouched_test_may_not_select_features_or_thresholds": true,
+    "historical_results_cannot_promote": true,
+    "manual_promotion_only_at_resolved_picks": [30, 60, 150]
+  }
+}

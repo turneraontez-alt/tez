@@ -344,7 +344,12 @@ def build_canonical_snapshot(
     target = _target(snapshot)
     core_ts = _source_timestamp(snapshot, ("snapshot_time", "snapshot_timestamp", "updated_at", "last_update", "timestamp", "ts"))
     candle_ts = float(candles[-1].get("timestamp") or candles[-1].get("end_time") or 0.0) if candles else None
-    quote_ts = _source_timestamp(snapshot, ("quote_timestamp", "market_quote_timestamp", "orderbook_timestamp", "kalshi_timestamp"))
+    # ``orderbook_event_ts`` FIRST: it is the key v5_hardening actually writes (v5_hardening.py:95)
+    # and the same one interval_research uses as its quote-age source. The four legacy aliases that
+    # follow are written by NOTHING in production, so quote_age was None on every live cycle —
+    # silently disabling both consumers below (the liquidity age decay and the stale_kalshi_quote
+    # entry blocker) and storing quote_age_seconds=None on every ledger row.
+    quote_ts = _source_timestamp(snapshot, ("orderbook_event_ts", "quote_timestamp", "market_quote_timestamp", "orderbook_timestamp", "kalshi_timestamp"))
     public_ts = _num(public_data.get("fetched_at"))
     if core_ts is None:
         core_ts = now
@@ -1632,8 +1637,24 @@ def apply_v95_policy(snapshot: MutableMapping[str, Any], analysis: Mapping[str, 
     # V9.5 is authoritative for the returned snapshot. It never places orders.
     snapshot["selected_side"] = analysis.get("prediction_side")
     snapshot["decision_state"] = analysis.get("trade_decision")
-    snapshot["entry_allowed"] = bool(analysis.get("entry_allowed"))
-    snapshot["new_entry_allowed"] = bool(analysis.get("entry_allowed"))
+    v95_entry = bool(analysis.get("entry_allowed"))
+    # FAIL-CLOSED PRESERVATION. enforce_fail_closed (v5_hardening) runs BEFORE run_cycle and
+    # sets entry_allowed=False when the snapshot's own freshness audit says the underlying data
+    # is invalid — stale spot, stale/missing book, or a crossed book. v9.5 used to overwrite
+    # that verdict unconditionally, and since analyse_v95 never reads v5_data_valid /
+    # spot_age_seconds, the only honest data-age measurement in the system was discarded: a
+    # 20-second-old price could be re-blessed as ENTRY_RECOMMENDED. v9.5 may NARROW the
+    # decision but must never re-open one v5 closed.
+    if snapshot.get("v5_data_valid") is False:
+        if v95_entry:
+            # Keep the message and the marker consistent with the suppressed entry —
+            # an "ENTRY RECOMMENDED" panel whose entry_allowed is False is contradictory.
+            snapshot["decision_state"] = "AVOID_INVALID_DATA"
+        snapshot["entry_allowed"] = False
+        snapshot["new_entry_allowed"] = False
+        return snapshot
+    snapshot["entry_allowed"] = v95_entry
+    snapshot["new_entry_allowed"] = v95_entry
     return snapshot
 
 
@@ -2005,6 +2026,20 @@ def _format_run_cycle_breakdown(timing: Mapping[str, Any], chain_timing: Mapping
         ]
         if sub_bits:
             parts.append("v95[" + " ".join(sub_bits) + "]")
+        record_bits = [
+            f"{k.removeprefix('record_')}={_g(v95_sub, k):.2f}s"
+            for k in (
+                "record_prediction",
+                "record_frozen_lookup",
+                "record_polymarket",
+                "record_flip_risk",
+                "record_flip_decision",
+                "record_timing_batch",
+            )
+            if _g(v95_sub, k) >= 0.01
+        ]
+        if record_bits:
+            parts.append("record[" + " ".join(record_bits) + "]")
     for k in ("market_reconcile", "signal_store_reconcile", "other"):
         if k in timing:
             parts.append(f"{k}={_g(timing, k):.2f}s")
@@ -2502,13 +2537,32 @@ def _resolve_checkpoint(
     """
     if not _env_bool("Q15_V95_TIME_AUTHORITATIVE_CHECKPOINT", True):
         return _detect_checkpoint(snapshots, messages)
+    # Only LIVE markets may set the label. app.py publishes assets with no current 15-minute
+    # market as market_state="upcoming" carrying the SOONEST future close, which can be tens of
+    # minutes out; feeding those into max() below pinned the label to "15M" for every asset for
+    # whole windows — recording 7-minute-horizon rows under the 15M checkpoint and (since 15M
+    # alerts default off) suppressing the owner's alerts entirely. The same market_state=="live"
+    # filter window_focus already applies. A window is also capped at 900s by construction, so a
+    # longer time cannot belong to the current one.
+    max_window_seconds = _env_float("Q15_V95_MAX_WINDOW_SECONDS", 900.0, 60.0, 3600.0)
     times = []
+    fallback_times = []
     for snapshot in snapshots.values():
         if not isinstance(snapshot, Mapping):
             continue
         seconds = _seconds_remaining(snapshot, now)
-        if seconds is not None:
-            times.append(seconds)
+        if seconds is None:
+            continue
+        fallback_times.append(seconds)
+        if snapshot.get("market_state") != "live":
+            continue
+        if seconds > max_window_seconds:
+            continue
+        times.append(seconds)
+    if not times:
+        # No snapshot carries market_state (older/test callers) — fall back to the unfiltered
+        # times, still excluding anything longer than a single window.
+        times = [s for s in fallback_times if s <= max_window_seconds]
     if not times:
         return _detect_checkpoint(snapshots, messages)
     # Boundaries mirror _detect_checkpoint's time fallback exactly (same env
@@ -2734,6 +2788,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._flip_threshold_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._reconcile_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="q15-v95-reconcile")
         self._reconcile_future: Future[dict[str, Any]] | None = None
+        # A distinct ledger instance gives the background settlement worker its
+        # own SQLite connection and Python lock.  Sharing ``self.ledger`` here
+        # made foreground prediction/timing writes wait tens of seconds behind
+        # settlement learning at each 15-minute boundary despite WAL mode.
+        self._background_reconcile_ledger = V95Ledger(self.ledger.path)
         atexit.register(self._reconcile_executor.shutdown, wait=False)
         # Optional Kalshi client (set by the app) so predictions can be settled
         # directly from official results, not only via the signals table.
@@ -2805,19 +2864,20 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         last_reconcile: dict[str, Any] = {}
         last_market_reconcile: dict[str, Any] = {}
         try:
+            reconcile_ledger = self._background_reconcile_ledger
             if self.signal_store is not None:
-                last_reconcile = self.ledger.reconcile_from_signal_store(self.signal_store)
+                last_reconcile = reconcile_ledger.reconcile_from_signal_store(self.signal_store)
                 result_events = list(last_reconcile.get("result_events") or [])
             if callable(get_market):
                 max_calls = _env_int("Q15_V95_RECONCILE_MAX_CALLS", 6, 1, 1000)
-                last_market_reconcile = self.ledger.reconcile_pending_from_market(
+                last_market_reconcile = reconcile_ledger.reconcile_pending_from_market(
                     get_market,
                     now,
                     max_calls=max_calls,
                 )
                 result_events = list(last_market_reconcile.get("result_events") or []) + result_events
             if _env_bool("Q15_V95_FLIP_RISK_TRACKING", True):
-                self.ledger.reconcile_flip_warnings()
+                reconcile_ledger.reconcile_flip_warnings()
             try:
                 from q15_upgrade.interval_research.runner import get_runner as _ir_runner
                 _irr = _ir_runner()
@@ -2843,6 +2903,12 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 "last_reconcile": last_reconcile,
                 "last_market_reconcile": last_market_reconcile,
                 "result_events": result_events[:20],
+                "ledger_changed": bool(
+                    int(last_reconcile.get("new_predictions_resolved") or 0)
+                    + int(last_reconcile.get("shadow_updates_applied") or 0)
+                    + int(last_market_reconcile.get("new_predictions_resolved") or 0)
+                    + int(last_market_reconcile.get("shadow_updates_applied") or 0)
+                ),
             }
         except Exception as exc:
             logger.debug("v95 reconcile job failed", exc_info=True)
@@ -2865,6 +2931,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             self._last_market_reconcile = dict(result["last_market_reconcile"])
         if result.get("error"):
             self._last_market_reconcile = {"available": False, "reason": str(result.get("error"))}
+        if result.get("ledger_changed"):
+            self.ledger.note_external_reconcile()
         return list(result.get("result_events") or [])
 
     def _schedule_reconcile_job(self, get_market: Any, now: float) -> None:
@@ -2930,7 +2998,9 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             )
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
             _t["v95_sub"] = {k: round(v, 3) for k, v in _sub.items()}
-            self._dispatch_research_overlays(analyses, canonicals, now)
+            self._dispatch_research_overlays(
+                analyses, canonicals, now, source_snapshots=snapshots,
+            )
             result_events: list[Mapping[str, Any]] = []
             _t0 = time.monotonic()
             result_events = self._harvest_reconcile_job()
@@ -2976,7 +3046,17 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         # Coarse sub-timers (accumulated across assets) so a v95_analysis
         # spike can be attributed to deepcopy vs canonical-build vs
         # model-eval vs ledger-write without guessing.
-        _sub = {"deepcopy": 0.0, "build": 0.0, "analyse": 0.0}
+        _sub = {
+            "deepcopy": 0.0,
+            "build": 0.0,
+            "analyse": 0.0,
+            "record_prediction": 0.0,
+            "record_frozen_lookup": 0.0,
+            "record_polymarket": 0.0,
+            "record_flip_risk": 0.0,
+            "record_flip_decision": 0.0,
+            "record_timing_batch": 0.0,
+        }
         for asset_key, raw in parent_output.items():
             if not isinstance(raw, Mapping):
                 continue
@@ -3052,6 +3132,8 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         snapshot_id = f"{checkpoint}@{int(now)}"
         _tmarks = _timing_experiment_marks()
         _tmark_band = _timing_experiment_band() if _tmarks else 0.0
+        _timing_batch: list[tuple[tuple[str, int], dict[str, Any]]] = []
+        _timing_pending_keys: set[tuple[str, int]] = set()
         # Record each prediction AFTER ranking so its pick rank (#1/#2/#3) is
         # persisted with it, enabling per-rank accuracy tracking.
         for key, snapshot in output.items():
@@ -3122,6 +3204,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         cross_asset.for_asset(asset, analysis, shadow_market)
                         if shadow_market is not None else None
                     )
+                    _op_started = time.monotonic()
                     prediction_id, inserted = self.ledger.record_prediction(
                         ticker=canonical.ticker, asset=asset, checkpoint=checkpoint,
                         created_at=now, close_time=canonical.settlement_time,
@@ -3149,9 +3232,12 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         shadow_signals=signals_row,
                         snapshot_id=snapshot_id,
                     )
+                    _sub["record_prediction"] += time.monotonic() - _op_started
                     original_side = str(analysis.get("prediction_side") or "").upper()
                     if not inserted:
+                        _op_started = time.monotonic()
                         frozen = self.ledger.frozen_prediction(canonical.ticker, checkpoint)
+                        _sub["record_frozen_lookup"] += time.monotonic() - _op_started
                         if isinstance(frozen, Mapping) and frozen.get("side"):
                             original_side = str(frozen.get("side") or "").upper()
                     prediction_cache = {
@@ -3209,6 +3295,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 # OUR P(up) is the same structural model re-thresholded at the
                 # Polymarket window-open price. observe() only enqueues — the
                 # HTTP/DB work happens on the shadow's worker, not this loop.
+                _op_started = time.monotonic()
                 try:
                     from q15_upgrade.polymarket.runner import get_runner as _poly_runner
                     _pr = _poly_runner()
@@ -3229,14 +3316,18 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         )
                 except Exception:
                     logger.debug("polymarket shadow observe skipped", exc_info=True)
+                finally:
+                    _sub["record_polymarket"] += time.monotonic() - _op_started
                 # Flip-risk overlay: learned threshold, flip-probability, alert
                 # state machine + dashboard, and confirmed-flip detection. Sends
                 # are gated (dormant until a learned threshold exists); CONFIRMED
                 # flips are factual and send regardless. Never changes the call.
+                _op_started = time.monotonic()
                 _fsent, _ffailed = self._process_flip_risk(
                     snapshot, asset, checkpoint, canonical.ticker, analysis,
                     flip_learned, notifier, now,
                 )
+                _sub["record_flip_risk"] += time.monotonic() - _op_started
                 flip_sent += _fsent
                 flip_failed += _ffailed
                 # OBSERVATIONAL entry-timing experiment: when this cycle sits on
@@ -3248,19 +3339,23 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                     for _mark in _tmarks:
                         if abs(seconds_left - _mark) <= _tmark_band:
                             _timing_key = (str(canonical.ticker), int(_mark))
-                            if _timing_key not in self._timing_observation_recorded:
-                                self.ledger.record_timing_observation(
-                                    contract=canonical.ticker, mark_seconds=_mark, asset=asset,
-                                    predicted_side=str(analysis.get("prediction_side") or "") or None,
-                                    yes_probability=analysis.get("yes_probability"),
-                                    selected_probability=analysis.get("selected_probability"),
-                                    confidence_grade=analysis.get("confidence_grade"),
-                                    created_at=now, close_time=canonical.settlement_time,
-                                    snapshot_id=snapshot_id,
-                                )
-                                self._timing_observation_recorded.add(_timing_key)
-                                if len(self._timing_observation_recorded) > 4096:
-                                    self._timing_observation_recorded.clear()
+                            if (
+                                _timing_key not in self._timing_observation_recorded
+                                and _timing_key not in _timing_pending_keys
+                            ):
+                                _timing_pending_keys.add(_timing_key)
+                                _timing_batch.append((_timing_key, {
+                                    "contract": canonical.ticker,
+                                    "mark_seconds": _mark,
+                                    "asset": asset,
+                                    "predicted_side": str(analysis.get("prediction_side") or "") or None,
+                                    "yes_probability": analysis.get("yes_probability"),
+                                    "selected_probability": analysis.get("selected_probability"),
+                                    "confidence_grade": analysis.get("confidence_grade"),
+                                    "created_at": now,
+                                    "close_time": canonical.settlement_time,
+                                    "snapshot_id": snapshot_id,
+                                }))
                             break
                 # STRICT FLIP DECISION (observational): compute the flip
                 # probability for this pick, decide YES only when the interval
@@ -3285,6 +3380,7 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                         }
                         _flip_record_key = (str(canonical.ticker), str(checkpoint))
                         if _flip_record_key not in self._flip_decision_recorded:
+                            _op_started = time.monotonic()
                             self.ledger.record_flip_decision(
                                 contract=canonical.ticker, checkpoint=checkpoint, asset=asset,
                                 predicted_side=str(analysis.get("prediction_side") or "") or None,
@@ -3293,17 +3389,34 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                                 created_at=now, close_time=canonical.settlement_time,
                                 snapshot_id=snapshot_id,
                             )
+                            _sub["record_flip_decision"] += time.monotonic() - _op_started
                             self._flip_decision_recorded.add(_flip_record_key)
                             if len(self._flip_decision_recorded) > 2048:
                                 self._flip_decision_recorded.clear()
                     except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
                         logger.debug("flip decision skipped for %s %s: %s", asset, checkpoint, exc)
 
+        if _timing_batch:
+            _op_started = time.monotonic()
+            self.ledger.record_timing_observations(
+                tuple(row for _key, row in _timing_batch)
+            )
+            _sub["record_timing_batch"] += time.monotonic() - _op_started
+            self._timing_observation_recorded.update(
+                key for key, _row in _timing_batch
+            )
+            if len(self._timing_observation_recorded) > 4096:
+                self._timing_observation_recorded.clear()
         _sub["record"] = time.monotonic() - _s_record
         return flip_sent, flip_failed
 
-    def _dispatch_research_overlays(self, analyses: dict[str, dict[str, Any]],
-                                    canonicals: dict[str, Any], now: float) -> None:
+    def _dispatch_research_overlays(
+        self,
+        analyses: dict[str, dict[str, Any]],
+        canonicals: dict[str, Any],
+        now: float,
+        source_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         """Feed the read-only research overlays (pure extraction from run_cycle)."""
         # Q15 MarketLead prospective evidence collector. It derives synchronized
         # venue/index/Kalshi microstructure evidence into a separate DB. It has
@@ -3335,7 +3448,12 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             from q15_upgrade.interval_research.runner import get_runner as _ir_runner
             _irr = _ir_runner()
             if _irr is not None:
-                _irr.observe(analyses=analyses, canonicals=canonicals, now=now)
+                _irr.observe(
+                    analyses=analyses,
+                    canonicals=canonicals,
+                    now=now,
+                    source_snapshots=source_snapshots,
+                )
         except Exception:
             logger.debug("interval-research observe skipped", exc_info=True)
         # Read-only Ultoim V2 paper entry-alert overlay (default-OFF; SEPARATE DB

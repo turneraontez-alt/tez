@@ -39,6 +39,7 @@ except Exception:  # pragma: no cover - optional dependency guard
 KRAKEN_WS = "wss://ws-l3.kraken.com/v2"
 KRAKEN_REST = "https://api.kraken.com"
 TOKEN_PATH = "/0/private/GetWebSocketsToken"
+PARTIAL_FILL_FLOW_SCHEMA_VERSION = "kraken-l3-partial-fill-flow-v1"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS kraken_l3_summaries (
@@ -87,6 +88,8 @@ CREATE TABLE IF NOT EXISTS kraken_l3_summaries (
     matched_buy_notional_60s REAL,
     matched_sell_notional_60s REAL,
     net_matched_buy_notional_60s REAL
+    ,partial_fill_flow_schema_version TEXT
+    ,summary_level_limit INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_kraken_l3_summary_symbol_time
     ON kraken_l3_summaries(symbol, created_at);
@@ -372,6 +375,10 @@ class KrakenL3Collector:
                 "depth_truncations": self._depth_truncations,
                 "depth": self.depth,
                 "summary_levels": self.summary_levels,
+                "record_seconds": self.record_seconds,
+                "partial_fill_flow_schema_version": (
+                    PARTIAL_FILL_FLOW_SCHEMA_VERSION
+                ),
                 "snapshot_reconnect_seconds": self.snapshot_reconnect_seconds,
                 "raw_events_enabled": self.raw_events_enabled,
                 "summary_retention_days": self.summary_retention_days,
@@ -565,14 +572,13 @@ class KrakenL3Collector:
             return None
         raw_event = str(row.get("event") or row.get("type") or "").lower() if isinstance(row, dict) else ""
         remove = (size is not None and size <= 0) or raw_event in {"delete", "deleted", "remove", "cancel", "canceled"}
-        trade = raw_event in {"trade", "match", "fill", "filled"}
         if remove:
             order = self._remove_order_locked(symbol, order_id)
             return self._event(
                 now,
                 symbol,
                 checksum,
-                "trade" if trade else "delete",
+                "delete",
                 order_id,
                 side,
                 order.price if order else price,
@@ -581,8 +587,36 @@ class KrakenL3Collector:
             )
         if price is None or size is None or price <= 0 or size <= 0:
             return None
-        event_type = "trade" if trade else self._upsert_order_locked(symbol, order_id, side, price, size)
-        return self._event(now, symbol, checksum, event_type, order_id, side, price, size, raw_event or None)
+        existing = self._orders.setdefault(symbol, {}).get(order_id)
+        # Kraken's documented L3 contract defines ``modify`` as a fill and
+        # reports the remaining visible quantity.  Persist only the observable
+        # positive size reduction as partial-fill flow.  A ``delete`` can be a
+        # full fill or a cancel, so it is deliberately never guessed as trade
+        # flow here.
+        fill_size = None
+        if raw_event == "modify" and existing is not None:
+            delta = existing.size - size
+            if delta > 1e-12:
+                fill_size = delta
+        event_type = self._upsert_order_locked(
+            symbol, order_id, side, price, size
+        )
+        if fill_size is not None:
+            return self._event(
+                now,
+                symbol,
+                checksum,
+                "trade",
+                order_id,
+                existing.side if existing is not None else side,
+                existing.price if existing is not None else price,
+                fill_size,
+                "modify_partial_fill",
+            )
+        return self._event(
+            now, symbol, checksum, event_type, order_id, side, price, size,
+            raw_event or None,
+        )
 
     @staticmethod
     def _event(
@@ -620,14 +654,17 @@ class KrakenL3Collector:
         if not rows and not raw_events:
             return 0
         conn = self._connect()
+        # Keep authenticated L3 ingestion independent of slow SQLite commits.
+        # The recorder loop is serial, so its connection remains single-writer
+        # while the websocket thread can continue updating the in-memory book.
+        for row in rows:
+            self._insert_summary_locked(conn, row)
+        if self.raw_events_enabled:
+            for event in raw_events:
+                self._insert_event_locked(conn, event)
+        self._prune_locked(conn, now)
+        conn.commit()
         with self._lock:
-            for row in rows:
-                self._insert_summary_locked(conn, row)
-            if self.raw_events_enabled:
-                for event in raw_events:
-                    self._insert_event_locked(conn, event)
-            self._prune_locked(conn, now)
-            conn.commit()
             self._records_written += len(rows)
             self._last_record_at = now
         return len(rows)
@@ -751,6 +788,10 @@ class KrakenL3Collector:
             "avg_bid_order_size_levels": bid_depth / bid_orders if bid_orders else None,
             "avg_ask_order_size_levels": ask_depth / ask_orders if ask_orders else None,
             "depth_imbalance": ((bid_depth - ask_depth) / denom) if denom > 0 else None,
+            "partial_fill_flow_schema_version": (
+                PARTIAL_FILL_FLOW_SCHEMA_VERSION
+            ),
+            "summary_level_limit": min(self.summary_levels, self.depth),
             "bid_levels_json": json.dumps(bids, separators=(",", ":")),
             "ask_levels_json": json.dumps(asks, separators=(",", ":")),
         }
@@ -808,6 +849,21 @@ class KrakenL3Collector:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            columns = {
+                row[1] for row in self._conn.execute(
+                    "PRAGMA table_info(kraken_l3_summaries)"
+                )
+            }
+            if "partial_fill_flow_schema_version" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE kraken_l3_summaries ADD COLUMN "
+                    "partial_fill_flow_schema_version TEXT"
+                )
+            if "summary_level_limit" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE kraken_l3_summaries ADD COLUMN "
+                    "summary_level_limit INTEGER"
+                )
             self._conn.commit()
             return self._conn
 
@@ -830,6 +886,8 @@ class KrakenL3Collector:
             "trade_count_60s", "cancel_to_add_60s",
             "matched_buy_notional_60s", "matched_sell_notional_60s",
             "net_matched_buy_notional_60s",
+            "partial_fill_flow_schema_version",
+            "summary_level_limit",
         )
         conn.execute(
             f"INSERT INTO kraken_l3_summaries({','.join(cols)}) "
@@ -873,7 +931,7 @@ class KrakenL3Collector:
     async def _recorder_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.record_once()
+                await asyncio.to_thread(self.record_once)
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self._last_error["recorder"] = str(exc)[:200]

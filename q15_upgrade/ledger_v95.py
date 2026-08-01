@@ -177,12 +177,25 @@ def _round_p(p: float | None) -> float | None:
     return round(p, min(digits, 15))
 
 
-def _isotonic_fit(pairs: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Pool-Adjacent-Violators isotonic regression.
+def _isotonic_fit(pairs: Sequence[tuple[float, float]],
+                  prior_weight: float | None = None) -> list[tuple[float, float]]:
+    """Pool-Adjacent-Violators isotonic regression, with shrinkage on thin blocks.
 
     ``pairs`` is (raw_probability, outcome∈{0,1}). Returns monotonically
     non-decreasing (x, y) anchors (block mean x → block mean y), x ascending —
-    the calibrated map. Pure and deterministic; empty in → empty out."""
+    the calibrated map. Pure and deterministic; empty in → empty out.
+
+    SHRINKAGE. Raw PAVA on binary labels routinely ends in a block of ONE
+    observation, whose mean is exactly 0.0 or 1.0. ``_isotonic_predict`` clamps
+    beyond the outermost anchor, so a single settled contract at raw 0.60 that
+    happened to resolve YES maps EVERY raw probability >= 0.60 to 1.0 (0.99 after
+    the caller's clamp) — one sample dictating maximum confidence on every asset
+    at that checkpoint. Each block mean is therefore shrunk toward the sample base
+    rate with a pseudo-count: y = (sum_y + a*base) / (count + a). A large block is
+    essentially untouched; a 1-observation block is pulled most of the way back.
+    Monotonicity is re-imposed afterwards, since unequal counts can otherwise let
+    shrinkage cross two adjacent blocks. ``prior_weight`` 0 restores raw PAVA.
+    """
     pts = sorted((float(x), float(y)) for x, y in pairs)
     if not pts:
         return []
@@ -194,7 +207,18 @@ def _isotonic_fit(pairs: Sequence[tuple[float, float]]) -> list[tuple[float, flo
             sy2, c2, sx2 = blocks.pop()
             sy1, c1, sx1 = blocks.pop()
             blocks.append([sy1 + sy2, c1 + c2, sx1 + sx2])
-    return [(sx / c, sy / c) for sy, c, sx in blocks]
+    if prior_weight is None:
+        prior_weight = _env_float("Q15_V95_ISOTONIC_PRIOR_WEIGHT", 5.0, 0.0, 1000.0)
+    if prior_weight <= 0:
+        return [(sx / c, sy / c) for sy, c, sx in blocks]
+    base = sum(y for _, y in pts) / len(pts)
+    anchors: list[tuple[float, float]] = []
+    running = 0.0
+    for sy, c, sx in blocks:
+        y = (sy + prior_weight * base) / (c + prior_weight)
+        running = max(running, y)          # keep the map non-decreasing
+        anchors.append((sx / c, running))
+    return anchors
 
 
 def _isotonic_predict(anchors: Sequence[tuple[float, float]], x: float) -> float | None:
@@ -493,6 +517,11 @@ class V95Ledger:
         self._calibration_fit_cache: dict[tuple[str, str | None], tuple[int, dict[str, Any]]] = {}
         self._pattern_centroid_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._challenger_weights_cache: dict[tuple[str, str | None], tuple[int, dict[str, float]]] = {}
+        # Accuracy metrics are a pure function of resolved prediction rows. Cache
+        # them by the same settlement/learning version as the calibration caches;
+        # otherwise every health request repeatedly walks the full resolved ledger
+        # and can delay the live refresh loop for several seconds.
+        self._metrics_cache: tuple[int, dict[str, Any]] | None = None
         # TTL cache for the display-only status() (see _STATUS_CACHE_TTL_SECONDS).
         # Deliberately time-based (not _data_version-based): a few seconds of
         # display staleness is harmless and avoids re-running its full-table scans
@@ -524,6 +553,20 @@ class V95Ledger:
         connection.execute("PRAGMA foreign_keys=ON")
         self._shared_connection = connection
         return connection
+
+    def note_external_reconcile(self) -> None:
+        """Invalidate hot-path caches after another ledger connection settles rows.
+
+        The background settlement worker intentionally owns a separate
+        ``V95Ledger`` instance so its long sequence of grading/learning operations
+        cannot hold the live recorder's Python lock.  WAL makes the database
+        changes visible immediately; this version bump makes the foreground
+        calibration/weight caches reload those changes on their next use.
+        """
+        with self._lock:
+            self._data_version += 1
+            self._status_cache = None
+            self._status_cache_at = 0.0
 
     def _initialize(self) -> None:
         with self._lock, closing(self._connect()) as connection:
@@ -1287,22 +1330,67 @@ class V95Ledger:
         time-to-close. Graded later by :meth:`resolve_ticker`."""
         if not self._available or not contract:
             return False
+        self.record_timing_observations(({
+            "contract": contract,
+            "mark_seconds": mark_seconds,
+            "asset": asset,
+            "predicted_side": predicted_side,
+            "yes_probability": yes_probability,
+            "selected_probability": selected_probability,
+            "confidence_grade": confidence_grade,
+            "created_at": created_at,
+            "close_time": close_time,
+            "snapshot_id": snapshot_id,
+        },))
+        return True
+
+    def record_timing_observations(self, observations: Sequence[Mapping[str, Any]]) -> int:
+        """Insert a same-cycle timing batch with one WAL commit.
+
+        A timing mark normally captures all tracked assets at once.  Committing
+        each tiny row separately caused the refresh loop to wait repeatedly on
+        SQLite checkpoints and settlement work, which in turn delayed websocket
+        keepalives.  This preserves identical first-write-wins rows while making
+        the seven-asset capture one short transaction.
+        """
+        if not self._available:
+            return 0
+        payloads: list[tuple[Any, ...]] = []
+        for observation in observations:
+            contract = str(observation.get("contract") or "")
+            if not contract:
+                continue
+            predicted_side = observation.get("predicted_side")
+            payloads.append((
+                MODEL_VERSION,
+                contract,
+                int(observation.get("mark_seconds") or 0),
+                (str(observation.get("asset")) if observation.get("asset") else None),
+                float(observation.get("created_at") or 0.0),
+                (str(predicted_side).upper() if predicted_side else None),
+                (float(observation["yes_probability"])
+                 if observation.get("yes_probability") is not None else None),
+                (float(observation["selected_probability"])
+                 if observation.get("selected_probability") is not None else None),
+                (str(observation.get("confidence_grade"))
+                 if observation.get("confidence_grade") else None),
+                (float(observation["close_time"])
+                 if observation.get("close_time") is not None else None),
+                (str(observation.get("snapshot_id"))
+                 if observation.get("snapshot_id") else None),
+            ))
+        if not payloads:
+            return 0
         with self._lock, closing(self._connect()) as connection:
-            connection.execute(
+            before = connection.total_changes
+            connection.executemany(
                 "INSERT OR IGNORE INTO timing_experiment(model_version,contract,mark_seconds,asset,"
                 "created_at,predicted_side,yes_probability,selected_probability,confidence_grade,"
                 "close_time,snapshot_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (MODEL_VERSION, str(contract), int(mark_seconds),
-                 (str(asset) if asset else None), float(created_at),
-                 (str(predicted_side).upper() if predicted_side else None),
-                 (float(yes_probability) if yes_probability is not None else None),
-                 (float(selected_probability) if selected_probability is not None else None),
-                 (str(confidence_grade) if confidence_grade else None),
-                 (float(close_time) if close_time is not None else None),
-                 (str(snapshot_id) if snapshot_id else None)),
+                payloads,
             )
             connection.commit()
-        return True
+            return int(connection.total_changes - before)
 
     def timing_experiment_scoreboard(self) -> dict[str, Any]:
         """Per-mark accuracy of the observational timing experiment.
@@ -3374,18 +3462,12 @@ class V95Ledger:
         """User-facing record: how often each interval, rank, and asset was right/wrong."""
         if not self._available:
             return {"available": False, "error": self._last_error}
-        with self._lock, closing(self._connect()) as connection:
-            rows = list(connection.execute(
-                "SELECT checkpoint, correct, rank, asset, realized_cents, "
-                "predicted_side, official_result, confidence_grade, changed_before_close, "
-                "manipulation_suspected, manipulation_reason, pushed, ticker "
-                "FROM predictions WHERE model_version=? AND official_result IS NOT NULL",
-                (MODEL_VERSION,),
-            ))
+        metrics = self.metrics()
+        scoreboard = copy.deepcopy(metrics.get("scoreboard") or {})
         return {
             "available": True, "model_version": MODEL_VERSION,
             "intervals": TRACKED_CHECKPOINTS, "priority_interval": self.primary_learning_checkpoint,
-            **self._scoreboard_rows(rows),
+            **scoreboard,
         }
 
     # ------------------------------------------------------------------ flip risk
@@ -3661,12 +3743,34 @@ class V95Ledger:
         d_i = worse - better (positive favors the challenger). Returns the mean
         Brier reduction, t statistic, and two-sided p-value, so promotion rests on
         statistical significance rather than a fixed margin."""
-        diffs = []
-        for row in rows:
+        # CLUSTER BY SETTLEMENT WINDOW. record_prediction writes one row per ASSET per
+        # checkpoint, so up to 7 rows share a single 15-minute settlement and therefore a
+        # single underlying move — they are not independent draws. Treating them as such
+        # understates the standard error by roughly sqrt(design effect) (~2x here), which is
+        # exactly how a run of luck in a handful of windows reads as p<0.05 across ~50 rows.
+        # Collapse each window to its mean difference and run the paired test on those
+        # cluster means (the standard cluster-robust move when clusters are small and
+        # numerous). Rows with no resolvable window key fall back to their own cluster, so
+        # older data and tests behave as before.
+        clusters: dict[Any, list[float]] = {}
+        for idx, row in enumerate(rows):
             worse = _num(_row_get(row, worse_key))
             better = _num(_row_get(row, better_key))
-            if worse is not None and better is not None:
-                diffs.append(worse - better)
+            if worse is None or better is None:
+                continue
+            # close_time is shared by every asset settling in the same 15-minute window,
+            # which is exactly the correlated unit. NOT ticker — that is unique per
+            # asset+window, so it would put every row in its own cluster and silently
+            # restore the uncorrected test.
+            key = None
+            for candidate in ("window_key", "close_time", "settlement_time"):
+                key = _row_get(row, candidate)
+                if key is not None:
+                    break
+            if key is None:
+                key = ("__row__", idx)   # unclusterable row: its own cluster, as before
+            clusters.setdefault(key, []).append(worse - better)
+        diffs = [sum(vals) / len(vals) for vals in clusters.values()]
         n = len(diffs)
         if n < 2:
             return {"n": n, "mean_brier_reduction": None, "t": None, "p_value": None,
@@ -3702,8 +3806,19 @@ class V95Ledger:
         if not self._available:
             return {"available": False, "error": self._last_error}
         with self._lock, closing(self._connect()) as connection:
+            version = self._data_version
+            if self._cache_enabled and self._metrics_cache is not None:
+                cached_version, cached_metrics = self._metrics_cache
+                if cached_version == version:
+                    return copy.deepcopy(cached_metrics)
             rows = list(connection.execute(
-                "SELECT * FROM predictions WHERE model_version=? AND official_result IS NOT NULL ORDER BY resolved_at",
+                "SELECT checkpoint,correct,rank,asset,realized_cents,predicted_side,"
+                "official_result,confidence_grade,changed_before_close,"
+                "manipulation_suspected,manipulation_reason,pushed,ticker,regime,"
+                "selected_probability,champion_brier,challenger_brier,baseline_brier,"
+                "champion_logloss,challenger_logloss,baseline_logloss "
+                "FROM predictions WHERE model_version=? AND official_result IS NOT NULL "
+                "ORDER BY resolved_at",
                 (MODEL_VERSION,),
             ))
         def aggregate(selected: Sequence[sqlite3.Row]) -> dict[str, Any]:
@@ -3796,7 +3911,7 @@ class V95Ledger:
                 "vs_champion": vs_champion, "vs_baseline": vs_baseline,
             }
         primary = promotion_by_checkpoint[self.primary_learning_checkpoint]
-        return {
+        result = {
             "available": True, "model_version": MODEL_VERSION, "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "overall": overall, "by_checkpoint": by_checkpoint, "by_regime": by_regime,
             "scoreboard": self._scoreboard_rows(rows),
@@ -3806,6 +3921,13 @@ class V95Ledger:
             "primary_learning_checkpoint": self.primary_learning_checkpoint,
             "automatic_promotion": False, "minimum_promotion_rows": self.minimum_promotion_rows,
         }
+        if self._cache_enabled:
+            with self._lock:
+                # Do not publish a result assembled across an intervening
+                # settlement; the next caller will recompute from the new version.
+                if self._data_version == version:
+                    self._metrics_cache = (version, copy.deepcopy(result))
+        return result
 
     def reserve_notification(self, *, event_key: str, checkpoint: str, state: str,
                              fingerprint: str, now: float | None = None) -> str | None:

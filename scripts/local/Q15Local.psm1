@@ -92,3 +92,63 @@ function Get-Q15Port {
     if ($env:PORT) { return [int]$env:PORT }
     return 8000
 }
+
+function Get-Q15ExactCaptureRestartWindow {
+    <#
+    Return the deterministic restart risk around each exact-13M capture.
+
+    Q15 close times are aligned to 15-minute Unix boundaries and the exact
+    decision occurs 780 seconds before close, at epoch phase 120 modulo 900.
+    A warm restart must budget for both the required 60-second lookback and
+    the observed stop/maintenance/cold-start time.  This helper is pure so the
+    launcher policy can be regression-tested without touching live services.
+    #>
+    param(
+        [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow,
+        [int]$RequiredHistorySeconds = 60,
+        [int]$RestartBudgetSeconds = 60,
+        [int]$SafetyMarginSeconds = 10,
+        [int]$PostCaptureSeconds = 5
+    )
+    foreach ($value in @(
+        $RequiredHistorySeconds,
+        $RestartBudgetSeconds,
+        $SafetyMarginSeconds,
+        $PostCaptureSeconds
+    )) {
+        if ($value -lt 0) { throw "Exact-capture restart timing values must be nonnegative" }
+    }
+    $epochSeconds = [long][Math]::Floor($Now.ToUnixTimeMilliseconds() / 1000.0)
+    $phaseSeconds = [int](($epochSeconds % 900 + 900) % 900)
+    $capturePhaseSeconds = 120
+    $secondsUntilCapture = [int](($capturePhaseSeconds - $phaseSeconds + 900) % 900)
+    $secondsSinceCapture = [int](($phaseSeconds - $capturePhaseSeconds + 900) % 900)
+    $protectedBeforeSeconds = (
+        $RequiredHistorySeconds + $RestartBudgetSeconds + $SafetyMarginSeconds
+    )
+    $beforeCaptureRisk = $secondsUntilCapture -le $protectedBeforeSeconds
+    $afterCaptureRisk = $secondsSinceCapture -le $PostCaptureSeconds
+    $protected = $beforeCaptureRisk -or $afterCaptureRisk
+    $retryAfterSeconds = 0
+    $reason = "SAFE_TO_RESTART"
+    if ($beforeCaptureRisk) {
+        $retryAfterSeconds = $secondsUntilCapture + $PostCaptureSeconds + 1
+        $reason = "REQUIRED_HISTORY_AND_COLD_START_OVERLAP_NEXT_EXACT_CAPTURE"
+    }
+    elseif ($afterCaptureRisk) {
+        $retryAfterSeconds = $PostCaptureSeconds - $secondsSinceCapture + 1
+        $reason = "EXACT_CAPTURE_MAY_STILL_BE_COMMITTING"
+    }
+    return [pscustomobject]@{
+        protected = [bool]$protected
+        reason = $reason
+        epoch_seconds = $epochSeconds
+        phase_seconds = $phaseSeconds
+        capture_phase_seconds = $capturePhaseSeconds
+        seconds_until_capture = $secondsUntilCapture
+        seconds_since_capture = $secondsSinceCapture
+        protected_before_seconds = $protectedBeforeSeconds
+        post_capture_seconds = $PostCaptureSeconds
+        retry_after_seconds = [int]$retryAfterSeconds
+    }
+}

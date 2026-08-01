@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .config import ExecutorConfig, yes_config_from_env
@@ -18,6 +19,16 @@ from .risk import Pick, PortfolioState, decide, apply_fill, apply_exit, prune_se
 from .trading_client import KalshiTradingClient
 
 logger = logging.getLogger("q15.executor")
+
+# Durable meta keys for the daily circuit breaker. Without these the day-start
+# reference is re-read from the (already drawn-down) balance on every restart,
+# so hitting the stop and bouncing the process silently re-arms trading.
+_META_DAY_DATE = "daily_stop_day_utc"
+_META_DAY_START_BALANCE = "daily_stop_day_start_balance_cents"
+
+
+def _utc_today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _coid(window_key: Any, ticker: str, kind: str, prefix: str = "v2x") -> str:
@@ -56,11 +67,19 @@ class Executor:
         bankroll = self._initial_bankroll(live_bal)
         # Day-start balance is the stop-loss reference: the REAL balance when live, else the
         # configured/dry-run bankroll. The stop measures realized loss as a drop from this.
-        self._day_start_balance = live_bal if live_bal is not None else bankroll
+        # RESTART SAFETY: if the store already holds a reference for TODAY (UTC), reuse it —
+        # re-reading the drawn-down balance here is what turned a $100/day cap into $100/restart.
+        default_ref = live_bal if live_bal is not None else bankroll
+        self._day_date = _utc_today()
+        self._day_start_balance = self._load_day_reference(default_ref)
         self.state = PortfolioState(
             bankroll_cents=bankroll,
             day_start_bankroll_cents=self._day_start_balance,
         )
+        # (window_key, ticker) -> broker order_id of the entry we placed. Lets a
+        # defensive exit CANCEL a still-resting entry instead of only selling
+        # against it (a GTC buy left working fills after we think we are flat).
+        self._entry_orders: dict[tuple[int, str], str] = {}
         # Side this executor trades. The NO executor (no_only=True) buys/sells "no"; the YES bot
         # (no_only=False) trades "yes". Drives on_exit and the client_order_id namespace, so the
         # two instances are wire-isolated at the exchange.
@@ -74,28 +93,96 @@ class Executor:
         self._rehydrate_window_cap()
         logger.info("executor init: %s | bankroll=%dc", self.cfg.safety_summary(), bankroll)
 
-    def _rehydrate_window_cap(self) -> None:
-        """Seed window_count/window_tickers from the orders store so the per-window cap and the
-        dup-ticker guard survive a process restart (otherwise an in-memory-only counter resets to
-        0 and over-places). Older windows are pruned on the next on_fire by prune_settled, so
-        rehydrating recent windows is safe. Never raises."""
+    def _load_day_reference(self, default_ref: int) -> int:
+        """Return the daily-stop reference balance for TODAY (UTC).
+
+        Reuses a stored reference when it belongs to today, so a restart cannot
+        clear the day's drawdown and re-arm entries. On a new UTC day (or with no
+        store) the current balance becomes the new reference and is persisted."""
+        if self.store is not None:
+            stored_date = self.store.get_meta(_META_DAY_DATE)
+            stored_ref = self.store.get_meta(_META_DAY_START_BALANCE)
+            if stored_date == self._day_date and stored_ref is not None:
+                try:
+                    ref = int(float(stored_ref))
+                except (TypeError, ValueError):
+                    ref = None
+                if ref is not None:
+                    logger.info(
+                        "executor daily-stop reference restored for %s: %dc "
+                        "(restart does NOT reset the day's loss)", self._day_date, ref)
+                    return ref
+        self._persist_day_reference(int(default_ref))
+        return int(default_ref)
+
+    def _persist_day_reference(self, ref_cents: int) -> None:
         if self.store is None:
             return
-        try:
-            recent = self.store.recent_window_entries(since_seconds=7200.0)
-        except Exception:  # noqa: BLE001 - best-effort; never block init
-            logger.exception("window-cap rehydrate failed (cap falls back to in-memory)")
+        self.store.set_meta(_META_DAY_DATE, self._day_date)
+        self.store.set_meta(_META_DAY_START_BALANCE, str(int(ref_cents)))
+
+    def _rehydrate_window_cap(self) -> None:
+        """Seed window_count/window_tickers AND positions/open_tickers from the orders store so
+        the per-window cap, the dup-ticker guard and — critically — the ability to EXIT survive a
+        process restart.
+
+        Without the position half, ``state.positions`` came back empty and every defensive close
+        refused with NO_POSITION while a real, funded position rode to settlement. The rehydrated
+        count is the REQUESTED count (an upper bound on what actually filled), which is safe
+        because a close is sent ``reduce_only``: Kalshi clamps it to the position genuinely held,
+        so overstating can never flip us short. Older windows are pruned on the next on_fire by
+        prune_settled. Never raises."""
+        if self.store is None:
             return
-        if not recent:
+        # Only inherit placements made in the SAME posture we are running in now: a book
+        # flipped from dry-run to live must not resurrect simulated positions as real ones.
+        can_place_live = (self.cfg.enabled and not self.cfg.dry_run
+                          and not self.cfg.kill_switch)
+        mode = "LIVE" if can_place_live else "dry-run"
+        try:
+            entries = self.store.recent_entry_orders(since_seconds=7200.0, mode=mode)
+        except Exception:  # noqa: BLE001 - best-effort; never block init
+            logger.exception("executor rehydrate failed (state falls back to in-memory)")
+            return
+        if not entries:
             return
         from dataclasses import replace
-        wt = {int(wk): frozenset(tks) for wk, tks in recent.items() if tks}
+
+        wt: dict[int, set[str]] = {}
+        positions: dict[str, int] = {}
+        for row in entries:
+            wk = row["window_key"]
+            ticker = row["ticker"]
+            wt.setdefault(wk, set()).add(ticker)
+            # Rows are oldest-first, so the newest placement for a ticker wins.
+            # Use the REQUESTED count, not the filled count: a resting GTC entry
+            # records filled_count=0 at POST time yet can still fill later in the
+            # window, so filled_count would rehydrate a live position as flat.
+            # Requested is the upper bound, and reduce_only clamps the close to
+            # whatever is genuinely held.
+            count = int(row.get("requested_count") or row.get("filled_count") or 0)
+            if count > 0:
+                positions[ticker] = count
+            if row.get("order_id"):
+                self._entry_orders[(wk, ticker)] = str(row["order_id"])
         if not wt:
             return
-        wc = {wk: len(tks) for wk, tks in wt.items()}
-        self.state = replace(self.state, window_count=wc, window_tickers=wt)
-        logger.info("executor rehydrated per-window cap from store: %s",
-                    {wk: n for wk, n in sorted(wc.items())})
+        window_tickers = {wk: frozenset(tks) for wk, tks in wt.items()}
+        window_count = {wk: len(tks) for wk, tks in window_tickers.items()}
+        open_tickers = frozenset(positions)
+        self.state = replace(
+            self.state,
+            window_count=window_count,
+            window_tickers=window_tickers,
+            positions=positions,
+            open_tickers=open_tickers,
+            open_count=len(open_tickers),
+        )
+        logger.info(
+            "executor rehydrated from store: per-window cap %s; %d open position(s) %s; "
+            "%d entry order id(s) for cancel-on-exit",
+            {wk: n for wk, n in sorted(window_count.items())},
+            len(open_tickers), sorted(open_tickers), len(self._entry_orders))
 
     def _initial_bankroll(self, live_bal: int | None = None) -> int:
         if self.cfg.bankroll_cents > 0:
@@ -123,6 +210,17 @@ class Executor:
         if bal is None:
             return
         from dataclasses import replace
+        # DAY ROLLOVER: without this the reference captured at __init__ never moves, so the
+        # "daily" stop is really a since-process-start stop — a process up for days stays frozen
+        # at DAILY_STOP on a loss that is no longer today's. Re-base at the UTC date change.
+        today = _utc_today()
+        if today != self._day_date:
+            logger.info("executor daily-stop rollover %s -> %s: reference %dc -> %dc",
+                        self._day_date, today, self._day_start_balance, int(bal))
+            self._day_date = today
+            self._day_start_balance = int(bal)
+            self._persist_day_reference(self._day_start_balance)
+            self.state = replace(self.state, day_start_bankroll_cents=self._day_start_balance)
         self.state = replace(self.state, day_realized_pnl_cents=int(bal) - int(self._day_start_balance))
 
     def on_fire(self, pick: Mapping[str, Any]) -> dict[str, Any]:
@@ -204,6 +302,21 @@ class Executor:
                 bal_ms=_bal_ms, order_ms=_order_ms,
                 client_order_id=_coid(p.window_key, p.ticker, "entry", self.coid_prefix))
         if not res.get("ok"):
+            if res.get("uncertain"):
+                # The POST failed in a way that does NOT prove rejection (read timeout,
+                # mid-flight drop) — Kalshi may have accepted and filled it. Treating this
+                # as "not placed" left a real position untracked AND released the window's
+                # risk budget, so the next co-settling pick doubled the intended exposure.
+                # Book it: consume the budget, own the ticker, and surface it for reconcile.
+                self.state = apply_fill(self.state, p, d)
+                logger.error(
+                    "order UNCERTAIN %s w%s (%s) — booking the exposure; reconcile against "
+                    "the account before trusting the position", p.ticker, p.window_key,
+                    res.get("error"))
+                return {"placed": False, "reason": "ORDER_UNCERTAIN", "uncertain": True,
+                        "booked": True, "detail": res, "ticker": p.ticker, "count": d.count,
+                        "balance_latency_ms": round(_bal_ms, 1),
+                        "order_latency_ms": round(_order_ms, 1), "fill_status": fill_status}
             logger.error("order FAILED %s: %s", p.ticker, res.get("error"))
             return {"placed": False, "reason": "ORDER_FAILED", "detail": res,
                     "balance_latency_ms": round(_bal_ms, 1), "order_latency_ms": round(_order_ms, 1),
@@ -213,6 +326,12 @@ class Executor:
         # (books on a successful PLACE, not a confirmed FILL); fill_status now records when that
         # assumption diverges, pending a validated reconcile before we change the bookkeeping.
         self.state = apply_fill(self.state, p, d)
+        # Remember the broker order id so a defensive exit can CANCEL a still-resting
+        # entry. A GTC buy left working keeps filling after the exit thinks we are flat.
+        entry_order_id = self._order_id_of(res)
+        entry_key = self._entry_key(p.ticker, p.window_key)
+        if entry_order_id and entry_key is not None:
+            self._entry_orders[entry_key] = entry_order_id
         mode = "dry-run" if res.get("dry_run") else "LIVE"
         _age_str = f"{_age_ms:.0f}ms" if _age_ms is not None else "n/a"
         logger.info("executor timing %s w%s: snapshot_age=%s balance=%.0fms order=%.0fms total=%.0fms fill=%s",
@@ -226,15 +345,73 @@ class Executor:
                 "snapshot_age_ms": (round(_age_ms, 1) if _age_ms is not None else None),
                 "fill_status": fill_status, "filled_count": filled_count}
 
+    @staticmethod
+    def _order_id_of(res: Mapping[str, Any]) -> str | None:
+        """Pull the broker order id out of a place_order response (None in dry-run)."""
+        try:
+            from .store import _inner_order
+            order = _inner_order((res or {}).get("data"))
+            oid = order.get("order_id")
+            if oid is None:
+                oid = order.get("id")
+            return None if oid is None else str(oid)
+        except Exception:  # noqa: BLE001 - id extraction must never break the order path
+            return None
+
+    @staticmethod
+    def _entry_key(ticker: str, window_key: Any) -> tuple[int, str] | None:
+        """(window_key, ticker) key for _entry_orders, or None if the window is unusable."""
+        try:
+            return (int(window_key), str(ticker))
+        except (TypeError, ValueError):
+            return None
+
+    def _cancel_resting_entry(self, ticker: str, window_key: Any) -> dict[str, Any] | None:
+        """Cancel the entry order for (window, ticker) if we know its id.
+
+        An entry is GTC so it can still be RESTING when the defensive exit fires. Selling
+        alone does not remove it: the IoC reduce_only sell fills 0 against a position that
+        does not exist yet, we book ourselves flat, and the original buy then fills into the
+        adverse move we were trying to escape. Cancelling first closes that hole. Cancelling
+        an already-filled order is harmless — the broker just reports it cannot be cancelled."""
+        key = self._entry_key(ticker, window_key)
+        order_id = self._entry_orders.get(key) if key is not None else None
+        if not order_id:
+            return None
+        try:
+            res = self.client.cancel_order(order_id)
+        except Exception:  # noqa: BLE001 - an exit must proceed even if the cancel errors
+            logger.exception("entry cancel raised for %s (%s); continuing to sell",
+                             ticker, order_id)
+            return {"ok": False, "error": "cancel_raised"}
+        if res.get("ok"):
+            logger.info("cancelled resting entry %s for %s before exit", order_id, ticker)
+        else:
+            # Expected when the entry already filled — not an error condition.
+            logger.info("entry cancel for %s (%s) not accepted: %s",
+                        ticker, order_id, res.get("error"))
+        return res
+
     def on_exit(self, ticker: str, window_key: Any, exit_price_cents: int) -> dict[str, Any]:
-        """Defensive-exit: SELL an open NO position at ``exit_price_cents``. The kill
-        switch blocks even exits (you can always close manually); everything else allows
-        them — closing risk is never gated by the daily/window caps."""
+        """Defensive-exit: CANCEL any still-resting entry, then SELL the open position at
+        ``exit_price_cents``. The kill switch blocks even exits (you can always close
+        manually); everything else allows them — closing risk is never gated by the
+        daily/window caps."""
         if not self.cfg.enabled:
             return {"placed": False, "reason": "DISABLED"}
+        # Cancel BEFORE selling, and do it even when we believe we hold nothing: after a
+        # restart the in-memory position is whatever the store rehydrated, and a resting
+        # GTC buy must come off the book regardless.
+        cancel_res = self._cancel_resting_entry(ticker, window_key)
         count = self.state.positions.get(ticker, 0)
         if count < 1:
-            return {"placed": False, "reason": "NO_POSITION"}
+            # Nothing to sell, but a cancel may still have pulled a working entry — say so
+            # rather than reporting a bare NO_POSITION the caller discards.
+            reason = "NO_POSITION_ENTRY_CANCELLED" if cancel_res and cancel_res.get("ok") \
+                else "NO_POSITION"
+            logger.warning("exit for %s w%s: %s (no in-memory position to sell)",
+                           ticker, window_key, reason)
+            return {"placed": False, "reason": reason, "cancel": cancel_res}
         # Price the close to actually fill: it goes out immediate-or-cancel (reduce_only), so a
         # mid-priced sell would cancel unfilled. Sell exit_limit_offset_cents UNDER the estimated
         # exit value to cross the resting bid. Clamp to a tradeable cent (the side/price mapper
@@ -255,13 +432,42 @@ class Executor:
                 client_order_id=_coid(window_key, ticker, "exit", self.coid_prefix))
         if res.get("ok"):
             self.state = apply_exit(self.state, ticker)   # close it out of the snapshot
+            key = self._entry_key(ticker, window_key)
+            if key is not None:
+                self._entry_orders.pop(key, None)
         return {"placed": bool(res.get("ok")), "count": count,
                 "mode": "dry-run" if res.get("dry_run") else "LIVE", "order": res,
-                "fill_status": fill_status}
+                "cancel": cancel_res, "fill_status": fill_status}
 
 
 _executor: Executor | None = None
 _yes_executor: Executor | None = None
+
+
+def _refresh_safety_switches(ex: "Executor", cfg: ExecutorConfig) -> None:
+    """Re-apply the two SAFETY switches from the environment onto a live executor.
+
+    ExecutorConfig is frozen and the singleton captured it at boot, so setting
+    Q15_EXEC_KILL=true on a running process used to do nothing — the documented
+    "panic button ... hard-blocks ALL placement regardless" only took effect after
+    a restart. Only kill_switch and dry_run are refreshed: they can exclusively
+    make the executor SAFER, so re-reading them cannot widen risk mid-session.
+    Sizing/gating fields deliberately stay pinned to boot values, so a half-edited
+    environment can never change position sizing under a running book."""
+    if ex.cfg.kill_switch == cfg.kill_switch and ex.cfg.dry_run == cfg.dry_run:
+        return
+    from dataclasses import replace
+    logger.warning("executor safety switches changed: kill %s->%s, dry_run %s->%s",
+                   ex.cfg.kill_switch, cfg.kill_switch, ex.cfg.dry_run, cfg.dry_run)
+    ex.cfg = replace(ex.cfg, kill_switch=cfg.kill_switch, dry_run=cfg.dry_run)
+    # The trading client holds its own reference and gates live_ready on it.
+    client_cfg = getattr(ex.client, "cfg", None)
+    if client_cfg is not None:
+        try:
+            ex.client.cfg = replace(client_cfg, kill_switch=cfg.kill_switch,
+                                    dry_run=cfg.dry_run)
+        except TypeError:  # a test double with a non-dataclass cfg
+            pass
 
 
 def get_executor() -> Executor | None:
@@ -272,6 +478,8 @@ def get_executor() -> Executor | None:
         return None
     if _executor is None:
         _executor = Executor(cfg)
+    else:
+        _refresh_safety_switches(_executor, cfg)
     return _executor
 
 
@@ -288,6 +496,8 @@ def get_yes_executor() -> Executor | None:
         return None
     if _yes_executor is None:
         _yes_executor = Executor(cfg)
+    else:
+        _refresh_safety_switches(_yes_executor, cfg)
     return _yes_executor
 
 

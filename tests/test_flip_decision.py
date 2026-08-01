@@ -10,6 +10,7 @@ contract, and a full reset that recalculates from post-reset data only.
 from __future__ import annotations
 
 import os
+import random
 import tempfile
 import types
 import unittest
@@ -90,6 +91,70 @@ class ThresholdSelectionTests(unittest.TestCase):
         sel = flip_decision.select_threshold(self._rows(20), _cfg(min_total=40))
         self.assertFalse(sel["validated"])
         self.assertEqual(sel["reason"], "insufficient_rows")
+
+    def test_fast_threshold_sweep_matches_reference_rescans(self):
+        rng = random.Random(17)
+        rows = [
+            {
+                "created_at": float(i),
+                "flip_probability": (None if i % 37 == 0 else round(rng.random(), 6)),
+                "flipped": rng.random() < 0.32,
+            }
+            for i in range(240)
+        ]
+        cfg = _cfg(min_total=40, min_yes_train=3, min_yes_test=3)
+
+        def reference(resolved_rows):
+            ordered = sorted(
+                resolved_rows,
+                key=lambda row: flip_decision._num(row.get("created_at"), 0.0) or 0.0,
+            )
+            n = len(ordered)
+            split = max(1, min(n - 1, int(round(cfg.train_fraction * n))))
+            train, test = ordered[:split], ordered[split:]
+            candidates = sorted({
+                flip_decision._num(row.get("flip_probability"), 0.0) or 0.0
+                for row in train
+            })
+            best = None
+            for candidate in candidates:
+                threshold = max(0.0, candidate - 1e-9)
+                metrics = flip_decision._metrics_at(train, threshold)
+                if (
+                    (metrics["yes_n"] or 0) >= cfg.min_yes_train
+                    and metrics["yes_precision"] is not None
+                    and metrics["yes_precision"] >= cfg.target_precision
+                ):
+                    best = threshold
+                    break
+            base = {
+                "validated": False, "threshold": 1.01, "n": n,
+                "target_precision": cfg.target_precision,
+                "reason": "insufficient_rows", "train": {}, "test": {},
+            }
+            if best is None:
+                base["reason"] = "no_train_threshold_meets_precision"
+                base["train"] = flip_decision._metrics_at(train, 0.5)
+                return base
+            test_metrics = flip_decision._metrics_at(test, best)
+            train_metrics = flip_decision._metrics_at(train, best)
+            validated = bool(
+                (test_metrics["yes_n"] or 0) >= cfg.min_yes_test
+                and test_metrics["yes_precision"] is not None
+                and test_metrics["yes_precision"] >= cfg.target_precision
+            )
+            return {
+                "validated": validated,
+                "threshold": round(best, 6) if validated else 1.01,
+                "candidate_threshold": round(best, 6),
+                "n": n,
+                "target_precision": cfg.target_precision,
+                "reason": "validated" if validated else "test_below_precision",
+                "train": train_metrics,
+                "test": test_metrics,
+            }
+
+        self.assertEqual(flip_decision.select_threshold(rows, cfg), reference(rows))
 
 
 # --------------------------------------------------------------------------- #

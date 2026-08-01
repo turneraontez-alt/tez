@@ -215,13 +215,15 @@ class TelegramNotifier:
         return "disabled"
 
     def _redact(self, s):
-        """Strip the bot token from any string before it is logged/exposed."""
-        if not s:
-            return s
-        s = str(s)
-        if self.token:
-            s = s.replace(self.token, "***")
-        return s
+        """Strip the bot token from any string before it is logged/exposed.
+
+        Delegates to the shared helper so the champion path also catches a
+        URL-embedded token that is not this sender's own (the client module is a
+        pure helper here — the champion's DELIVERY code stays independent).
+        """
+        from notifications.telegram_client import redact_token
+
+        return redact_token(s, self.token)
 
     def send(self, text):
         """Backward-compatible boolean send: True when the message was handled
