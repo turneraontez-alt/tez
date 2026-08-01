@@ -216,6 +216,36 @@ CREATE INDEX IF NOT EXISTS idx_ultoim_v2_exit_resolve
 """
 
 
+# Kalshi's fee is QUADRATIC in price: round_up(0.07 * C * P * (1-P)) dollars, so
+# per contract it peaks near 1.75c at 50c and collapses toward ~0.2c at the tails.
+# Verified against real filled orders in the executor store: p=0.25 -> 0.0131
+# (recorded 0.0131); p=0.42 -> 0.0170 (recorded 0.0170). A FLAT fee assumption is
+# ~3x too harsh at the tails and too soft in the middle, which misprices the
+# breakeven a pick has to clear. Use the shared implementation rather than a local
+# copy — it also models the exchange's round-UP, which matters on small orders.
+from ..entry_economics.costs import kalshi_fee_cents  # noqa: E402
+
+
+def _entry_cost_cents(total_cost: Any, fee: Any, ask_cents: Any) -> float:
+    """Best available per-contract entry cost in cents.
+
+    Prefers the cost the row actually recorded; falls back to Kalshi's fee curve
+    for rows written before cost capture, so a legacy row is charged a realistic
+    fee rather than none at all."""
+    for candidate in (total_cost, fee):
+        if candidate is not None:
+            try:
+                value = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0.0:
+                return value
+    try:
+        return kalshi_fee_cents(float(ask_cents))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _window_key(close_time: float | None, now: float) -> int:
     """Bucket a contract into its 15-minute settlement window so all assets that
     settle together share one report lock."""
@@ -327,6 +357,15 @@ class UltoimV2Ledger:
             # outcome settled-window run as of prediction time (+N YES / -N NO). Nullable,
             # never gates; graded in streak_research_scoreboard.
             ("settlement_streak", "INTEGER"),
+            # FEE-ADJUSTED P&L. `hypothetical_pnl_cents` is the GROSS binary payoff
+            # (win=100-ask, loss=-ask) and ignores transaction costs entirely, even
+            # though `total_cost_cents` is stored on the very same row. Measured over
+            # 1,035 fired+settled picks that overstates the book by +1.36c/bet -- which
+            # is larger than the book's whole apparent edge: gross reads +0.61c/bet,
+            # net reads -0.92c/bet. Every threshold tuned against the gross column was
+            # therefore selected on a biased objective. This column carries the honest
+            # number; the gross one is left untouched so historical rows stay comparable.
+            ("net_pnl_cents", "REAL"),
             # Bet SIZE actually taken on this entry (1 = normal, 2 = conviction-doubled on
             # >=3 co-triggering 10M alerts). hypothetical_pnl_cents is scored at THIS size,
             # so the ledger reflects staked paper P&L. Legacy rows default to 1 (unchanged).
@@ -597,7 +636,8 @@ class UltoimV2Ledger:
         ts = time.time() if now is None else now
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, predicted_side, entry_ask_cents, stake_multiplier "
+                "SELECT id, predicted_side, entry_ask_cents, stake_multiplier, "
+                "total_cost_cents, fee_cents "
                 "FROM ultoim_v2_predictions "
                 "WHERE model_version=? AND ticker=? AND official_result IS NULL",
                 (model_version, ticker),
@@ -607,7 +647,7 @@ class UltoimV2Ledger:
                 side = str(r["predicted_side"] or "").upper()
                 correct = 1 if side == official else 0
                 ask = r["entry_ask_cents"]
-                pnl = None
+                pnl = net = None
                 if ask is not None:
                     # Staked paper P&L: per-contract payoff times the bet size taken
                     # (stake_multiplier=2 on conviction-doubled rows). Legacy rows carry
@@ -615,10 +655,16 @@ class UltoimV2Ledger:
                     stake = r["stake_multiplier"] if r["stake_multiplier"] is not None else 1
                     unit = (100.0 - float(ask)) if correct else (-float(ask))
                     pnl = unit * float(stake)
+                    # ...and the same payoff NET of the cost this row already recorded.
+                    # A win nets (100 - ask - cost); a loss nets -(ask + cost). Falls back
+                    # to Kalshi's own fee curve when the row predates cost capture.
+                    cost = _entry_cost_cents(r["total_cost_cents"], r["fee_cents"], ask)
+                    net_unit = (100.0 - float(ask) - cost) if correct else -(float(ask) + cost)
+                    net = net_unit * float(stake)
                 self._conn.execute(
                     "UPDATE ultoim_v2_predictions SET official_result=?, resolved_at=?, "
-                    "correct=?, hypothetical_pnl_cents=? WHERE id=?",
-                    (official, ts, correct, pnl, r["id"]),
+                    "correct=?, hypothetical_pnl_cents=?, net_pnl_cents=? WHERE id=?",
+                    (official, ts, correct, pnl, net, r["id"]),
                 )
                 graded += 1
             self._conn.commit()
