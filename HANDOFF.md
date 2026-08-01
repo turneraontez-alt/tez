@@ -3063,6 +3063,354 @@ websocket connected, and every official RTI fresh. Executor dry-run + kill
 switches remain true.
 Each forward book starts at n=0 by design; never aggregate transfer cohorts into
 BTC's validated performance.
+## Shipped THIS session - PREDICTION_PLAN.md: model v2 build plan (owner-requested)
+Run time: 2026-07-19 (follow-on; owner wants a fully fleshed-out prediction
+system for the TT leagues with non-standard features, plan first).
+
+``tt_edge/PREDICTION_PLAN.md`` is now the standing build plan: Phase A data
+foundation (results backfill, per-set score verification, ratings/feature/
+model-version tables) -> B league-aware MOV-Elo with Glicko-style RD gating
+as a shadow head -> C feature expansion (same-day rematch, fatigue/workload,
+time-of-day residuals, layoff, clutch/deciding-set, opponent-adjusted form
+residual, H2H residual vs rating expectation, margin trend, per-league
+calibration; market features quarantined to a separate overlay head) ->
+D fitted logistic + per-league Platt -> E promotion gates (Brier/log-loss
+vs champion AND vs market close, CLV tracking to start early) -> F edge-
+ranked slot claiming + report integration. Build phases in order in future
+sessions; every phase behind the shadow/challenger discipline.
+
+## Shipped THIS session - CLOUD-FIRST: Routine owns all leagues, home autoscan default OFF
+Run time: 2026-07-19 (follow-on; owner: "just make the tt elite pics arive
+here too so i can see them all when i ask").
+
+Split coverage lasted ~40 minutes: the owner wants EVERY league's picks
+visible from cloud sessions on demand, so the operating mode is now
+CLOUD-FIRST:
+- Routine recreated as "TT-Edge cloud pick cycle (all leagues)"
+  (trig_01CdhzBLRdyUfwbHyEm22Gz8, hourly at :01) — default league list
+  (29128,29097,22742), no pin.
+- ``integration.autoscan_enabled`` production default flipped to OFF (with
+  docstring + test updates): an unconfigured app restart must not start a
+  second loop that double-alerts against the Routine. Opt back in with
+  TT_EDGE_AUTOSCAN_ENABLED=true only after pausing the Routine.
+- CLAUDE.md gained a "TT-Edge picks on demand" section: when the owner asks
+  for picks, run ``python3 -m tt_edge.jobs.cloud_cycle`` in-session and
+  report the PICKS section + near-miss edges from the scan log; in-session
+  output IS the delivery (no Telegram creds in sandboxes; claims are
+  idempotent so the Routine won't re-alert). README + .env.example updated
+  from split-coverage to cloud-first wording.
+
+Live activity this session (in-session runs with the owner-pasted token,
+now also in environment settings): 2 pre-split TT Elite claims settled via
+the new grade-only path (Malcher won +138c, Rutkowski/Olbrycht lost -205c),
+2 new TT Cup picks claimed and reported in-chat (Moravec -150 edge +10.2,
+Lasota -110 edge +10.5, both start ~06:00Z). Ledger now 6W-3L, net -286c,
+bankroll 6214c, 3 open. KEY-REACHES-ROUTINE still UNVERIFIED: the 00:01
+fire's state push (if any) was overwritten by an in-session run at 00:04 —
+verify at a fire with no in-session runs nearby (state branch commit or
+odds stamps after the :01 fire = confirmed).
+
+## Shipped THIS session - TT-Edge fix: grade-only results for unscanned leagues
+Run time: 2026-07-18/19 (follow-on; owner pasted the BetsAPI token in-session
+and asked for fresh odds — the live cups-only run then exposed the gap).
+
+Bug (latent, would have bitten within hours): the cups-only Routine never
+fetches TT Elite results, so the 3 OPEN TT Elite claims in the cloud DB
+(recommended 22:56Z, pre-split) could never settle — and
+``edge_calc`` abstains on ``open_recommendations >= 3``, so every future
+cup pick would have been silently suppressed forever. Fix: the cloud cycle
+now self-heals — ``grade_only_result_dates`` maps each open claim's
+tournament to its BetsAPI league id (new ``betsapi.LEAGUE_ID_BY_NAME``) and,
+for leagues NOT in the scan list, fetches a results-only bundle
+(``betsapi.fetch_results_bundle``: ended feed only, not-started events
+dropped, no history/odds calls) on each claim's own start date. Grading
+settles them; the board parser only analyzes ``notstarted`` events, so a
+grade-only league structurally cannot produce a new pick (no double-alert
+with the home loop). Unmapped tournament names log a warning naming the fix.
+
+Verification: 3 new tests (full settle-without-scan flow incl. no
+upcoming/history/odds calls for the unscanned league; date derivation skips
+scanned + unmapped leagues and reaches days-old claims; results bundle is
+ended-only and degrades per-date). Live token validated in-session: cups
+cycle ran clean (101 matches, 22 odds rows, no qualifying picks — selective,
+not broken). Full suite green (below); config audit OK.
+
+## Shipped THIS session - PC back: SPLIT COVERAGE decided + Routine now cups-only
+Run time: 2026-07-18 (owner: "okay im on my pc set up what you need to").
+
+Owner is back at the PC (its app last ran 2026-07-16 / commit c78c4de —
+pre-TT-Edge, so a pull+restart is pending there). Asked the owner to choose
+the TT-Edge operating mode; they chose **SPLIT COVERAGE**:
+- HOME (the PC's in-app autoscan, automatic on pull+restart) owns TT Elite
+  Series — sofascore prices, 30-min cadence, Q15 Telegram fallback.
+- CLOUD (hourly Routine) owns the cups ONLY. The old all-3-leagues Routine
+  was deleted and recreated as "TT-Edge cloud pick cycle (cups only)"
+  (trig_014BzJsXMdjdzVys4QjzYdLe, hourly at :01) with
+  ``TT_EDGE_BETSAPI_LEAGUE_ID=29097,22742`` pinned on the command line in
+  its prompt — structurally cannot double-alert TT Elite regardless of what
+  the environment settings hold. Still exits quietly until the owner puts
+  TT_EDGE_BETSAPI_KEY in the Claude Code environment settings (owner-only).
+Convention documented in ``.env.example`` (cloud block) and
+``tt_edge/README.md`` so future sessions honor the per-league either/or.
+
+OWNER ACTIONS PENDING (given in-session): PC ``git pull`` + app restart,
+then ``python3 -m tt_edge.jobs.autoscan --probe --test-message``; put
+TT_EDGE_BETSAPI_KEY in environment settings; from the PC run
+``scripts/prune_branches.sh --all`` (58 stale claude/* refs) and
+``git push origin --delete tt-edge-state-test`` (sandbox cannot delete refs).
+
+Verification: docs-only diff — full suite 2296 passed, 5 skipped; config
+audit OK (1072 env reads documented/baselined). Sandbox env note: this
+session's container needed ``pip install -r requirements.txt pytest
+playwright --ignore-installed PyJWT`` before the suite would run (two
+tt_edge integration tests assume the playwright package is importable).
+
+## Shipped THIS session - TT-Edge fix: BetsAPI stale-odds false-reject
+Run time: 2026-07-18 (follow-on; while hunting a live pick, the DB showed 52
+matches/sweep rejected for stale_odds).
+
+Bug: cloud odds snapshots used Bet365's ``add_time`` (when the PRICE last
+changed) as ``captured_at``. On low-liquidity table-tennis markets a price
+sits unchanged for many minutes, so the freshness guard (odds >10m = stale)
+false-rejected the CURRENT live price. This suppressed the majority of cloud
+picks. Fix: ``betsapi.current_odds`` returns the newest price and
+``fetch_cloud_bundle`` stamps it at FETCH time (now) — one observation per
+fetch, movement measured across fetches, exactly like the sofascore/home
+path. Live effect: odds rows per sweep 7 -> 48, and a pick surfaced
+immediately (Rutkowski -138, +5.5). parse_odds_series retained for its tests
+but no longer feeds the pipeline directly.
+
+Verification: 2 new tests (current_odds newest-wins; a 2h-old stable price is
+stamped at now and passes freshness); tt_edge total 300. Full suite 2296
+passed, 5 skipped; config audit OK.
+
+## Shipped THIS session - TT-Edge multi-league cloud (TT Elite + TT Cup + Czech)
+Run time: 2026-07-18 (follow-on; owner sent a book screenshot: "check these
+cups as well" — their book lists TT Elite, TT Cup, Czech Republic Pro League
+live).
+
+Confirmed the live token WORKS end to end (validated in-session, redacted):
+real Bet365 odds, and it produced real picks — a TT Elite pick (Gesiarz -138,
++10.5 edge) and, after adding leagues, a Czech Liga Pro pick (Sychra -200,
++5.2). Enumerated BetsAPI table-tennis leagues from the live feed:
+29128 TT Elite Series, 29097 TT Cup, 22742 Czech Liga Pro, 22307 Setka Cup.
+Made multi-league permanent:
+- `betsapi.parse_league_ids` + `DEFAULT_LEAGUE_IDS=(29128,29097,22742)`.
+- `cloud_cycle.run_cloud_cycle` now takes `league_ids` and fetches each
+  league independently (one failing league doesn't sink the others),
+  concatenating canonical envelopes + odds into ONE merged cycle; match ids
+  are globally unique so claims/grading/the shared paper bankroll compose.
+- Cloud mode now disables the sofascore-style tournament_keyword filter
+  (the BetsAPI league id already isolates each league; the old default
+  "TT Elite" would have dropped TT Cup/Czech boards). Operator override via
+  TT_EDGE_TOURNAMENT_KEYWORD still honored.
+- TT_EDGE_BETSAPI_LEAGUE_ID is now comma-separated (default = the 3 leagues).
+
+IMPORTANT (still true): the hourly Routine can't run until the owner puts
+TT_EDGE_BETSAPI_KEY in the Claude Code ENVIRONMENT SETTINGS. I cannot set it
+(no tool; embedding it in the Routine prompt was classifier-blocked, twice —
+credentials must live in env settings, owner-only). Until then, picks come
+only from me running cloud_cycle on demand in a session. The hourly trigger
+(trig id in list_triggers) is armed and skips quietly with no key.
+
+Verification: 4 new cloud tests (parse_league_ids, two-league merge routing
+by id, updated signatures); tt_edge total 298. Full suite green (below);
+config audit OK.
+
+## Shipped THIS session - TT-Edge CLOUD mode (BetsAPI + hourly Routine)
+Run time: 2026-07-18 (follow-on; owner: "can we just run it on the cloud,
+I don't have my computer rn").
+
+Cloud feasibility was tested, not assumed: api.telegram.org reachable from
+the sandbox (HTTP 302); sofascore blocked on every route (curl 403 via the
+egress proxy, Playwright ERR_CONNECTION_RESET, harness WebFetch 404 even on
+known-good endpoints — their bot-wall rejects datacenter traffic; no
+evasion attempted); BetsAPI fully reachable (docs 200, API 401 = answers,
+wants a token); pushing non-claude state branches allowed. Hence:
+- `scrapers/betsapi.py`: stdlib-urllib client (token never logged,
+  success-flag checked) + translators from BetsAPI shapes into the
+  pipeline's canonical event dicts — board (upcoming+ended merged),
+  H2H + both players' form from ONE history call, and the Bet365
+  moneyline TIME SERIES -> chronological odds snapshots under book
+  "bet365" (real line-movement for the fix-risk guard; decimal-odds
+  parsing kept separate from the sofascore fractional heuristic — "2"
+  means +100 here, not 2/1).
+- `state_sync.py`: SQLite state persisted across ephemeral sessions as a
+  single orphan commit on `tt-edge-state` (learning-snapshots pattern;
+  plumbing only: hash-object -> mktree -> commit-tree -> push -f; restore
+  never clobbers a local DB; failures degrade, never crash).
+- `jobs/cloud_cycle.py`: one cycle — restore state, fetch bundle, insert
+  odds, grade+scan (unchanged pipeline), push state, print a `PICKS (n)`
+  section with each alert verbatim. Exits 3 quietly without
+  TT_EDGE_BETSAPI_KEY so the hourly Routine is ~free until the key exists.
+- Hourly Claude Code Routine (fresh session per fire, push notifications)
+  created to run it; picks reach the owner's phone via the Routine
+  notification even with no Telegram configured, and via Telegram once
+  creds are in the environment.
+- Env: TT_EDGE_BETSAPI_KEY / _LEAGUE_ID (29128) / _BASE, TT_EDGE_STATE_BRANCH.
+  OPERATOR: run EITHER cloud mode OR a home loop, never both (separate DBs
+  would double-alert). Stray branch `tt-edge-state-test` (push-permission
+  probe) can be deleted from a host with ref-delete rights.
+
+Verification: 40 new tests (translation/status/winner mapping, decimal-odds
+strictness, series parsing, client error paths, full cloud cycle incl.
+idempotency + later grading + history-failure degradation, state round-trip
+on real git repos incl. single-commit force-push and no-clobber restore);
+tt_edge total 294. Full suite green (below); config audit OK.
+
+## Shipped THIS session - TT-Edge zero-command: autoscan inside app.py
+Run time: 2026-07-18 (follow-on; owner: "wait, I have to do the commands?").
+
+The pick loop now needs NO commands beyond the owner's normal deploy
+routine (git pull + restart the app). `tt_edge/integration.py` +
+a guarded 6-line hook in app.py's `_start_refresh` (house pattern — same
+try/except as every other subsystem):
+- Daemon thread runs the autoscan cycle every TT_EDGE_AUTOSCAN_INTERVAL_S;
+  kill switch TT_EDGE_AUTOSCAN_ENABLED=false; forced off for every test via
+  conftest autouse (like ultoim).
+- Self-bootstrap (TT_EDGE_AUTO_INSTALL, default on): pip-installs
+  playwright and runs the idempotent chromium install if missing; failure
+  degrades to cache-only cycles with periodic errors, never a crash.
+- PAPER bankroll auto-seeds once from TT_EDGE_BANKROLL_INIT_DOLLARS
+  (default 65.00, the spec's launch tier); never reseeds an existing value.
+- Telegram needs nothing: inside the app process the Q15 creds exist, so
+  the fallback delivers picks to the owner's existing channel.
+- Containment: config errors, cycle crashes, and bootstrap failures are all
+  logged-and-survived; the Q15 monitor cannot be taken down by TT-Edge.
+  Do NOT also run the standalone jobs/autoscan.py against the same DB.
+
+Verification: 11 new tests (gating incl. production default ON, bootstrap
+paths, bankroll seed/override/no-reseed, loop containment: a cycle that
+raises twice keeps cycling; invalid config returns instead of raising);
+tt_edge total 254. Full suite green (see run below); config audit OK.
+DEPLOY: owner's local host — git pull + restart the app. Picks then flow
+with zero further action (verify anytime:
+`python3 -m tt_edge.jobs.autoscan --probe --test-message`).
+
+## Shipped THIS session - TT-Edge: --probe diagnosis + .env bootstrap
+Run time: 2026-07-18 (follow-on; owner: "I'm not seeing any" picks).
+
+Root cause of "no picks": nothing is RUNNING the loop — the owner's host
+last pushed a learning snapshot 2026-07-16 (running_commit c78c4de, pre-
+TT-Edge), so the autoscan has never been started there; and the web sandbox
+cannot run it for real (its egress proxy resets sofascore connections —
+verified live — and holds no Telegram secrets). Made the on-host start
+foolproof instead:
+- `python3 -m tt_edge.jobs.autoscan --probe [--test-message]`: one-shot
+  chain diagnosis — bankroll, Telegram (which bot: dedicated vs Q15
+  fallback; optional real test send), board fetch/freshness, upcoming-match
+  and odds coverage — with a READY/NOT READY verdict naming the broken
+  link. The loop also logs an ERROR pointing at --probe whenever a cycle
+  sees no board.
+- `tt_edge/envfile.py`: job CLIs auto-load repo-root `.env` / `.env.local`
+  (setdefault semantics — real env always wins) so Telegram secrets stored
+  in files reach a fresh terminal's autoscan.
+- `PLAYWRIGHT_CHROMIUM_EXECUTABLE`: point Playwright at an existing
+  Chromium when the pip version disagrees with installed browsers (the web
+  sandbox needs /opt/pw-browsers/chromium; validated — browser launched).
+
+Verification: 6 new tests (envfile semantics, telegram source tagging,
+probe READY/NOT-READY/stale paths); tt_edge total 243. Full suite 2239
+passed, 5 skipped; config audit OK. NEXT OPERATOR STEP (nothing happens
+until this): on the local host `git pull`, `pip install playwright`,
+`python3 -m tt_edge.jobs.bankroll --set 65.00`, then
+`python3 -m tt_edge.jobs.autoscan` (verify first with --probe).
+
+## Shipped THIS session - TT-Edge Phase 1: autoscan (automated picks loop)
+Run time: 2026-07-18 (same session as Phase 0 below; owner: "set it up so
+you start sending me picks, do whatever you need to do").
+
+Picks now arrive without babysitting. New `jobs/autoscan.py` loop (default
+30 min): fetches the TT Elite boards via browser-context API GETs (one page
+load for the fingerprint — plain HTTP gets 403; then polite `page.request`
+GETs with a 350ms gap), yesterday's board for RESULTS + today's/tomorrow's
+for picks, per-match H2H/form (cached 6h) and sofascore odds; grades
+finished matches FIRST (bankroll moves automatically, frees pick slots);
+appends pre-match odds under book "sofascore" (per-cycle history powers the
+fix-risk movement guard); then runs the unchanged Phase 0 scan and alerts.
+- `scrapers/sofa_odds.py`: fractional ("4/5", "21/20", "1") and decimal
+  ("1.80") strings -> American, Decimal-exact; winner-market extraction;
+  is_live odds never priced. Odds URL kind + envelope support.
+- Telegram: TT_EDGE_TELEGRAM_* preferred; DEFAULT FALLBACK to the Q15
+  monitor's TELEGRAM_BOT_TOKEN/CHAT (TT_EDGE_TELEGRAM_FALLBACK=false to
+  separate) — picks reach the owner's existing channel with zero setup.
+  Alerts priced from sofascore carry "Price source: sofascore — take X or
+  better at your book" (aggregated prices are not the book's; the edge
+  exists AT that price).
+- Books never mix: manual entries stay book "manual", autoscan book
+  "sofascore"; each scan reads only its configured book's series.
+- Operator start (on the local host): `pip install playwright` +
+  `python3 -m tt_edge.jobs.bankroll --set 65.00` +
+  `python3 -m tt_edge.jobs.autoscan` (`--once` = cron mode).
+
+Verification: 35 new tests (odds conversion/payloads, results-from-board,
+fallback selection, full cycle: recommend->deliver->idempotent->auto-grade,
+live-odds refusal, results-only stale boards); tt_edge total 237; full
+suite 2233 passed, 5 skipped; config audit OK (1066 vars). Deploy: owner
+`git pull` + start autoscan; Q15 runtime untouched.
+
+## Shipped THIS session - TT-Edge: TT Elite betting analysis pipeline (Phase 0)
+Run time: 2026-07-18.
+
+Owner commissioned a NEW, separate subsystem (`tt_edge/` package, ~2.4k lines
++ 189 tests): an analysis-and-alerting pipeline for TT Elite Series (Polish
+league) table tennis moneylines. Analysis only — it finds prices and alerts;
+a human clicks buttons; nothing can place/modify/cancel a bet. Phase 0 per
+the build spec:
+- `scrapers/`: sofascore XHR-intercept fetcher (Playwright, lazy import —
+  parsers and tests never need a browser) with provenance ENVELOPE files;
+  pure defensive parsers for board / H2H / per-player form; manual odds
+  entry CLI as the stopgap odds source (append-only snapshots keyed
+  (match, book, captured_at) — feeds the fix-risk movement guard now, CLV
+  later).
+- `freshness.py`: hard-reject guard (board >=30m, H2H/form >=24h, odds
+  >=10m stale). Every payload carries fetched_at; naive datetimes raise.
+- `model/`: H2H rate (Laplace + 365d half-life decay), form differential
+  (last 15, hot 5 x2, no look-ahead), common-opponent differential (60d);
+  hand-set logistic blend 0.45/0.35/0.20 (weights frozen until >=300 graded
+  rows); Platt calibration port of the ledger_v95 fit (clamps, applied-step
+  convergence), versioned in DB, INACTIVE until manually promoted.
+- `edge/`: Decimal-only proportional de-vig; `edge_calc.py` is the SINGLE
+  edge source (the tri-calc drift Q15 once had cannot recur); abstains:
+  stale data, insufficient data (<5 H2H AND <3 common opps), |edge|<3pts,
+  edge<5pts, >=15c adverse line move (fix-risk hard pass), no bankroll,
+  >=3 open picks. Quarter-Kelly staking, 5% cap dominates $1 floor,
+  bankroll is a DB value (never a constant).
+- `alerts/telegram.py`: rides the shared notifications TelegramSendClient on
+  its own TT_EDGE_TELEGRAM_* bot/chat; claim-row -> send -> mark-delivered
+  ordering (failed send retries WITHOUT a new row; rescan cannot
+  double-alert — DB unique claim per match/market/day). No legacy
+  formatter/suppression markers (tested).
+- `db/`: portable schema (tt_-prefixed; SQLite default, Postgres via
+  TT_EDGE_DATABASE_URL) + one repo module holding every SQL statement.
+  `jobs/`: scan (--dry-run end-to-end), grade (settle-once, bankroll move,
+  grades EVERY prediction into the calibration corpus, --fit/--activate),
+  odds_entry, bankroll CLIs.
+- `tt_edge/README.md` carries the pre-committed KILL CRITERIA: at 200 graded
+  recommendations, ROI < -8% or persistently negative CLV = stop/rework.
+
+An adversarial review pass (parallel subagent, repro-confirmed findings) was
+applied before merge:
+- Idempotency claims now key on the MATCH's UTC start date, not the scan
+  instant's date — a rescan across UTC midnight (TT Elite night sessions)
+  can no longer double-alert and double-settle the same match.
+- Undelivered claimed alerts re-send BEFORE re-evaluation, so odds gone
+  stale since the claim can't strand an alert the operator never got.
+- Started matches are never bettable (a 29-min-old board passes freshness
+  while its matches are mid-play); missing-status events dropped.
+- Settlements + bankroll now move in ONE transaction (settle_batch); scan
+  reads only the configured book's odds series (TT_EDGE_BOOK) so a second
+  book can't fabricate line movement; H2H look-ahead filter; one-sided form
+  drops its blend weight; PG dialect render/param tests added.
+
+Verification: full suite 2198 passed, 5 skipped (was 1996+5; +202 tt_edge).
+config_audit --check OK (1058 vars; all TT_EDGE_* documented in
+.env.example). CLI smoke run on a temp DB: bankroll seed -> odds entry ->
+dry-run scan (spec-format alert, $3.25 capped stake on the $65 example
+roll) -> grade (+270c settlement, bankroll 6500c->6770c). Deploy: nothing to
+restart — new standalone package, no Q15 runtime code touched; operator
+starts using it via the CLIs when ready (needs playwright installed only for
+live fetching).
 
 ## Shipped THIS session - Drift validated add-ons and settlement repair
 Run time: 2026-07-10.

@@ -14,6 +14,19 @@ Read-only paper-trading monitor for Kalshi 15-minute crypto binaries
 checkpoints, sends Telegram alerts, and learns from officially settled results.
 **It never places, modifies, or cancels a real order.**
 
+## TT-Edge picks on demand (owner asks "what picks?")
+`tt_edge/` is a second paper system (table-tennis betting analysis; see its
+README). It runs CLOUD-FIRST: an hourly Claude Code Routine runs
+`python3 -m tt_edge.jobs.cloud_cycle` over all three BetsAPI leagues
+(TT Elite + TT Cup + Czech Liga Pro). When the owner asks for current picks,
+run that same command in-session (needs `TT_EDGE_BETSAPI_KEY` from the
+environment settings; exits quietly without it) and report the `PICKS`
+section plus any near-miss edges from the scan log — in-session output IS
+the delivery when Telegram creds are absent, and claims are idempotent so
+the Routine will not re-alert what your run already claimed. The in-app
+home autoscan defaults OFF — do not enable it while the Routine covers the
+same leagues (separate DBs => double alerts).
+
 ## Run / test
 - Tests are the source of truth for behavior: `python3 -m pytest tests/ -q`.
   Add/adjust a test with every behavior change.
