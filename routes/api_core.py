@@ -16,6 +16,46 @@ _health_cache_at = None
 _health_cache_lock = threading.RLock()
 
 
+def _github_relay_status() -> dict:
+    """Read the relay's durable status file so a broken deploy path is VISIBLE.
+
+    The relay reported a failed push only by printing to its own stdout log, so
+    an expired GH_PUSH_TOKEN looked identical to healthy operation from here —
+    commits silently stopped reaching GitHub. ``ok`` is False once a push has
+    failed consecutively, which is the signal worth alerting on. Missing file =
+    the relay has not run (or is an older build), reported as ``unknown`` rather
+    than a failure. Never raises: health must not break on a bad status file.
+    """
+    import json
+    import os
+    import time
+
+    path = os.environ.get("GITHUB_RELAY_STATUS_PATH") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "work", "local-run", "relay_status.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {"ok": None, "state": "unknown", "detail": "no relay status file"}
+    if not isinstance(raw, dict):
+        return {"ok": None, "state": "unknown", "detail": "malformed relay status"}
+    fails = raw.get("consecutive_push_failures") or 0
+    updated = raw.get("updated_at")
+    return {
+        "ok": fails == 0,
+        "state": "failing" if fails else "ok",
+        "consecutive_push_failures": fails,
+        "last_push_ok_at": raw.get("last_push_ok_at"),
+        "last_push_error": raw.get("last_push_error"),
+        "last_push_error_at": raw.get("last_push_error_at"),
+        "status_age_seconds": (round(time.time() - float(updated), 1)
+                               if isinstance(updated, (int, float)) else None),
+        "local": raw.get("local"),
+        "remote": raw.get("remote"),
+    }
+
+
 def _exact_capture_guard_state(now: float) -> dict:
     """Protect the 60-second independent-path history from health contention."""
     epoch = int(float(now))
@@ -479,6 +519,7 @@ def register(flask_app, host):
             "cycle_watchdog": _app.cycle_watchdog.health(),
             "feed_watchdog": _app.cycle_watchdog.feed_health(),
             "heartbeat_watchdog": _app.cycle_watchdog.heartbeat_status(now=now),
+            "github_relay": _github_relay_status(),
             "startup_config_manifest": _app.startup_config_manifest.health(),
             "current_market_window": current_window,
             "assets_subscribed": [s.get("asset") for s in live],

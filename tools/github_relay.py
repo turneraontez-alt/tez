@@ -61,6 +61,45 @@ def _log(msg: str) -> None:
     print(f"[relay] {msg}", flush=True)
 
 
+# Durable status surface. The relay used to report a failed push ONLY by printing
+# to its own stdout log, so an expired GH_PUSH_TOKEN looked exactly like healthy
+# operation from anywhere else — the deploy path stopped working and nothing
+# said so. Write the outcome of every cycle where /api/health can read it, and
+# count consecutive failures so "briefly flaky" is distinguishable from "broken
+# since Tuesday". Best-effort: status writing never affects relay behaviour.
+STATUS_PATH = os.environ.get("GITHUB_RELAY_STATUS_PATH") or os.path.join(
+    WORKDIR, "work", "local-run", "relay_status.json")
+
+_status = {
+    "last_push_ok_at": None,
+    "last_push_error": None,
+    "last_push_error_at": None,
+    "consecutive_push_failures": 0,
+    "local": None,
+    "remote": None,
+    "updated_at": None,
+}
+
+
+def _write_status(**fields) -> None:
+    """Merge ``fields`` into the durable status file (never raises)."""
+    import json
+
+    _status.update(fields)
+    _status["updated_at"] = time.time()
+    try:
+        os.makedirs(os.path.dirname(STATUS_PATH), exist_ok=True)
+        tmp = STATUS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(_status, fh)
+        os.replace(tmp, STATUS_PATH)   # atomic; a reader never sees a partial file
+    except (OSError, ValueError, TypeError):
+        # Deliberate best-effort boundary: observability must never be able to
+        # disturb the relay loop. ValueError/TypeError cover an unusable path
+        # (e.g. an embedded null) which os.makedirs raises rather than OSError.
+        pass
+
+
 def _git(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=WORKDIR, capture_output=True, text=True)
 
@@ -181,11 +220,25 @@ def main() -> int:
                 pok, pout = _push(token)
                 if pok:
                     _log(f"pushed {local[:8]}")
+                    _write_status(last_push_ok_at=time.time(), last_push_error=None,
+                                  consecutive_push_failures=0, local=local, remote=remote)
                 elif "non-fast-forward" in pout.lower() or "fetch first" in pout.lower():
                     # Remote moved between fetch and push; next cycle reconciles.
                     pass
                 else:
                     _log(f"push failed for {local[:8]}: {pout}")
+                    fails = _status.get("consecutive_push_failures") or 0
+                    _write_status(last_push_error=_mask(pout, token)[:400],
+                                  last_push_error_at=time.time(),
+                                  consecutive_push_failures=fails + 1,
+                                  local=local, remote=remote)
+            else:
+                # Nothing to push: local and remote agree, which is the healthy
+                # steady state. Clear any stale failure so a recovered relay does
+                # not keep reporting an old error forever.
+                if _status.get("consecutive_push_failures"):
+                    _write_status(consecutive_push_failures=0, last_push_error=None,
+                                  local=local, remote=remote)
         except Exception as exc:  # never let the relay die on a transient error
             _log(f"unexpected error: {_mask(str(exc), token)}")
         time.sleep(INTERVAL)
