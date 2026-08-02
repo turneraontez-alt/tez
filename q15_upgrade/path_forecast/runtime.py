@@ -87,6 +87,8 @@ class PathForecastRunner:
         self._rejected = 0
         self._dropped = 0
         self._reconciled = 0
+        self._clock_mismatch_observations = 0
+        self._max_clock_mismatch_seconds = 0.0
         if self.enabled:
             self._initialize()
 
@@ -140,7 +142,15 @@ class PathForecastRunner:
             return False
         asset_name = str(asset or "").upper()
         ts = time.time() if now is None else float(now)
+        reported_remaining = remaining
         close = canonical_close_time(close)
+        remaining = close - ts
+        clock_mismatch = abs(reported_remaining - remaining)
+        if clock_mismatch > 0.001:
+            self._clock_mismatch_observations += 1
+            self._max_clock_mismatch_seconds = max(
+                self._max_clock_mismatch_seconds, clock_mismatch,
+            )
         key = (asset_name, close)
         bid = _finite(yes_bid)
         ask = _finite(yes_ask)
@@ -181,7 +191,8 @@ class PathForecastRunner:
                     "close_time": close,
                     "checkpoint_seconds": checkpoint,
                     "decision_time": close - checkpoint,
-                    "captured_offset_seconds": diagnostics["decision_age_seconds"],
+                    "captured_offset_seconds": lag,
+                    "feature_age_seconds": diagnostics["decision_age_seconds"],
                     "target_px": target,
                     "current_px": current_px,
                     "current_yes_mid": current_yes_mid,
@@ -222,6 +233,7 @@ class PathForecastRunner:
             current_yes_mid=_finite(job.get("current_yes_mid")),
             prediction=prediction,
             feature_vector=feature_json,
+            feature_age_seconds=_finite(job.get("feature_age_seconds")),
         )
         if inserted:
             self._recorded += 1
@@ -377,6 +389,10 @@ class PathForecastRunner:
             "duplicates_this_process": self._duplicates,
             "rejected_checkpoints": self._rejected,
             "dropped_jobs": self._dropped,
+            "clock_mismatch_observations": self._clock_mismatch_observations,
+            "max_clock_mismatch_seconds": round(
+                self._max_clock_mismatch_seconds, 6,
+            ),
             "last_prediction_age_seconds": (
                 None if self._last_prediction_at is None else round(max(0.0, now - self._last_prediction_at), 3)
             ),

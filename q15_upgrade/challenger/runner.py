@@ -65,6 +65,22 @@ class ShadowRunner:
         self._last_report_window: int | None = None
         self._pending_report: str | None = None
         self._lock = threading.Lock()
+        # Reversal watch: paper delivery of the preregistered cheap-YES pocket.
+        # Default-OFF; a build failure must never take down the shadow recorder.
+        self._reversal = None
+        self._pending_reversal: list[str] = []
+        if self.config.reversal_watch_enabled:
+            try:
+                from .reversal_watch import ReversalWatch
+                self._reversal = ReversalWatch(
+                    self.config.db_path, model_version=self.config.model_version,
+                    max_ask_cents=self.config.reversal_watch_max_ask_cents,
+                    assets=[a.strip() for a in self.config.reversal_watch_assets.split(",") if a.strip()],
+                    checkpoints=[c.strip() for c in self.config.reversal_watch_checkpoints.split(",") if c.strip()],
+                )
+            except Exception:
+                logger.exception("reversal watch init failed (disabled)")
+                self._reversal = None
 
     # ---- training ----
     def _train(self):
@@ -117,6 +133,15 @@ class ShadowRunner:
                 lineage=lineage_record(self.config, calibrator_version=calib),
                 snapshot_id=snapshot_id,
             )
+            # Reversal watch (paper, idempotent): if this fresh prediction sits
+            # inside the preregistered cheap-YES pocket, queue its one-time alert.
+            if self._reversal is not None:
+                msg = self._reversal.consider(
+                    pred, ticker=ticker, asset=asset, checkpoint=checkpoint,
+                    close_time=close_time, created_at=created_at)
+                if msg:
+                    with self._lock:
+                        self._pending_reversal.append(msg)
         except Exception:
             logger.exception("challenger shadow observe failed (ignored)")
 
@@ -199,6 +224,12 @@ class ShadowRunner:
         with self._lock:
             r, self._pending_report = self._pending_report, None
             return r
+
+    def drain_reversal_alerts(self) -> list[str]:
+        """Pop any queued reversal-watch paper alerts (empty when disabled)."""
+        with self._lock:
+            out, self._pending_reversal = self._pending_reversal, []
+            return out
 
     def comparison(self) -> dict:
         return self.ledger.comparison(model_version=self.config.model_version,

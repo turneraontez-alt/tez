@@ -365,6 +365,11 @@ CREATE INDEX IF NOT EXISTS idx_strategy_bot_resolve
     ON strategy_bot_decisions(source_system, source_model_version, ticker, official_result);
 CREATE INDEX IF NOT EXISTS idx_strategy_bot_score
     ON strategy_bot_decisions(strategy_version, bot_name, decision_status, asset, side);
+CREATE INDEX IF NOT EXISTS idx_strategy_bot_drift_retry
+    ON strategy_bot_decisions(
+        notification_status, paper_only, bot_name, notified_at, created_at, id
+    )
+    WHERE notification_status='QUEUED_RETRY' AND paper_only=1;
 
 CREATE TABLE IF NOT EXISTS strategy_bot_meta (
     meta_key TEXT PRIMARY KEY,

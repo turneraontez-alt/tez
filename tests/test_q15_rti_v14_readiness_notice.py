@@ -67,11 +67,11 @@ def test_v14_notice_projection_cannot_include_outcomes():
 def test_v14_snapshot_builder_uses_only_feature_loader(monkeypatch, tmp_path):
     loaded = []
 
-    def fake_load(path: Path):
-        loaded.append(path)
+    def fake_load(path: Path, after_close_time: float):
+        loaded.append((path, after_close_time))
         return []
 
-    monkeypatch.setattr(notice, "load_feature_rows", fake_load)
+    monkeypatch.setattr(notice, "load_feature_rows_after", fake_load)
     monkeypatch.setattr(
         notice, "build_report", lambda rows, source_schema: {"sentinel": True}
     )
@@ -106,7 +106,7 @@ def test_v14_snapshot_builder_uses_only_feature_loader(monkeypatch, tmp_path):
     )
     db = tmp_path / "features.sqlite3"
     snapshot = notice.build_outcome_blind_snapshot(database_path=db)
-    assert loaded == [db]
+    assert loaded == [(db, notice.v14.PROSPECTIVE_AFTER_CLOSE_TIME)]
     assert notice.ready_milestones(snapshot) == ["GEOMETRY_30", "NON_BTC_60"]
     assert snapshot["outcome_labels_read"] is False
     assert snapshot["model_fit_performed"] is False

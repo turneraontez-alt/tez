@@ -165,6 +165,10 @@ def test_kalshi_event_microstructure_tracks_pressure_and_microprice(monkeypatch)
     assert metrics["yes_bid_cents"] == 66.0
     assert metrics["yes_ask_cents"] == 68.0
     assert metrics["yes_microprice_edge_cents"] == pytest.approx(-1 / 3)
+    assert metrics["yes_fill_10x2c"]["full_fill_supported"] is True
+    assert metrics["yes_fill_10x2c"]["vwap_cents"] == 68.0
+    assert metrics["no_fill_10x2c"]["full_fill_supported"] is True
+    assert metrics["no_fill_10x2c"]["vwap_cents"] == 34.0
     assert metrics["book_delta_pressure_yes_5s"] == pytest.approx(1.0)
     assert metrics["trade_imbalance_yes_15s"] == pytest.approx(1.0)
     assert metrics["event_count_5s"] == 1
@@ -359,6 +363,36 @@ def test_kalshi_microstructure_history_fails_closed_until_rewarmed(monkeypatch):
     )
     assert rewarmed["book_window_complete_60s"] is True
     assert rewarmed["trade_window_complete_60s"] is True
+
+
+def test_quiet_stale_book_keeps_flow_history_but_not_execution_quote(monkeypatch):
+    """Book mutation age must not erase continuously observed zero-flow history."""
+    monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_ACCESS_KEY", raising=False)
+    feed = KalshiWebSocketFeed()
+    ticker = "KXBTC-QUIET-HISTORY"
+    now = 1_900_000_500.0
+    feed._handle_book_snapshot({
+        "market_ticker": ticker,
+        "yes_dollars": [["0.5500", "10"]],
+        "no_dollars": [["0.4400", "10"]],
+    }, now - 70.0)
+    with feed._lock:
+        feed._connected = True
+        feed._last_message_at = now - 0.1
+
+    metrics = feed.get_microstructure(ticker, now=now, max_book_age=2.0)
+
+    assert metrics["available"] is False
+    assert metrics["reason"] == "book_stale"
+    assert metrics["microstructure_evidence_source"] == (
+        "kalshi_official_websocket_history"
+    )
+    assert metrics["microstructure_transport_connected"] is True
+    assert metrics["microstructure_transport_age_seconds"] == pytest.approx(0.1)
+    assert metrics["microstructure_window_complete_60s"] is True
+    assert metrics["book_delta_pressure_yes_60s"] == pytest.approx(0.0)
+    assert metrics["trade_imbalance_yes_60s"] == pytest.approx(0.0)
 
 
 def test_feature_engine_builds_ready_joint_alignment(tmp_path):

@@ -30,7 +30,7 @@ def capture_protection_delay_seconds(now: float) -> float:
 
 def _enabled() -> bool:
     return os.environ.get(
-        "Q15_V13_READINESS_MONITOR", "true"
+        "Q15_V13_READINESS_MONITOR", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -43,6 +43,11 @@ def _interval_seconds() -> float:
 
 
 class V13ReadinessMonitor:
+    # V13/V14 milestones are one-shot administrative notices.  Once every
+    # idempotent delivery is complete there is no reason to keep rescanning the
+    # wide strategy ledger.  The independent-path subclass overrides this
+    # because it also watches ongoing source degradation.
+    STOP_AFTER_ALL_MILESTONES = True
     NOTICE_MODULE = "tools.q15_rti_v13_readiness_notice"
     LOG_LABEL = "V13"
     THREAD_NAME = "q15-v13-paper-readiness"
@@ -135,7 +140,12 @@ class V13ReadinessMonitor:
                     break
                 continue
             try:
-                self.check_once()
+                result = self.check_once()
+                if (
+                    self.STOP_AFTER_ALL_MILESTONES
+                    and result.get("all_milestones_completed") is True
+                ):
+                    return
             except Exception as exc:
                 with self._lock:
                     self._checks += 1

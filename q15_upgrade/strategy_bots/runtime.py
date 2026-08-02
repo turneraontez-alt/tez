@@ -203,6 +203,16 @@ _telegram: V3Telegram | None = None
 _drift_outbox: Any | None = None
 _drift_outbox_identity: tuple[int, str] | None = None
 _drift_reconcile_lock = threading.Lock()
+_drift_reconcile_worker_lock = threading.Lock()
+_drift_reconcile_worker: threading.Thread | None = None
+_drift_reconcile_worker_state: dict[str, Any] = {
+    "inflight": False,
+    "submitted_at": None,
+    "finished_at": None,
+    "last_duration_seconds": None,
+    "last_summary": None,
+    "last_error": None,
+}
 _thirteen_m_stats_warning_logged = False
 _thirteen_m_flow_warning_logged = False
 
@@ -1502,6 +1512,84 @@ def reconcile_drift_delivery_statuses(limit: int = 100) -> dict[str, int]:
         return summary
     finally:
         _drift_reconcile_lock.release()
+
+
+def request_drift_delivery_reconcile(limit: int = 100) -> dict[str, Any]:
+    """Start one bounded local reconcile without blocking the capture loop.
+
+    SQLite/OneDrive contention can make even a bounded reconciliation take
+    minutes.  The exact RTI scheduler must never wait for that maintenance.
+    At most one daemon worker is active; later refresh cycles only observe it.
+    """
+    global _drift_reconcile_worker
+    bounded_limit = max(1, min(int(limit), 1000))
+    submitted_at = time.time()
+    with _drift_reconcile_worker_lock:
+        current = _drift_reconcile_worker
+        if current is not None and current.is_alive():
+            return {
+                "submitted": False,
+                "inflight": True,
+                "submitted_at": _drift_reconcile_worker_state[
+                    "submitted_at"
+                ],
+            }
+
+        def _run() -> None:
+            started = time.time()
+            summary = None
+            error = None
+            try:
+                summary = reconcile_drift_delivery_statuses(bounded_limit)
+            except Exception as exc:  # defensive: public callable is fail-safe
+                error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "background Drift delivery reconciliation failed",
+                    exc_info=True,
+                )
+            finished = time.time()
+            with _drift_reconcile_worker_lock:
+                _drift_reconcile_worker_state.update({
+                    "inflight": False,
+                    "finished_at": finished,
+                    "last_duration_seconds": max(0.0, finished - started),
+                    "last_summary": summary,
+                    "last_error": error,
+                })
+
+        _drift_reconcile_worker_state.update({
+            "inflight": True,
+            "submitted_at": submitted_at,
+            "finished_at": None,
+            "last_duration_seconds": None,
+            "last_error": None,
+        })
+        worker = threading.Thread(
+            target=_run,
+            name="q15-drift-delivery-reconcile",
+            daemon=True,
+        )
+        _drift_reconcile_worker = worker
+        worker.start()
+        return {
+            "submitted": True,
+            "inflight": True,
+            "submitted_at": submitted_at,
+        }
+
+
+def drift_delivery_reconcile_worker_health() -> dict[str, Any]:
+    with _drift_reconcile_worker_lock:
+        output = dict(_drift_reconcile_worker_state)
+        current = _drift_reconcile_worker
+        output["inflight"] = bool(current is not None and current.is_alive())
+    submitted = output.get("submitted_at")
+    output["inflight_seconds"] = (
+        max(0.0, time.time() - float(submitted))
+        if output["inflight"] and submitted is not None else 0.0
+    )
+    output["live_refresh_loop_blocking_allowed"] = False
+    return output
 
 
 def _normalize_delivery_result(result: Any) -> dict[str, Any]:

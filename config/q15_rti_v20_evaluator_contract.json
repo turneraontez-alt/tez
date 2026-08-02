@@ -1,0 +1,187 @@
+{
+  "contract_id": "q15-rti-v20-frozen-model-selection-and-calibration-v1",
+  "contract_status": "FROZEN_BEFORE_ANY_V20_LABEL_ACCESS_OR_MODEL_FIT",
+  "protocol_id": "q15-rti-v20-delayed-reversal-hazard-prospective-v1",
+  "protocol_sha256": "cdd860d63be6c2165d7e91431d576d57645c3218701df616853ac969a9db9450",
+  "feature_builder_version": "q15-rti-v20-delayed-reversal-features-v1",
+  "feature_count": 52,
+  "feature_names_sha256": "fff635c3dddba73732dc4225622b33b763b55e881f14a4d031278adcf6bfe35d",
+  "runtime": {
+    "python_minimum": "3.11",
+    "scikit_learn_exact": "1.9.0",
+    "single_process": true,
+    "estimator_threads": 1,
+    "random_seed": 1520
+  },
+  "partitions": {
+    "train_complete_close_windows": 90,
+    "calibration_complete_close_windows": 30,
+    "untouched_test_complete_close_windows": 30,
+    "same_close_assets_never_cross_partitions": true,
+    "cohorts_evaluated_separately": ["NON_BTC_TRANSFER", "BTC"],
+    "cross_cohort_model_or_gate_pooling_forbidden": true
+  },
+  "preprocessing": {
+    "fit_on_each_training_fold_only": true,
+    "center": "COLUMN_MEDIAN",
+    "scale": "COLUMN_Q75_LINEAR_MINUS_Q25_LINEAR",
+    "zero_or_nonfinite_scale_replacement": 1.0,
+    "missing_or_nonfinite_feature": "FAIL_CLOSED",
+    "calibration_or_test_statistics_forbidden": true
+  },
+  "internal_walk_forward": {
+    "folds": [
+      {"train_window_indices_inclusive": [0, 29], "validation_window_indices_inclusive": [30, 44]},
+      {"train_window_indices_inclusive": [0, 44], "validation_window_indices_inclusive": [45, 59]},
+      {"train_window_indices_inclusive": [0, 59], "validation_window_indices_inclusive": [60, 74]},
+      {"train_window_indices_inclusive": [0, 74], "validation_window_indices_inclusive": [75, 89]}
+    ],
+    "probability_clip": [0.000001, 0.999999],
+    "selection_metric": "POOLED_VALIDATION_ROW_LOG_LOSS",
+    "first_tie_breaker": "POOLED_VALIDATION_ROW_BRIER_SCORE",
+    "second_tie_breaker": "FROZEN_COMPLEXITY_RANK_ASCENDING",
+    "third_tie_breaker": "MODEL_ID_LEXICOGRAPHIC_ASCENDING",
+    "selected_log_loss_must_be_strictly_below_pooled_market_log_loss": true,
+    "market_probability_feature": "delayed_market_side_probability"
+  },
+  "candidates": {
+    "NON_BTC_TRANSFER": [
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.03, "l1_ratio": 0.0, "complexity_rank": 1},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.03, "l1_ratio": 0.25, "complexity_rank": 2},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.03, "l1_ratio": 0.5, "complexity_rank": 3},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.1, "l1_ratio": 0.0, "complexity_rank": 4},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.1, "l1_ratio": 0.25, "complexity_rank": 5},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.1, "l1_ratio": 0.5, "complexity_rank": 6},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.3, "l1_ratio": 0.0, "complexity_rank": 7},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.3, "l1_ratio": 0.25, "complexity_rank": 8},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 0.3, "l1_ratio": 0.5, "complexity_rank": 9},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 1.0, "l1_ratio": 0.0, "complexity_rank": 10},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 1.0, "l1_ratio": 0.25, "complexity_rank": 11},
+      {"family": "ELASTIC_NET_LOGISTIC", "C": 1.0, "l1_ratio": 0.5, "complexity_rank": 12},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 7, "min_samples_leaf": 30, "l2_regularization": 5.0, "complexity_rank": 13},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 7, "min_samples_leaf": 30, "l2_regularization": 1.0, "complexity_rank": 14},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 7, "min_samples_leaf": 15, "l2_regularization": 5.0, "complexity_rank": 15},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 7, "min_samples_leaf": 15, "l2_regularization": 1.0, "complexity_rank": 16},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 7, "min_samples_leaf": 30, "l2_regularization": 5.0, "complexity_rank": 17},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 7, "min_samples_leaf": 30, "l2_regularization": 1.0, "complexity_rank": 18},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 7, "min_samples_leaf": 15, "l2_regularization": 5.0, "complexity_rank": 19},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 7, "min_samples_leaf": 15, "l2_regularization": 1.0, "complexity_rank": 20},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 15, "min_samples_leaf": 30, "l2_regularization": 5.0, "complexity_rank": 21},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 15, "min_samples_leaf": 30, "l2_regularization": 1.0, "complexity_rank": 22},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 15, "min_samples_leaf": 15, "l2_regularization": 5.0, "complexity_rank": 23},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.03, "max_leaf_nodes": 15, "min_samples_leaf": 15, "l2_regularization": 1.0, "complexity_rank": 24},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 15, "min_samples_leaf": 30, "l2_regularization": 5.0, "complexity_rank": 25},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 15, "min_samples_leaf": 30, "l2_regularization": 1.0, "complexity_rank": 26},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 15, "min_samples_leaf": 15, "l2_regularization": 5.0, "complexity_rank": 27},
+      {"family": "HIST_GRADIENT_BOOSTING", "learning_rate": 0.07, "max_leaf_nodes": 15, "min_samples_leaf": 15, "l2_regularization": 1.0, "complexity_rank": 28}
+    ],
+    "BTC": [
+      {"family": "RIDGE_LOGISTIC", "C": 0.01, "complexity_rank": 1},
+      {"family": "RIDGE_LOGISTIC", "C": 0.03, "complexity_rank": 2},
+      {"family": "RIDGE_LOGISTIC", "C": 0.1, "complexity_rank": 3},
+      {"family": "RIDGE_LOGISTIC", "C": 0.3, "complexity_rank": 4}
+    ]
+  },
+  "estimator_parameters": {
+    "ELASTIC_NET_LOGISTIC": {"solver": "saga", "penalty": "elasticnet", "class_weight": null, "max_iter": 5000, "tol": 0.0001, "random_state": 1520, "n_jobs": 1},
+    "RIDGE_LOGISTIC": {"solver": "lbfgs", "penalty": "l2", "class_weight": null, "max_iter": 5000, "tol": 0.0001, "random_state": 1520, "n_jobs": 1},
+    "HIST_GRADIENT_BOOSTING": {"max_iter": 200, "early_stopping": false, "random_state": 1520}
+  },
+  "post_selection": {
+    "base_model_refit_partition": "ALL_90_TRAIN_WINDOWS_ONLY",
+    "platt_input": "CLIPPED_BASE_MODEL_LOGIT",
+    "platt_fit_partition": "ALL_30_CALIBRATION_WINDOWS_ONLY",
+    "platt_solver": "lbfgs",
+    "platt_penalty": null,
+    "platt_max_iter": 5000,
+    "platt_tol": 0.0001,
+    "platt_random_state": 1520,
+    "calibration_metrics_are_in_sample_and_not_independent_confirmation": true
+  },
+  "selective_execution": {
+    "contracts": 10,
+    "slippage_cents_per_contract": 2.0,
+    "fee_schedule_version": "kalshi-fee-schedule-20260707",
+    "execution_cost_model_version": "rti-quote-plus-slippage-fee-at-fill-20260721-v2",
+    "edge_margin_grid": [0.0, 0.02, 0.04, 0.06],
+    "pick_condition": "CALIBRATED_PROBABILITY_MINUS_FEE_SLIPPAGE_BREAK_EVEN_GREATER_THAN_OR_EQUAL_TO_MARGIN",
+    "bootstrap_resamples": 5000,
+    "bootstrap_quantile": 0.2,
+    "bootstrap_quantile_method": "linear",
+    "bootstrap_cluster": "CLOSE_TIME",
+    "bootstrap_population": "UNIQUE_CLOSE_TIMES_WITH_AT_LEAST_ONE_PICK",
+    "non_btc_random_seed": 152001,
+    "btc_random_seed": 152002,
+    "margin_objective": "MAXIMUM_BOOTSTRAP_20TH_PERCENTILE_MEAN_PNL_CENTS_PER_TEN_CONTRACT_PICK",
+    "margin_tie_breakers": ["HIGHER_OBSERVED_MEAN_PNL", "MORE_PICKS", "LOWER_MARGIN"],
+    "non_btc_minimum_picks": 30,
+    "btc_minimum_picks": 10,
+    "minimum_yes_picks": 5,
+    "minimum_no_picks": 5,
+    "bootstrap_lower_mean_pnl_must_be_strictly_positive": true,
+    "no_passing_margin": "ABSTAIN_COHORT"
+  },
+  "untouched_test_scoring": {
+    "model_probability_metrics_population": "ALL_SOURCE_COMPLETE_COHORT_ROWS",
+    "selective_trade_population": "CALIBRATED_EDGE_AT_OR_ABOVE_FROZEN_SELECTED_MARGIN",
+    "market_probability_feature": "delayed_market_side_probability",
+    "all_source_control_entry": "12M_QUOTED_ASK_PLUS_2_CENTS_SLIPPAGE",
+    "matched_v18_entry": "13M_PARENT_ASK_PLUS_2_CENTS_SLIPPAGE",
+    "matched_v19_entry": "12M_QUOTED_ASK_PLUS_2_CENTS_SLIPPAGE",
+    "maximum_drawdown_order": ["CLOSE_TIME_ASCENDING", "ASSET_LEXICOGRAPHIC_ASCENDING"],
+    "cluster_bootstrap_resamples": 5000,
+    "cluster_bootstrap_two_sided_quantiles": [0.025, 0.975],
+    "non_btc_random_seed": 152011,
+    "btc_random_seed": 152012,
+    "wilson_z": 1.959963984540054,
+    "required_gates": [
+      "FEE_SLIPPAGE_ADJUSTED_PNL_STRICTLY_POSITIVE",
+      "WILSON_95_LOWER_STRICTLY_EXCEEDS_AVERAGE_BREAK_EVEN",
+      "ALL_ROW_LOG_LOSS_STRICTLY_BEATS_MARKET",
+      "ALL_ROW_BRIER_STRICTLY_BEATS_MARKET",
+      "MAXIMUM_DRAWDOWN_STRICTLY_BELOW_ALL_SOURCE_CONTROL",
+      "MINIMUM_FIVE_YES_AND_FIVE_NO_PICKS"
+    ]
+  },
+  "reporting_subgroups": {
+    "report_only_never_used_for_selection_or_gates": true,
+    "distance_feature": "delayed_distance_bps",
+    "distance_absolute_bps_tiers": [
+      {"name": "PINNED_LT_2", "minimum_inclusive": 0.0, "maximum_exclusive": 2.0},
+      {"name": "NEAR_2_TO_5", "minimum_inclusive": 2.0, "maximum_exclusive": 5.0},
+      {"name": "FAR_GE_5", "minimum_inclusive": 5.0, "maximum_exclusive": null}
+    ],
+    "volatility_feature": "log1p_spot_fast_volatility_60s_bps",
+    "volatility_raw_bps_tiers_after_expm1": [
+      {"name": "LOW_LT_1", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+      {"name": "MEDIUM_1_TO_3", "minimum_inclusive": 1.0, "maximum_exclusive": 3.0},
+      {"name": "HIGH_GE_3", "minimum_inclusive": 3.0, "maximum_exclusive": null}
+    ],
+    "market_regime_rule": {
+      "CHOP": "spot_fast_trend_efficiency_60s_LT_0_30",
+      "TREND_ALIGNED": "spot_fast_trend_efficiency_60s_GE_0_50_AND_kalshi_spot_direction_agreement_60s_GT_0",
+      "MIXED": "OTHERWISE"
+    },
+    "reversal_risk_from_calibrated_survival_probability": [
+      {"name": "LOW", "minimum_inclusive": 0.75, "maximum_exclusive": null},
+      {"name": "MEDIUM", "minimum_inclusive": 0.60, "maximum_exclusive": 0.75},
+      {"name": "HIGH", "minimum_inclusive": 0.0, "maximum_exclusive": 0.60}
+    ],
+    "settlement_average_risk_feature": "parent_distance_to_remaining_volatility",
+    "settlement_average_risk_absolute_ratio_tiers": [
+      {"name": "HIGH", "minimum_inclusive": 0.0, "maximum_exclusive": 0.5},
+      {"name": "MEDIUM", "minimum_inclusive": 0.5, "maximum_exclusive": 1.5},
+      {"name": "LOW", "minimum_inclusive": 1.5, "maximum_exclusive": null}
+    ]
+  },
+  "safety": {
+    "feature_seal_required_before_labels": true,
+    "authoritative_settlement_evidence_required": true,
+    "model_fit_before_exclusive_label_reservation_forbidden": true,
+    "untouched_test_labels_read_during_pretest_forbidden": true,
+    "test_guided_refit_recalibration_margin_or_model_selection_forbidden": true,
+    "notifications_before_all_historical_gates_pass_forbidden": true,
+    "automatic_promotion": false,
+    "real_trading_allowed": false
+  }
+}

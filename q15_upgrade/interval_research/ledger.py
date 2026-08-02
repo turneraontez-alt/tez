@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS interval_captures (
 );
 CREATE INDEX IF NOT EXISTS idx_ir_resolved ON interval_captures(interval, official_result);
 CREATE INDEX IF NOT EXISTS idx_ir_ticker ON interval_captures(ticker);
+CREATE INDEX IF NOT EXISTS idx_ir_model_interval_window_scored
+ON interval_captures(model_version, interval, window_key, predicted_side);
 
 CREATE TABLE IF NOT EXISTS precision13_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,6 +174,14 @@ class IntervalResearchLedger:
             if self.path.parent and str(self.path.parent) not in ("", "."):
                 os.makedirs(self.path.parent, exist_ok=True)
             with closing(self._connect()) as conn:
+                # This optional research ledger must never hold the exact RTI
+                # scheduler behind rollback-journal locks. WAL lets readers
+                # proceed beside a writer; the short busy timeout makes any
+                # remaining contention fail into the runner's fail-closed
+                # retry path instead of stalling the live process for 5s per
+                # query (nine sequential lookups previously cost ~45s).
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
                 conn.executescript(_SCHEMA)
                 self._migrate(conn)
                 conn.commit()
@@ -180,8 +190,9 @@ class IntervalResearchLedger:
             self._last_error = f"interval-research ledger init failed: {exc}"
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=5.0)
+        conn = sqlite3.connect(self.path, timeout=0.25)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=250")
         return conn
 
     @staticmethod

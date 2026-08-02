@@ -76,8 +76,11 @@ from .v13_readiness_monitor import (
 
 
 def _enabled() -> bool:
+    # Historical milestones/degradation backfill are complete.  This heavy
+    # in-process scan is opt-in after it held the GIL through a delayed-capture
+    # deadline; current feed watchdogs cover live source health.
     return os.environ.get(
-        "Q15_INDEPENDENT_PATH_READINESS_MONITOR", "true"
+        "Q15_INDEPENDENT_PATH_READINESS_MONITOR", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -95,6 +98,7 @@ class IndependentPathReadinessMonitor(V13ReadinessMonitor):
     NOTICE_MODULE = "tools.q15_rti_independent_path_readiness_notice"
     LOG_LABEL = "INDEPENDENT PATH"
     THREAD_NAME = "q15-independent-path-paper-readiness"
+    STOP_AFTER_ALL_MILESTONES = False
 
     def __init__(self, **kwargs: Any) -> None:
         if "enabled" not in kwargs:

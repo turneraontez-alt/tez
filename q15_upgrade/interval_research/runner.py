@@ -188,6 +188,19 @@ class IntervalResearchRunner:
     def model_version(self) -> str:
         return self.config.model_version
 
+    @staticmethod
+    def _exact_rti_critical_window(canonicals: Mapping[str, Any]) -> bool:
+        """Protect exact 13M plus 30/60/90s captures from shadow replay work."""
+        if not _env_bool("Q15_V3_RTI_EXACT_SAMPLER", False):
+            return False
+        return any(
+            seconds is not None and 680.0 <= seconds <= 780.0
+            for seconds in (
+                _num(getattr(canonical, "seconds_remaining", None))
+                for canonical in (canonicals or {}).values()
+            )
+        )
+
     def _prepare_capture(
         self,
         *,
@@ -484,11 +497,17 @@ class IntervalResearchRunner:
                             drift_checkpoint_targets.setdefault(
                                 (interval, wk), (candidate.close_time, now)
                             )
-                self._maybe_top_pick_13m(canonicals, now)
-                self._maybe_drift_shadow(canonicals, now, drift_13m_targets)
-                self._maybe_drift_checkpoints(
-                    canonicals, now, drift_checkpoint_targets
-                )
+                # Source rows above are frozen at their real observed times.
+                # Optional top-pick/Drift scoring can be expensive and is
+                # replay-safe from those durable rows, so defer it until 100s
+                # after 13M when the independent exact 30/60/90s stages have
+                # finished. This changes no control or source feature.
+                if not self._exact_rti_critical_window(canonicals):
+                    self._maybe_top_pick_13m(canonicals, now)
+                    self._maybe_drift_shadow(canonicals, now, drift_13m_targets)
+                    self._maybe_drift_checkpoints(
+                        canonicals, now, drift_checkpoint_targets
+                    )
                 for done_ticker, done_at in list(self._rti_path_13m_done.items()):
                     if now - done_at > 1800.0:
                         self._rti_path_13m_done.pop(done_ticker, None)

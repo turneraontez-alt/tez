@@ -1,0 +1,129 @@
+{
+  "protocol_id": "q15-rti-v19-low-reversal-fresh-60s-prospective-v1",
+  "design_id": "q15-rti-v19-low-reversal-fresh-60s-paper-candidate",
+  "protocol_status": "FROZEN_BEFORE_ANY_V19_PROSPECTIVE_OUTCOME_ACCESS",
+  "frozen_at": "2026-08-01T09:41:13Z",
+  "outcome_blind_source_identity_amendment": {
+    "amended_at": "2026-08-01T11:35:00Z",
+    "reason": "The prospective integration review found that delayed rows retained quote age but did not persist the official quote evidence source, and the V19 selector did not explicitly bind full 10-contract fill support or the exact 12M record kind.",
+    "replacement": "Require the exact delayed record kind, an official WebSocket or REST quote source identity, internally aligned evaluation timestamps, and explicit full-fill support for ten contracts. Earlier rows missing source identity receive no V19 audit credit.",
+    "prospective_outcomes_or_resolution_status_inspected": false,
+    "entry_side_price_spread_depth_or_risk_threshold_changed": false,
+    "historical_credit_claimed": false
+  },
+  "objective": "test whether waiting 60 seconds for an independent official-RTI path and a newly captured Kalshi quote improves the frozen V18 low-reversal selector without reusing the 13-minute entry price",
+  "parent_control": {
+    "protocol_id": "q15-rti-v18-strict-low-reversal-prospective-selection-v1",
+    "protocol_sha256": "1e7a8c6c7529950e848b5b0eb9b247c78627b7312f8b2881a3e93743c4e3f2f5",
+    "rule_version": "q15-rti-v18-strict-low-reversal-selective-v1",
+    "unchanged": true
+  },
+  "development_selection_disclosure": {
+    "source_population": "PRE_V18_NON_BTC_DEVELOPMENT_ROWS_ONLY",
+    "maximum_label_close_time": 1785573900.0,
+    "v18_or_v19_outcomes_read": false,
+    "report_path": "reports/q15_rti_v19_exploration/pre-v18-delayed-confirmation-development-v1.json",
+    "report_sha256": "0d4dfe9d8a1799fbefcea936c377727c54a23de29afd99517617ff7a55e0df30",
+    "multiple_candidate_rules_compared": true,
+    "selected_rule": "LOW_REVERSAL_FRESH_60",
+    "development_trades": 6,
+    "development_correct": 5,
+    "development_accuracy": 0.8333333333333334,
+    "development_wilson_95_low": 0.4364971778135299,
+    "development_average_fee_slippage_break_even_rate": 0.5858333333333333,
+    "development_ten_contract_pnl_dollars": 14.85,
+    "development_ten_contract_max_drawdown_dollars": 5.48,
+    "independent_confirmation": false,
+    "robustness_screen_passed": false,
+    "reason_not_proven": "six development picks are far too few and the Wilson lower bound is below fee-and-slippage break-even",
+    "historical_result_can_promote_notify_or_trade": false
+  },
+  "population": {
+    "cohort": "NON_BTC_TRANSFER",
+    "assets": ["BNB", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+    "btc_labels_forbidden": true,
+    "prospective_after_close_time": 1785577500.0,
+    "first_eligible_close_time": 1785578400.0,
+    "parent_interval": "13M",
+    "candidate_interval": "12M",
+    "parent_record_kind": "RTI_PATH_13M_PROSPECTIVE_EXACT",
+    "same_asset_ticker_close_and_parent_row_identity_required": true,
+    "development_rows_or_outcomes_may_not_receive_prospective_credit": true
+  },
+  "frozen_rule": {
+    "rule_version": "q15-rti-v19-low-reversal-fresh-60s-selective-v1",
+    "parent_v18_eligible_required": true,
+    "official_rti_side_must_remain_same": true,
+    "new_61_second_rti_path_required": true,
+    "new_quote_required": true,
+    "reused_13m_entry_quote_forbidden": true,
+    "delayed_record_kind_required": "RTI_PATH_12M_CONFIRM_PROSPECTIVE",
+    "allowed_quote_age_sources": [
+      "kalshi_rest_snapshot_received_at",
+      "kalshi_ws_exact_sampler"
+    ],
+    "allowed_quote_evidence_sources": [
+      "kalshi_official_rest_orderbook",
+      "kalshi_official_websocket_book"
+    ],
+    "evaluation_delay_must_match_evaluated_at_minus_target_at": true,
+    "confirmation_capture_target_seconds_before_close": 720.0,
+    "maximum_capture_timing_offset_seconds": 2.0,
+    "maximum_evaluation_delay_seconds": 2.0,
+    "maximum_path_or_quote_age_seconds": 3.0,
+    "new_ask_max_cents": 62.0,
+    "new_spread_min_cents": 0.0,
+    "new_spread_max_cents": 1.5,
+    "new_depth_min_contracts": 10.0,
+    "sim_contracts": 10,
+    "explicit_full_fill_support_required": true,
+    "additional_threshold_tuning_allowed": false,
+    "fallback": "ABSTAIN"
+  },
+  "execution_simulation": {
+    "paper_only": true,
+    "contracts": 10,
+    "entry_price": "fresh_12m_displayed_ask_plus_2_cents",
+    "slippage_cents_per_contract": 2.0,
+    "official_kalshi_general_fee_formula": true,
+    "fee_computed_at_simulated_fill_price": true,
+    "partial_or_unknown_fill_fails_closed": true,
+    "settlement_payout_cents_when_correct": 100.0
+  },
+  "prospective_reviews": {
+    "manual_review_bars": [30, 60, 150],
+    "first_review_minimum_resolved_picks": 30,
+    "minimum_complete_matched_parent_windows": 150,
+    "same_close_assets_clustered_for_uncertainty": true,
+    "exclusive_feature_seal_before_outcome_access": true,
+    "fresh_authoritative_kalshi_settlement_verification_required": true,
+    "automatic_outcome_opening": false,
+    "automatic_promotion": false,
+    "manual_confirmation_required": true
+  },
+  "promotion_gates": {
+    "positive_fee_slippage_adjusted_pnl_required": true,
+    "wilson_95_lower_accuracy_must_exceed_average_fee_slippage_adjusted_break_even": true,
+    "candidate_must_beat_matched_v18_parent_control_on_accuracy_and_pnl": true,
+    "candidate_maximum_drawdown_must_be_below_matched_parent_control": true,
+    "both_yes_and_no_minimum_five_picks_required": true,
+    "every_asset_and_regime_reported": true,
+    "timestamp_contract_parent_and_feature_hash_integrity_required": true,
+    "no_stale_reused_or_post_decision_evidence": true,
+    "historical_development_result_alone_can_pass": false,
+    "manual_promotion_only": true
+  },
+  "collection": {
+    "source_collection_already_active": true,
+    "outcome_blind_readiness_count_allowed": true,
+    "prospective_feature_seal_allowed": true,
+    "outcome_access_allowed_now": false,
+    "model_fit_allowed": false,
+    "probability_scoring_allowed": false,
+    "paper_pick_artifact_allowed_now": false,
+    "notifications_allowed_now": false,
+    "telegram_allowed_now": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  }
+}

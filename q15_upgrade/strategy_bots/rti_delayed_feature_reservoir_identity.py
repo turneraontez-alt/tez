@@ -1,0 +1,20 @@
+"""Immutable identity for the delayed RTI feature reservoir."""
+
+PROTOCOL_ID = "q15-rti-delayed-feature-reservoir-v1"
+PROTOCOL_SHA256 = (
+    "2e31993e2219f4dc6db734f3dabfab5e9540ec06dcf0c77b27982065b80b816e"
+)
+PROTOCOL_RELATIVE_PATH = "config/q15_rti_delayed_feature_reservoir_protocol.json"
+
+RESERVOIR_VERSION = "q15-rti-delayed-feature-reservoir-v1"
+PROSPECTIVE_AFTER_CLOSE_TIME = 1785594600.0
+FIRST_ELIGIBLE_CLOSE_TIME = 1785595500.0
+
+OUTCOME_ACCESS_ALLOWED = False
+MODEL_FIT_ALLOWED = False
+THRESHOLD_SELECTION_ALLOWED = False
+PROBABILITY_SCORING_ALLOWED = False
+PAPER_ARTIFACT_ALLOWED = False
+NOTIFICATION_ELIGIBLE = False
+AUTOMATIC_PROMOTION = False
+REAL_TRADING_ALLOWED = False

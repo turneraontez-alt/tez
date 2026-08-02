@@ -1,0 +1,107 @@
+{
+  "contract_id": "q15-rti-v16-development-one-shot-evaluator-v1",
+  "contract_status": "FROZEN_BEFORE_ANY_V16_DEVELOPMENT_LABEL_ACCESS",
+  "frozen_at": "2026-08-01T06:52:00Z",
+  "protocol_id": "q15-rti-v16-hierarchical-interaction-prospective-calibration-v1",
+  "protocol_sha256": "8684c5d74fea0ba6d296cd5033d109e5e36bd6b2dabb3eca3d991793d390b69a",
+  "development_seal_version": "q15-rti-v16-development-outcome-blind-seal-v1",
+  "development_seal_sha256": "6f496b8486cb52b60c127acf09f1df9da9bf5883eb5300a306cb3263247a43d6",
+  "cohort": "NON_BTC_TRANSFER",
+  "assets": ["BNB", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+  "development_close_windows": 240,
+  "development_rows": 1440,
+  "feature_architectures": {
+    "candidate": {
+      "name": "V16",
+      "feature_key": "v16_features",
+      "feature_names_key": "v16_feature_names",
+      "feature_count": 45,
+      "training_config_source": "V16_FROZEN_PROTOCOL_MODEL"
+    },
+    "v15": {
+      "name": "V15",
+      "feature_key": "v15_features",
+      "feature_names_key": "v15_feature_names",
+      "feature_count": 25,
+      "design_id": "q15-rti-market-anchored-independent-path-augmented-residual-v15",
+      "design_sha256": "8c6facc23a0a56968c8a24408272f676923e78a7b51111a39122577d902f0ba7",
+      "training_config_source": "FROZEN_V15_DESIGN"
+    },
+    "v14": {
+      "name": "V14",
+      "feature_key": "v14_features",
+      "feature_names_key": "v14_feature_names",
+      "feature_count": 20,
+      "design_id": "q15-rti-market-anchored-nested-safe-residual-v14",
+      "design_sha256": "aa5efa9a986dc575ee4e358777cd2394b38550ad7328154b58a7d06bf55c3dda",
+      "training_config_source": "FROZEN_V14_DESIGN"
+    }
+  },
+  "folds": {
+    "initial_train_close_windows": 120,
+    "validation_block_close_windows": 30,
+    "outer_fold_count": 4,
+    "inner_initial_train_close_windows": 60,
+    "inner_validation_block_close_windows": 30,
+    "same_close_assets_share_every_fold": true,
+    "strict_chronology_required": true,
+    "future_calibration_rows_used": false,
+    "future_test_rows_used": false
+  },
+  "trust_selection": {
+    "population": "INNER_CHRONOLOGICAL_OUT_OF_FOLD_WITHIN_EACH_OUTER_TRAINING_SET",
+    "fixed_factor_grid": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "fallback_factor": 0.0,
+    "selection_comparator": "POINT_IN_TIME_KALSHI_MARKET_PRIOR",
+    "requires_observed_brier_and_log_loss_improvement": true,
+    "requires_clustered_one_sided_upper_below_zero": true,
+    "bootstrap_resamples": 10000,
+    "bootstrap_confidence_level": 0.9,
+    "bootstrap_random_seed": 2026080101,
+    "outer_validation_labels_used_for_selection": false,
+    "future_calibration_labels_used_for_selection": false,
+    "future_test_labels_used_for_selection": false
+  },
+  "aggregate_comparison": {
+    "cluster_key": "close_time",
+    "bootstrap_resamples": 10000,
+    "bootstrap_confidence_level": 0.9,
+    "candidate_minus_market_random_seed": 2026080111,
+    "candidate_minus_v15_random_seed": 2026080112,
+    "candidate_minus_v14_random_seed": 2026080113,
+    "candidate_brier_and_log_loss_must_beat_every_comparator": true,
+    "every_outer_fold_not_worse_than_market_and_v15": true,
+    "candidate_minus_market_brier_mean_must_be_at_most": -0.001,
+    "candidate_minus_market_log_loss_mean_must_be_at_most": -0.001,
+    "candidate_minus_v15_brier_mean_must_be_at_most": -0.00025,
+    "candidate_minus_v15_log_loss_mean_must_be_at_most": -0.00025,
+    "every_comparator_bootstrap_one_sided_upper_below_zero": true,
+    "accuracy_is_report_only": true
+  },
+  "label_access": {
+    "confirmation_phrase": "OPEN_V16_DEVELOPMENT_LABELS_ONCE",
+    "exclusive_reservation_before_callback": true,
+    "exact_sealed_row_ids_only": true,
+    "fresh_authoritative_kalshi_finalized_evidence_required": true,
+    "authoritative_verifier_max_requests_per_second": 5.0,
+    "authoritative_verifier_capacity": 1,
+    "fetch_attempts_per_contract": 3,
+    "network_or_rate_limit_exhaustion_fails_closed": true,
+    "contract_ticker_asset_close_identity_required": true,
+    "local_cache_disagreement_fails_closed": true,
+    "btc_labels_forbidden": true,
+    "failed_or_interrupted_callback_is_permanently_ambiguous": true,
+    "reread_or_replay_forbidden": true
+  },
+  "result_policy": {
+    "future_calibration_access_allowed_only_if_development_gate_passes": true,
+    "historical_development_result_can_promote": false,
+    "paper_artifact_allowed": false,
+    "notifications_allowed": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  },
+  "outcome_labels_used_to_create_contract": false,
+  "model_fit_performed_before_contract_freeze": false,
+  "probability_scoring_performed_before_contract_freeze": false
+}

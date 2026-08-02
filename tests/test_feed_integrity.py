@@ -11,11 +11,64 @@ Two collectors were publishing data no downstream consumer could tell was wrong:
 """
 from __future__ import annotations
 
+import threading
 import time
 
+from q15_upgrade import kalshi_rest
 from q15_upgrade.marketlead.config import MarketLeadConfig
 from q15_upgrade.marketlead.features import MarketLeadFeatureEngine
 from spot_depth import SpotDepthRecorder
+
+
+def test_kalshi_rest_reuses_one_read_only_session_per_thread(monkeypatch):
+    created = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    class Session:
+        def __init__(self):
+            self.headers = {}
+            created.append(self)
+
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(kalshi_rest.requests, "Session", Session)
+    client = kalshi_rest.KalshiClient(rate=100.0, capacity=100)
+    assert client._get("/first") == {"ok": True}
+    assert client._get("/second") == {"ok": True}
+    assert len(created) == 1
+
+    thread = threading.Thread(target=lambda: client._get("/third"))
+    thread.start()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert len(created) == 2
+
+
+def test_kalshi_rest_get_series_uses_official_series_endpoint(monkeypatch):
+    client = kalshi_rest.KalshiClient(rate=100.0, capacity=100)
+    observed = []
+
+    def fake_get(path, **kwargs):
+        observed.append((path, kwargs))
+        return {"series": {"ticker": "KXBTC15M", "fee_type": "quadratic"}}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert client.get_series("KXBTC15M") == {
+        "ticker": "KXBTC15M", "fee_type": "quadratic",
+    }
+    assert observed == [("/series/KXBTC15M", {"retries": 3})]
 
 
 # ------------------------------------------------------------ spot_depth guard
@@ -41,6 +94,45 @@ def test_healthy_book_still_publishes(tmp_path):
     assert row["best_bid"] == 100.0 and row["best_ask"] == 101.0
     assert row["mid"] == 100.5
     assert row["spread_bps"] > 0
+
+
+def test_spot_freshness_and_trade_windows_use_local_receipt_time(tmp_path):
+    """Exchange clocks are provenance, never the freshness authority."""
+    rec = _recorder(tmp_path)
+    now = time.time()
+    rec._replace_book(
+        "BTC",
+        provider="coinbase",
+        symbol="BTC-USD",
+        bids=[["100.0", "2"]],
+        asks=[["101.0", "3"]],
+        ts=now + 1.0,
+        received_at=now - 0.1,
+    )
+    rec._record_trade(
+        "BTC",
+        provider="coinbase",
+        symbol="BTC-USD",
+        side="buy",
+        price=100.5,
+        size=2.0,
+        ts=now + 0.8,
+        received_at=now - 0.2,
+    )
+
+    with rec._lock:
+        row = rec._snapshot_locked("BTC", rec._books["BTC"], now)
+
+    assert row is not None
+    assert row["book_age_seconds"] == 0.1
+    assert row["book_source_age_seconds"] == -1.0
+    assert row["orderbook_received_at"] == now - 0.1
+    assert row["orderbook_ts"] == now + 1.0
+    assert row["trade_age_seconds"] == 0.2
+    assert row["trade_source_age_seconds"] == -0.8
+    assert row["trade_received_at"] == now - 0.2
+    assert row["trade_ts"] == now + 0.8
+    assert row["trade_buy_notional_5s"] == 201.0
 
 
 def test_crossed_book_is_dropped_not_published(tmp_path):

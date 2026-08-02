@@ -43,8 +43,8 @@ def test_feature_projection_cannot_include_outcomes():
 def test_snapshot_builder_uses_feature_only_loader(monkeypatch, tmp_path):
     loaded = []
 
-    def fake_load(path: Path):
-        loaded.append(path)
+    def fake_load(path: Path, after_close_time: float):
+        loaded.append((path, after_close_time))
         return [{"id": 1, "asset": "ETH"}]
 
     class Runtime:
@@ -53,7 +53,7 @@ def test_snapshot_builder_uses_feature_only_loader(monkeypatch, tmp_path):
             assert rows == [{"id": 1, "asset": "ETH"}]
             return {"model_feature_timestamp_failures": 0}
 
-    monkeypatch.setattr(notice, "load_feature_rows", fake_load)
+    monkeypatch.setattr(notice, "load_feature_rows_after", fake_load)
     monkeypatch.setattr(
         notice, "build_report", lambda rows, source_schema: {"sentinel": True}
     )
@@ -77,7 +77,7 @@ def test_snapshot_builder_uses_feature_only_loader(monkeypatch, tmp_path):
     db = tmp_path / "features.sqlite3"
     snapshot = notice.build_outcome_blind_snapshot(database_path=db)
 
-    assert loaded == [db]
+    assert loaded == [(db, notice.v11.PROSPECTIVE_AFTER_CLOSE_TIME)]
     assert notice.snapshot_is_notice_ready(snapshot)
     assert snapshot["outcome_columns_selected"] is False
     assert snapshot["outcome_labels_read"] is False

@@ -2,19 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
+import threading
 
 import pytest
 
 from notifications.outbox_v9 import ReliableTelegramOutbox
 from q15_upgrade.strategy_bots import runtime
+from q15_upgrade.strategy_bots.ledger import StrategyBotLedger
 from q15_upgrade.strategy_bots.rules import (
     ACCEPTED,
+    BOT_DRIFT_13M,
     BOT_DRIFT_ADDON,
     BOT_DRIFT_ASYMMETRIC_VOLUME,
     BOT_DRIFT_FLOW_SPREAD,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_FLOW15,
     BOT_DRIFT_FLOW_SPREAD_SHADOW_SPREAD4,
+    BOT_DRIFT_LATEQUAL,
     BOT_DRIFT_NO_EXPANSION,
+    BOT_DRIFT_NO_MIRROR,
+    BOT_RTI_PATH_13M,
     STRATEGY_VERSION,
     BotDecision,
 )
@@ -97,6 +103,34 @@ def _flow_row(**over):
     }
     row.update(over)
     return row
+
+
+def test_drift_reconciliation_uses_retry_partial_index(tmp_path):
+    ledger = StrategyBotLedger(tmp_path / "strategy.sqlite3")
+    drift_bots = (
+        BOT_DRIFT_13M,
+        BOT_DRIFT_FLOW_SPREAD,
+        BOT_DRIFT_ADDON,
+        BOT_DRIFT_LATEQUAL,
+        BOT_DRIFT_NO_EXPANSION,
+        BOT_DRIFT_NO_MIRROR,
+        BOT_RTI_PATH_13M,
+    )
+    placeholders = ",".join("?" for _ in drift_bots)
+    try:
+        plan = ledger._conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM strategy_bot_decisions "
+            "WHERE (source_system='drift_shadow' OR bot_name=?) AND paper_only=1 "
+            "AND notification_status='QUEUED_RETRY' "
+            f"AND bot_name IN ({placeholders}) "
+            "ORDER BY COALESCE(notified_at, created_at) ASC, id ASC LIMIT ?",
+            (BOT_RTI_PATH_13M, *drift_bots, 100),
+        ).fetchall()
+    finally:
+        ledger.close()
+    assert any(
+        "idx_strategy_bot_drift_retry" in str(row[3]) for row in plan
+    ), plan
 
 
 def _no_row(**over):
@@ -320,6 +354,46 @@ def test_drift_outbox_queues_exact_payload_and_retries_once(tmp_path, monkeypatc
     assert runtime.record_drift_pick_row(_flow_row(entry_ask_cents=66.0)) is None
     assert len(outbox.rows()) == 1
     assert telegram.sent == [frozen_payload]
+
+
+def test_drift_reconcile_request_never_blocks_live_capture_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_reconcile(limit=100):
+        calls.append(limit)
+        started.set()
+        assert release.wait(2.0)
+        return {"scanned": 1, "updated": 0}
+
+    monkeypatch.setattr(
+        runtime, "reconcile_drift_delivery_statuses", slow_reconcile,
+    )
+    before = time.monotonic()
+    first = runtime.request_drift_delivery_reconcile(100)
+    elapsed = time.monotonic() - before
+    assert first["submitted"] is True
+    assert elapsed < 0.1
+    assert started.wait(0.5)
+
+    second = runtime.request_drift_delivery_reconcile(100)
+    assert second["submitted"] is False
+    assert second["inflight"] is True
+    assert calls == [100]
+
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while (
+        runtime.drift_delivery_reconcile_worker_health()["inflight"]
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    health = runtime.drift_delivery_reconcile_worker_health()
+    assert health["inflight"] is False
+    assert health["last_summary"] == {"scanned": 1, "updated": 0}
+    assert health["last_error"] is None
+    assert health["live_refresh_loop_blocking_allowed"] is False
 
 
 @pytest.mark.parametrize("terminal", ["EXPIRED", "DEAD_LETTER"])

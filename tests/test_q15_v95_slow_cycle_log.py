@@ -19,6 +19,10 @@ class TestFormatRunCycleBreakdown(unittest.TestCase):
 
         timing = {
             "total": 5.55, "parent_chain": 3.20, "v95_analysis": 1.80,
+            "research_overlays": 0.75,
+            "research_overlay_sub": {
+                "marketlead": 0.10, "interval_research": 0.65,
+            },
             "market_reconcile": 0.40, "signal_store_reconcile": 0.05, "other": 0.10,
             "v95_sub": {"deepcopy": 0.2, "build": 0.3, "analyse": 0.9, "record": 0.4},
         }
@@ -34,6 +38,8 @@ class TestFormatRunCycleBreakdown(unittest.TestCase):
         # v95 sub-stages and the periodic reconcile are named explicitly
         self.assertIn("record=0.40s", out)
         self.assertIn("analyse=0.90s", out)
+        self.assertIn("research_overlays=0.75s", out)
+        self.assertIn("interval_research=0.65s", out)
         self.assertIn("market_reconcile=0.40s", out)
 
     def test_tolerates_missing_and_malformed(self):

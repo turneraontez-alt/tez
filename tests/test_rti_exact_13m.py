@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import time
+import threading
 
 import pytest
 
-from q15_upgrade.rti_exact_13m import ExactRTI13MSampler
+from q15_upgrade import rti_exact_13m as exact_module
+from q15_upgrade.rti_exact_13m import (
+    ExactRTI13MSampler,
+    _CONFIRMATION_POLICIES,
+    _ConfirmationPending,
+    _Market,
+)
+from q15_upgrade.rti_confirmation_spool import RTIConfirmationSpool
 from q15_upgrade.rti_path_13m import (
+    RTI_DISTANCE_TO_REMAINING_VOLATILITY_CAP,
     RTI_POINT_IN_TIME_RISK_POLICY_VERSION,
+    build_rti_path_features,
     classify_rti_point_in_time_risk,
 )
 from q15_upgrade.strategy_bots.rules import (
@@ -47,6 +57,25 @@ class _Feed:
             "no_ask_cents": 41.0,
             "yes_bid_qty": 22.0,
             "yes_ask_qty": 31.0,
+            "execution_ladder_schema_version": (
+                "kalshi-execution-ladder-10x2c-v1"
+            ),
+            "yes_fill_10x2c": {
+                "depth_within_limit_contracts": 31.0,
+                "filled_contracts_within_limit": 10.0,
+                "full_fill_supported": True,
+                "vwap_cents": 60.0,
+                "worst_price_cents": 60.0,
+                "slippage_cents": 0.0,
+            },
+            "no_fill_10x2c": {
+                "depth_within_limit_contracts": 22.0,
+                "filled_contracts_within_limit": 10.0,
+                "full_fill_supported": True,
+                "vwap_cents": 41.0,
+                "worst_price_cents": 41.0,
+                "slippage_cents": 0.0,
+            },
             "yes_microprice_cents": 59.4,
             "yes_microprice_edge_cents": -0.1,
             "event_count_5s": 3,
@@ -181,6 +210,24 @@ def test_point_in_time_risk_taxonomy_is_diagnostic_and_fails_unknown():
     assert unknown["rti_market_agreement_class"] == "unknown"
 
 
+def test_flat_path_uses_finite_zero_volatility_limit_instead_of_missing_feature():
+    path = {
+        "status": "ok",
+        "complete": True,
+        "rows": [{"index_px": 100.0} for _ in range(61)],
+    }
+    features = build_rti_path_features(path, strike=99.0)
+    assert features["rti_expected_remaining_volatility_bps"] == 0.0
+    assert features["rti_distance_to_remaining_volatility"] == (
+        RTI_DISTANCE_TO_REMAINING_VOLATILITY_CAP
+    )
+    assert features["rti_zero_remaining_volatility_limit_applied"] is True
+
+    exactly_on_strike = build_rti_path_features(path, strike=100.0)
+    assert exactly_on_strike["rti_distance_to_remaining_volatility"] == 0.0
+    assert exactly_on_strike["rti_zero_remaining_volatility_limit_applied"] is True
+
+
 def test_exact_sampler_freezes_quote_once_then_waits_for_official_end_second():
     feed = _Feed()
     path_calls = []
@@ -203,7 +250,13 @@ def test_exact_sampler_freezes_quote_once_then_waits_for_official_end_second():
         spot_reader=lambda asset, **kwargs: {
             "created_at": 1018.0,
             "book_age_seconds": 0.1,
+            "book_source_age_seconds": -0.9,
+            "orderbook_ts": 1018.9,
+            "orderbook_received_at": 1017.9,
             "trade_age_seconds": 0.2,
+            "trade_source_age_seconds": -0.8,
+            "trade_ts": 1018.8,
+            "trade_received_at": 1017.8,
             "source": "coinbase ETH-USD",
             "depth_imbalance": 0.4,
             "trade_buy_notional_15s": 1200.0,
@@ -291,6 +344,12 @@ def test_exact_sampler_freezes_quote_once_then_waits_for_official_end_second():
     assert row["spot_depth_status"] == "ok"
     assert abs(row["rti_spot_snapshot_age_s"] - 2.0) < 1e-9
     assert row["rti_spot_book_age_s"] == 0.1
+    assert row["rti_spot_book_source_at"] == 1018.9
+    assert row["rti_spot_book_received_at"] == 1017.9
+    assert row["rti_spot_book_source_age_s"] == -0.9
+    assert row["rti_spot_trade_source_at"] == 1018.8
+    assert row["rti_spot_trade_received_at"] == 1017.8
+    assert row["rti_spot_trade_source_age_s"] == -0.8
     assert row["spot_depth_imbalance"] == 0.4
     assert row["spot_depth_trade_net_notional_15s"] == 500.0
     assert row["spot_mid_window_complete_60s"] is True
@@ -335,6 +394,54 @@ def test_exact_sampler_freezes_quote_once_then_waits_for_official_end_second():
     assert path_source["automatic_promotion"] is False
     assert path_source["real_trading_allowed"] is False
     assert health["spot_confirm_challenger"]["notification_eligible"] is False
+
+
+def test_spot_rest_reservoir_submission_occurs_after_existing_spot_freeze():
+    events = []
+
+    def spot_reader(_asset, **_kwargs):
+        events.append("spot_frozen")
+        return {
+            "created_at": 1020.0,
+            "book_age_seconds": 0.1,
+            "book_source_age_seconds": 0.1,
+            "orderbook_ts": 1019.9,
+            "orderbook_received_at": 1019.9,
+            "source": "coinbase ETH-USD",
+        }
+
+    submissions = []
+
+    def submitter(**kwargs):
+        events.append("rest_submitted")
+        submissions.append(kwargs)
+        return True
+
+    recorded = []
+    sampler = ExactRTI13MSampler(
+        enabled=True,
+        feed=_Feed(),
+        path_reader=lambda *_args, **_kwargs: _path(complete=True),
+        spot_reader=spot_reader,
+        recorder=lambda row: recorded.append(dict(row)) or 1,
+        spot_rest_submitter=submitter,
+    )
+    sampler.register_market(
+        asset="ETH", ticker="KXETH15M-REST-ORDER", close_time=1800.0,
+        strike=2000.0, now=1000.0,
+    )
+    sampler.tick(1020.0)
+    assert events[:2] == ["spot_frozen", "rest_submitted"]
+    assert submissions == [{
+        "asset": "ETH",
+        "ticker": "KXETH15M-REST-ORDER",
+        "close_time": 1800.0,
+        "stage": "13M",
+        "target_at": 1020.0,
+        "submitted_at": 1020.0,
+    }]
+    assert len(recorded) == 1
+    assert not any("rest_top_book" in key for key in recorded[0])
 
 
 def test_rti_spot_lead_lag_fails_closed_on_timestamp_contradiction():
@@ -392,6 +499,90 @@ def test_exact_sampler_fails_closed_when_first_wake_is_after_deadline():
     assert health["recent_missed_tickers"] == ["KXBTC-MISSED"]
 
 
+def test_registration_identity_is_first_seen_immutable_and_auditable():
+    sampler = ExactRTI13MSampler(enabled=True, feed=_Feed())
+    assert sampler.register_market(
+        asset="ETH",
+        ticker="KXETH-IDENTITY",
+        close_time=1800.0,
+        strike=2000.0,
+        now=1000.0,
+    )
+    assert sampler.register_market(
+        asset="ETH",
+        ticker="KXETH-IDENTITY",
+        close_time=1800.0,
+        strike=2000.0,
+        now=1010.0,
+    )
+    health = sampler.health()
+    assert isinstance(health["health_generated_at"], float)
+    registration = health["registration_by_asset"]["ETH"]
+    assert registration == {
+        "ticker": "KXETH-IDENTITY",
+        "close_time": 1800.0,
+        "decision_time": 1020.0,
+        "strike": 2000.0,
+        "registered_at": 1000.0,
+        "registration_lead_seconds": 20.0,
+        "registered_before_decision": True,
+        "seconds_to_decision": registration["seconds_to_decision"],
+    }
+    assert health["registration_identity_conflicts"] == 0
+
+    assert sampler.register_market(
+        asset="ETH",
+        ticker="KXETH-IDENTITY",
+        close_time=1800.0,
+        strike=2001.0,
+        now=1011.0,
+    ) is False
+    health = sampler.health()
+    assert health["registration_by_asset"]["ETH"]["strike"] == 2000.0
+    assert health["registration_identity_conflicts"] == 1
+    assert health["last_registration_identity_conflict"] == {
+        "asset": "ETH",
+        "ticker": "KXETH-IDENTITY",
+        "registered_close_time": 1800.0,
+        "observed_close_time": 1800.0,
+        "registered_strike": 2000.0,
+        "observed_strike": 2001.0,
+        "detected_at": 1011.0,
+    }
+
+
+def test_registration_watchdog_detects_unregistered_or_late_capture_fold(
+    monkeypatch,
+):
+    monkeypatch.setattr(exact_module.time, "time", lambda: 1021.0)
+    healthy = ExactRTI13MSampler(enabled=True, feed=_Feed())
+    late = ExactRTI13MSampler(enabled=True, feed=_Feed())
+    for index, asset in enumerate(sorted(exact_module.RTI_EXACT_REQUIRED_ASSETS)):
+        assert healthy.register_market(
+            asset=asset, ticker=f"KX{asset}-HEALTHY", close_time=1800.0,
+            strike=100.0 + index, now=1000.0,
+        )
+        assert late.register_market(
+            asset=asset, ticker=f"KX{asset}-LATE", close_time=1800.0,
+            strike=100.0 + index, now=1021.0,
+        )
+
+    healthy_status = healthy.health()
+    assert healthy_status["registration_watchdog_status"] == "OK"
+    assert healthy_status["registration_watchdog_ok"] is True
+    assert healthy_status["latest_expected_decision_time"] == 1020.0
+    assert healthy_status["overdue_registration_assets"] == []
+
+    late_status = late.health()
+    assert late_status["registration_watchdog_status"] == (
+        "STALE_MISSING_OR_LATE"
+    )
+    assert late_status["registration_watchdog_ok"] is False
+    assert late_status["overdue_registration_assets"] == sorted(
+        exact_module.RTI_EXACT_REQUIRED_ASSETS
+    )
+
+
 def test_exact_sampler_retries_a_stale_book_and_freezes_the_fresh_quote_time():
     class StaleThenFresh(_Feed):
         def get_microstructure(self, ticker, *, now, max_book_age):
@@ -437,6 +628,64 @@ def test_exact_sampler_retries_a_stale_book_and_freezes_the_fresh_quote_time():
     assert health["quote_retry_successes"] == 1
     assert health["quote_retry_exhausted"] == 0
     assert health["missed_deadlines"] == 0
+
+
+def test_exact_sampler_uses_new_official_rest_snapshot_when_ws_book_is_stale():
+    class StaleFeed(_Feed):
+        def get_microstructure(self, ticker, *, now, max_book_age):
+            self.calls.append((ticker, now, max_book_age))
+            return {
+                "available": False,
+                "reason": "book_stale",
+                "book_age_seconds": 8.0,
+            }
+
+    rest_calls = []
+
+    def rest_orderbook(ticker):
+        rest_calls.append(ticker)
+        return {
+            "_captured_at": 1020.1,
+            "yes_dollars": [["0.59", "22"]],
+            "no_dollars": [["0.40", "6"], ["0.39", "5"]],
+        }
+
+    recorded = []
+    sampler = ExactRTI13MSampler(
+        enabled=True,
+        max_timing_offset_s=2.0,
+        feed=StaleFeed(),
+        rest_orderbook_reader=rest_orderbook,
+        path_reader=lambda *args, **kwargs: _path(complete=True),
+        spot_reader=lambda *args, **kwargs: None,
+        recorder=lambda row: recorded.append(dict(row)) or 1,
+    )
+    sampler.register_market(
+        asset="ETH",
+        ticker="KXETH-REST-FALLBACK",
+        close_time=1800.0,
+        strike=2000.0,
+        now=1000.0,
+    )
+    sampler.tick(1020.0)
+
+    assert rest_calls == ["KXETH-REST-FALLBACK"]
+    assert len(recorded) == 1
+    assert recorded[0]["entry_ask_cents"] == 60.0
+    assert recorded[0]["depth_contracts"] == 6.0
+    assert recorded[0]["rti_ladder_depth_within_2c_contracts"] == 11.0
+    assert recorded[0]["rti_ladder_10_contract_full_fill_supported"] is True
+    assert recorded[0]["rti_ladder_10_contract_vwap_cents"] == 60.4
+    assert recorded[0]["rti_ladder_10_contract_worst_price_cents"] == 61.0
+    assert recorded[0]["quote_age_seconds"] == 0.0
+    assert recorded[0]["quote_age_source"] == (
+        "kalshi_rest_snapshot_received_at"
+    )
+    assert recorded[0]["quote_evidence_source"] == (
+        "kalshi_official_rest_orderbook"
+    )
+    assert recorded[0]["rti_timing_offset_s"] == pytest.approx(0.1)
+    assert sampler.health()["missed_deadlines"] == 0
 
 
 def test_exact_sampler_persists_missing_quote_before_deadline_when_retries_exhaust():
@@ -655,21 +904,21 @@ def test_exact_sampler_delayed_confirmation_uses_fresh_quote_and_path():
             quote = super().get_microstructure(
                 ticker, now=now, max_book_age=max_book_age
             )
-            if len(self.calls) >= 2:
+            if now >= 1050.0:
                 quote.update({
                     "yes_bid_cents": 56.0,
                     "yes_ask_cents": 57.0,
                     "no_bid_cents": 43.0,
                     "no_ask_cents": 44.0,
                 })
-            if len(self.calls) >= 3:
+            if now >= 1080.0:
                 quote.update({
                     "yes_bid_cents": 54.0,
                     "yes_ask_cents": 55.0,
                     "no_bid_cents": 45.0,
                     "no_ask_cents": 46.0,
                 })
-            if len(self.calls) >= 4:
+            if now >= 1110.0:
                 quote.update({
                     "yes_bid_cents": 52.0,
                     "yes_ask_cents": 53.0,
@@ -727,10 +976,10 @@ def test_exact_sampler_delayed_confirmation_uses_fresh_quote_and_path():
     sampler.tick(1049.9)
     assert len(base_rows) == 1
     assert confirmation_rows == []
-    assert len(feed.calls) == 1
+    assert len(feed.calls) == 2
 
     sampler.tick(1050.0)
-    assert len(feed.calls) == 2
+    assert len(feed.calls) == 3
     assert len(confirmation_rows) == 1
     row = confirmation_rows[0]
     assert row["interval"] == "12M30S"
@@ -745,12 +994,16 @@ def test_exact_sampler_delayed_confirmation_uses_fresh_quote_and_path():
     assert row["rti_confirm_path_count"] == 31
     assert row["rti_confirm_path_complete"] is True
     assert row["rti_confirm_side"] == "YES"
+    assert row["rti_execution_ladder_schema_version"] == (
+        "kalshi-execution-ladder-10x2c-v1"
+    )
+    assert row["rti_ladder_10_contract_full_fill_supported"] is True
     assert sampler.health()["delayed_confirmation"]["pending_tickers"] == [
         "KXETH-DELAYED@+60s", "KXETH-DELAYED@+90s"
     ]
 
     sampler.tick(1080.0)
-    assert len(feed.calls) == 3
+    assert len(feed.calls) == 4
     assert len(confirmation_rows) == 2
     row_60 = confirmation_rows[1]
     assert row_60["interval"] == "12M"
@@ -765,7 +1018,7 @@ def test_exact_sampler_delayed_confirmation_uses_fresh_quote_and_path():
     ]
 
     sampler.tick(1110.0)
-    assert len(feed.calls) == 4
+    assert len(feed.calls) == 5
     assert len(confirmation_rows) == 3
     row_90 = confirmation_rows[2]
     assert row_90["interval"] == "11M30S"
@@ -841,6 +1094,179 @@ def test_delayed_confirmation_retries_stale_quote_then_freezes_fresh_timestamp()
     assert health["quote_retry_exhausted"] == 0
     assert health["quote_retry_pending_tickers"] == []
     assert health["missed_deadlines"] == 0
+
+
+def test_delayed_rest_fallback_captures_due_assets_concurrently():
+    class FreshThenStale(_Feed):
+        def __init__(self):
+            super().__init__()
+            self.attempts = {}
+
+        def get_microstructure(self, ticker, *, now, max_book_age):
+            self.attempts[ticker] = self.attempts.get(ticker, 0) + 1
+            if self.attempts[ticker] == 1:
+                return super().get_microstructure(
+                    ticker, now=now, max_book_age=max_book_age
+                )
+            return {
+                "available": False,
+                "reason": "book_stale",
+                "book_age_seconds": 9.0,
+                "microstructure_captured_at": now,
+                "microstructure_evidence_source": (
+                    "kalshi_official_websocket_history"
+                ),
+                "microstructure_transport_connected": True,
+                "microstructure_transport_age_seconds": 0.1,
+                "microstructure_book_age_seconds": 9.0,
+                "microstructure_time_basis": "local_received_at",
+                "microstructure_extension_schema_version": "test-extension-v1",
+                "microstructure_window_complete_60s": True,
+                "book_delta_pressure_yes_60s": 0.25,
+                "trade_imbalance_yes_60s": -0.5,
+            }
+
+    barrier = threading.Barrier(2, timeout=1.0)
+    rest_calls = []
+
+    def rest_orderbook(ticker):
+        rest_calls.append(ticker)
+        barrier.wait()
+        return {
+            "_captured_at": 1050.1,
+            "yes_dollars": [["0.59", "22"]],
+            "no_dollars": [["0.40", "31"]],
+        }
+
+    confirmation_rows = []
+    parent_ids = iter((77, 78))
+
+    def read_path(asset, **kwargs):
+        if kwargs["end_ts"] == 1020.0:
+            return _path(complete=True)
+        return _confirmation_path(complete=True)
+
+    sampler = ExactRTI13MSampler(
+        enabled=True,
+        feed=FreshThenStale(),
+        rest_orderbook_reader=rest_orderbook,
+        path_reader=read_path,
+        spot_reader=lambda *args, **kwargs: None,
+        recorder=lambda row: next(parent_ids),
+        confirmation_recorder=(
+            lambda row: confirmation_rows.append(dict(row)) or 88
+        ),
+    )
+    for asset in ("BTC", "ETH"):
+        sampler.register_market(
+            asset=asset,
+            ticker=f"KX{asset}-DELAYED-REST-BATCH",
+            close_time=1800.0,
+            strike=2000.0,
+            now=1000.0,
+        )
+    sampler.tick(1020.0)
+    sampler.tick(1050.0)
+
+    assert sorted(rest_calls) == [
+        "KXBTC-DELAYED-REST-BATCH",
+        "KXETH-DELAYED-REST-BATCH",
+    ]
+    assert len(confirmation_rows) == 2
+    assert all(row["entry_ask_cents"] == 60.0 for row in confirmation_rows)
+    assert all(
+        row["quote_age_source"] == "kalshi_rest_snapshot_received_at"
+        for row in confirmation_rows
+    )
+    assert all(
+        row["rti_confirm_timing_offset_s"] == pytest.approx(0.1)
+        for row in confirmation_rows
+    )
+    assert all(
+        row["kalshi_microstructure_evidence_source"]
+        == "kalshi_official_websocket_history"
+        for row in confirmation_rows
+    )
+    assert all(
+        row["kalshi_microstructure_transport_connected"] is True
+        for row in confirmation_rows
+    )
+    assert all(
+        row["kalshi_microstructure_window_complete_60s"] is True
+        for row in confirmation_rows
+    )
+    assert all(
+        row["kalshi_trade_imbalance_yes_60s"] == pytest.approx(-0.5)
+        for row in confirmation_rows
+    )
+    health = sampler.health()["delayed_confirmation"]
+    assert health["missed_deadlines"] == 0
+    assert health["record_failures"] == 0
+
+
+def test_delayed_rest_prefetch_keeps_true_post_target_receipt_time():
+    class FreshThenStale(_Feed):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        def get_microstructure(self, ticker, *, now, max_book_age):
+            self.attempts += 1
+            if self.attempts == 1:
+                return super().get_microstructure(
+                    ticker, now=now, max_book_age=max_book_age
+                )
+            return {
+                "available": False,
+                "reason": "book_stale",
+                "book_age_seconds": 9.0,
+            }
+
+    confirmation_rows = []
+
+    def read_path(asset, **kwargs):
+        if kwargs["end_ts"] == 1020.0:
+            return _path(complete=True)
+        return _confirmation_path(complete=True)
+
+    sampler = ExactRTI13MSampler(
+        enabled=True,
+        feed=FreshThenStale(),
+        rest_orderbook_reader=lambda ticker: {
+            "_captured_at": 1050.8,
+            "yes_dollars": [["0.59", "22"]],
+            "no_dollars": [["0.40", "31"]],
+        },
+        path_reader=read_path,
+        spot_reader=lambda *args, **kwargs: None,
+        recorder=lambda row: 77,
+        confirmation_recorder=(
+            lambda row: confirmation_rows.append(dict(row)) or 88
+        ),
+    )
+    sampler.register_market(
+        asset="ETH",
+        ticker="KXETH-DELAYED-REST-PREFETCH",
+        close_time=1800.0,
+        strike=2000.0,
+        now=1000.0,
+    )
+    sampler.tick(1020.0)
+    sampler.tick(1049.25)
+
+    assert confirmation_rows == []
+    health = sampler.health()["delayed_confirmation"]
+    assert health["quote_prefetch_attempts"] == 1
+    assert health["quote_prefetch_usable"] == 1
+
+    sampler.tick(1050.8)
+    assert len(confirmation_rows) == 1
+    assert confirmation_rows[0]["rti_confirm_quote_captured_at"] == 1050.8
+    assert confirmation_rows[0]["rti_confirm_timing_offset_s"] == pytest.approx(0.8)
+    assert confirmation_rows[0]["quote_age_source"] == (
+        "kalshi_rest_snapshot_received_at"
+    )
+    assert sampler.health()["delayed_confirmation"]["missed_deadlines"] == 0
 
 
 def test_delayed_confirmation_persists_missing_quote_when_retries_exhaust():
@@ -1010,6 +1436,120 @@ def test_restart_recovery_finishes_before_market_is_visible_to_exact_worker():
     assert health["delayed_confirmation"]["recovered_parents"] == 1
 
 
+def test_live_confirmation_writer_does_not_block_exact_scheduler():
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_recorder(_row):
+        started.set()
+        assert release.wait(2.0)
+        return 91
+
+    sampler = ExactRTI13MSampler(
+        enabled=True,
+        confirmation_recorder=slow_recorder,
+    )
+    market = _Market(
+        asset="ETH",
+        ticker="KXETH-ASYNC-WRITE",
+        close_time=1800.0,
+        strike=2000.0,
+        registered_at=1000.0,
+    )
+    pending = _ConfirmationPending(
+        policy=_CONFIRMATION_POLICIES[0],
+        market=market,
+        original_source={"rti_side": "YES"},
+        original_row_id=77,
+        original_strict_accepted=True,
+        target_at=1050.0,
+        captured_at=1050.0,
+        record_inflight=True,
+    )
+    key = sampler._confirmation_key(pending)
+    sampler._confirmation_pending[key] = pending
+    try:
+        assert sampler.start() is True
+        started_at = time.monotonic()
+        assert sampler._enqueue_confirmation_record(
+            pending,
+            {"record_kind": "RTI_PATH_12M30_CONFIRM_PROSPECTIVE"},
+            queued_at=1050.1,
+        ) is True
+        assert time.monotonic() - started_at < 0.1
+        assert started.wait(1.0)
+        health = sampler.health()["delayed_confirmation"]
+        assert health["record_thread_alive"] is True
+        assert health["quote_executor_active"] is True
+        assert health["quote_executor_reuses_connections"] is True
+        assert health["record_inflight"] == 1
+        assert health["decisions_recorded"] == 0
+
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if sampler.health()["delayed_confirmation"]["decisions_recorded"]:
+                break
+            time.sleep(0.01)
+        health = sampler.health()["delayed_confirmation"]
+        assert health["decisions_recorded"] == 1
+        assert health["record_inflight"] == 0
+        assert health["pending_tickers"] == []
+    finally:
+        release.set()
+        sampler.stop()
+
+
+def test_live_confirmation_spool_defers_heavy_write_past_all_exact_stages(
+    tmp_path,
+):
+    recorder_started = threading.Event()
+    sampler = ExactRTI13MSampler(
+        enabled=True,
+        confirmation_recorder=lambda _row: recorder_started.set() or 91,
+    )
+    spool = RTIConfirmationSpool(tmp_path / "deferred-spool.sqlite3")
+    sampler._confirmation_spool = spool
+    now = time.time()
+    market = _Market(
+        asset="ETH",
+        ticker="KXETH-DEFERRED-WRITE",
+        close_time=now + 780.0,
+        strike=2000.0,
+        registered_at=now,
+    )
+    pending = _ConfirmationPending(
+        policy=_CONFIRMATION_POLICIES[0],
+        market=market,
+        original_source={"rti_side": "YES"},
+        original_row_id=77,
+        original_strict_accepted=True,
+        target_at=now + 30.0,
+        captured_at=now + 30.0,
+        record_inflight=True,
+    )
+    sampler._confirmation_pending[sampler._confirmation_key(pending)] = pending
+    try:
+        assert sampler.start() is True
+        assert sampler._enqueue_confirmation_record(
+            pending,
+            {"record_kind": "RTI_PATH_12M30_CONFIRM_PROSPECTIVE"},
+            queued_at=now + 30.1,
+        ) is True
+        assert recorder_started.wait(0.15) is False
+        health = sampler.health()["delayed_confirmation"]
+        assert health["record_spooled"] == 1
+        assert health["record_inflight"] == 0
+        assert health["record_queue_depth"] == 1
+        assert health["durable_spool"]["pending"] == 1
+        assert health["record_release_delay_seconds"] == 95.0
+    finally:
+        sampler.stop()
+        if sampler._confirmation_record_thread is not None:
+            sampler._confirmation_record_thread.join(timeout=1.0)
+        spool.close()
+
+
 def test_exact_sampler_rejects_spot_snapshot_created_after_decision():
     recorded = []
     sampler = ExactRTI13MSampler(
@@ -1050,9 +1590,31 @@ def test_exact_sampler_freezes_independent_opposite_side_quote_and_depth():
         "no_ask_cents": 41.0,
         "yes_bid_qty": 22.0,
         "yes_ask_qty": 31.0,
+        "execution_ladder_schema_version": "kalshi-execution-ladder-10x2c-v1",
+        "yes_fill_10x2c": {
+            "depth_within_limit_contracts": 35.0,
+            "filled_contracts_within_limit": 10.0,
+            "full_fill_supported": True,
+            "vwap_cents": 60.6,
+            "worst_price_cents": 61.0,
+            "slippage_cents": 0.6,
+        },
+        "no_fill_10x2c": {
+            "depth_within_limit_contracts": 22.0,
+            "filled_contracts_within_limit": 10.0,
+            "full_fill_supported": True,
+            "vwap_cents": 41.4,
+            "worst_price_cents": 42.0,
+            "slippage_cents": 0.4,
+        },
     }, "NO")
     assert quote["entry_ask_cents"] == 41.0
     assert quote["depth_contracts"] == 22.0
     assert quote["rti_opposite_side"] == "YES"
     assert quote["rti_opposite_ask_cents"] == 60.0
     assert quote["rti_opposite_depth_contracts"] == 31.0
+    assert quote["rti_ladder_depth_within_2c_contracts"] == 22.0
+    assert quote["rti_ladder_10_contract_full_fill_supported"] is True
+    assert quote["rti_ladder_10_contract_vwap_cents"] == 41.4
+    assert quote["rti_ladder_10_contract_worst_price_cents"] == 42.0
+    assert quote["rti_ladder_10_contract_slippage_cents"] == 0.4

@@ -316,3 +316,63 @@ def test_runtime_reconciles_forecast_with_durable_path_and_official_result(tmp_p
         runner.stop()
         if runner._ledger is not None:
             runner._ledger.close()
+
+
+def test_runtime_uses_canonical_clock_and_never_records_before_checkpoint(tmp_path):
+    model, _ = train_and_audit(_synthetic_examples())
+    model = replace(
+        model,
+        audit_summary={**model.audit_summary, "forward_shadow_eligible": True},
+    )
+    model_path = tmp_path / "model.npz"
+    db_path = tmp_path / "forward.sqlite3"
+    model.save(str(model_path))
+    runner = PathForecastRunner(
+        model_path=str(model_path), db_path=str(db_path), enabled=True,
+    )
+    raw_close = 8_989.0
+    canonical_close = 9_000.0
+    decision = canonical_close - 780.0
+    try:
+        # The raw market clock says 13m remain eleven seconds before the
+        # canonical checkpoint.  This used to create a pre-decision row.
+        for now in np.arange(decision - 120.0, decision - 10.0, 5.0):
+            runner.observe(
+                asset="BTC",
+                close_time=raw_close,
+                seconds_remaining=raw_close - now,
+                target_px=100.0,
+                index_px=100.0,
+                spot_px=None,
+                yes_bid=49.0,
+                yes_ask=51.0,
+                now=float(now),
+            )
+        runner._queue.join()
+        assert runner.health()["rows"] == 0
+
+        runner.observe(
+            asset="BTC",
+            close_time=raw_close,
+            seconds_remaining=raw_close - decision,
+            target_px=100.0,
+            index_px=100.0,
+            spot_px=None,
+            yes_bid=49.0,
+            yes_ask=51.0,
+            now=decision,
+        )
+        runner._queue.join()
+        assert runner._ledger is not None
+        row = runner._ledger.rows(limit=1)[0]
+        assert row["created_at"] >= row["decision_time"]
+        assert row["captured_offset_seconds"] == pytest.approx(0.0)
+        assert row["feature_age_seconds"] == pytest.approx(0.0)
+        health = runner.health()
+        assert health["timestamp_aligned_rows"] == 1
+        assert health["legacy_or_unaligned_rows"] == 0
+        assert health["clock_mismatch_observations"] > 0
+    finally:
+        runner.stop()
+        if runner._ledger is not None:
+            runner._ledger.close()

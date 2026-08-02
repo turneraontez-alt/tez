@@ -1,0 +1,121 @@
+{
+  "protocol_id": "q15-rti-v22-official-rest-top-book-challenger-v1",
+  "protocol_status": "PRE_EVIDENCE_IMPLEMENTATION_AMENDMENT_FROZEN_BEFORE_ANY_V22_FEATURE_CREDIT_OUTCOME_OR_LABEL_ACCESS",
+  "frozen_at": "2026-08-01T21:53:00Z",
+  "freeze_evidence": {
+    "eligible_v2_source_close_windows_before_amendment": 2,
+    "eligible_v2_source_rows_before_amendment": 56,
+    "v22_feature_complete_close_windows_before_amendment": 0,
+    "source_values_inspected": false,
+    "outcomes_or_resolution_status_inspected": false,
+    "labels_read": false,
+    "model_fit_or_probability_scoring_performed": false,
+    "feature_rules_selected_from_outcome_results": false,
+    "feature_engineering_basis": "PREDECLARED_MARKET_MICROSTRUCTURE_PRIORS_ONLY",
+    "amendment_reason": "the first source-only readiness execution failed closed at zero V22 feature rows because requiring a complete V21 vector inherited the intermittent Coinbase-only spot-depth failure for BNB/HYPE; V22 now retains only the 62 RTI/Kalshi features that do not depend on that source and replaces the excluded spot-derived fields with the independently captured official REST feature map"
+  },
+  "objective": "test whether independent four-stage official spot top-book persistence, liquidity, spread, and path evidence improves an outcome-blind RTI/Kalshi base while preserving frozen V21 as a matched diagnostic control",
+  "frozen_controls": {
+    "v21_protocol_id": "q15-rti-v21-intraminute-trajectory-prospective-v1",
+    "v21_protocol_sha256": "11b7e4c39280d793ae118c5237bf34eaadf83d1c281daf9171d5720b75d32454",
+    "v21_feature_builder_version": "q15-rti-v21-intraminute-trajectory-features-v2",
+    "v21_feature_names_sha256": "7e49760012a82d82bef6b6442d7c556bba822b702a983e10be184c8cc775dfd8",
+    "v21_feature_count": 76,
+    "v21_must_not_be_modified_or_replaced": true
+  },
+  "source_contract": {
+    "rest_protocol_id": "q15-rti-spot-rest-top-book-reservoir-v2",
+    "rest_protocol_sha256": "b4e3e342ae73c94679becb917a680020eabf9ee6cd3a80fa14b0781d2eb92a17",
+    "rest_schema_version": "official-spot-rest-top-book-v1",
+    "first_eligible_common_close_time": 1785620700.0,
+    "stages": ["13M", "12M30S", "12M", "11M30S"],
+    "assets": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+    "all_four_stages_and_all_seven_assets_required_per_close": true,
+    "only_rows_passing_the_frozen_v2_integrity_contract_allowed": true,
+    "historical_backfill_allowed": false,
+    "failed_or_terminally_excluded_v1_rows_receive_credit": false,
+    "exchange_timestamp_may_be_used_as_model_feature": false,
+    "request_or_response_timing_may_be_used_as_model_feature": false,
+    "provider_status_or_failure_metadata_may_be_used_as_model_feature": false
+  },
+  "feature_contract": {
+    "feature_builder_version": "q15-rti-v22-official-rest-top-book-features-v1",
+    "base_feature_count": 62,
+    "added_feature_count": 29,
+    "total_feature_count": 91,
+    "feature_names_sha256": "d0823eb838a834d43eaffe28267fe71b5fb8dfba18d613d78b871b42c4b0d853",
+    "base_feature_definition": "THE_62_FROZEN_V21_RTI_AND_KALSHI_FEATURES_REMAINING_AFTER_EXCLUDING_ALL_14_COINBASE_SPOT_DERIVED_FEATURES",
+    "excluded_v21_spot_derived_feature_count": 14,
+    "excluded_v21_spot_values_are_NEVER_neutrally_imputed_into_the_v22_vector": true,
+    "neutral_internal_values_may_only_allow_reuse_of_THE_FROZEN_FORMULA_AND_ARE_DROPPED_BEFORE_THE_VECTOR_IS_HASHED": true,
+    "added_feature_groups": {
+      "side_aligned_top_imbalance_at_four_stages": 4,
+      "spread_at_four_stages": 4,
+      "top_notional_at_four_stages": 4,
+      "imbalance_persistence_change_slope_and_flips": 6,
+      "spread_aggregates": 3,
+      "side_aligned_mid_path_and_acceleration": 6,
+      "top_notional_aggregates": 2
+    },
+    "top_notional_definition": "BEST_BID_TIMES_BID_SIZE_PLUS_BEST_ASK_TIMES_ASK_SIZE_IN_THE_FROZEN_QUOTE_CURRENCY",
+    "side_alignment": "YES_PLUS_ONE_NO_MINUS_ONE",
+    "missing_value_imputation_allowed": false,
+    "partial_stage_feature_rows_allowed": false,
+    "nonfinite_or_book_geometry_contradiction": "FAIL_ROW_AND_COMPLETE_CLOSE",
+    "source_timing_metadata_excluded_from_feature_map": true
+  },
+  "historical_audit_contract": {
+    "exclusive_earliest_complete_common_close_windows": 180,
+    "partitions": {
+      "train": [0, 104],
+      "probability_calibration": [105, 129],
+      "execution_policy_selection": [130, 154],
+      "untouched_test": [155, 179]
+    },
+    "same_close_all_asset_cluster_may_not_cross_partitions": true,
+    "cohorts": ["NON_BTC_TRANSFER", "BTC"],
+    "cross_cohort_training_calibration_selection_or_gate_pooling_forbidden": true,
+    "compare_v22_against_its_independently_fit_62_feature_base_ablation_on_exactly_the_same_common_rows": true,
+    "report_frozen_v21_only_on_exactly_matched_rows_where_v21_source_completeness_exists": true,
+    "matched_v21_reporting_never_used_for_v22_model_calibration_policy_or_gate_selection": true,
+    "model_and_hyperparameter_grids_must_be_frozen_before_label_access": true,
+    "chronological_walk_forward_train_only_model_selection_required": true,
+    "calibration_and_policy_partitions_must_be_disjoint": true,
+    "untouched_test_is_one_shot_and_only_independent_final_historical_confirmation": true,
+    "official_fee_metadata_reverified_before_each_label_reservation": true,
+    "contracts": 10,
+    "adverse_slippage_cents_per_contract": 2,
+    "actual_ten_contract_displayed_depth_required_for_trade_and_pnl": true,
+    "fake_or_partial_fills_forbidden": true,
+    "required_reporting": [
+      "SAMPLE_SIZE_AND_TRADE_FREQUENCY",
+      "ACCURACY_AND_WILSON_95_INTERVAL",
+      "OFFICIAL_FEE_AND_SLIPPAGE_ADJUSTED_PNL",
+      "EV_PER_TRADE_AND_MAXIMUM_DRAWDOWN",
+      "CLOSE_CLUSTER_BOOTSTRAP",
+      "REJECTED_TRADE_COUNTERFACTUALS",
+      "ASSET_SIDE_DISTANCE_VOLATILITY_AND_REGIME_SUBGROUPS"
+    ],
+    "minimum_paper_consideration_gates": [
+      "V22_FEE_SLIPPAGE_ADJUSTED_PNL_STRICTLY_POSITIVE",
+      "V22_CLOSE_CLUSTER_BOOTSTRAP_20TH_PERCENTILE_MEAN_PNL_STRICTLY_POSITIVE",
+      "V22_WILSON_95_LOWER_STRICTLY_EXCEEDS_AVERAGE_BREAK_EVEN",
+      "V22_ALL_ROW_LOG_LOSS_STRICTLY_BEATS_INDEPENDENTLY_FIT_62_FEATURE_BASE_ABLATION",
+      "V22_ALL_ROW_BRIER_STRICTLY_BEATS_INDEPENDENTLY_FIT_62_FEATURE_BASE_ABLATION",
+      "FROZEN_TEST_VOLUME_AND_BOTH_SIDE_MINIMA",
+      "NO_TIMESTAMP_SOURCE_OR_CROSS_ASSET_FOLD_LEAKAGE"
+    ],
+    "historical_results_cannot_auto_promote": true,
+    "manual_paper_reviews_required_at_resolved_picks": [30, 60, 150]
+  },
+  "safety": {
+    "outcome_access_allowed_now": false,
+    "label_access_allowed_now": false,
+    "model_fit_allowed_now": false,
+    "probability_scoring_allowed_now": false,
+    "paper_artifact_allowed_now": false,
+    "notifications_allowed_now": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  }
+}

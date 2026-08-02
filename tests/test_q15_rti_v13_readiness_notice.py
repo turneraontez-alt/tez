@@ -76,8 +76,8 @@ def test_v13_notice_projection_cannot_include_outcomes():
 def test_v13_snapshot_builder_uses_only_feature_loader(monkeypatch, tmp_path):
     loaded = []
 
-    def fake_load(path: Path):
-        loaded.append(path)
+    def fake_load(path: Path, after_close_time: float):
+        loaded.append((path, after_close_time))
         return [{"id": 1, "asset": "ETH"}]
 
     class Runtime:
@@ -91,7 +91,7 @@ def test_v13_snapshot_builder_uses_only_feature_loader(monkeypatch, tmp_path):
                 "model_feature_complete_close_times": [],
             }
 
-    monkeypatch.setattr(notice, "load_feature_rows", fake_load)
+    monkeypatch.setattr(notice, "load_feature_rows_after", fake_load)
     monkeypatch.setattr(
         notice, "build_report", lambda rows, source_schema: {"sentinel": True}
     )
@@ -119,7 +119,7 @@ def test_v13_snapshot_builder_uses_only_feature_loader(monkeypatch, tmp_path):
     )
     db = tmp_path / "features.sqlite3"
     snapshot = notice.build_outcome_blind_snapshot(database_path=db)
-    assert loaded == [db]
+    assert loaded == [(db, notice.v13.PROSPECTIVE_AFTER_CLOSE_TIME)]
     assert notice.ready_milestones(snapshot) == ["GEOMETRY_30", "NON_BTC_60"]
     assert snapshot["outcome_columns_selected"] is False
     assert snapshot["outcome_labels_read"] is False
@@ -293,3 +293,46 @@ def test_readiness_scans_defer_outside_exact_capture_history():
     assert health["capture_protected_before_seconds"] == 130
     assert health["capture_protected_after_seconds"] == 5
     assert health["capture_deferrals"] == 0
+
+
+def test_completed_one_shot_monitor_stops_rescanning(monkeypatch):
+    monkeypatch.setattr(
+        "q15_upgrade.v13_readiness_monitor.capture_protection_delay_seconds",
+        lambda _now: 0.0,
+    )
+
+    def factory():
+        return lambda text, **kwargs: {
+            "ok": True, "delivered": True, "muted": False,
+        }
+
+    monitor = V13ReadinessMonitor(
+        enabled=True,
+        snapshot_builder=lambda: _snapshot(150),
+        sender_factory=factory,
+    )
+    monitor._run()
+    health = monitor.health()
+    assert health["checks"] == 1
+    assert health["all_milestones_completed"] is True
+
+
+def test_completed_legacy_monitors_default_off_but_allow_explicit_opt_in(
+    monkeypatch,
+):
+    from q15_upgrade import independent_path_readiness_monitor as independent
+    from q15_upgrade import v11_readiness_monitor as v11_monitor
+    from q15_upgrade import v13_readiness_monitor as v13_monitor
+    from q15_upgrade import v14_readiness_monitor as v14_monitor
+
+    modules = (
+        (v11_monitor, "Q15_V11_READINESS_MONITOR"),
+        (v13_monitor, "Q15_V13_READINESS_MONITOR"),
+        (v14_monitor, "Q15_V14_READINESS_MONITOR"),
+        (independent, "Q15_INDEPENDENT_PATH_READINESS_MONITOR"),
+    )
+    for module, key in modules:
+        monkeypatch.delenv(key, raising=False)
+        assert module._enabled() is False
+        monkeypatch.setenv(key, "true")
+        assert module._enabled() is True

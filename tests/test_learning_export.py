@@ -116,6 +116,7 @@ def test_build_snapshot_exports_new_collector_dbs(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     _point_ledgers_at(monkeypatch, data_dir)
+    monkeypatch.setenv("LEARNING_EXPORT_RAW_DB_EXCLUDE_NAMES", "")
 
     specs = {
         "q15_settlement_index_v1.sqlite3": "settlement_index_ticks",
@@ -211,6 +212,94 @@ def test_build_snapshot_excludes_high_volume_raw_db_without_backup_or_gzip(tmp_p
     assert meta["gz_sha256"] is None
     assert meta["row_counts"]["payloads"] == 1
     assert artifacts == {}
+
+
+def test_build_snapshot_streams_raw_database_compression(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _point_ledgers_at(monkeypatch, data_dir)
+    monkeypatch.setenv("LEARNING_EXPORT_RAW_DB_EXCLUDE_NAMES", "")
+
+    db = data_dir / "ordinary.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE payloads (payload BLOB)")
+        conn.execute("INSERT INTO payloads VALUES (?)", (os.urandom(1024 * 1024),))
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path):
+        if path.name.startswith("lexport_") and path.suffix == ".sqlite3":
+            raise AssertionError("raw SQLite backup must be streamed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    snap, artifacts = lx.build_snapshot(
+        data_dir,
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc),
+        head_commit=None,
+        build_info=None,
+    )
+
+    rel = "dbs/ordinary.sqlite3.gz"
+    assert snap["databases"]["ordinary.sqlite3"]["artifact"] == rel
+    assert gzip.decompress(artifacts[rel])[:16] == b"SQLite format 3\x00"
+
+
+def test_default_raw_exclusions_include_settlement_index():
+    assert "q15_settlement_index_v1.sqlite3" in lx._raw_artifact_exclude_names()
+    assert "q15_strategy_bots_v3.sqlite3" in lx._raw_artifact_exclude_names()
+
+
+def test_strategy_export_does_not_materialize_frozen_json(tmp_path, monkeypatch):
+    from q15_upgrade.strategy_bots.ledger import StrategyBotLedger
+    from q15_upgrade.strategy_bots.rules import confidence_tier_decision
+
+    data_dir = tmp_path / "data"
+    _point_ledgers_at(monkeypatch, data_dir)
+    db = data_dir / "q15_strategy_bots_v3.sqlite3"
+    ledger = StrategyBotLedger(db)
+    row = {
+        "created_at": 1000.0,
+        "model_version": "ultoim-v2",
+        "asset": "BTC",
+        "ticker": "KXBTC-1",
+        "interval": "10M",
+        "window_key": 10,
+        "predicted_side": "YES",
+        "entry_ask_cents": 80.0,
+        "spread_cents": 2.0,
+        "delivery_status": "MUTED",
+        "record_kind": "DELIVERED_CANDIDATE",
+        "reason_codes": "TEST",
+    }
+    decision = confidence_tier_decision(row, source_system="ultoim_v2")
+    assert ledger.record_decision(
+        decision, row, source_system="ultoim_v2",
+    ) is not None
+    ledger.close()
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "UPDATE strategy_bot_decisions SET threshold_json=?",
+            (json.dumps({"large": "x" * (2 * 1024 * 1024)}),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with patch.object(
+        StrategyBotLedger,
+        "scoreboard",
+        side_effect=AssertionError("full scoreboard must not run in exporter"),
+    ):
+        result = lx._strategy_bot_scoreboards(db)["scoreboard"]
+
+    assert result["export_mode"] == "MEMORY_BOUNDED_COMPACT_SQL_V1"
+    assert result["by_tier"]["A"]["rows"] == 1
 
 
 def test_build_snapshot_handles_empty_data_dir(tmp_path, monkeypatch):
@@ -362,6 +451,19 @@ def test_main_without_token_does_not_run(monkeypatch):
 
 def test_url_embeds_token():
     assert lx._url("owner/repo", "Tk") == "https://x-access-token:Tk@github.com/owner/repo.git"
+
+
+@pytest.mark.parametrize("detail", [
+    "remote: Invalid username or token.",
+    "fatal: Authentication failed for repo",
+    '{"message":"Bad credentials"}',
+])
+def test_auth_failures_are_terminal(detail):
+    assert lx._is_auth_failure(detail) is True
+
+
+def test_non_auth_publish_failure_is_retryable():
+    assert lx._is_auth_failure("temporary network timeout") is False
 
 
 def test_git_executable_prefers_configured_git(tmp_path, monkeypatch):

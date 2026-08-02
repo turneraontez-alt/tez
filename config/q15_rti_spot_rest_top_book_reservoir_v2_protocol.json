@@ -1,0 +1,101 @@
+{
+  "protocol_id": "q15-rti-spot-rest-top-book-reservoir-v2",
+  "protocol_status": "FROZEN_BEFORE_FIRST_V2_ELIGIBLE_REST_BOOK_EVIDENCE",
+  "source_only_amendment": "After V1's first and only source window, with no outcome or label access, the V1 implementation was found to contradict its receipt-freshness contract by rejecting exchange mutation timestamps more than one second ahead of the host clock. V2 retains local receipt as the only freshness authority, stores exchange time as provenance, freezes a five-second exchange-clock-lead sanity bound, moves the prospective boundary forward, and gives all V1 rows zero V2 credit.",
+  "eligible_v2_rows_before_freeze": 0,
+  "v1_terminal_exclusion": {
+    "protocol_sha256": "291fb660cc05135704b8983f0644ce3253bb9de407bb7feb4d32f36436ee104c",
+    "database": "data/q15_rti_spot_rest_top_book_v1.sqlite3",
+    "row_count": 28,
+    "ordered_evidence_hashes_sha256": "bc27e20a6e2efb0901d8c77f4ad74fec37d6d681a18b7f7f5858f5086528d64b",
+    "rows_receive_v2_credit": false,
+    "outcomes_inspected": false
+  },
+  "objective": "retain newly requested official spot top-of-book evidence at each exact RTI stage for a future challenger without changing V21, any control, notification, or trade",
+  "prospective_boundary": {
+    "strictly_after_close_time": 1785619800.0,
+    "first_eligible_close_time": 1785620700.0,
+    "historical_backfill_allowed": false,
+    "pre_boundary_rows_receive_credit": false
+  },
+  "capture_contract": {
+    "assets": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+    "stages": ["13M", "12M30S", "12M", "11M30S"],
+    "source_identity_by_asset": {
+      "BNB": {"provider": "okx", "symbol": "BNB-USDT", "quote_currency": "USDT"},
+      "BTC": {"provider": "coinbase", "symbol": "BTC-USD", "quote_currency": "USD"},
+      "DOGE": {"provider": "coinbase", "symbol": "DOGE-USD", "quote_currency": "USD"},
+      "ETH": {"provider": "coinbase", "symbol": "ETH-USD", "quote_currency": "USD"},
+      "HYPE": {"provider": "okx", "symbol": "HYPE-USDT", "quote_currency": "USDT"},
+      "SOL": {"provider": "coinbase", "symbol": "SOL-USD", "quote_currency": "USD"},
+      "XRP": {"provider": "coinbase", "symbol": "XRP-USD", "quote_currency": "USD"}
+    },
+    "request_contract_by_provider": {
+      "coinbase": {
+        "method": "GET",
+        "url_template": "https://api.exchange.coinbase.com/products/{symbol}/book",
+        "query": {"level": "1"}
+      },
+      "okx": {
+        "method": "GET",
+        "url_template": "https://www.okx.com/api/v5/market/books",
+        "query": {"instId": "{symbol}", "sz": "1"}
+      }
+    },
+    "depth_scope": "OFFICIAL_TOP_OF_BOOK_LEVEL_1",
+    "request_must_start_at_or_after_target": true,
+    "maximum_request_start_offset_seconds": 2.0,
+    "maximum_response_latency_seconds": 2.0,
+    "maximum_receive_offset_seconds": 4.0,
+    "maximum_exchange_clock_lead_seconds": 5.0,
+    "local_request_and_receive_clock_is_freshness_authority": true,
+    "exchange_book_timestamp_is_mutation_provenance_not_receipt_freshness": true,
+    "exchange_timestamp_never_establishes_feature_availability": true,
+    "positive_two_sided_uncrossed_book_required": true,
+    "schema_version": "official-spot-rest-top-book-v1"
+  },
+  "storage_contract": {
+    "database": "data/q15_rti_spot_rest_top_book_v2.sqlite3",
+    "sqlite_journal_mode": "WAL",
+    "unique_identity": ["ticker", "close_time", "stage"],
+    "canonical_evidence_sha256_required": true,
+    "existing_identity_never_overwritten": true,
+    "outcome_columns_forbidden": true,
+    "failed_requests_are_retained": true
+  },
+  "noninterference": {
+    "submit_is_nonblocking": true,
+    "network_and_database_work_run_outside_exact_sampler_thread": true,
+    "submit_only_after_existing_stage_quote_and_spot_context_are_frozen": true,
+    "used_by_v18": false,
+    "used_by_v19": false,
+    "used_by_v20": false,
+    "used_by_v21": false,
+    "changes_existing_features": false,
+    "changes_existing_decisions": false,
+    "changes_existing_readiness": false
+  },
+  "usage": {
+    "record_only": true,
+    "outcome_access_allowed": false,
+    "label_access_allowed": false,
+    "model_fit_allowed": false,
+    "probability_scoring_allowed": false,
+    "threshold_selection_allowed": false,
+    "paper_artifact_allowed": false,
+    "notifications_allowed": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  },
+  "future_audit_requirements": {
+    "feature_rules_frozen_before_outcome_access": true,
+    "chronological_same_close_cross_asset_folds": true,
+    "separate_btc_and_non_btc_reports": true,
+    "compare_against_frozen_v21_and_frozen_strict_control": true,
+    "official_fee_and_slippage_adjusted_pnl": true,
+    "rejected_trade_counterfactuals": true,
+    "untouched_test_required": true,
+    "historical_results_cannot_auto_promote": true,
+    "prospective_paper_review_required": true
+  }
+}

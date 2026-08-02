@@ -1,8 +1,8 @@
 param(
     [string]$MaintenanceTaskName = "Q15 Storage Maintenance",
     [string]$BackupTaskName = "Q15 Critical Data Backup",
-    [string]$MaintenanceTime = "02:45",
-    [string]$BackupTime = "03:00"
+    [string]$MaintenanceTime = "02:50",
+    [string]$BackupTime = "03:20"
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"

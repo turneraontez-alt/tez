@@ -18,8 +18,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _enabled() -> bool:
+    # The one-shot V11 milestone is complete.  Keep this legacy full-ledger
+    # scan opt-in so it cannot starve exact RTI capture in the same process.
     return os.environ.get(
-        "Q15_V11_READINESS_MONITOR", "true"
+        "Q15_V11_READINESS_MONITOR", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 

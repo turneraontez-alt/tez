@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 RTI_POINT_IN_TIME_RISK_POLICY_VERSION = (
     "rti-point-in-time-risk-taxonomy-20260720-v1"
 )
+RTI_DISTANCE_TO_REMAINING_VOLATILITY_CAP = 10.0
 
 
 def _num(value: Any) -> float | None:
@@ -141,12 +142,23 @@ def build_rti_path_features(
         if realized_volatility_bps is None
         else realized_volatility_bps * math.sqrt(780.0 / 60.0)
     )
+    zero_remaining_volatility_limit = bool(
+        absolute_distance_bps is not None
+        and remaining_volatility_bps == 0.0
+    )
     distance_to_remaining_volatility = (
         None
-        if absolute_distance_bps is None
-        or remaining_volatility_bps is None
-        or remaining_volatility_bps == 0.0
-        else absolute_distance_bps / remaining_volatility_bps
+        if absolute_distance_bps is None or remaining_volatility_bps is None
+        else (
+            0.0
+            if remaining_volatility_bps == 0.0 and absolute_distance_bps == 0.0
+            else RTI_DISTANCE_TO_REMAINING_VOLATILITY_CAP
+            if remaining_volatility_bps == 0.0
+            else min(
+                RTI_DISTANCE_TO_REMAINING_VOLATILITY_CAP,
+                absolute_distance_bps / remaining_volatility_bps,
+            )
+        )
     )
     return {
         "rti_path_status": path_context.get("status"),
@@ -182,6 +194,12 @@ def build_rti_path_features(
         "rti_path_seconds_since_last_crossing": seconds_since_last_crossing,
         "rti_expected_remaining_volatility_bps": remaining_volatility_bps,
         "rti_distance_to_remaining_volatility": distance_to_remaining_volatility,
+        "rti_distance_to_remaining_volatility_cap": (
+            RTI_DISTANCE_TO_REMAINING_VOLATILITY_CAP
+        ),
+        "rti_zero_remaining_volatility_limit_applied": (
+            zero_remaining_volatility_limit
+        ),
     }
 
 

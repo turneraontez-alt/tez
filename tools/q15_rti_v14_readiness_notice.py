@@ -20,7 +20,7 @@ from q15_upgrade.strategy_bots import rti_microstructure_v14 as v14
 from q15_upgrade.strategy_bots.telegram import V3Telegram
 from tools.q15_rti_feature_coverage_audit import build_report
 from tools.q15_rti_microstructure_feature_audit import soft_input_integrity
-from tools.q15_rti_microstructure_freeze import load_feature_rows
+from tools.q15_rti_microstructure_freeze import load_feature_rows_after
 from tools.q15_rti_microstructure_preregister import (
     DEFAULT_DB,
     build_readiness,
@@ -73,7 +73,12 @@ def build_outcome_blind_snapshot(
         design_fingerprint(design) != v14.DESIGN_SHA256
     ):
         raise ValueError("v14_readiness_design_binding_mismatch")
-    rows = load_feature_rows(database_path)
+    # Only strictly prospective rows can receive V14 readiness credit.  Filter
+    # in SQLite so the background monitor cannot repeatedly materialize the
+    # entire historical wide table and starve exact capture.
+    rows = load_feature_rows_after(
+        database_path, float(design["prospective_after_close_time"]),
+    )
     coverage = build_report(
         rows, source_schema=str(design.get("source_schema") or ""),
     )

@@ -993,10 +993,15 @@ def _feature_only_sqlite_authorizer(
     return sqlite3.SQLITE_OK
 
 
-def load_feature_rows(db_path: Path) -> list[dict[str, Any]]:
-    """Load a strict allow-list that excludes every settlement/P&L column."""
+def _load_feature_rows(
+    db_path: Path, *, after_close_time: float | None,
+) -> list[dict[str, Any]]:
+    """Load the feature allow-list, optionally restricted by close time."""
     if OUTCOME_COLUMNS.intersection(FEATURE_SELECT_COLUMNS):
         raise AssertionError("feature_allow_list_contains_outcome")
+    boundary = None if after_close_time is None else _num(after_close_time)
+    if after_close_time is not None and boundary is None:
+        raise ValueError("feature_database_close_boundary_invalid")
     connection = _connect_read_only(db_path)
     connection.set_authorizer(_feature_only_sqlite_authorizer)
     try:
@@ -1016,16 +1021,21 @@ def load_feature_rows(db_path: Path) -> list[dict[str, Any]]:
         feature_projection, profile_aliases = feature_only_sql_projection(
             columns
         )
+        boundary_sql = "" if boundary is None else "AND close_time>? "
         query = (
             f"SELECT {','.join([*selected, *feature_projection])} "
             "FROM strategy_bot_decisions "
             "WHERE bot_name='rti_path_13m' AND interval='13M' "
             "AND record_kind='RTI_PATH_13M_PROSPECTIVE_EXACT' "
+            f"{boundary_sql}"
             "ORDER BY close_time,id"
+        )
+        parameters: tuple[float, ...] = (
+            () if boundary is None else (float(boundary),)
         )
         rows = [
             materialize_feature_only_row(row, profile_aliases)
-            for row in connection.execute(query).fetchall()
+            for row in connection.execute(query, parameters).fetchall()
         ]
         for row in rows:
             profile = json.loads(row["threshold_json"])
@@ -1038,6 +1048,20 @@ def load_feature_rows(db_path: Path) -> list[dict[str, Any]]:
         return rows
     finally:
         connection.close()
+
+
+def load_feature_rows(db_path: Path) -> list[dict[str, Any]]:
+    """Load all feature rows without exposing settlement/P&L columns."""
+    return _load_feature_rows(db_path, after_close_time=None)
+
+
+def load_feature_rows_after(
+    db_path: Path, after_close_time: float,
+) -> list[dict[str, Any]]:
+    """Load only rows strictly after a frozen outcome-blind close boundary."""
+    return _load_feature_rows(
+        db_path, after_close_time=float(after_close_time),
+    )
 
 
 def _complete_window_rows(

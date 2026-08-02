@@ -279,11 +279,11 @@ def test_snapshot_builder_uses_reconstructable_feature_only_report(
 ):
     loaded = []
 
-    def fake_load(path: Path):
-        loaded.append(path)
+    def fake_load(path: Path, after_close_time: float):
+        loaded.append((path, after_close_time))
         return [{"feature_only": True}]
 
-    monkeypatch.setattr(notice, "load_feature_rows", fake_load)
+    monkeypatch.setattr(notice, "load_feature_rows_after", fake_load)
     monkeypatch.setattr(
         notice,
         "complete_audit_windows",
@@ -336,7 +336,7 @@ def test_snapshot_builder_uses_reconstructable_feature_only_report(
             - 1
         ),
     )
-    assert loaded == [db]
+    assert loaded == [(db, 1784746800.0)]
     assert notice.ready_milestones(snapshot) == ["GEOMETRY_30"]
     assert snapshot["invalid_rows_excluded_from_credit"] == 4
     assert snapshot["successor_audit_complete_close_windows"] == 29
@@ -373,7 +373,9 @@ def test_expected_close_is_due_only_after_exact_capture_grace():
 def test_snapshot_builder_detects_an_entirely_missing_due_close(
     monkeypatch, tmp_path,
 ):
-    monkeypatch.setattr(notice, "load_feature_rows", lambda path: [])
+    monkeypatch.setattr(
+        notice, "load_feature_rows_after", lambda path, after_close_time: [],
+    )
     monkeypatch.setattr(notice, "build_report", lambda rows, design: {
         "complete_seven_asset_close_windows": 0,
         "complete_close_times": [],
@@ -430,7 +432,9 @@ def test_user_confirmed_maintenance_is_excluded_without_audit_credit(
         if value < start
     ]
     windows = len(earlier)
-    monkeypatch.setattr(notice, "load_feature_rows", lambda path: [])
+    monkeypatch.setattr(
+        notice, "load_feature_rows_after", lambda path, after_close_time: [],
+    )
     monkeypatch.setattr(notice, "build_report", lambda rows, design: {
         "complete_seven_asset_close_windows": windows,
         "complete_close_times": earlier,
@@ -786,6 +790,7 @@ def test_repeated_degradation_delivery_is_durable_and_idempotent(
 
 
 def test_monitor_waits_without_sender_then_exposes_safe_ready_health():
+    assert IndependentPathReadinessMonitor.STOP_AFTER_ALL_MILESTONES is False
     factory_calls = []
     waiting = IndependentPathReadinessMonitor(
         enabled=True,

@@ -1953,6 +1953,11 @@ def _rti_delayed_confirm_row(**over):
         rti_confirm_path_decision_age_s=0.3,
         quote_age_seconds=0.2,
         quote_age_source="kalshi_ws_exact_sampler",
+        quote_evidence_source="kalshi_official_websocket_book",
+        kalshi_trade_imbalance_yes_60s=0.25,
+        kalshi_book_delta_pressure_yes_60s=1.5,
+        spot_depth_trade_net_notional_60s=500.0,
+        spot_depth_trade_net_qty_60s=2.0,
         entry_ask_cents=57.0,
         spread_cents=1.0,
         depth_contracts=25.0,
@@ -1960,6 +1965,15 @@ def _rti_delayed_confirm_row(**over):
         rti_opposite_side="NO",
         rti_opposite_ask_cents=43.0,
         rti_opposite_depth_contracts=22.0,
+        rti_execution_ladder_schema_version=(
+            "kalshi-execution-ladder-10x2c-v1"
+        ),
+        rti_ladder_depth_within_2c_contracts=25.0,
+        rti_ladder_10_contract_filled_contracts=10.0,
+        rti_ladder_10_contract_full_fill_supported=True,
+        rti_ladder_10_contract_vwap_cents=57.4,
+        rti_ladder_10_contract_worst_price_cents=58.0,
+        rti_ladder_10_contract_slippage_cents=0.4,
     )
     base.update(over)
     return base
@@ -2374,6 +2388,21 @@ def test_rti_delayed_60s_confirmation_is_independent_and_fails_closed():
     assert challenger["criteria"]["policy_version"] == (
         RTI_PATH_13M_DELAYED_CONFIRM_60S_POLICY_VERSION
     )
+    assert decision.threshold_profile["quote_evidence_source"] == (
+        "kalshi_official_websocket_book"
+    )
+    assert decision.threshold_profile["kalshi_trade_imbalance_yes_60s"] == 0.25
+    assert decision.threshold_profile["kalshi_book_delta_pressure_yes_60s"] == 1.5
+    assert decision.threshold_profile["spot_depth_trade_net_notional_60s"] == 500.0
+    assert decision.threshold_profile["delayed_feature_reservoir_record_only"] is True
+    assert decision.threshold_profile["delayed_feature_reservoir_used_for_decision"] is False
+    assert decision.threshold_profile["rti_execution_ladder_schema_version"] == (
+        "kalshi-execution-ladder-10x2c-v1"
+    )
+    assert decision.threshold_profile[
+        "rti_ladder_10_contract_full_fill_supported"
+    ] is True
+    assert decision.threshold_profile["rti_ladder_10_contract_vwap_cents"] == 57.4
 
     rejected = rti_path_12m_confirmation_decision(
         _rti_delayed_confirm_60s_row(rti_confirm_path_count=60)
@@ -2384,6 +2413,33 @@ def test_rti_delayed_60s_confirmation_is_independent_and_fails_closed():
     assert rejected.decision_status == REJECTED
     assert rejected_book["accepted"] is False
     assert "CONFIRM_PATH_61_FRESH" in rejected_book["failures"]
+
+
+def test_rti_delayed_feature_reservoir_never_changes_frozen_decision():
+    baseline = rti_path_12m_confirmation_decision(
+        _rti_delayed_confirm_60s_row()
+    )
+    extreme = rti_path_12m_confirmation_decision(
+        _rti_delayed_confirm_60s_row(
+            kalshi_trade_imbalance_yes_60s=-1.0,
+            kalshi_book_delta_pressure_yes_60s=-1_000_000.0,
+            spot_depth_trade_net_notional_60s=-1_000_000_000.0,
+            spot_depth_trade_net_qty_60s=-1_000_000.0,
+            rti_ladder_depth_within_2c_contracts=1_000_000.0,
+            rti_ladder_10_contract_filled_contracts=0.0,
+            rti_ladder_10_contract_full_fill_supported=False,
+            rti_ladder_10_contract_vwap_cents=None,
+            rti_ladder_10_contract_worst_price_cents=None,
+            rti_ladder_10_contract_slippage_cents=None,
+        )
+    )
+    assert extreme.decision_status == baseline.decision_status
+    assert extreme.reason_codes == baseline.reason_codes
+    assert extreme.side_override == baseline.side_override
+    assert extreme.entry_ask_cents == baseline.entry_ask_cents
+    assert extreme.threshold_profile[
+        "delayed_feature_reservoir_used_for_decision"
+    ] is False
 
 
 def test_rti_delayed_90s_stability_is_fresh_silent_and_post_loss_selected():

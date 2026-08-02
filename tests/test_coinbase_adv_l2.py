@@ -7,6 +7,8 @@ import sqlite3
 import sys
 import time
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 
@@ -22,6 +24,42 @@ def test_load_cdp_key_accepts_name_or_id(tmp_path):
     id_key = tmp_path / "id.json"
     id_key.write_text(json.dumps({"id": "key-id", "privateKey": "secret-2"}))
     assert load_cdp_key(str(id_key)) == ("key-id", "secret-2")
+
+
+def test_explicit_missing_key_path_never_scans_downloads(tmp_path, monkeypatch):
+    configured = tmp_path / "missing-explicit.json"
+    monkeypatch.setenv("Q15_COINBASE_ADV_L2_KEY_FILE", str(configured))
+    monkeypatch.setattr(
+        adv_l2,
+        "_default_key_file",
+        lambda: (_ for _ in ()).throw(AssertionError("downloads scan")),
+    )
+    with pytest.raises(FileNotFoundError):
+        load_cdp_key()
+
+
+def test_active_feed_health_reuses_loaded_key_state(tmp_path, monkeypatch):
+    feed = CoinbaseAdvancedL2Collector(
+        products=["BTC-USD"],
+        db_path=str(tmp_path / "adv_l2.sqlite3"),
+        key_file=str(tmp_path / "missing.json"),
+    )
+    monkeypatch.setattr(adv_l2, "_feed", feed)
+    monkeypatch.setattr(
+        adv_l2,
+        "_has_key_file",
+        lambda: (_ for _ in ()).throw(AssertionError("key reread")),
+    )
+    monkeypatch.setattr(
+        adv_l2,
+        "_key_file",
+        lambda: (_ for _ in ()).throw(AssertionError("key rescan")),
+    )
+
+    health = coinbase_adv_l2_health()
+    assert health["authenticated_key_loaded"] is False
+    assert health["connection_mode"] == "public"
+    assert health["key_file"].endswith("missing.json")
 
 
 def test_l2_snapshot_update_and_record(tmp_path):

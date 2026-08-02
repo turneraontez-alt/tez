@@ -1,0 +1,20 @@
+"""Immutable identity for the outcome-blind RTI V17 path-dynamics design."""
+
+DESIGN_ID = "q15-rti-market-anchored-kalshi-path-dynamics-v17"
+PROTOCOL_ID = "q15-rti-v17-kalshi-path-dynamics-disjoint-development-v1"
+PROTOCOL_SHA256 = (
+    "33a40c2afc22cd4967fcf37dab5ba1e18437358669b919121b22ba411cedd272"
+)
+PROTOCOL_RELATIVE_PATH = "config/q15_rti_v17_path_dynamics_protocol.json"
+
+FEATURE_SOURCE_AFTER_CLOSE_TIME = 1784746800.0
+DEVELOPMENT_BEFORE_OR_AT_CLOSE_TIME = 1785569400.0
+PROSPECTIVE_AFTER_CLOSE_TIME = 1785569400.0
+
+OUTCOME_ACCESS_ALLOWED = False
+MODEL_FIT_ALLOWED = False
+PROBABILITY_SCORING_ALLOWED = False
+PAPER_ARTIFACT_ALLOWED = False
+NOTIFICATION_ELIGIBLE = False
+AUTOMATIC_PROMOTION = False
+REAL_TRADING_ALLOWED = False

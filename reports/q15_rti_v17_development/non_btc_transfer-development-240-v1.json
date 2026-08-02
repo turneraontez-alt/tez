@@ -1,0 +1,235 @@
+{
+  "automatic_promotion": false,
+  "btc_labels_read": false,
+  "cohort": "NON_BTC_TRANSFER",
+  "cohort_assets": [
+    "BNB",
+    "DOGE",
+    "ETH",
+    "HYPE",
+    "SOL",
+    "XRP"
+  ],
+  "complete_disjoint_windows_available": 244,
+  "design_id": "q15-rti-market-anchored-kalshi-path-dynamics-v17",
+  "feature_count": 81,
+  "feature_names_sha256": "30c4690a1b8a98d9579aa0cb4cdbae746f39dbf6881b8202bcffa1cd2e97af15",
+  "feature_schema_version": "rti-probability-microstructure-features-v17",
+  "first_selected_close_time": 1785324600.0,
+  "fold_manifest": {
+    "calibration_rows_are_not_in_walk_forward_validation": true,
+    "initial_train_close_windows": 120,
+    "inner_validation_strictly_after_training": true,
+    "outer_fold_count": 4,
+    "outer_folds": [
+      {
+        "fold": 1,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "7bc119f29d8681edb7729df8a7e85b3c0c0abe9e47886883af3ec595cbecb092",
+            "train_close_windows": 60,
+            "validation_close_times_sha256": "f2e92453a6bb5327f6d3acd884eb8bedf2fc596eed2e334a77e49eedda0a66a6",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "a1e5cfddc193ca188f378168290343b78582330614e46076f24f64464c9aed0e",
+            "train_close_windows": 90,
+            "validation_close_times_sha256": "f1dce95576d13787dd89c3953557b6adb36f0924b6820bc0f0ec9ed30562c701",
+            "validation_close_windows": 30
+          }
+        ],
+        "train_close_times_sha256": "5ec37ed5dc63a287ff656256912342dea40d1eddcbdbdb01e1445d67bc67d492",
+        "train_close_windows": 120,
+        "validation_close_times_sha256": "ed3491d2250939c30b434c20f6b0c752117ebac0d2a4ed30a379c41d669c6c85",
+        "validation_close_windows": 30
+      },
+      {
+        "fold": 2,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "7bc119f29d8681edb7729df8a7e85b3c0c0abe9e47886883af3ec595cbecb092",
+            "train_close_windows": 60,
+            "validation_close_times_sha256": "f2e92453a6bb5327f6d3acd884eb8bedf2fc596eed2e334a77e49eedda0a66a6",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "a1e5cfddc193ca188f378168290343b78582330614e46076f24f64464c9aed0e",
+            "train_close_windows": 90,
+            "validation_close_times_sha256": "f1dce95576d13787dd89c3953557b6adb36f0924b6820bc0f0ec9ed30562c701",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 3,
+            "train_close_times_sha256": "5ec37ed5dc63a287ff656256912342dea40d1eddcbdbdb01e1445d67bc67d492",
+            "train_close_windows": 120,
+            "validation_close_times_sha256": "ed3491d2250939c30b434c20f6b0c752117ebac0d2a4ed30a379c41d669c6c85",
+            "validation_close_windows": 30
+          }
+        ],
+        "train_close_times_sha256": "be7e2c1a78bcc0f6cffd224007ab460a5104bffe14f2a08d404683630ab06c1a",
+        "train_close_windows": 150,
+        "validation_close_times_sha256": "2e55aac875e60ce6cbbdf874cad2305118f528598531a02e4e4a860c6d1ef30d",
+        "validation_close_windows": 30
+      },
+      {
+        "fold": 3,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "7bc119f29d8681edb7729df8a7e85b3c0c0abe9e47886883af3ec595cbecb092",
+            "train_close_windows": 60,
+            "validation_close_times_sha256": "f2e92453a6bb5327f6d3acd884eb8bedf2fc596eed2e334a77e49eedda0a66a6",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "a1e5cfddc193ca188f378168290343b78582330614e46076f24f64464c9aed0e",
+            "train_close_windows": 90,
+            "validation_close_times_sha256": "f1dce95576d13787dd89c3953557b6adb36f0924b6820bc0f0ec9ed30562c701",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 3,
+            "train_close_times_sha256": "5ec37ed5dc63a287ff656256912342dea40d1eddcbdbdb01e1445d67bc67d492",
+            "train_close_windows": 120,
+            "validation_close_times_sha256": "ed3491d2250939c30b434c20f6b0c752117ebac0d2a4ed30a379c41d669c6c85",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 4,
+            "train_close_times_sha256": "be7e2c1a78bcc0f6cffd224007ab460a5104bffe14f2a08d404683630ab06c1a",
+            "train_close_windows": 150,
+            "validation_close_times_sha256": "2e55aac875e60ce6cbbdf874cad2305118f528598531a02e4e4a860c6d1ef30d",
+            "validation_close_windows": 30
+          }
+        ],
+        "train_close_times_sha256": "7a9eaeeda3deba8c1b4dc94af74861fe9f6c57cab76e35d965d4926650be9ac1",
+        "train_close_windows": 180,
+        "validation_close_times_sha256": "491448af8fdc3dccfb400ac2a9cfa329ce42662648f879d4ac8eb0ac9e7de16b",
+        "validation_close_windows": 30
+      },
+      {
+        "fold": 4,
+        "inner_folds": [
+          {
+            "fold": 1,
+            "train_close_times_sha256": "7bc119f29d8681edb7729df8a7e85b3c0c0abe9e47886883af3ec595cbecb092",
+            "train_close_windows": 60,
+            "validation_close_times_sha256": "f2e92453a6bb5327f6d3acd884eb8bedf2fc596eed2e334a77e49eedda0a66a6",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 2,
+            "train_close_times_sha256": "a1e5cfddc193ca188f378168290343b78582330614e46076f24f64464c9aed0e",
+            "train_close_windows": 90,
+            "validation_close_times_sha256": "f1dce95576d13787dd89c3953557b6adb36f0924b6820bc0f0ec9ed30562c701",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 3,
+            "train_close_times_sha256": "5ec37ed5dc63a287ff656256912342dea40d1eddcbdbdb01e1445d67bc67d492",
+            "train_close_windows": 120,
+            "validation_close_times_sha256": "ed3491d2250939c30b434c20f6b0c752117ebac0d2a4ed30a379c41d669c6c85",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 4,
+            "train_close_times_sha256": "be7e2c1a78bcc0f6cffd224007ab460a5104bffe14f2a08d404683630ab06c1a",
+            "train_close_windows": 150,
+            "validation_close_times_sha256": "2e55aac875e60ce6cbbdf874cad2305118f528598531a02e4e4a860c6d1ef30d",
+            "validation_close_windows": 30
+          },
+          {
+            "fold": 5,
+            "train_close_times_sha256": "7a9eaeeda3deba8c1b4dc94af74861fe9f6c57cab76e35d965d4926650be9ac1",
+            "train_close_windows": 180,
+            "validation_close_times_sha256": "491448af8fdc3dccfb400ac2a9cfa329ce42662648f879d4ac8eb0ac9e7de16b",
+            "validation_close_windows": 30
+          }
+        ],
+        "train_close_times_sha256": "b14139252287b7891f408dde8bb949bfb3cdb55c2201e200f72bd8833392ba2c",
+        "train_close_windows": 210,
+        "validation_close_times_sha256": "40cd48882fecdb888165676a54751d1f392be427812ee60f2d75c50da62503a4",
+        "validation_close_windows": 30
+      }
+    ],
+    "outer_validation_strictly_after_training": true,
+    "same_close_assets_share_every_outer_and_inner_fold": true,
+    "walk_forward_validation_close_windows": 120
+  },
+  "generated_at": "2026-08-01T07:42:00.465868+00:00",
+  "last_selected_close_time": 1785565800.0,
+  "market_prior_consistency": {
+    "audit_version": "q15-rti-market-prior-outcome-blind-consistency-v1",
+    "outcome_labels_read": false,
+    "rows": 1680,
+    "status": "PASS"
+  },
+  "model_fit_performed": false,
+  "notification_eligible": false,
+  "outcome_columns_selected": false,
+  "outcome_labels_read": false,
+  "paper_artifact_created": false,
+  "prior_population_exclusion": {
+    "all_prior_selected_close_times_sha256": "1206fe8bcf772ee3391957860d16f688a98fa589a603cb7dbc8b07d06eb83ac9",
+    "all_prior_selected_unique_close_windows": 444,
+    "v15_seal_manifests": [
+      {
+        "name": "earliest_60_v3",
+        "seal_sha256": "4dc62ef1c00ddee075d033b1d7131bee1d17480232c36be27fe2ec9bcf1ac5a3",
+        "selected_close_times_sha256": "b0ce8ad55578894a5ee496c6a1ecab53d5864b769f3f49060d682f97fe6673c1",
+        "selected_close_windows": 60,
+        "selected_row_ids_sha256": "5b96ca1c24ab5e23d44d0c73c340fdffb9046c205ba08e59d19ddd1e9c39340c",
+        "selected_rows": 360
+      },
+      {
+        "name": "disjoint_recovery_60_v1",
+        "seal_sha256": "6a501bf7bc40c4b1e202c031b4712565756a4bb9af73c337865d22207bd60617",
+        "selected_close_times_sha256": "bc057cd5995e24fafada9418f37dc6a7204b0ecedb9a220710e7e21ad58f55c6",
+        "selected_close_windows": 60,
+        "selected_row_ids_sha256": "7830cd471f6f193e223282c44cf19d094cfc165326fb49cde7c30880d12473b0",
+        "selected_rows": 360
+      },
+      {
+        "name": "final_disjoint_60_v1",
+        "seal_sha256": "446fcf880cc245364e8ab3247b82d5bb7540d222c3e57ed8c6f5468c7822b4b4",
+        "selected_close_times_sha256": "dc50350ad5e5beefdbf855221be8cdfedcea87ee0957db91214b7b667b8f0a85",
+        "selected_close_windows": 60,
+        "selected_row_ids_sha256": "cac6beae76666b689f450b08df0b6cddf09c3dd73e374ad7453ae2043820701f",
+        "selected_rows": 360
+      },
+      {
+        "name": "fourth_disjoint_60_v1",
+        "seal_sha256": "ce0b40c032113b869f1b9918e8d1607d48b40b88237efa242300d0fafc0b9a94",
+        "selected_close_times_sha256": "a9704a72531f4922f04abb06a41c46365ff5c902c8cc38f4fb57d788c3c99ad0",
+        "selected_close_windows": 60,
+        "selected_row_ids_sha256": "b3bfaa42c17334e471b9e891eaa922cc372b1bf8eb73d0326bad95bc19788c25",
+        "selected_rows": 360
+      }
+    ],
+    "v15_selected_close_times_sha256": "4051de5a8b1d0b27f53b395f5411c2569cf9d8b1e19b04e7ddcc74357fef95a1",
+    "v15_selected_unique_close_windows": 204,
+    "v16_development_close_times_sha256": "f6f07f51aef4994889ce3470f1148ffccc5b6bf580ddff21a7a788ee3253ee86",
+    "v16_development_close_windows": 240,
+    "v16_development_seal_sha256": "6f496b8486cb52b60c127acf09f1df9da9bf5883eb5300a306cb3263247a43d6"
+  },
+  "probability_scoring_performed": false,
+  "protocol_id": "q15-rti-v17-kalshi-path-dynamics-disjoint-development-v1",
+  "protocol_sha256": "33a40c2afc22cd4967fcf37dab5ba1e18437358669b919121b22ba411cedd272",
+  "real_trading_allowed": false,
+  "seal_sha256": "dd1d24a7e04b941b9672d48738898037ebc0007901cd6a017b5c18415ac8322d",
+  "seal_version": "q15-rti-v17-development-outcome-blind-seal-v1",
+  "selected_all_seven_source_rows": 1680,
+  "selected_close_times_sha256": "7ec2ae0e4ee0d3a92b4cf4e36296d811162ac6e1a437870313d748887586a285",
+  "selected_development_close_windows": 240,
+  "selected_development_rows": 1440,
+  "selected_feature_evidence_sha256": "adca2d79593823a8ec879cc708f822fe08df89bafd21295b2942921dc8151e0c",
+  "selected_row_ids_sha256": "30c048108f9f4546a0b932926086d53f4107fcddfa89e9546cdc1f63749189ee",
+  "selection": "EARLIEST_240_COMPLETE_V17_EXTENSION_WINDOWS_DISJOINT_FROM_EVERY_SELECTED_V15_WINDOW_AND_EVERY_SELECTED_V16_DEVELOPMENT_WINDOW",
+  "status": "V17_DEVELOPMENT_SEALED_PROSPECTIVE_CALIBRATION_COLLECTING",
+  "unselected_historical_complete_windows": 4
+}

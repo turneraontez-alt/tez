@@ -14,7 +14,7 @@ from .v13_readiness_monitor import (
 
 def _enabled() -> bool:
     return os.environ.get(
-        "Q15_V14_READINESS_MONITOR", "true"
+        "Q15_V14_READINESS_MONITOR", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 

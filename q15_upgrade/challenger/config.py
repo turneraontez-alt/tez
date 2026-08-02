@@ -167,6 +167,20 @@ class ChallengerConfig:
     native_sent_only: bool = field(
         default_factory=lambda: _bool("Q15_CHALLENGER_NATIVE_SENT_ONLY", False))
 
+    # -- reversal watch (paper delivery of the cheap-YES pocket; default OFF) --
+    # Preregistered 2026-08-01 from the forward-settled challenger-v5 record:
+    # alert (Telegram, read-only, never an order) whenever the challenger decides
+    # BUY_YES at 10M/7M on BTC/ETH/DOGE with executable YES ask < 45c. The
+    # defaults ARE the frozen rule; widening any of them is a new hypothesis.
+    reversal_watch_enabled: bool = field(
+        default_factory=lambda: _bool("Q15_CHALLENGER_REVERSAL_WATCH", False))
+    reversal_watch_max_ask_cents: float = field(
+        default_factory=lambda: _float("Q15_CHALLENGER_REVERSAL_MAX_ASK", 45.0))
+    reversal_watch_assets: str = field(
+        default_factory=lambda: _str("Q15_CHALLENGER_REVERSAL_ASSETS", "BTC,ETH,DOGE"))
+    reversal_watch_checkpoints: str = field(
+        default_factory=lambda: _str("Q15_CHALLENGER_REVERSAL_CHECKPOINTS", "10M,7M"))
+
     @classmethod
     def from_env(cls) -> "ChallengerConfig":
         return cls()

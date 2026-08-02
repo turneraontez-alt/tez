@@ -27,7 +27,7 @@ from q15_upgrade.strategy_bots.telegram import V3Telegram
 from tools.q15_rti_feature_coverage_audit import build_report
 from tools.q15_rti_microstructure_freeze import (
     _feature_runtime,
-    load_feature_rows,
+    load_feature_rows_after,
 )
 from tools.q15_rti_microstructure_preregister import (
     DEFAULT_DB,
@@ -65,7 +65,9 @@ def build_outcome_blind_snapshot(
         raise ValueError("v11_readiness_design_binding_mismatch")
     # This loader uses the audited feature-only SQL projection.  Outcome and
     # P/L columns are not selected from SQLite.
-    feature_rows = load_feature_rows(database_path)
+    feature_rows = load_feature_rows_after(
+        database_path, float(design["prospective_after_close_time"]),
+    )
     coverage = build_report(
         feature_rows, source_schema=str(design.get("source_schema") or ""),
     )

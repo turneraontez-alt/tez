@@ -81,13 +81,28 @@ class KalshiClient:
     def __init__(self, base_url: str = BASE_URL, rate: float = 18.0, capacity: int = 18):
         self.base = base_url.rstrip("/")
         self.bucket = TokenBucket(rate, capacity)
+        # One read-only HTTP session per calling thread. The exact sampler
+        # keeps a bounded worker pool alive across 13M/+30/+60/+90 stages, so
+        # these sessions reuse TLS connections without sharing mutable Session
+        # state across threads.
+        self._thread_local = threading.local()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"Accept": "application/json"})
+            self._thread_local.session = session
+        return session
 
     def _get(self, path: str, params=None, retries: int = 1, timeout=(3.05, 4)):
         url = f"{self.base}{path}"
         for attempt in range(max(1, retries)):
             self.bucket.acquire()
             try:
-                response = requests.get(url, params=params, timeout=timeout, headers={"Accept": "application/json"})
+                response = self._session().get(
+                    url, params=params, timeout=timeout,
+                )
                 if response.status_code == 429:
                     if attempt + 1 < retries:
                         # Honor the server's Retry-After when present, else fall
@@ -125,8 +140,13 @@ class KalshiClient:
         data = self._get(f"/markets/{ticker}")
         return data.get("market") if data else None
 
-    def get_orderbook(self, ticker):
-        data = self._get(f"/markets/{ticker}/orderbook")
+    def get_series(self, ticker):
+        """Return official series metadata, including fee type/multiplier."""
+        data = self._get(f"/series/{ticker}", retries=3)
+        return data.get("series") if data else None
+
+    def get_orderbook(self, ticker, timeout=(3.05, 4)):
+        data = self._get(f"/markets/{ticker}/orderbook", timeout=timeout)
         if not data:
             return None
         return data.get("orderbook_fp") or data.get("orderbook")

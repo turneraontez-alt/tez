@@ -33,6 +33,12 @@ class TestHealthLedgerSurface(unittest.TestCase):
         self.assertIn("available", body["ledger"])
         self.assertIsInstance(body["ledger"]["available"], bool)
 
+    def test_health_exposes_nonblocking_drift_reconcile_worker(self):
+        body = self.client.get("/api/health").get_json()
+        worker = body["drift_delivery_reconcile"]
+        self.assertIn("inflight", worker)
+        self.assertFalse(worker["live_refresh_loop_blocking_allowed"])
+
     def test_health_exposes_v13_admin_monitor_without_trade_authority(self):
         body = self.client.get("/api/health").get_json()
         monitor = body["v13_readiness_monitor"]
@@ -231,6 +237,52 @@ class TestHealthLedgerSurface(unittest.TestCase):
                 api_core._health_cache = original_cache
                 api_core._health_cache_at = original_cache_at
 
+    def test_live_health_uses_bounded_overlay_outside_capture_guard(self):
+        from types import SimpleNamespace
+        from routes import api_core
+
+        original_time = appmod.time
+        original_started = appmod._refresh_started
+        original_market_health = appmod.market_data.health
+        with api_core._health_cache_lock:
+            original_cache = api_core._health_cache
+            original_cache_at = api_core._health_cache_at
+            api_core._health_cache = {
+                "status": "ok",
+                "sentinel": "cached-expensive-diagnostics",
+            }
+            api_core._health_cache_at = 200.0
+        try:
+            # Phase 221 is one second beyond the protected +100s boundary.
+            appmod.time = SimpleNamespace(time=lambda: 221.0)
+            appmod._refresh_started = True
+            appmod.market_data.health = lambda: {
+                "connected": True,
+                "last_message_at": 220.5,
+                "book_ages": {"TEST": 0.5},
+                "microstructure_history": {"buffers": {}},
+            }
+            body = self.client.get("/api/health").get_json()
+            self.assertEqual(
+                body["sentinel"], "cached-expensive-diagnostics"
+            )
+            self.assertTrue(body["websocket_connected"])
+            self.assertTrue(body["health_cache"]["served_cached"])
+            self.assertFalse(body["health_cache"]["protected"])
+            self.assertEqual(
+                body["health_cache"]["reason"],
+                "LIVE_NONBLOCKING_HEALTH",
+            )
+            self.assertEqual(body["health_cache"]["cache_age_seconds"], 21.0)
+            self.assertEqual(body["health_cache"]["live_overlay_updated_at"], 221.0)
+        finally:
+            appmod.time = original_time
+            appmod._refresh_started = original_started
+            appmod.market_data.health = original_market_health
+            with api_core._health_cache_lock:
+                api_core._health_cache = original_cache
+                api_core._health_cache_at = original_cache_at
+
     def test_exact_capture_health_guard_boundaries_are_deterministic(self):
         from routes.api_core import _exact_capture_guard_state
 
@@ -239,7 +291,8 @@ class TestHealthLedgerSurface(unittest.TestCase):
         self.assertFalse(_exact_capture_guard_state(44.0)["protected"])
         self.assertTrue(_exact_capture_guard_state(120.0)["protected"])
         self.assertTrue(_exact_capture_guard_state(125.0)["protected"])
-        self.assertFalse(_exact_capture_guard_state(126.0)["protected"])
+        self.assertTrue(_exact_capture_guard_state(220.0)["protected"])
+        self.assertFalse(_exact_capture_guard_state(221.0)["protected"])
 
     def test_unavailable_ledger_is_visible_at_top_level(self):
         # When the ledger is down it returns an unavailable status (calibration

@@ -1038,6 +1038,10 @@ def refresh_loop(max_cycles=None):
                     _cr_msg = _cr.drain_report()
                     if _cr_msg:
                         notifier.send(_cr_msg)
+                    # Reversal watch: deliver any queued cheap-YES paper alerts.
+                    # Read-only like the shadow itself; empty when disabled.
+                    for _rv_msg in _cr.drain_reversal_alerts():
+                        notifier.send(_rv_msg)
             except Exception:
                 logger.debug("challenger shadow report skipped", exc_info=True)
             # Read-only Polymarket up/down shadow: enqueue a settlement reconcile
@@ -1089,11 +1093,11 @@ def refresh_loop(max_cycles=None):
             if now - _last_learn >= 10:           # heavy DB work: every 10s, not 1s
                 try:
                     from q15_upgrade.strategy_bots.runtime import (
-                        reconcile_drift_delivery_statuses,
+                        request_drift_delivery_reconcile,
                     )
                     ct.safe(
                         "drift_delivery_reconcile",
-                        reconcile_drift_delivery_statuses,
+                        request_drift_delivery_reconcile,
                         100,
                     )
                 except Exception:
@@ -1338,6 +1342,15 @@ def _start_refresh():
                 start_settlement_index()
             except Exception as exc:
                 logger.warning("Settlement index collector did not start: %s", exc)
+            try:
+                from q15_upgrade.rti_spot_rest_top_book import (
+                    start_spot_rest_top_book_reservoir,
+                )
+                start_spot_rest_top_book_reservoir()
+            except Exception as exc:
+                logger.warning(
+                    "Spot REST top-book reservoir did not start: %s", exc
+                )
             try:
                 from q15_upgrade.rti_exact_13m import start_exact_rti_13m_sampler
                 start_exact_rti_13m_sampler()

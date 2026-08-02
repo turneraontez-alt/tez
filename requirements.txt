@@ -6,3 +6,4 @@ coinbase-advanced-py>=1.8.2
 psycopg2-binary>=2.9.9
 tzdata>=2024.1
 numpy>=1.26.0
+scikit-learn==1.9.0

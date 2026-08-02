@@ -85,8 +85,10 @@ DEFAULT_MAX_ARTIFACT_BYTES = 95 * 1024 * 1024
 DEFAULT_RAW_ARTIFACT_EXCLUDE_NAMES = {
     "q15_coinbase_adv_l2_v1.sqlite3",
     "q15_kraken_l3_v1.sqlite3",
+    "q15_settlement_index_v1.sqlite3",
     "q15_spot_depth_v1.sqlite3",
     "q15_spot_l3_v1.sqlite3",
+    "q15_strategy_bots_v3.sqlite3",
 }
 
 # Canonical ledger locations, so curated scoreboards are attached to the right
@@ -343,6 +345,39 @@ def _safe_unlink(path: Path | None) -> None:
                 _log(f"could not remove temp {candidate.name}: {type(exc).__name__}: {exc}")
 
 
+def _gzip_file(src: Path) -> tuple[Path, int, str]:
+    """Compress ``src`` without materialising the database in memory.
+
+    Learning databases can grow to several gigabytes.  Reading a complete
+    backup and then calling ``gzip.compress`` briefly requires both the raw and
+    compressed copies in RAM, and CPython may retain that high-water mark for
+    the lifetime of this hourly worker.  Stream through a temporary gzip file
+    instead; only artifacts already proven to fit the publish cap are later
+    loaded into memory.
+    """
+    fd, tmp = tempfile.mkstemp(prefix="lexport_", suffix=".sqlite3.gz")
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        with src.open("rb") as source, tmp_path.open("wb") as target:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=target,
+                mtime=0,
+            ) as compressed:
+                shutil.copyfileobj(source, compressed, length=1024 * 1024)
+
+        digest = hashlib.sha256()
+        with tmp_path.open("rb") as compressed:
+            for chunk in iter(lambda: compressed.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return tmp_path, tmp_path.stat().st_size, digest.hexdigest()
+    except Exception:
+        _safe_unlink(tmp_path)
+        raise
+
+
 def _db_row_counts(db_path: Path) -> dict[str, int]:
     """Row count for every user table, read-only."""
     counts: dict[str, int] = {}
@@ -415,17 +450,141 @@ def _challenger_scoreboards(backup_path: Path) -> dict[str, Any]:
 
 
 def _strategy_bot_scoreboards(backup_path: Path) -> dict[str, Any]:
-    from q15_upgrade.strategy_bots.ledger import StrategyBotLedger
-    from q15_upgrade.strategy_bots.rules import STRATEGY_VERSION
+    from q15_upgrade.strategy_bots.rules import (
+        BOT_CONFIDENCE_TIER,
+        STRATEGY_VERSION,
+    )
 
-    ledger = StrategyBotLedger(str(backup_path))
+    # ``StrategyBotLedger.scoreboard`` intentionally serves a very rich local
+    # diagnostic and materialises every matching row, including multi-kilobyte
+    # frozen evidence JSON.  On a multi-gigabyte ledger that made this optional
+    # exporter consume gigabytes and starve the live collector.  The remote
+    # snapshot needs a durable health summary, not every local diagnostic.
+    # Stream only compact scalar columns and aggregate them incrementally.
+    conn = sqlite3.connect(
+        f"file:{backup_path}?mode=ro", uri=True, timeout=30.0,
+    )
+    conn.row_factory = sqlite3.Row
+
+    def empty_bucket() -> dict[str, Any]:
+        return {
+            "rows": 0,
+            "resolved": 0,
+            "correct": 0,
+            "stored_hypothetical_pnl_cents": 0.0,
+        }
+
+    def add(bucket: dict[str, Any], row: sqlite3.Row) -> None:
+        bucket["rows"] += 1
+        official = str(row["official_result"] or "").upper()
+        side = str(row["side"] or "").upper()
+        if official in {"YES", "NO"}:
+            bucket["resolved"] += 1
+            if side in {"YES", "NO"} and side == official:
+                bucket["correct"] += 1
+            pnl = row["hypothetical_pnl_cents"]
+            if pnl is not None:
+                bucket["stored_hypothetical_pnl_cents"] += float(pnl)
+
+    def finish(bucket: dict[str, Any]) -> dict[str, Any]:
+        resolved = int(bucket["resolved"])
+        return {
+            **bucket,
+            "accuracy": (
+                float(bucket["correct"]) / resolved if resolved else None
+            ),
+        }
+
+    total = empty_bucket()
+    accepted = empty_bucket()
+    research_only = empty_bucket()
+    groups: dict[str, dict[str, dict[str, Any]]] = {
+        "by_bot": {},
+        "by_tier": {},
+        "by_tier_status": {},
+        "by_bot_status": {},
+        "by_bot_asset": {},
+        "by_bot_asset_side": {},
+        "by_bot_rule": {},
+        "by_bot_interval": {},
+        "by_bot_delivery_status": {},
+    }
+    data_coverage = {
+        "rows": 0,
+        "data_complete": 0,
+        "full_feature_complete": 0,
+        "evidence_grade_present": 0,
+    }
+
+    def group(name: str, label: str, row: sqlite3.Row) -> None:
+        bucket = groups[name].setdefault(label, empty_bucket())
+        add(bucket, row)
+
     try:
-        return {"scoreboard": _guard(
-            "strategy_bots.scoreboard",
-            lambda: ledger.scoreboard(STRATEGY_VERSION),
-        )}
+        cursor = conn.execute(
+            "SELECT bot_name, tier, decision_status, asset, side, source_rule, "
+            "interval, delivery_status, official_result, "
+            "hypothetical_pnl_cents, data_complete, full_feature_complete, "
+            "evidence_grade FROM strategy_bot_decisions "
+            "WHERE strategy_version=? ORDER BY id",
+            (STRATEGY_VERSION,),
+        )
+        for row in cursor:
+            add(total, row)
+            status = str(row["decision_status"] or "")
+            if status == "ACCEPTED":
+                add(accepted, row)
+            elif status == "RESEARCH_ONLY":
+                add(research_only, row)
+
+            bot = str(row["bot_name"] or "")
+            tier = str(row["tier"] or "")
+            asset = str(row["asset"] or "")
+            side = str(row["side"] or "")
+            source_rule = str(row["source_rule"] or "")
+            interval = str(row["interval"] or "")
+            delivery = str(row["delivery_status"] or "")
+            group("by_bot", bot, row)
+            group("by_bot_status", f"{bot}|{status}", row)
+            group("by_bot_asset", f"{bot}|{asset}", row)
+            group("by_bot_asset_side", f"{bot}|{asset}|{side}", row)
+            group("by_bot_rule", f"{bot}|{source_rule}", row)
+            group("by_bot_interval", f"{bot}|{interval}", row)
+            group("by_bot_delivery_status", f"{bot}|{delivery}", row)
+            if bot == BOT_CONFIDENCE_TIER:
+                group("by_tier", tier, row)
+                group("by_tier_status", f"{tier}|{status}", row)
+
+            data_coverage["rows"] += 1
+            data_coverage["data_complete"] += int(
+                row["data_complete"] == 1
+            )
+            data_coverage["full_feature_complete"] += int(
+                row["full_feature_complete"] == 1
+            )
+            data_coverage["evidence_grade_present"] += int(
+                row["evidence_grade"] is not None
+            )
     finally:
-        ledger.close()
+        conn.close()
+
+    scoreboard = {
+        "available": True,
+        "strategy_version": STRATEGY_VERSION,
+        "paper_only": True,
+        "export_mode": "MEMORY_BOUNDED_COMPACT_SQL_V1",
+        "total_rows": int(total["rows"]),
+        "resolved": int(total["resolved"]),
+        "accepted": finish(accepted),
+        "research_only": finish(research_only),
+        "all": finish(total),
+        "data_coverage": data_coverage,
+    }
+    scoreboard.update({
+        name: {label: finish(bucket) for label, bucket in sorted(values.items())}
+        for name, values in groups.items()
+    })
+    return {"scoreboard": scoreboard}
 
 
 def build_snapshot(
@@ -468,22 +627,27 @@ def build_snapshot(
                     lambda path=src: _db_row_counts(path),
                 ),
             }
+            if src.name == strategy_bots_name:
+                scoreboards["strategy_bots"] = _guard(
+                    "strategy_bots",
+                    lambda path=src: _strategy_bot_scoreboards(path),
+                )
             continue
         backup = _backup_db(src)
         if backup is None:
             databases[src.name] = {"error": "backup_failed"}
             continue
+        compressed: Path | None = None
         try:
-            raw = backup.read_bytes()
             rel = f"dbs/{src.name}.gz"
-            gz = gzip.compress(raw, mtime=0)
-            artifact_skipped = len(gz) > max_artifact_bytes
+            compressed, gz_bytes, gz_sha256 = _gzip_file(backup)
+            artifact_skipped = gz_bytes > max_artifact_bytes
             if not artifact_skipped:
-                artifacts[rel] = gz
+                artifacts[rel] = compressed.read_bytes()
             else:
                 _log(
                     f"skipping raw DB artifact {src.name}: "
-                    f"{len(gz or b'')} gz bytes exceeds {max_artifact_bytes}"
+                    f"{gz_bytes} gz bytes exceeds {max_artifact_bytes}"
                 )
             databases[src.name] = {
                 "artifact": None if artifact_skipped else rel,
@@ -492,9 +656,9 @@ def build_snapshot(
                     "gz_bytes_exceed_limit" if artifact_skipped else None
                 ),
                 "artifact_max_bytes": max_artifact_bytes,
-                "db_bytes": len(raw),
-                "gz_bytes": len(gz),
-                "gz_sha256": hashlib.sha256(gz).hexdigest(),
+                "db_bytes": backup.stat().st_size,
+                "gz_bytes": gz_bytes,
+                "gz_sha256": gz_sha256,
                 "row_counts": _db_row_counts(backup),
             }
             # Guard the whole scoreboard build (incl. import/constructor) so a
@@ -511,6 +675,7 @@ def build_snapshot(
                     "strategy_bots", lambda b=backup: _strategy_bot_scoreboards(b)
                 )
         finally:
+            _safe_unlink(compressed)
             _safe_unlink(backup)
 
     snapshot = {
@@ -563,6 +728,16 @@ def _snapshot_files(artifacts: dict[str, bytes], snapshot: dict[str, Any]) -> di
 
 def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_auth_failure(detail: str) -> bool:
+    normalized = str(detail or "").lower()
+    return any(marker in normalized for marker in (
+        "authentication failed",
+        "invalid username or token",
+        "bad credentials",
+        "requires authentication",
+    ))
 
 
 def _can_publish_with_git(workdir: str) -> bool:
@@ -837,6 +1012,12 @@ def main() -> int:
                 _log(f"published snapshot {snapshot.get('generated_at')} ({ndb} db(s))")
             else:
                 _log("publish failed (will retry next cycle): " + detail)
+                if _is_auth_failure(detail):
+                    _log(
+                        "authentication is invalid; exiting instead of retaining "
+                        "snapshot memory until the next retry"
+                    )
+                    return 3
         except Exception as exc:  # noqa: BLE001 - process boundary: log + recover
             _log(f"unexpected error: {_mask(str(exc), token)}")
         time.sleep(INTERVAL)

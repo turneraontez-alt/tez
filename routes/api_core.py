@@ -57,14 +57,17 @@ def _github_relay_status() -> dict:
 
 
 def _exact_capture_guard_state(now: float) -> dict:
-    """Protect the 60-second independent-path history from health contention."""
+    """Protect 14M history through delayed +90s capture and spool release."""
     epoch = int(float(now))
     phase = (epoch % 900 + 900) % 900
     capture_phase = 120
     seconds_until = (capture_phase - phase + 900) % 900
     seconds_since = (phase - capture_phase + 900) % 900
     protected_before_seconds = 75
-    protected_after_seconds = 5
+    # Full health reconstruction is expensive enough to starve both spot
+    # WebSocket providers. Keep it off the hot process through +90s evidence
+    # and the decision+95s durable-spool release boundary.
+    protected_after_seconds = 100
     protected = bool(
         seconds_until <= protected_before_seconds
         or seconds_since <= protected_after_seconds
@@ -78,6 +81,117 @@ def _exact_capture_guard_state(now: float) -> dict:
         "protected_before_seconds": protected_before_seconds,
         "protected_after_seconds": protected_after_seconds,
     }
+
+
+def _runtime_live_health_overlay(now: float) -> dict:
+    """Refresh only bounded in-memory collector health for normal live reads.
+
+    The complete health graph includes several large-ledger status reports.  A
+    sparse liveness request must not rebuild those reports in the hot process:
+    doing so has taken 12-20 seconds in production and can starve the very feed
+    threads being observed.  These fields are deliberately limited to the
+    collection path and cheap process liveness.  Expensive diagnostics remain
+    in the cached full snapshot, whose age is always disclosed.
+    """
+    overlay = {
+        "server_started_at": _app.SERVER_STARTED_AT_ISO,
+        "uptime_seconds": round(float(now) - _app.SERVER_STARTED_AT),
+        "last_successful_cycle_age_s": (
+            round(float(now) - _app._last_cycle_ok, 2)
+            if _app._last_cycle_ok
+            else None
+        ),
+    }
+
+    try:
+        with _app.state_lock:
+            snaps = list(_app.state.values())
+            live = [s for s in snaps if s.get("market_state") == "live"]
+            ages = []
+            for asset in _app.ASSETS:
+                snap = next(
+                    (x for x in live if x.get("asset") == asset), None
+                )
+                updated_at = _app.engine_update_ts.get(asset)
+                if snap is not None and updated_at:
+                    ages.append(float(now) - float(updated_at))
+        closes = sorted(
+            s.get("close_time") for s in live if s.get("close_time")
+        )
+        seconds_remaining = next(
+            (
+                s.get("seconds_remaining")
+                for s in live
+                if closes and s.get("close_time") == closes[0]
+            ),
+            None,
+        )
+        overlay.update({
+            "data_age_seconds": round(max(ages), 2) if ages else None,
+            "current_market_window": (
+                {
+                    "close_time": closes[0],
+                    "seconds_remaining": seconds_remaining,
+                }
+                if closes
+                else None
+            ),
+            "assets_subscribed": [s.get("asset") for s in live],
+            "assets_tracked": len(snaps),
+        })
+    except Exception:
+        pass
+
+    try:
+        wsh = _app.market_data.health() or {}
+        overlay.update({
+            "websocket_connected": bool(wsh.get("connected")),
+            "websocket_last_message_at": wsh.get("last_message_at"),
+            "websocket_book_ages": wsh.get("book_ages"),
+            "kalshi_microstructure_history": wsh.get(
+                "microstructure_history"
+            ),
+            "mode": (
+                "ws-primary" if wsh.get("connected") else "rest-polling"
+            ),
+        })
+    except Exception:
+        pass
+
+    bounded_health = (
+        ("spot_ws", "spot_ws", "spot_ws_health"),
+        ("spot_depth", "spot_depth", "spot_depth_health"),
+        (
+            "settlement_index",
+            "settlement_index",
+            "settlement_index_health",
+        ),
+        (
+            "rti_exact_13m",
+            "q15_upgrade.rti_exact_13m",
+            "exact_rti_13m_health",
+        ),
+    )
+    import importlib
+
+    for payload_key, module_name, function_name in bounded_health:
+        try:
+            function = getattr(importlib.import_module(module_name), function_name)
+            overlay[payload_key] = function()
+        except Exception:
+            # Preserve the last full snapshot value on a transient live-overlay
+            # error rather than replacing it with a false disabled state.
+            pass
+
+    try:
+        overlay["cycle_watchdog"] = _app.cycle_watchdog.health()
+        overlay["feed_watchdog"] = _app.cycle_watchdog.feed_health()
+        overlay["heartbeat_watchdog"] = (
+            _app.cycle_watchdog.heartbeat_status(now=now)
+        )
+    except Exception:
+        pass
+    return overlay
 
 
 def register(flask_app, host):
@@ -212,33 +326,63 @@ def register(flask_app, host):
         global _health_cache, _health_cache_at
         now = _app.time.time()
         capture_guard = _exact_capture_guard_state(now)
-        # Building the complete health graph can monopolize the Python process
-        # for several seconds.  During the exact path's required history, serve
-        # the most recent immutable snapshot instead.  Tests do not start the
-        # live refresh loop, so this operational guard cannot mask test state.
-        if bool(getattr(_app, "_refresh_started", False)) and capture_guard[
-            "protected"
-        ]:
-            with _health_cache_lock:
-                cached = _health_cache
-                cached_at = _health_cache_at
+        live_runtime = bool(getattr(_app, "_refresh_started", False))
+        try:
+            force_full = str(_app.request.args.get("full") or "").lower() in {
+                "1", "true", "yes",
+            }
+        except Exception:
+            force_full = False
+        with _health_cache_lock:
+            cached = _health_cache
+            cached_at = _health_cache_at
+
+        # Building the complete graph can monopolize the Python process for
+        # 12-20 seconds.  Normal live reads therefore reuse the last complete
+        # diagnostic snapshot and refresh only bounded collector/feed fields.
+        # A manual ?full=1 request may rebuild diagnostics outside the exact
+        # capture guard.  Tests do not start the live refresh loop, so cached
+        # operational delivery cannot mask test state.
+        serve_cached = bool(
+            live_runtime
+            and cached is not None
+            and (capture_guard["protected"] or not force_full)
+        )
+        if serve_cached:
+            protected = bool(capture_guard["protected"])
             cache_meta = {
                 **capture_guard,
-                "served_cached": cached is not None,
-                "reason": "EXACT_INDEPENDENT_PATH_COLLECTION_GUARD",
+                "served_cached": True,
+                "reason": (
+                    "EXACT_INDEPENDENT_PATH_COLLECTION_GUARD"
+                    if protected
+                    else "LIVE_NONBLOCKING_HEALTH"
+                ),
                 "cached_at": cached_at,
                 "cache_age_seconds": (
                     None if cached_at is None else max(0.0, now - cached_at)
                 ),
+                "live_overlay_updated_at": None if protected else now,
+                "full_refresh_requested": force_full,
             }
-            if cached is None:
-                return _app.jsonify({
-                    "status": "capture_guard_cache_warming",
-                    "health_cache": cache_meta,
-                })
             payload = dict(cached)
+            if not protected:
+                payload.update(_runtime_live_health_overlay(now))
             payload["health_cache"] = cache_meta
             return _app.jsonify(payload)
+        if live_runtime and capture_guard["protected"]:
+            return _app.jsonify({
+                "status": "capture_guard_cache_warming",
+                "health_cache": {
+                    **capture_guard,
+                    "served_cached": False,
+                    "reason": "EXACT_INDEPENDENT_PATH_COLLECTION_GUARD",
+                    "cached_at": cached_at,
+                    "cache_age_seconds": None,
+                    "live_overlay_updated_at": None,
+                    "full_refresh_requested": force_full,
+                },
+            })
         with _app.state_lock:
             snaps = list(_app.state.values())
             live = [s for s in snaps if s.get("market_state") == "live"]
@@ -389,6 +533,20 @@ def register(flask_app, host):
             }
 
         try:
+            from q15_upgrade.strategy_bots.runtime import (
+                drift_delivery_reconcile_worker_health,
+            )
+            drift_delivery_reconcile_status = (
+                drift_delivery_reconcile_worker_health()
+            )
+        except Exception as exc:
+            drift_delivery_reconcile_status = {
+                "inflight": False,
+                "last_error": f"{type(exc).__name__}: {exc}",
+                "live_refresh_loop_blocking_allowed": False,
+            }
+
+        try:
             from ladder_probe import ladder_health
             ladder_probe_status = ladder_health()
         except Exception:
@@ -510,6 +668,7 @@ def register(flask_app, host):
                 independent_path_readiness_monitor_status
             ),
             "rti_path_13m_challenger": rti_path_13m_challenger_status,
+            "drift_delivery_reconcile": drift_delivery_reconcile_status,
             "ladder_probe": ladder_probe_status,
             "market_activity": market_activity_status,
             "path_recorder": path_recorder_status,
@@ -541,6 +700,8 @@ def register(flask_app, host):
                 "reason": None,
                 "cached_at": now,
                 "cache_age_seconds": 0.0,
+                "live_overlay_updated_at": now,
+                "full_refresh_requested": force_full,
             },
         }
         with _health_cache_lock:

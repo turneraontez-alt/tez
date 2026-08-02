@@ -1,0 +1,275 @@
+{
+  "contract_id": "q15-rti-v22-disjoint-historical-evaluator-v1",
+  "contract_status": "FROZEN_BEFORE_ANY_V22_LABEL_ACCESS_MODEL_FIT_OR_PROBABILITY_SCORING",
+  "frozen_at": "2026-08-01T22:28:00Z",
+  "pre_evidence_implementation_amendment": {
+    "reason": "while implementing the dormant evaluator, before any V22 label access, model fit, or probability score, the reporting subgroup names were found to lack numerical bin boundaries; this amendment freezes those report-only bins and changes no feature, selection, calibration, policy, or gate rule",
+    "v22_feature_complete_close_windows_at_amendment": 4,
+    "v22_outcomes_or_resolution_status_inspected": false,
+    "v22_labels_read": false,
+    "v22_model_fit_or_probability_scoring_performed": false
+  },
+  "freeze_evidence": {
+    "v22_feature_complete_close_windows_at_freeze": 3,
+    "v22_feature_rows_at_freeze": 21,
+    "v22_outcomes_or_resolution_status_inspected": false,
+    "v22_labels_read": false,
+    "v22_model_fit_or_probability_scoring_performed": false,
+    "thresholds_selected_from_outcome_results": false
+  },
+  "protocol_id": "q15-rti-v22-official-rest-top-book-challenger-v1",
+  "protocol_sha256": "1f81a05dd679e68e1713cc95d661f93b744257fe77f3ae44db606c4968753a9a",
+  "feature_builder_version": "q15-rti-v22-official-rest-top-book-features-v1",
+  "feature_count": 91,
+  "feature_names_sha256": "d0823eb838a834d43eaffe28267fe71b5fb8dfba18d613d78b871b42c4b0d853",
+  "dependency_contract": {
+    "python_package": "scikit-learn",
+    "exact_version": "1.9.0",
+    "single_threaded_fit_required": true,
+    "deterministic_random_seed": 1522
+  },
+  "partitions": {
+    "exclusive_earliest_complete_windows": 180,
+    "train": [0, 104],
+    "probability_calibration": [105, 129],
+    "execution_policy_selection": [130, 154],
+    "untouched_test": [155, 179],
+    "same_close_all_asset_cluster_may_not_cross_partitions": true,
+    "probability_calibration_and_policy_selection_are_disjoint": true,
+    "untouched_test_is_only_independent_final_historical_confirmation": true
+  },
+  "internal_walk_forward_folds": [
+    {"train": [0, 44], "validation": [45, 59]},
+    {"train": [0, 59], "validation": [60, 74]},
+    {"train": [0, 74], "validation": [75, 89]},
+    {"train": [0, 89], "validation": [90, 104]}
+  ],
+  "cohorts": {
+    "separate": ["NON_BTC_TRANSFER", "BTC"],
+    "cross_cohort_training_calibration_selection_gate_or_reporting_pooling_forbidden": true
+  },
+  "preprocessing": {
+    "fit_scope": "EACH_TRAINING_FOLD_ONLY",
+    "numeric_center": "MEDIAN",
+    "numeric_scale": "INTERQUARTILE_RANGE",
+    "quantile_method": "linear",
+    "zero_or_nonfinite_scale_replacement": 1.0,
+    "probability_clip": [0.000001, 0.999999],
+    "calibration_policy_or_test_statistics_forbidden": true,
+    "learned_imputation_forbidden": true
+  },
+  "candidate_models": {
+    "NON_BTC_TRANSFER": [
+      {
+        "family": "ELASTIC_NET_LOGISTIC",
+        "solver": "saga",
+        "C_grid": [0.03, 0.1, 0.3, 1.0],
+        "l1_ratio_grid": [0.0, 0.25, 0.5],
+        "class_weight": null,
+        "fit_intercept": true,
+        "tol": 0.000001,
+        "max_iter": 5000
+      },
+      {
+        "family": "HIST_GRADIENT_BOOSTING",
+        "learning_rate_grid": [0.03, 0.07],
+        "max_leaf_nodes_grid": [7, 15],
+        "min_samples_leaf_grid": [15, 30],
+        "l2_regularization_grid": [1.0, 5.0],
+        "max_iter": 200,
+        "max_bins": 255,
+        "early_stopping": false
+      }
+    ],
+    "BTC": [
+      {
+        "family": "RIDGE_LOGISTIC",
+        "solver": "lbfgs",
+        "C_grid": [0.01, 0.03, 0.1, 0.3],
+        "class_weight": null,
+        "fit_intercept": true,
+        "tol": 0.000001,
+        "max_iter": 5000
+      }
+    ]
+  },
+  "model_selection": {
+    "training_rows": "ALL_FEATURE_COMPLETE_ROWS_IN_TRAIN_FOLD",
+    "primary_validation_rows": "ROW_LEVEL_EXECUTABLE_VALIDATION_ROWS_ONLY",
+    "primary_metric": "LOWEST_CLOSE_FOLD_WEIGHTED_LOG_LOSS",
+    "secondary_metrics": [
+      "LOWEST_EXECUTABLE_BRIER_SCORE",
+      "LOWEST_ALL_FEATURE_COMPLETE_LOG_LOSS",
+      "LOWER_MODEL_COMPLEXITY",
+      "LEXICOGRAPHIC_MODEL_ID"
+    ],
+    "minimum_executable_rows_each_validation_fold_non_btc": 20,
+    "minimum_executable_rows_each_validation_fold_btc": 4,
+    "candidate_missing_any_fold_minimum_is_rejected": true,
+    "refit_after_selection": "SELECTED_HYPERPARAMETERS_ON_ALL_105_TRAIN_WINDOWS_ONLY"
+  },
+  "probability_calibration": {
+    "method": "DISJOINT_POLICY_SELECTION_BETWEEN_IDENTITY_AND_L2_REGULARIZED_PLATT_ON_LOGIT",
+    "candidate_methods": ["IDENTITY", "L2_REGULARIZED_PLATT_ON_LOGIT"],
+    "C": 0.1,
+    "solver": "lbfgs",
+    "fit_intercept": true,
+    "tol": 0.00000001,
+    "max_iter": 5000,
+    "fit_windows": [105, 129],
+    "fit_rows": "ALL_FEATURE_COMPLETE_CALIBRATION_ROWS",
+    "minimum_rows_non_btc": 150,
+    "minimum_rows_btc": 25,
+    "single_class_or_nonconvergence": "FAIL_COHORT",
+    "proper_score_gate_population": "DISJOINT_ROW_LEVEL_EXECUTABLE_POLICY_ROWS",
+    "selection_primary_metric": "LOWEST_POLICY_LOG_LOSS",
+    "selection_secondary_metrics": ["LOWEST_POLICY_BRIER_SCORE", "IDENTITY_BEFORE_PLATT_LEXICOGRAPHIC"],
+    "proper_score_gate_requires": [
+      "SELECTED_CALIBRATOR_LOG_LOSS_STRICTLY_BEATS_12M_MARKET",
+      "SELECTED_CALIBRATOR_BRIER_STRICTLY_BEATS_12M_MARKET"
+    ],
+    "in_sample_calibration_scores_are_diagnostic_only": true,
+    "policy_or_test_labels_for_calibrator_fit_forbidden": true,
+    "policy_labels_may_select_but_never_refit_calibrator": true
+  },
+  "execution_policy_selection": {
+    "windows": [130, 154],
+    "entry": "ACTUAL_12M_ASK_PLUS_2_CENTS_PER_CONTRACT_SLIPPAGE",
+    "contracts": 10,
+    "official_general_fee_formula": true,
+    "edge_margin_grid": [0.0, 0.02, 0.04, 0.06],
+    "selection_metric": "HIGHEST_CLOSE_CLUSTER_BOOTSTRAP_20TH_PERCENTILE_FEE_ADJUSTED_EV",
+    "minimum_picks_non_btc": 25,
+    "minimum_picks_btc": 8,
+    "minimum_picks_each_side": 4,
+    "positive_lower_ev_required": true,
+    "probability_calibration_refit_forbidden": true
+  },
+  "bootstrap": {
+    "unit": "COMPLETE_CLOSE_CLUSTER",
+    "resamples": 5000,
+    "random_seed": 1522,
+    "quantile_method": "linear",
+    "percentile_interval": [0.025, 0.975],
+    "policy_lower_percentile": 0.2
+  },
+  "base_feature_ablation": {
+    "feature_count": 62,
+    "feature_indices_zero_based": [0, 61],
+    "feature_names_sha256": "4148a6f7de978cbd918354b26cd4c598887c0b0656875febc4472038861ae590",
+    "same_candidate_grid_as_v22": true,
+    "selection_uses_only_train_internal_walk_forward": true,
+    "fit_rows": "SAME_ALL_FEATURE_COMPLETE_TRAIN_ROWS",
+    "calibration": "SEPARATE_REGULARIZED_PLATT_ON_CALIBRATION_WITH_IDENTITY_VERSUS_PLATT_SELECTED_ON_EXECUTABLE_POLICY_WITHOUT_REFIT",
+    "independent_margin_selection_on_policy_for_diagnostic_pnl": true,
+    "never_used_for_v22_model_calibration_or_margin_selection": true,
+    "untouched_test_all_row_log_loss_and_brier_are_required_v22_gates": true
+  },
+  "untouched_test": {
+    "windows": [155, 179],
+    "one_shot_only": true,
+    "refit_recalibration_model_choice_margin_choice_or_threshold_change_forbidden": true,
+    "label_population": "ALL_FEATURE_COMPLETE_UNTOUCHED_TEST_ROWS_AFTER_EXCLUSIVE_RESERVATION",
+    "model_probability_metrics_population": "ALL_FEATURE_COMPLETE_COHORT_ROWS",
+    "candidate_trade_population": "ROW_LEVEL_FULL_FILL_SUPPORTED_AND_CALIBRATED_EDGE_AT_OR_ABOVE_FROZEN_SELECTED_MARGIN",
+    "pnl_scored_only_for_row_level_full_fill_supported_picks": true,
+    "nonexecutable_rows_reported_without_trade_or_pnl": true,
+    "maximum_drawdown_order": ["CLOSE_TIME_ASCENDING", "ASSET_LEXICOGRAPHIC_ASCENDING", "PARENT_ID_ASCENDING"],
+    "wilson_z": 1.959963984540054,
+    "bootstrap_resamples": 5000,
+    "bootstrap_quantiles": [0.025, 0.975],
+    "bootstrap_policy_lower_quantile": 0.2,
+    "non_btc_random_seed": 152211,
+    "btc_random_seed": 152212,
+    "minimum_picks_non_btc": 25,
+    "minimum_picks_btc": 8,
+    "minimum_picks_each_side": 4,
+    "required_gates": [
+      "FEE_SLIPPAGE_ADJUSTED_PNL_STRICTLY_POSITIVE",
+      "CLOSE_CLUSTER_BOOTSTRAP_20TH_PERCENTILE_MEAN_PNL_STRICTLY_POSITIVE",
+      "WILSON_95_LOWER_STRICTLY_EXCEEDS_AVERAGE_BREAK_EVEN",
+      "ALL_ROW_LOG_LOSS_STRICTLY_BEATS_12M_MARKET",
+      "ALL_ROW_BRIER_STRICTLY_BEATS_12M_MARKET",
+      "ALL_ROW_LOG_LOSS_STRICTLY_BEATS_INDEPENDENT_62_FEATURE_BASE_ABLATION",
+      "ALL_ROW_BRIER_STRICTLY_BEATS_INDEPENDENT_62_FEATURE_BASE_ABLATION",
+      "MAXIMUM_DRAWDOWN_PER_PICK_STRICTLY_BELOW_ALL_SOURCE_EXECUTABLE_CONTROL",
+      "FROZEN_TEST_VOLUME_AND_SIDE_MINIMA"
+    ],
+    "required_benchmarks": [
+      "12M_MARKET_SIDE_PROBABILITY",
+      "INDEPENDENT_62_FEATURE_BASE_ABLATION",
+      "ALL_SOURCE_COMPLETE_12M_SIDE_FOLLOW_CONTROL",
+      "MATCHED_FROZEN_V21_DIAGNOSTIC"
+    ],
+    "matched_v21_reporting": "ONLY_EXACTLY_MATCHED_FEATURE_COMPLETE_ROWS_AND_NEVER_USED_FOR_SELECTION_OR_GATES"
+  },
+  "fee_schedule_verification": {
+    "fresh_at_each_manual_label_stage": true,
+    "outcome_free_series_fee_precondition_before_label_reservation": true,
+    "official_endpoint": "https://external-api.kalshi.com/trade-api/v2/series/{series_ticker}",
+    "series_tickers": ["KXBNB15M", "KXBTC15M", "KXDOGE15M", "KXETH15M", "KXHYPE15M", "KXSOL15M", "KXXRP15M"],
+    "required_fee_type": "quadratic",
+    "required_fee_multiplier": 1,
+    "general_taker_fee_rate": 0.07,
+    "fee_schedule_version": "kalshi-fee-schedule-20260707",
+    "execution_cost_model_version": "rti-quote-plus-slippage-fee-at-fill-20260721-v2",
+    "unavailable_mismatched_or_changed_metadata": "FAIL_CLOSED_BEFORE_LABEL_RESERVATION"
+  },
+  "reporting_subgroups": {
+    "report_only_never_used_for_selection_or_gates": true,
+    "required": [
+      "ASSET",
+      "RTI_SIDE",
+      "ABSOLUTE_DISTANCE_TIER",
+      "VOLATILITY_TIER",
+      "MARKET_REGIME",
+      "REST_IMBALANCE_PERSISTENCE_TIER",
+      "REST_SPREAD_TIER",
+      "REST_PATH_CURVATURE_TIER"
+    ],
+    "distance_absolute_bps_tiers": [
+      {"name": "PINNED_LT_2", "minimum_inclusive": 0.0, "maximum_exclusive": 2.0},
+      {"name": "NEAR_2_TO_5", "minimum_inclusive": 2.0, "maximum_exclusive": 5.0},
+      {"name": "FAR_GE_5", "minimum_inclusive": 5.0, "maximum_exclusive": null}
+    ],
+    "volatility_raw_bps_tiers": [
+      {"name": "LOW_LT_1", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+      {"name": "MEDIUM_1_TO_3", "minimum_inclusive": 1.0, "maximum_exclusive": 3.0},
+      {"name": "HIGH_GE_3", "minimum_inclusive": 3.0, "maximum_exclusive": null}
+    ],
+    "rest_imbalance_persistence_tiers": [
+      {"name": "LOW_LT_50", "minimum_inclusive": 0.0, "maximum_exclusive": 0.5},
+      {"name": "MEDIUM_50_TO_75", "minimum_inclusive": 0.5, "maximum_exclusive": 0.75},
+      {"name": "HIGH_GE_75", "minimum_inclusive": 0.75, "maximum_exclusive": null}
+    ],
+    "rest_spread_bps_tiers": [
+      {"name": "TIGHT_LT_1", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+      {"name": "NORMAL_1_TO_3", "minimum_inclusive": 1.0, "maximum_exclusive": 3.0},
+      {"name": "WIDE_GE_3", "minimum_inclusive": 3.0, "maximum_exclusive": null}
+    ],
+    "rest_path_curvature_bps_tiers": [
+      {"name": "HARD_REVERSAL", "minimum_inclusive": null, "maximum_exclusive": -1.0},
+      {"name": "MILD_REVERSAL", "minimum_inclusive": -1.0, "maximum_exclusive": 0.0},
+      {"name": "MILD_CONTINUATION", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+      {"name": "STRONG_CONTINUATION", "minimum_inclusive": 1.0, "maximum_exclusive": null}
+    ],
+    "rejected_trade_counterfactual_required": true,
+    "known_prior_losses_exclusion_sensitivity_not_applicable": "V22_USES_A_LATER_STRICTLY_PROSPECTIVE_SAMPLE_AND_NONE_OF_THE_KNOWN_LOSSES_CAN_ENTER_ITS_180_WINDOW_SEAL"
+  },
+  "safety": {
+    "feature_seal_must_exist_before_any_label_reservation": true,
+    "label_reservation_must_be_hash_bound_to_exact_parent_ids_contracts_and_feature_hashes": true,
+    "pretest_label_population": "ALL_TRAIN_AND_CALIBRATION_ROWS_PLUS_ONLY_ROW_LEVEL_EXECUTABLE_POLICY_ROWS",
+    "nonexecutable_policy_labels_forbidden": true,
+    "untouched_test_labels_forbidden_during_pretest": true,
+    "outcome_access_allowed_now": false,
+    "model_fit_allowed_now": false,
+    "probability_scoring_allowed_now": false,
+    "automatic_command_confirmation_allowed": false,
+    "paper_artifact_allowed_now": false,
+    "notification_allowed_now": false,
+    "telegram_allowed_now": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  }
+}

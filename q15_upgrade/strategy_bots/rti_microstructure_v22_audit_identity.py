@@ -1,0 +1,26 @@
+"""Immutable identities for V22's manual, one-shot historical audit."""
+
+from . import rti_microstructure_v22_identity as identity
+
+
+EVALUATOR_CONTRACT_ID = identity.EVALUATOR_CONTRACT_ID
+EVALUATOR_CONTRACT_RELATIVE_PATH = identity.EVALUATOR_CONTRACT_RELATIVE_PATH
+EVALUATOR_CONTRACT_SHA256 = identity.EVALUATOR_CONTRACT_SHA256
+MODELING_VERSION = "q15-rti-v22-disjoint-pretest-modeling-v1"
+
+PRETEST_BINDING_VERSION = "q15-rti-v22-pretest-label-binding-v1"
+PRETEST_RUNNER_VERSION = "q15-rti-v22-one-shot-train-calibration-policy-v1"
+PRETEST_STATE_VERSION = "q15-rti-v22-train-calibration-policy-state-v1"
+UNTOUCHED_TEST_RUNNER_VERSION = "q15-rti-v22-one-shot-untouched-test-v1"
+UNTOUCHED_TEST_STATE_VERSION = "q15-rti-v22-untouched-test-state-v1"
+
+PRETEST_CONFIRMATION = "OPEN_V22_TRAIN_CAL_POLICY_LABELS_ONCE"
+UNTOUCHED_TEST_CONFIRMATION = "SCORE_V22_UNTOUCHED_TEST_ONCE"
+
+OUTCOME_ACCESS_ALLOWED_NOW = False
+MODEL_FIT_ALLOWED_NOW = False
+PROBABILITY_SCORING_ALLOWED_NOW = False
+PAPER_ARTIFACT_ALLOWED_NOW = False
+NOTIFICATION_ELIGIBLE = False
+AUTOMATIC_PROMOTION = False
+REAL_TRADING_ALLOWED = False

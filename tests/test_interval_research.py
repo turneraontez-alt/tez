@@ -113,6 +113,16 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(IntervalResearchConfig.from_env().enabled)
         self.assertIsNone(get_runner())
 
+    def test_ledger_uses_wal_and_short_busy_timeout(self):
+        tmp = tempfile.mkdtemp()
+        ledger = IntervalResearchLedger(os.path.join(tmp, "wal.sqlite3"))
+        conn = ledger._connect()
+        try:
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 250)
+        finally:
+            conn.close()
+
 
 class CaptureResolveTest(unittest.TestCase):
     def setUp(self):
@@ -122,6 +132,17 @@ class CaptureResolveTest(unittest.TestCase):
     def _observe(self, ticker, seconds, side="NO", ask=61.0, **kw):
         self.r.observe(analyses={"BTC": _analysis(side=side, ask=ask, **kw)},
                        canonicals={"BTC": _Canon(ticker, seconds)}, now=1000.0)
+
+    def test_window_slate_lookup_uses_composite_index(self):
+        with self.r.ledger._connect() as conn:
+            plan = conn.execute(
+                "EXPLAIN QUERY PLAN SELECT ticker FROM interval_captures "
+                "WHERE model_version=? AND interval=? AND window_key=? "
+                "AND predicted_side IS NOT NULL",
+                ("ir-test", "13M", 1),
+            ).fetchall()
+        detail = " ".join(str(row[3]) for row in plan)
+        self.assertIn("idx_ir_model_interval_window_scored", detail)
 
     def test_capture_in_band_and_dedup(self):
         self._observe("KX1", 600)   # exactly 10M
@@ -519,6 +540,37 @@ class CaptureResolveTest(unittest.TestCase):
             {row["ticker"] for row in rec.window_calls[0]["slate"]},
             {"KXSOL", "KXDOGE", "KXXRP"},
         )
+
+    def test_exact_sampler_defers_shadow_work_but_replays_durable_source(self):
+        rec = _DriftRecorder()
+        close_time = 1776.0
+        env = {
+            "Q15_V3_RTI_EXACT_SAMPLER": "true",
+            "Q15_V3_TOP_PICK_13M": "false",
+        }
+        with patch.dict(os.environ, env):
+            with patch("q15_upgrade.drift_shadow.get_recorder", return_value=rec):
+                self.r.observe(
+                    analyses={"SOL": _analysis(side="YES", ask=67.0)},
+                    canonicals={"SOL": _Canon("KXPROTECTED", 776, close_time)},
+                    now=1000.0,
+                )
+                source = self.r.ledger.captures_for_window(
+                    "ir-test", "13M", 1
+                )
+                self.assertEqual(len(source), 1)
+                self.assertEqual(source[0]["captured_at"], 1000.0)
+                self.assertEqual(rec.window_calls, [])
+
+                # Below 11m20s, replay uses the immutable 13M source row.
+                self.r.observe(
+                    analyses={"SOL": _analysis(side="YES", ask=67.0)},
+                    canonicals={"SOL": _Canon("KXPROTECTED", 670, close_time)},
+                    now=1106.0,
+                )
+
+        self.assertEqual(len(rec.window_calls), 1)
+        self.assertEqual(rec.window_calls[0]["slate"][0]["captured_at"], 1000.0)
 
     def test_precision13_shadow_records_without_drift_or_delivery(self):
         assets = ("BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP")

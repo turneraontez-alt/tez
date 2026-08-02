@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS path_forecasts (
     checkpoint_seconds INTEGER NOT NULL,
     decision_time REAL NOT NULL,
     captured_offset_seconds REAL NOT NULL,
+    feature_age_seconds REAL,
     target_px REAL NOT NULL,
     current_px REAL NOT NULL,
     current_yes_mid REAL,
@@ -57,6 +58,14 @@ class PathForecastLedger:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=15000")
         self._conn.executescript(_SCHEMA)
+        columns = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(path_forecasts)")
+        }
+        if "feature_age_seconds" not in columns:
+            self._conn.execute(
+                "ALTER TABLE path_forecasts ADD COLUMN feature_age_seconds REAL"
+            )
         self._conn.commit()
 
     def close(self) -> None:
@@ -77,6 +86,7 @@ class PathForecastLedger:
         current_yes_mid: float | None,
         prediction: Mapping[str, Any],
         feature_vector: list[float | None],
+        feature_age_seconds: float | None = None,
     ) -> tuple[int, bool]:
         values = (
             float(created_at),
@@ -87,6 +97,11 @@ class PathForecastLedger:
             int(checkpoint_seconds),
             float(decision_time),
             float(captured_offset_seconds),
+            (
+                None
+                if feature_age_seconds is None
+                else float(feature_age_seconds)
+            ),
             float(target_px),
             float(current_px),
             None if current_yes_mid is None else float(current_yes_mid),
@@ -104,11 +119,12 @@ class PathForecastLedger:
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO path_forecasts("
                 "created_at,model_version,feature_schema_version,asset,close_time,"
-                "checkpoint_seconds,decision_time,captured_offset_seconds,target_px,current_px,"
+                "checkpoint_seconds,decision_time,captured_offset_seconds,feature_age_seconds,"
+                "target_px,current_px,"
                 "current_yes_mid,top_archetype,top_archetype_probability,"
                 "settlement_yes_probability,strike_cross_probability,turn_delay_seconds_q10,"
                 "turn_delay_seconds_q50,turn_delay_seconds_q90,prediction_json,feature_json"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 values,
             )
             inserted = cursor.rowcount == 1
@@ -175,6 +191,23 @@ class PathForecastLedger:
             resolved = int(self._conn.execute(
                 "SELECT COUNT(*) FROM path_forecasts WHERE official_result IN ('YES','NO')"
             ).fetchone()[0])
+            timestamp_aligned = int(self._conn.execute(
+                "SELECT COUNT(*) FROM path_forecasts "
+                "WHERE feature_age_seconds IS NOT NULL "
+                "AND created_at>=decision_time "
+                "AND captured_offset_seconds>=0 "
+                "AND captured_offset_seconds<=12 "
+                "AND feature_age_seconds>=0 AND feature_age_seconds<=12"
+            ).fetchone()[0])
+            timestamp_aligned_resolved = int(self._conn.execute(
+                "SELECT COUNT(*) FROM path_forecasts "
+                "WHERE official_result IN ('YES','NO') "
+                "AND feature_age_seconds IS NOT NULL "
+                "AND created_at>=decision_time "
+                "AND captured_offset_seconds>=0 "
+                "AND captured_offset_seconds<=12 "
+                "AND feature_age_seconds>=0 AND feature_age_seconds<=12"
+            ).fetchone()[0])
             latest = self._conn.execute(
                 "SELECT created_at,asset,close_time,checkpoint_seconds,top_archetype,"
                 "top_archetype_probability,settlement_yes_probability,strike_cross_probability "
@@ -184,5 +217,8 @@ class PathForecastLedger:
             "db_path": self.db_path,
             "rows": total,
             "resolved_rows": resolved,
+            "timestamp_aligned_rows": timestamp_aligned,
+            "timestamp_aligned_resolved_rows": timestamp_aligned_resolved,
+            "legacy_or_unaligned_rows": total - timestamp_aligned,
             "latest": None if latest is None else dict(latest),
         }

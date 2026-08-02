@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from datetime import datetime
+import heapq
 import json
 import logging
 import math
@@ -42,6 +43,9 @@ SPOT_MID_PATH_SCHEMA_VERSION = "spot-mid-path-local-v1"
 SPOT_MID_PATH_TIME_BASIS = "local_created_at"
 SPOT_MID_PATH_HORIZONS = (15, 60)
 SPOT_MID_PATH_RETENTION_SECONDS = 180.0
+SPOT_FAST_MID_PATH_SCHEMA_VERSION = "spot-fast-mid-path-local-observed-v1"
+SPOT_FAST_MID_PATH_TIME_BASIS = "local_received_or_captured_at"
+SPOT_FAST_MID_SAMPLE_SECONDS = 1.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS spot_depth_snapshots (
@@ -86,7 +90,11 @@ CREATE TABLE IF NOT EXISTS spot_depth_snapshots (
     last_trade_side TEXT,
     last_trade_size REAL,
     orderbook_ts REAL,
-    trade_ts REAL
+    trade_ts REAL,
+    orderbook_received_at REAL,
+    trade_received_at REAL,
+    book_source_age_seconds REAL,
+    trade_source_age_seconds REAL
 );
 CREATE INDEX IF NOT EXISTS idx_spot_depth_asset_time
     ON spot_depth_snapshots(asset, created_at);
@@ -225,6 +233,12 @@ class SpotDepthRecorder:
         self._mid_history: dict[str, deque[dict[str, float]]] = {
             asset: deque() for asset in self.assets
         }
+        # A separate event-driven path for future outcome-blind research.  The
+        # legacy 5-second DB-cadence path above remains byte-for-byte compatible
+        # with frozen controls.
+        self._fast_mid_history: dict[str, deque[dict[str, float]]] = {
+            asset: deque() for asset in self.assets
+        }
         self._latest_snapshot: dict[str, dict[str, Any]] = {}
         self._connected = {"coinbase": False, "okx": False}
         self._last_error: dict[str, str] = {}
@@ -234,6 +248,11 @@ class SpotDepthRecorder:
         self._records_pruned = 0
         self._last_prune_at = 0.0
         self._thread: threading.Thread | None = None
+        self._fast_mid_thread: threading.Thread | None = None
+        self._last_fast_mid_sample_at: float | None = None
+        self._fast_mid_sampler_iterations = 0
+        self._fast_mid_sampler_late_iterations = 0
+        self._fast_mid_sampler_max_interval_seconds = 0.0
         self._stop = threading.Event()
         self._conn: sqlite3.Connection | None = None
 
@@ -253,11 +272,19 @@ class SpotDepthRecorder:
         if not _HAVE_WS:
             logger.warning("Spot depth disabled: `pip install websockets`")
             return
-        if self._thread and self._thread.is_alive():
-            return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._thread_main, name="spot-depth", daemon=True)
-        self._thread.start()
+        if not self._fast_mid_thread or not self._fast_mid_thread.is_alive():
+            self._fast_mid_thread = threading.Thread(
+                target=self._fast_mid_sampler_thread_main,
+                name="spot-fast-mid",
+                daemon=True,
+            )
+            self._fast_mid_thread.start()
+        if not self._thread or not self._thread.is_alive():
+            self._thread = threading.Thread(
+                target=self._thread_main, name="spot-depth", daemon=True
+            )
+            self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -289,22 +316,58 @@ class SpotDepthRecorder:
             row = self._snapshot_locked(asset_key, book, now)
             if row is not None:
                 row.update(self._mid_path_features_locked(asset_key, row, now))
+                row.update(self._fast_mid_path_features_locked(asset_key, row, now))
         return None if row is None else dict(row)
 
     def health(self) -> dict[str, Any]:
         now = time.time()
         with self._lock:
             books = {
+                asset: round(now - float(book.get("orderbook_received_at") or 0.0), 3)
+                for asset, book in self._books.items()
+            }
+            book_source_ages = {
                 asset: round(now - float(book.get("orderbook_ts") or 0.0), 3)
                 for asset, book in self._books.items()
             }
             trades = {}
             for asset, rows in self._trades.items():
                 if rows:
-                    trades[asset] = round(now - float(rows[-1].get("ts") or 0.0), 3)
+                    trades[asset] = round(
+                        now - float(rows[-1].get("received_at") or 0.0), 3
+                    )
             mid_history_rows = {
                 asset: len(rows) for asset, rows in self._mid_history.items()
             }
+            fast_mid_history_rows = {
+                asset: len(rows) for asset, rows in self._fast_mid_history.items()
+            }
+            fast_mid_recent_path: dict[str, dict[str, Any]] = {}
+            cutoff = now - 60.0
+            for asset, rows in self._fast_mid_history.items():
+                prior = next(
+                    (
+                        row for row in reversed(rows)
+                        if float(row.get("created_at") or 0.0) <= cutoff
+                    ),
+                    None,
+                )
+                recent = [
+                    row for row in rows
+                    if float(row.get("created_at") or 0.0) > cutoff
+                ]
+                selected = ([] if prior is None else [prior]) + recent
+                times = [float(row["created_at"]) for row in selected]
+                gaps = [right - left for left, right in zip(times, times[1:])]
+                fast_mid_recent_path[asset] = {
+                    "count_60s": len(selected),
+                    "max_gap_seconds_60s": (
+                        None if not gaps else round(max(gaps), 3)
+                    ),
+                    "latest_age_seconds": (
+                        None if not times else round(now - times[-1], 3)
+                    ),
+                }
             mid_history_seconds = {
                 asset: round(
                     max(0.0, now - float(rows[0].get("created_at") or now)), 3
@@ -323,11 +386,32 @@ class SpotDepthRecorder:
                 "trade_side_semantics": "aggressor",
                 "connected": dict(self._connected),
                 "book_age_seconds": books,
+                "book_source_age_seconds": book_source_ages,
                 "trade_age_seconds": trades,
                 "mid_path_schema_version": SPOT_MID_PATH_SCHEMA_VERSION,
                 "mid_path_time_basis": SPOT_MID_PATH_TIME_BASIS,
                 "mid_path_retention_seconds": SPOT_MID_PATH_RETENTION_SECONDS,
                 "mid_history_rows": mid_history_rows,
+                "fast_mid_path_schema_version": SPOT_FAST_MID_PATH_SCHEMA_VERSION,
+                "fast_mid_path_time_basis": SPOT_FAST_MID_PATH_TIME_BASIS,
+                "fast_mid_sample_seconds": SPOT_FAST_MID_SAMPLE_SECONDS,
+                "fast_mid_sampler_thread_alive": bool(
+                    self._fast_mid_thread and self._fast_mid_thread.is_alive()
+                ),
+                "fast_mid_sampler_iterations": self._fast_mid_sampler_iterations,
+                "fast_mid_sampler_late_iterations": (
+                    self._fast_mid_sampler_late_iterations
+                ),
+                "fast_mid_sampler_max_interval_seconds": round(
+                    self._fast_mid_sampler_max_interval_seconds, 3
+                ),
+                "fast_mid_sampler_age_seconds": (
+                    None
+                    if self._last_fast_mid_sample_at is None
+                    else round(now - self._last_fast_mid_sample_at, 3)
+                ),
+                "fast_mid_history_rows": fast_mid_history_rows,
+                "fast_mid_recent_path": fast_mid_recent_path,
                 "mid_history_seconds": mid_history_seconds,
                 "last_record_age_seconds": (
                     round(now - self._last_record_at, 3) if self._last_record_at else None
@@ -346,6 +430,7 @@ class SpotDepthRecorder:
 
     # --- parsing ---------------------------------------------------------
     def _handle_coinbase(self, raw: str) -> None:
+        received_at = time.time()
         try:
             data = json.loads(raw)
         except Exception:
@@ -368,7 +453,8 @@ class SpotDepthRecorder:
                 symbol=str(data.get("product_id")),
                 bids=data.get("bids") or [],
                 asks=data.get("asks") or [],
-                ts=time.time(),
+                ts=received_at,
+                received_at=received_at,
             )
         elif typ == "l2update":
             self._update_book(
@@ -376,7 +462,8 @@ class SpotDepthRecorder:
                 provider="coinbase",
                 symbol=str(data.get("product_id")),
                 changes=data.get("changes") or [],
-                ts=_source_ts(data.get("time")) or time.time(),
+                ts=_source_ts(data.get("time")) or received_at,
+                received_at=received_at,
             )
         elif typ in {"match", "last_match"}:
             self._record_trade(
@@ -386,10 +473,12 @@ class SpotDepthRecorder:
                 side=_coinbase_aggressor_side(data.get("side")),
                 price=_f(data.get("price")),
                 size=_f(data.get("size")),
-                ts=_source_ts(data.get("time")) or time.time(),
+                ts=_source_ts(data.get("time")) or received_at,
+                received_at=received_at,
             )
 
     def _handle_okx(self, raw: str) -> None:
+        received_at = time.time()
         try:
             data = json.loads(raw)
         except Exception:
@@ -410,6 +499,7 @@ class SpotDepthRecorder:
                     bids=row.get("bids") or [],
                     asks=row.get("asks") or [],
                     ts=ts,
+                    received_at=received_at,
                 )
             elif channel == "trades":
                 self._record_trade(
@@ -420,6 +510,7 @@ class SpotDepthRecorder:
                     price=_f(row.get("px")),
                     size=_f(row.get("sz")),
                     ts=ts,
+                    received_at=received_at,
                 )
 
     def _replace_book(
@@ -431,6 +522,7 @@ class SpotDepthRecorder:
         bids: Iterable[Any],
         asks: Iterable[Any],
         ts: float,
+        received_at: float | None = None,
     ) -> None:
         bid_map = self._levels_to_map(bids)
         ask_map = self._levels_to_map(asks)
@@ -442,8 +534,15 @@ class SpotDepthRecorder:
                 "symbol": symbol,
                 "bids": bid_map,
                 "asks": ask_map,
+                "best_bid": max(bid_map),
+                "best_ask": min(ask_map),
                 "orderbook_ts": ts,
+                "orderbook_received_at": received_at if received_at is not None else ts,
             }
+            self._append_fast_mid_from_book_locked(
+                asset, self._books[asset],
+                received_at if received_at is not None else ts,
+            )
             # A full snapshot is exactly what a flagged resync was waiting for.
             self._resync_assets.discard(asset)
 
@@ -455,6 +554,7 @@ class SpotDepthRecorder:
         symbol: str,
         changes: Iterable[Any],
         ts: float,
+        received_at: float | None = None,
     ) -> None:
         with self._lock:
             # A book flagged as crossed is known-corrupt: patching more deltas onto it only
@@ -466,10 +566,19 @@ class SpotDepthRecorder:
                 return
             book = self._books.setdefault(
                 asset,
-                {"provider": provider, "symbol": symbol, "bids": {}, "asks": {}, "orderbook_ts": ts},
+                {
+                    "provider": provider,
+                    "symbol": symbol,
+                    "bids": {},
+                    "asks": {},
+                    "orderbook_ts": ts,
+                    "orderbook_received_at": received_at if received_at is not None else ts,
+                },
             )
             book["provider"] = provider
             book["symbol"] = symbol
+            best_bid = _f(book.get("best_bid"))
+            best_ask = _f(book.get("best_ask"))
             for change in changes:
                 try:
                     side, price_raw, size_raw = change[:3]
@@ -479,12 +588,31 @@ class SpotDepthRecorder:
                 size = _f(size_raw)
                 if price is None or size is None:
                     continue
-                target = book["bids"] if str(side).lower() in {"buy", "bid"} else book["asks"]
+                is_bid = str(side).lower() in {"buy", "bid"}
+                target = book["bids"] if is_bid else book["asks"]
                 if size <= 0:
                     target.pop(price, None)
+                    if is_bid and best_bid == price:
+                        best_bid = None
+                    elif not is_bid and best_ask == price:
+                        best_ask = None
                 else:
                     target[price] = (size, None)
+                    if is_bid and (best_bid is None or price > best_bid):
+                        best_bid = price
+                    elif not is_bid and (best_ask is None or price < best_ask):
+                        best_ask = price
+            if best_bid is None and book["bids"]:
+                best_bid = max(book["bids"])
+            if best_ask is None and book["asks"]:
+                best_ask = min(book["asks"])
+            book["best_bid"] = best_bid
+            book["best_ask"] = best_ask
             book["orderbook_ts"] = ts
+            book["orderbook_received_at"] = received_at if received_at is not None else ts
+            self._append_fast_mid_from_book_locked(
+                asset, book, received_at if received_at is not None else ts,
+            )
 
     @staticmethod
     def _levels_to_map(levels: Iterable[Any]) -> dict[float, tuple[float, float | None]]:
@@ -512,11 +640,14 @@ class SpotDepthRecorder:
         price: float | None,
         size: float | None,
         ts: float,
+        received_at: float | None = None,
     ) -> None:
         if side not in {"buy", "sell"} or price is None or size is None or price <= 0 or size <= 0:
             return
+        local_received_at = received_at if received_at is not None else ts
         trade = {
             "ts": ts,
+            "received_at": local_received_at,
             "side": side,
             "price": price,
             "size": size,
@@ -528,7 +659,7 @@ class SpotDepthRecorder:
         with self._lock:
             rows = self._trades.setdefault(asset, deque())
             rows.append(trade)
-            while rows and float(rows[0].get("ts") or 0.0) < cutoff:
+            while rows and float(rows[0].get("received_at") or 0.0) < cutoff:
                 rows.popleft()
 
     # --- recording -------------------------------------------------------
@@ -581,12 +712,99 @@ class SpotDepthRecorder:
         while history and float(history[0].get("created_at") or 0.0) < cutoff:
             history.popleft()
 
+    def _append_fast_mid_from_book_locked(
+        self, asset: str, book: dict[str, Any], observed_at: float,
+    ) -> None:
+        """Rate-limit live book events into an in-memory, receipt-time path."""
+        history = self._fast_mid_history.setdefault(asset, deque())
+        if (
+            history
+            and observed_at - float(history[-1].get("created_at") or 0.0)
+            < SPOT_FAST_MID_SAMPLE_SECONDS * 0.8
+        ):
+            return
+        bids = book.get("bids") or {}
+        asks = book.get("asks") or {}
+        if not bids or not asks:
+            return
+        best_bid = _f(book.get("best_bid"))
+        best_ask = _f(book.get("best_ask"))
+        if best_bid is None:
+            best_bid = max(bids)
+            book["best_bid"] = best_bid
+        if best_ask is None:
+            best_ask = min(asks)
+            book["best_ask"] = best_ask
+        if best_bid <= 0.0 or best_ask <= 0.0 or best_bid >= best_ask:
+            return
+        history.append({
+            "created_at": observed_at,
+            "mid": (best_bid + best_ask) / 2.0,
+        })
+        cutoff = observed_at - SPOT_MID_PATH_RETENTION_SECONDS
+        while history and float(history[0].get("created_at") or 0.0) < cutoff:
+            history.popleft()
+
+    def _sample_fast_mid_once(self, now: float | None = None) -> int:
+        """Observe unchanged live books too, without coupling to SQLite writes."""
+        observed_at = time.time() if now is None else now
+        sampled = 0
+        with self._lock:
+            for asset, book in self._books.items():
+                received_at = _f(book.get("orderbook_received_at"))
+                if (
+                    received_at is None
+                    or received_at > observed_at
+                    or observed_at - received_at > self._max_book_age
+                ):
+                    continue
+                before = len(self._fast_mid_history.get(asset, ()))
+                self._append_fast_mid_from_book_locked(asset, book, observed_at)
+                if len(self._fast_mid_history.get(asset, ())) > before:
+                    sampled += 1
+        return sampled
+
     def _mid_path_features_locked(
         self, asset: str, current_row: dict[str, Any], now: float,
     ) -> dict[str, Any]:
         """Summarize locally available spot-mid paths without future rows."""
+        return self._summarize_mid_path_locked(
+            history_rows=self._mid_history.get(asset, ()),
+            current_row=current_row,
+            now=now,
+            prefix="spot_mid",
+            schema_version=SPOT_MID_PATH_SCHEMA_VERSION,
+            time_basis=SPOT_MID_PATH_TIME_BASIS,
+            interval_seconds=self._record_seconds,
+        )
+
+    def _fast_mid_path_features_locked(
+        self, asset: str, current_row: dict[str, Any], now: float,
+    ) -> dict[str, Any]:
+        """Summarize the outcome-blind event-driven spot-mid reservoir."""
+        return self._summarize_mid_path_locked(
+            history_rows=self._fast_mid_history.get(asset, ()),
+            current_row=current_row,
+            now=now,
+            prefix="spot_fast_mid",
+            schema_version=SPOT_FAST_MID_PATH_SCHEMA_VERSION,
+            time_basis=SPOT_FAST_MID_PATH_TIME_BASIS,
+            interval_seconds=SPOT_FAST_MID_SAMPLE_SECONDS,
+        )
+
+    @staticmethod
+    def _summarize_mid_path_locked(
+        *,
+        history_rows: Iterable[dict[str, float]],
+        current_row: dict[str, Any],
+        now: float,
+        prefix: str,
+        schema_version: str,
+        time_basis: str,
+        interval_seconds: float,
+    ) -> dict[str, Any]:
         history = [
-            dict(row) for row in self._mid_history.get(asset, ())
+            dict(row) for row in history_rows
             if _f(row.get("created_at")) is not None
             and float(row["created_at"]) <= now
             and _f(row.get("mid")) is not None
@@ -600,20 +818,20 @@ class SpotDepthRecorder:
         history.sort(key=lambda row: float(row["created_at"]))
         started_at = _f(history[0].get("created_at")) if history else None
         output: dict[str, Any] = {
-            "spot_mid_path_schema_version": SPOT_MID_PATH_SCHEMA_VERSION,
-            "spot_mid_path_time_basis": SPOT_MID_PATH_TIME_BASIS,
-            "spot_mid_path_captured_at": current_at,
-            "spot_mid_history_started_at": started_at,
-            "spot_mid_history_seconds": (
+            f"{prefix}_path_schema_version": schema_version,
+            f"{prefix}_path_time_basis": time_basis,
+            f"{prefix}_path_captured_at": current_at,
+            f"{prefix}_history_started_at": started_at,
+            f"{prefix}_history_seconds": (
                 None if started_at is None else max(0.0, now - started_at)
             ),
-            "spot_mid_history_retention_seconds": (
+            f"{prefix}_history_retention_seconds": (
                 SPOT_MID_PATH_RETENTION_SECONDS
             ),
-            "spot_mid_record_interval_seconds": self._record_seconds,
+            f"{prefix}_record_interval_seconds": interval_seconds,
         }
-        start_tolerance = max(2.0, self._record_seconds * 1.75)
-        max_allowed_gap = max(3.0, self._record_seconds * 2.0)
+        start_tolerance = max(2.0, interval_seconds * 1.75)
+        max_allowed_gap = max(3.0, interval_seconds * 2.0)
         for horizon in SPOT_MID_PATH_HORIZONS:
             cutoff = now - float(horizon)
             prior = next(
@@ -644,7 +862,7 @@ class SpotDepthRecorder:
             prices = [float(row["mid"]) for row in selected]
             gaps = [right - left for left, right in zip(timestamps, timestamps[1:])]
             max_gap = max(gaps) if gaps else None
-            required_count = max(3, int(float(horizon) / self._record_seconds))
+            required_count = max(3, int(float(horizon) / interval_seconds))
             reasons: list[str] = []
             if prior is None:
                 reasons.append("HISTORY_DOES_NOT_REACH_WINDOW_START")
@@ -691,30 +909,38 @@ class SpotDepthRecorder:
             )
             suffix = f"_{horizon}s"
             output.update({
-                f"spot_mid_window_complete{suffix}": complete,
-                f"spot_mid_path_missing_reason{suffix}": (
+                f"{prefix}_window_complete{suffix}": complete,
+                f"{prefix}_path_missing_reason{suffix}": (
                     None if complete else ",".join(reasons)
                 ),
-                f"spot_mid_path_count{suffix}": len(selected),
-                f"spot_mid_path_start_at{suffix}": (
+                f"{prefix}_path_count{suffix}": len(selected),
+                f"{prefix}_path_start_at{suffix}": (
                     timestamps[0] if timestamps else None
                 ),
-                f"spot_mid_path_end_at{suffix}": (
+                f"{prefix}_path_end_at{suffix}": (
                     timestamps[-1] if timestamps else None
                 ),
-                f"spot_mid_path_max_gap_seconds{suffix}": max_gap,
-                f"spot_mid_start{suffix}": start_mid,
-                f"spot_mid_end{suffix}": end_mid,
-                f"spot_mid_change_bps{suffix}": change_bps,
-                f"spot_mid_range_bps{suffix}": range_bps,
-                f"spot_mid_realized_volatility_bps{suffix}": realized,
-                f"spot_mid_trend_efficiency{suffix}": efficiency,
+                f"{prefix}_path_max_gap_seconds{suffix}": max_gap,
+                f"{prefix}_start{suffix}": start_mid,
+                f"{prefix}_end{suffix}": end_mid,
+                f"{prefix}_change_bps{suffix}": change_bps,
+                f"{prefix}_range_bps{suffix}": range_bps,
+                f"{prefix}_realized_volatility_bps{suffix}": realized,
+                f"{prefix}_trend_efficiency{suffix}": efficiency,
             })
         return output
 
     def _snapshot_locked(self, asset: str, book: dict[str, Any], now: float) -> dict[str, Any] | None:
         orderbook_ts = _f(book.get("orderbook_ts"))
-        if orderbook_ts is None or now - orderbook_ts > self._max_book_age:
+        orderbook_received_at = _f(book.get("orderbook_received_at"))
+        if orderbook_received_at is None:
+            # Compatibility for in-memory fixtures and pre-upgrade books only.
+            orderbook_received_at = orderbook_ts
+        if (
+            orderbook_ts is None
+            or orderbook_received_at is None
+            or now - orderbook_received_at > self._max_book_age
+        ):
             return None
         bids = self._top_levels(book.get("bids") or {}, reverse=True)
         asks = self._top_levels(book.get("asks") or {}, reverse=False)
@@ -749,9 +975,15 @@ class SpotDepthRecorder:
             "provider": book.get("provider"),
             "symbol": book.get("symbol"),
             "source": f"{book.get('provider')} {book.get('symbol')}",
-            "book_age_seconds": round(now - orderbook_ts, 3),
+            "book_age_seconds": round(now - orderbook_received_at, 3),
+            "book_source_age_seconds": round(now - orderbook_ts, 3),
             "trade_age_seconds": (
-                round(now - float(last_trade.get("ts")), 3) if last_trade.get("ts") else None
+                round(now - float(last_trade.get("received_at")), 3)
+                if last_trade.get("received_at") else None
+            ),
+            "trade_source_age_seconds": (
+                round(now - float(last_trade.get("ts")), 3)
+                if last_trade.get("ts") else None
             ),
             "trade_side_semantics": "aggressor",
             "best_bid": best_bid,
@@ -772,6 +1004,8 @@ class SpotDepthRecorder:
             "last_trade_size": last_trade.get("size"),
             "orderbook_ts": orderbook_ts,
             "trade_ts": last_trade.get("ts"),
+            "orderbook_received_at": orderbook_received_at,
+            "trade_received_at": last_trade.get("received_at"),
         }
         out.update(self._trade_sums(trades, now, 5.0, "5s"))
         out.update(self._trade_sums(trades, now, 15.0, "15s"))
@@ -784,7 +1018,8 @@ class SpotDepthRecorder:
         *,
         reverse: bool,
     ) -> list[list[float | None]]:
-        ordered = sorted(levels.items(), key=lambda item: item[0], reverse=reverse)[: self.level_count]
+        selector = heapq.nlargest if reverse else heapq.nsmallest
+        ordered = selector(self.level_count, levels.items(), key=lambda item: item[0])
         return [[price, size, order_count] for price, (size, order_count) in ordered]
 
     @staticmethod
@@ -794,7 +1029,7 @@ class SpotDepthRecorder:
         buy_qty = sell_qty = buy_notional = sell_notional = 0.0
         cutoff = now - window
         for trade in trades:
-            if float(trade.get("ts") or 0.0) < cutoff:
+            if float(trade.get("received_at") or 0.0) < cutoff:
                 continue
             size = float(trade.get("size") or 0.0)
             notional = float(trade.get("notional") or 0.0)
@@ -828,6 +1063,16 @@ class SpotDepthRecorder:
                 self._conn.execute(
                     "ALTER TABLE spot_depth_snapshots ADD COLUMN trade_side_semantics TEXT"
                 )
+            for column in (
+                "orderbook_received_at",
+                "trade_received_at",
+                "book_source_age_seconds",
+                "trade_source_age_seconds",
+            ):
+                if column not in columns:
+                    self._conn.execute(
+                        f"ALTER TABLE spot_depth_snapshots ADD COLUMN {column} REAL"
+                    )
             self._conn.commit()
             return self._conn
 
@@ -848,7 +1093,9 @@ class SpotDepthRecorder:
             "trade_buy_qty_60s", "trade_sell_qty_60s", "trade_net_qty_60s",
             "trade_buy_notional_60s", "trade_sell_notional_60s",
             "last_trade_price", "last_trade_side", "last_trade_size",
-            "orderbook_ts", "trade_ts",
+            "orderbook_ts", "trade_ts", "orderbook_received_at",
+            "trade_received_at", "book_source_age_seconds",
+            "trade_source_age_seconds",
         )
         conn.execute(
             f"INSERT INTO spot_depth_snapshots({','.join(cols)}) "
@@ -870,6 +1117,28 @@ class SpotDepthRecorder:
         if self._okx:
             tasks.append(self._provider_loop("okx", OKX_WS, self._subscribe_okx, self._handle_okx))
         await asyncio.gather(*tasks)
+
+    def _fast_mid_sampler_thread_main(self) -> None:
+        """Sample unchanged books outside the busy WebSocket event loop."""
+        while not self._stop.is_set():
+            started_at = time.time()
+            self._sample_fast_mid_once(started_at)
+            completed_at = time.time()
+            with self._lock:
+                prior = self._last_fast_mid_sample_at
+                if prior is not None:
+                    interval = max(0.0, started_at - prior)
+                    self._fast_mid_sampler_max_interval_seconds = max(
+                        self._fast_mid_sampler_max_interval_seconds, interval
+                    )
+                    if interval > SPOT_FAST_MID_SAMPLE_SECONDS * 2.0:
+                        self._fast_mid_sampler_late_iterations += 1
+                self._last_fast_mid_sample_at = started_at
+                self._fast_mid_sampler_iterations += 1
+            elapsed = max(0.0, completed_at - started_at)
+            self._stop.wait(
+                max(0.05, SPOT_FAST_MID_SAMPLE_SECONDS - elapsed)
+            )
 
     async def _recorder_loop(self) -> None:
         while not self._stop.is_set():

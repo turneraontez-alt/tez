@@ -76,6 +76,31 @@ def test_live_capture_does_not_wait_for_periodic_database_write(tmp_path):
     assert not os.path.exists(db)
 
 
+def test_cached_best_prices_recalculate_when_top_level_is_removed(tmp_path):
+    feed = SpotDepthRecorder(
+        assets=["BTC"], db_path=str(tmp_path / "cached-best.sqlite3")
+    )
+    feed._replace_book(
+        "BTC", provider="coinbase", symbol="BTC-USD",
+        bids=[[100.0, 2.0], [99.0, 3.0]],
+        asks=[[101.0, 2.0], [102.0, 3.0]],
+        ts=time.time(),
+    )
+    feed._update_book(
+        "BTC", provider="coinbase", symbol="BTC-USD",
+        changes=[["buy", "100.0", "0"], ["sell", "101.0", "0"]],
+        ts=time.time(),
+    )
+
+    snapshot = feed.capture_current("BTC")
+    assert snapshot is not None
+    assert snapshot["best_bid"] == 99.0
+    assert snapshot["best_ask"] == 102.0
+    assert feed._books["BTC"]["best_bid"] == 99.0
+    assert feed._books["BTC"]["best_ask"] == 102.0
+    feed.close()
+
+
 def test_spot_mid_path_is_local_complete_and_excludes_future_rows(
     tmp_path, monkeypatch,
 ):
@@ -149,6 +174,72 @@ def test_spot_mid_path_fails_closed_on_restart_or_continuity_gap(
     assert "PATH_CONTINUITY_GAP" in (
         snapshot["spot_mid_path_missing_reason_60s"]
     )
+    feed.close()
+
+
+def test_event_driven_fast_mid_path_is_separate_from_legacy_db_cadence(
+    tmp_path, monkeypatch,
+):
+    clock = [3000.0]
+    monkeypatch.setattr(spot_depth_module.time, "time", lambda: clock[0])
+    feed = SpotDepthRecorder(
+        assets=["BTC"], db_path=str(tmp_path / "fast-mid.sqlite3")
+    )
+    for step in range(61):
+        clock[0] = 3000.0 + step
+        bid = 100.0 + step / 100.0
+        feed._replace_book(
+            "BTC",
+            provider="coinbase",
+            symbol="BTC-USD",
+            bids=[[bid, 2.0]],
+            asks=[[bid + 1.0, 2.0]],
+            ts=clock[0] + 0.5,
+            received_at=clock[0],
+        )
+
+    snapshot = feed.capture_current("BTC")
+    assert snapshot is not None
+    assert snapshot["spot_fast_mid_path_schema_version"] == (
+        "spot-fast-mid-path-local-observed-v1"
+    )
+    assert snapshot["spot_fast_mid_path_time_basis"] == (
+        "local_received_or_captured_at"
+    )
+    assert snapshot["spot_fast_mid_window_complete_60s"] is True
+    assert snapshot["spot_fast_mid_path_count_60s"] == 61
+    assert snapshot["spot_fast_mid_path_max_gap_seconds_60s"] == 1.0
+    # Frozen-control history is still populated only by record_once().
+    assert snapshot["spot_mid_window_complete_60s"] is False
+    feed.close()
+
+
+def test_fast_mid_sampler_observes_unchanged_fresh_book(tmp_path, monkeypatch):
+    clock = [4000.0]
+    monkeypatch.setattr(spot_depth_module.time, "time", lambda: clock[0])
+    feed = SpotDepthRecorder(
+        assets=["BTC"], db_path=str(tmp_path / "fast-mid-timer.sqlite3")
+    )
+    feed._replace_book(
+        "BTC",
+        provider="coinbase",
+        symbol="BTC-USD",
+        bids=[[100.0, 2.0]],
+        asks=[[101.0, 2.0]],
+        ts=4000.0,
+        received_at=4000.0,
+    )
+    for step in range(1, 61):
+        clock[0] = 4000.0 + step
+        # Simulate a live but unchanged top of book.
+        feed._books["BTC"]["orderbook_received_at"] = clock[0]
+        assert feed._sample_fast_mid_once(clock[0]) == 1
+
+    snapshot = feed.capture_current("BTC")
+    assert snapshot is not None
+    assert snapshot["spot_fast_mid_window_complete_60s"] is True
+    assert snapshot["spot_fast_mid_path_count_60s"] == 61
+    assert snapshot["spot_mid_window_complete_60s"] is False
     feed.close()
 
 

@@ -11,8 +11,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -34,6 +36,7 @@ from q15_upgrade.strategy_bots.rules import (
     RTI_PATH_13M_SPOT_CONFIRM_CHALLENGER_ID,
     RTI_PATH_13M_SPOT_SNAPSHOT_MAX_AGE_SECONDS,
     RTI_EXACT_MICROSTRUCTURE_SCHEMA_VERSION,
+    SPOT_FAST_MID_PATH_KEYS,
     SPOT_MID_PATH_KEYS,
 )
 from q15_upgrade.strategy_bots.rti_cross_venue import (
@@ -45,9 +48,64 @@ from q15_upgrade.strategy_bots.rti_independent_path_identity import (
     FIRST_ELIGIBLE_CLOSE_TIME as RTI_INDEPENDENT_PATH_FIRST_ELIGIBLE_CLOSE_TIME,
     PROSPECTIVE_AFTER_CLOSE_TIME as RTI_INDEPENDENT_PATH_PROSPECTIVE_AFTER_CLOSE_TIME,
 )
+from q15_upgrade.rti_confirmation_spool import RTIConfirmationSpool
 
 logger = logging.getLogger(__name__)
 RTI_SPOT_LEAD_LAG_SCHEMA_VERSION = "rti-spot-index-lead-lag-v1"
+RTI_CONFIRMATION_PERSIST_RELEASE_DELAY_SECONDS = 95.0
+RTI_EXACT_REQUIRED_ASSETS = frozenset({
+    "BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP",
+})
+RTI_EXACT_DECISION_PHASE_SECONDS = 120.0
+RTI_EXACT_WINDOW_SECONDS = 900.0
+
+_KALSHI_MICROSTRUCTURE_BASE_KEYS = frozenset({
+    "microstructure_captured_at",
+    "microstructure_evidence_source",
+    "microstructure_transport_connected",
+    "microstructure_transport_age_seconds",
+    "microstructure_book_age_seconds",
+    "microstructure_time_basis",
+    "microstructure_extension_schema_version",
+    "history_count_capped",
+    "book_event_retention_seconds",
+    "trade_retention_seconds",
+    "book_history_started_at",
+    "trade_history_started_at",
+    "book_history_seconds",
+    "trade_history_seconds",
+    "yes_microprice_cents",
+    "yes_microprice_edge_cents",
+})
+_KALSHI_MICROSTRUCTURE_PREFIXES = (
+    "book_window_complete_",
+    "trade_window_complete_",
+    "microstructure_window_complete_",
+    "event_count_",
+    "trade_count_",
+    "book_delta_pressure_yes_",
+    "trade_imbalance_yes_",
+    "taker_yes_volume_",
+    "taker_no_volume_",
+    "taker_net_yes_volume_",
+    "yes_best_depletion_",
+    "no_best_depletion_",
+    "yes_best_refill_",
+    "no_best_refill_",
+    "book_add_volume_yes_",
+    "book_remove_volume_yes_",
+    "book_add_volume_no_",
+    "book_remove_volume_no_",
+    "microprice_change_cents_",
+    "microprice_range_cents_",
+    "microprice_variation_cents_",
+    "microprice_trend_efficiency_",
+    "trade_yes_price_change_cents_",
+    "trade_yes_price_range_cents_",
+    "trade_yes_price_variation_cents_",
+    "trade_yes_price_trend_efficiency_",
+    "trade_yes_vwap_cents_",
+)
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -149,12 +207,21 @@ class _ConfirmationPending:
     original_row_id: int
     original_strict_accepted: bool
     target_at: float
+    prefetched_quote: dict[str, Any] | None = None
     captured_at: float | None = None
     quote: dict[str, Any] | None = None
     spot_context: dict[str, Any] | None = None
     evidence_completed_at: float | None = None
     last_path: dict[str, Any] | None = None
     last_record_attempt: float = 0.0
+    # Live persistence is deliberately decoupled from the exact-time worker.
+    # The source is frozen once from point-in-time evidence, then an isolated
+    # daemon writer may wait on the large shared strategy ledger without
+    # delaying later 30/60/90-second captures. Injected-time tests keep the
+    # original synchronous path for deterministic assertions.
+    record_source: dict[str, Any] | None = None
+    record_inflight: bool = False
+    record_spooled: bool = False
 
 
 class ExactRTI13MSampler:
@@ -170,6 +237,9 @@ class ExactRTI13MSampler:
         path_reader: Callable[..., Mapping[str, Any]] | None = None,
         spot_reader: Callable[..., Mapping[str, Any] | None] | None = None,
         cross_venue_reader: Callable[..., Mapping[str, Any]] | None = None,
+        rest_orderbook_reader: (
+            Callable[[str], Mapping[str, Any] | None] | None
+        ) = None,
         recorder: Callable[[Mapping[str, Any]], int | None] | None = None,
         confirmation_recorder: (
             Callable[[Mapping[str, Any]], int | None] | None
@@ -177,6 +247,7 @@ class ExactRTI13MSampler:
         confirmation_recovery_reader: (
             Callable[..., Mapping[str, Any] | None] | None
         ) = None,
+        spot_rest_submitter: Callable[..., bool] | None = None,
     ):
         self.enabled = (
             _bool("Q15_V3_RTI_EXACT_SAMPLER", False)
@@ -196,9 +267,19 @@ class ExactRTI13MSampler:
         self._spot_reader = spot_reader
         self._spot_reader_is_live_capture = spot_reader is None
         self._cross_venue_reader = cross_venue_reader
+        # Tests and embedded callers that inject a feed stay hermetic unless
+        # they explicitly inject a REST reader.  The live singleton may use a
+        # newly requested official Kalshi snapshot when an otherwise valid
+        # WebSocket book has not changed recently enough for the exact gate.
+        self._default_rest_quote_reader_allowed = (
+            feed is None and rest_orderbook_reader is None
+        )
+        self._rest_orderbook_reader = rest_orderbook_reader
+        self._rest_client: Any | None = None
         self._recorder = recorder
         self._confirmation_recorder = confirmation_recorder
         self._confirmation_recovery_reader = confirmation_recovery_reader
+        self._spot_rest_submitter = spot_rest_submitter
         self._confirmation_recovery_enabled = (
             confirmation_recovery_reader is not None or recorder is None
         )
@@ -216,6 +297,25 @@ class ExactRTI13MSampler:
         self._confirmation_recovery_checked: set[str] = set()
         self._confirmation_recovery_last_attempt: dict[str, float] = {}
         self._thread: threading.Thread | None = None
+        self._confirmation_quote_executor: ThreadPoolExecutor | None = None
+        self._confirmation_record_thread: threading.Thread | None = None
+        self._confirmation_record_queue: queue.Queue[
+            tuple[_ConfirmationPending, dict[str, Any]]
+        ] = queue.Queue()
+        self._confirmation_spool: RTIConfirmationSpool | None = None
+        self._confirmation_spool_init_error: str | None = None
+        if feed is None and confirmation_recorder is None:
+            try:
+                self._confirmation_spool = RTIConfirmationSpool(
+                    os.environ.get(
+                        "Q15_RTI_CONFIRMATION_SPOOL_DB",
+                        "data/q15_rti_confirmation_spool_v1.sqlite3",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - live path fails closed
+                self._confirmation_spool_init_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
         self._stop = threading.Event()
         self._quote_captures = 0
         self._quote_retry_attempts = 0
@@ -240,6 +340,10 @@ class ExactRTI13MSampler:
         self._confirmation_quote_retry_attempts = 0
         self._confirmation_quote_retry_successes = 0
         self._confirmation_quote_retry_exhausted = 0
+        self._confirmation_quote_prefetch_batches = 0
+        self._confirmation_quote_prefetch_attempts = 0
+        self._confirmation_quote_prefetch_usable = 0
+        self._last_confirmation_quote_prefetch_at: float | None = None
         self._confirmation_decisions_recorded = 0
         self._confirmation_missed_deadlines = 0
         self._confirmation_record_failures = 0
@@ -256,6 +360,8 @@ class ExactRTI13MSampler:
         self._last_recorded_at: float | None = None
         self._last_timing_offset_s: float | None = None
         self._last_error: str | None = None
+        self._registration_identity_conflicts = 0
+        self._last_registration_identity_conflict: dict[str, Any] | None = None
 
     def start(self) -> bool:
         if not self.enabled:
@@ -264,6 +370,21 @@ class ExactRTI13MSampler:
             if self._thread is not None and self._thread.is_alive():
                 return True
             self._stop.clear()
+            if self._confirmation_quote_executor is None:
+                self._confirmation_quote_executor = ThreadPoolExecutor(
+                    max_workers=8,
+                    thread_name_prefix="rti-confirm-quote",
+                )
+            if (
+                self._confirmation_record_thread is None
+                or not self._confirmation_record_thread.is_alive()
+            ):
+                self._confirmation_record_thread = threading.Thread(
+                    target=self._run_confirmation_recorder,
+                    name="q15-rti-confirm-record",
+                    daemon=True,
+                )
+                self._confirmation_record_thread.start()
             self._thread = threading.Thread(
                 target=self._run,
                 name="q15-rti-exact-13m",
@@ -274,6 +395,156 @@ class ExactRTI13MSampler:
 
     def stop(self) -> None:
         self._stop.set()
+        executor = self._confirmation_quote_executor
+        self._confirmation_quote_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _run_confirmation_recorder(self) -> None:
+        """Drain frozen delayed sources only after every exact stage is safe."""
+        while (
+            not self._stop.is_set()
+            or (
+                self._confirmation_spool is None
+                and not self._confirmation_record_queue.empty()
+            )
+        ):
+            spool_row: dict[str, Any] | None = None
+            queue_item = False
+            pending: _ConfirmationPending | None = None
+            source: dict[str, Any]
+            if self._confirmation_spool is not None:
+                try:
+                    spool_row = self._confirmation_spool.next_ready(
+                        now=time.time()
+                    )
+                except Exception as exc:  # noqa: BLE001 - fail closed
+                    with self._lock:
+                        self._last_confirmation_error = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    self._stop.wait(0.25)
+                    continue
+                if spool_row is None:
+                    self._stop.wait(0.1)
+                    continue
+                key = (
+                    str(spool_row.get("ticker") or ""),
+                    str(spool_row.get("policy_id") or ""),
+                )
+                with self._lock:
+                    pending = self._confirmation_pending.get(key)
+                    if pending is not None:
+                        pending.record_inflight = True
+                source = dict(spool_row["source"])
+            else:
+                try:
+                    pending, source = self._confirmation_record_queue.get(
+                        timeout=0.1
+                    )
+                    queue_item = True
+                except queue.Empty:
+                    continue
+            try:
+                row_id = self._record_confirmation(source)
+                completed_at = time.time()
+                with self._lock:
+                    key = (
+                        self._confirmation_key(pending)
+                        if pending is not None
+                        else (
+                            str(spool_row.get("ticker") or ""),
+                            str(spool_row.get("policy_id") or ""),
+                        )
+                    )
+                    current = self._confirmation_pending.get(key)
+                    if row_id is None:
+                        if pending is not None and current is pending:
+                            pending.record_inflight = False
+                        self._confirmation_record_failures += 1
+                        self._last_confirmation_error = (
+                            "delayed_confirmation_record_returned_none"
+                        )
+                    else:
+                        if pending is not None and current is pending:
+                            self._confirmation_pending.pop(key, None)
+                        self._confirmation_decisions_recorded += 1
+                        self._last_confirmation_recorded_at = completed_at
+                        self._last_confirmation_error = None
+                if spool_row is not None:
+                    if row_id is None:
+                        self._confirmation_spool.mark_failure(
+                            int(spool_row["id"]),
+                            "delayed_confirmation_record_returned_none",
+                            now=completed_at,
+                        )
+                    else:
+                        self._confirmation_spool.mark_completed(
+                            int(spool_row["id"])
+                        )
+            except Exception as exc:  # noqa: BLE001 - writer must stay alive
+                with self._lock:
+                    if (
+                        pending is not None
+                        and self._confirmation_pending.get(
+                            self._confirmation_key(pending)
+                        ) is pending
+                    ):
+                        pending.record_inflight = False
+                    self._confirmation_record_failures += 1
+                    self._last_confirmation_error = f"{type(exc).__name__}: {exc}"
+                if spool_row is not None:
+                    try:
+                        self._confirmation_spool.mark_failure(
+                            int(spool_row["id"]),
+                            f"{type(exc).__name__}: {exc}",
+                            now=time.time(),
+                        )
+                    except Exception:  # noqa: BLE001 - original error wins
+                        pass
+                logger.warning(
+                    "delayed RTI confirmation async record failed", exc_info=True
+                )
+            finally:
+                if queue_item:
+                    self._confirmation_record_queue.task_done()
+
+    def _enqueue_confirmation_record(
+        self,
+        pending: _ConfirmationPending,
+        source: Mapping[str, Any],
+        *,
+        queued_at: float,
+    ) -> bool:
+        """Queue one immutable source when the live writer is available."""
+        record_thread = self._confirmation_record_thread
+        if record_thread is None or not record_thread.is_alive():
+            return False
+        pending.last_record_attempt = float(queued_at)
+        if self._confirmation_spool is not None:
+            release_at = (
+                pending.market.decision_time
+                + RTI_CONFIRMATION_PERSIST_RELEASE_DELAY_SECONDS
+            )
+            self._confirmation_spool.enqueue(
+                dedupe_key=(
+                    f"{pending.market.ticker}|{pending.policy.challenger_id}"
+                ),
+                ticker=pending.market.ticker,
+                policy_id=pending.policy.challenger_id,
+                interval=pending.policy.interval,
+                close_time=pending.market.close_time,
+                target_at=pending.target_at,
+                release_at=release_at,
+                source=source,
+                now=queued_at,
+            )
+            pending.record_spooled = True
+            pending.record_inflight = False
+            return True
+        pending.record_inflight = True
+        self._confirmation_record_queue.put_nowait((pending, dict(source)))
+        return True
 
     def register_market(
         self,
@@ -298,6 +569,38 @@ class ExactRTI13MSampler:
         ):
             return False
         current = time.time() if now is None else float(now)
+        with self._lock:
+            prior = self._markets.get(asset_key)
+            if prior is not None and prior.ticker == ticker_key:
+                identity_matches = bool(
+                    math.isclose(
+                        prior.close_time, close, rel_tol=0.0, abs_tol=1e-6
+                    )
+                    and math.isclose(
+                        prior.strike,
+                        strike_value,
+                        rel_tol=1e-12,
+                        abs_tol=1e-9,
+                    )
+                )
+                if identity_matches:
+                    # The app refreshes the same market every cycle.  Preserve
+                    # the first-seen timestamp and frozen contract identity so
+                    # health can prove genuine registration lead time and an
+                    # upstream glitch cannot mutate the strike before capture.
+                    return True
+                self._registration_identity_conflicts += 1
+                self._last_registration_identity_conflict = {
+                    "asset": asset_key,
+                    "ticker": ticker_key,
+                    "registered_close_time": prior.close_time,
+                    "observed_close_time": close,
+                    "registered_strike": prior.strike,
+                    "observed_strike": strike_value,
+                    "detected_at": current,
+                }
+                return False
+
         market = _Market(asset_key, ticker_key, close, strike_value, current)
         # Recover a durable parent before publishing this market to the exact
         # worker.  Otherwise the worker can observe an already-past decision
@@ -306,6 +609,33 @@ class ExactRTI13MSampler:
         self._recover_confirmation_schedule(market, current=current)
         with self._lock:
             prior = self._markets.get(asset_key)
+            # Re-check after recovery, which may perform durable I/O outside
+            # the lock.  A concurrent first registration wins; a contradictory
+            # same-ticker identity still fails closed.
+            if prior is not None and prior.ticker == ticker_key:
+                if (
+                    math.isclose(
+                        prior.close_time, close, rel_tol=0.0, abs_tol=1e-6
+                    )
+                    and math.isclose(
+                        prior.strike,
+                        strike_value,
+                        rel_tol=1e-12,
+                        abs_tol=1e-9,
+                    )
+                ):
+                    return True
+                self._registration_identity_conflicts += 1
+                self._last_registration_identity_conflict = {
+                    "asset": asset_key,
+                    "ticker": ticker_key,
+                    "registered_close_time": prior.close_time,
+                    "observed_close_time": close,
+                    "registered_strike": prior.strike,
+                    "observed_strike": strike_value,
+                    "detected_at": current,
+                }
+                return False
             self._markets[asset_key] = market
             if prior is not None and prior.ticker != ticker_key:
                 self._pending.pop(prior.ticker, None)
@@ -363,6 +693,93 @@ class ExactRTI13MSampler:
             max_age_s=2.0,
         ))
 
+    def _get_rest_orderbook_reader(
+        self,
+    ) -> Callable[[str], Mapping[str, Any] | None] | None:
+        if self._rest_orderbook_reader is not None:
+            return self._rest_orderbook_reader
+        if not self._default_rest_quote_reader_allowed:
+            return None
+        if self._rest_client is None:
+            from q15_upgrade.kalshi_rest import KalshiClient
+
+            self._rest_client = KalshiClient(rate=18.0, capacity=18)
+        return lambda ticker: self._rest_client.get_orderbook(
+            ticker,
+            timeout=(0.35, 1.0),
+        )
+
+    def _capture_rest_quote(
+        self,
+        market: _Market,
+    ) -> dict[str, Any] | None:
+        reader = self._get_rest_orderbook_reader()
+        if reader is None:
+            return None
+        request_started_at = time.time()
+        try:
+            raw = reader(market.ticker)
+            received_at = time.time()
+            if isinstance(raw, Mapping):
+                # An injected reader can bind its synthetic/test evidence time.
+                received_at = _num(raw.get("_captured_at")) or received_at
+            if not isinstance(raw, Mapping):
+                return {
+                    "available": False,
+                    "reason": "kalshi_rest_snapshot_missing",
+                    "captured_at": received_at,
+                    "quote_age_seconds": 0.0,
+                    "quote_age_source": "kalshi_rest_snapshot_received_at",
+                    "quote_evidence_source": "kalshi_official_rest_orderbook",
+                }
+
+            from q15_upgrade.orderbook import parse_orderbook
+
+            parsed = parse_orderbook(dict(raw))
+            yes_bid = _num(parsed.get("yes_bid"))
+            yes_ask = _num(parsed.get("yes_ask"))
+            no_bid = _num(parsed.get("no_bid"))
+            no_ask = _num(parsed.get("no_ask"))
+            available = all(
+                value is not None
+                for value in (yes_bid, yes_ask, no_bid, no_ask)
+            ) and bool(yes_ask >= yes_bid and no_ask >= no_bid)
+            return {
+                "available": available,
+                "reason": None if available else "rest_two_sided_book_missing",
+                "captured_at": received_at,
+                # This age is bound to receipt of a newly requested snapshot,
+                # not to the last market mutation inside Kalshi's book.
+                "book_age_seconds": 0.0,
+                "quote_age_source": "kalshi_rest_snapshot_received_at",
+                "quote_evidence_source": "kalshi_official_rest_orderbook",
+                "rest_request_latency_seconds": max(
+                    0.0, received_at - request_started_at
+                ),
+                "yes_bid_cents": yes_bid,
+                "yes_ask_cents": yes_ask,
+                "no_bid_cents": no_bid,
+                "no_ask_cents": no_ask,
+                "yes_bid_qty": _num(parsed.get("yes_bid_qty")),
+                "yes_ask_qty": _num(parsed.get("yes_ask_qty")),
+                "no_bid_qty": _num(parsed.get("no_bid_qty")),
+                "no_ask_qty": _num(parsed.get("no_ask_qty")),
+                "execution_ladder_schema_version": parsed.get(
+                    "execution_ladder_schema_version"
+                ),
+                "yes_fill_10x2c": parsed.get("yes_fill_10x2c"),
+                "no_fill_10x2c": parsed.get("no_fill_10x2c"),
+            }
+        except Exception as exc:  # noqa: BLE001 - missing evidence fails closed
+            return {
+                "available": False,
+                "reason": f"kalshi_rest_snapshot_{type(exc).__name__}: {exc}",
+                "captured_at": time.time(),
+                "quote_age_seconds": 0.0,
+                "quote_age_source": "kalshi_rest_snapshot_received_at",
+                "quote_evidence_source": "kalshi_official_rest_orderbook",
+            }
+
     def _capture_quote(self, market: _Market, now: float) -> dict[str, Any]:
         try:
             raw = self._get_feed().get_microstructure(
@@ -374,6 +791,27 @@ class ExactRTI13MSampler:
         except Exception as exc:  # noqa: BLE001 - missing evidence fails closed
             quote = {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
         quote["captured_at"] = now
+        quote.setdefault("microstructure_captured_at", now)
+        quote.setdefault(
+            "microstructure_evidence_source",
+            "kalshi_official_websocket_history",
+        )
+        quote.setdefault("quote_age_source", "kalshi_ws_exact_sampler")
+        quote.setdefault("quote_evidence_source", "kalshi_official_websocket_book")
+        if not self._quote_has_executable_book(quote):
+            rest_quote = self._capture_rest_quote(market)
+            if rest_quote is not None:
+                rest_quote["websocket_fallback_reason"] = quote.get("reason")
+                # REST supplies the newly requested executable book.  Preserve
+                # the independently timestamped WebSocket event/trade history
+                # captured immediately before that request; never relabel it as
+                # REST evidence or reuse the old executable quote.
+                rest_quote.update({
+                    key: value for key, value in quote.items()
+                    if key in _KALSHI_MICROSTRUCTURE_BASE_KEYS
+                    or key.startswith(_KALSHI_MICROSTRUCTURE_PREFIXES)
+                })
+                quote = rest_quote
         return quote
 
     @staticmethod
@@ -431,6 +869,7 @@ class ExactRTI13MSampler:
             return "missed", None
 
         quote = self._capture_quote(market, capture_at)
+        quote_captured_at = _num(quote.get("captured_at")) or capture_at
         retry_cutoff_s = max(
             0.0,
             self.max_timing_offset_s
@@ -442,7 +881,7 @@ class ExactRTI13MSampler:
                 self._last_quote_failure_reason_by_ticker[market.ticker] = (
                     self._quote_failure_reason(quote)
                 )
-        if not quote_usable and capture_at - decision_time < retry_cutoff_s:
+        if not quote_usable and quote_captured_at - decision_time < retry_cutoff_s:
             with self._lock:
                 self._quote_retry_pending[market.ticker] = (
                     self._quote_retry_pending.get(market.ticker, 0) + 1
@@ -466,7 +905,7 @@ class ExactRTI13MSampler:
                     )
         pending = _Pending(
             market=market,
-            captured_at=capture_at,
+            captured_at=quote_captured_at,
             quote=quote,
         )
         with self._lock:
@@ -474,8 +913,8 @@ class ExactRTI13MSampler:
                 return "done", None
             self._pending[market.ticker] = pending
             self._quote_captures += 1
-            self._last_capture_at = capture_at
-            self._last_timing_offset_s = capture_at - decision_time
+            self._last_capture_at = quote_captured_at
+            self._last_timing_offset_s = quote_captured_at - decision_time
         return "captured", pending
 
     def _drain_primary_quote_retries(
@@ -579,6 +1018,12 @@ class ExactRTI13MSampler:
             "rti_spot_snapshot_created_at": created_at,
             "rti_spot_snapshot_age_s": snapshot_age,
             "rti_spot_book_age_s": book_age,
+            "rti_spot_book_source_at": _num(value("orderbook_ts")),
+            "rti_spot_book_received_at": _num(value("orderbook_received_at")),
+            "rti_spot_book_source_age_s": _num(value("book_source_age_seconds")),
+            "rti_spot_trade_source_at": _num(value("trade_ts")),
+            "rti_spot_trade_received_at": _num(value("trade_received_at")),
+            "rti_spot_trade_source_age_s": _num(value("trade_source_age_seconds")),
             "spot_depth_status": status,
             "spot_depth_missing_reason": missing_reason,
             "spot_depth_source": value("source"),
@@ -613,6 +1058,7 @@ class ExactRTI13MSampler:
             "spot_depth_last_trade_side": value("last_trade_side"),
             "spot_depth_last_trade_size": _num(value("last_trade_size")),
             **{key: value(key) for key in SPOT_MID_PATH_KEYS},
+            **{key: value(key) for key in SPOT_FAST_MID_PATH_KEYS},
         }
 
     def _capture_cross_venue_context(
@@ -771,21 +1217,28 @@ class ExactRTI13MSampler:
         yes_ask_depth = _num(quote.get("yes_ask_qty"))
         no_bid_depth = yes_ask_depth
         no_ask_depth = yes_bid_depth
+        yes_fill = quote.get("yes_fill_10x2c")
+        yes_fill = dict(yes_fill) if isinstance(yes_fill, Mapping) else {}
+        no_fill = quote.get("no_fill_10x2c")
+        no_fill = dict(no_fill) if isinstance(no_fill, Mapping) else {}
         if side == "YES":
             bid, ask, depth = yes_bid, yes_ask, yes_ask_depth
             opposite_side = "NO"
             opposite_ask = no_ask
             opposite_depth = no_ask_depth
+            selected_fill = yes_fill
         elif side == "NO":
             bid, ask, depth = no_bid, no_ask, no_ask_depth
             opposite_side = "YES"
             opposite_ask = yes_ask
             opposite_depth = yes_ask_depth
+            selected_fill = no_fill
         else:
             bid = ask = depth = None
             opposite_side = None
             opposite_ask = None
             opposite_depth = None
+            selected_fill = {}
         spread = None if bid is None or ask is None else ask - bid
         market_mid = None if bid is None or ask is None else (bid + ask) / 2.0
         microstructure = {
@@ -795,7 +1248,25 @@ class ExactRTI13MSampler:
             "kalshi_microstructure_extension_schema_version": quote.get(
                 "microstructure_extension_schema_version"
             ),
-            "kalshi_microstructure_captured_at": _num(quote.get("captured_at")),
+            "kalshi_microstructure_captured_at": _num(
+                quote.get("microstructure_captured_at")
+                if quote.get("microstructure_captured_at") is not None
+                else quote.get("captured_at")
+            ),
+            "kalshi_microstructure_evidence_source": quote.get(
+                "microstructure_evidence_source"
+            ),
+            "kalshi_microstructure_transport_connected": (
+                bool(quote.get("microstructure_transport_connected"))
+                if "microstructure_transport_connected" in quote
+                else None
+            ),
+            "kalshi_microstructure_transport_age_seconds": _num(
+                quote.get("microstructure_transport_age_seconds")
+            ),
+            "kalshi_microstructure_book_age_seconds": _num(
+                quote.get("microstructure_book_age_seconds")
+            ),
             "kalshi_microstructure_time_basis": quote.get(
                 "microstructure_time_basis"
             ),
@@ -889,13 +1360,38 @@ class ExactRTI13MSampler:
             "rti_opposite_ask_cents": opposite_ask,
             "rti_opposite_depth_contracts": opposite_depth,
             "quote_age_seconds": _num(quote.get("book_age_seconds")),
-            "quote_age_source": "kalshi_ws_exact_sampler",
+            "quote_age_source": (
+                quote.get("quote_age_source") or "kalshi_ws_exact_sampler"
+            ),
+            "quote_evidence_source": quote.get("quote_evidence_source"),
             "kalshi_depth_status": "ok" if quote.get("available") else "missing",
             "kalshi_depth_missing_reason": quote.get("reason"),
             "yes_bid_depth_contracts": yes_bid_depth,
             "yes_ask_depth_contracts": yes_ask_depth,
             "no_bid_depth_contracts": no_bid_depth,
             "no_ask_depth_contracts": no_ask_depth,
+            "rti_execution_ladder_schema_version": quote.get(
+                "execution_ladder_schema_version"
+            ),
+            "rti_ladder_depth_within_2c_contracts": _num(
+                selected_fill.get("depth_within_limit_contracts")
+            ),
+            "rti_ladder_10_contract_filled_contracts": _num(
+                selected_fill.get("filled_contracts_within_limit")
+            ),
+            "rti_ladder_10_contract_full_fill_supported": (
+                bool(selected_fill.get("full_fill_supported"))
+                if "full_fill_supported" in selected_fill else None
+            ),
+            "rti_ladder_10_contract_vwap_cents": _num(
+                selected_fill.get("vwap_cents")
+            ),
+            "rti_ladder_10_contract_worst_price_cents": _num(
+                selected_fill.get("worst_price_cents")
+            ),
+            "rti_ladder_10_contract_slippage_cents": _num(
+                selected_fill.get("slippage_cents")
+            ),
             **microstructure,
         }
 
@@ -1192,6 +1688,19 @@ class ExactRTI13MSampler:
             str(interval or "").upper()
             for interval in (state.get("completed_intervals") or ())
         }
+        if self._confirmation_spool is not None:
+            try:
+                completed.update(self._confirmation_spool.pending_intervals(
+                    ticker=market.ticker,
+                    close_time=market.close_time,
+                ))
+            except Exception as exc:  # noqa: BLE001 - recovery fails closed
+                with self._lock:
+                    self._confirmation_recovery_failures += 1
+                    self._last_confirmation_error = (
+                        f"confirmation_spool_recovery:{type(exc).__name__}: {exc}"
+                    )
+                return
         scheduled = self._schedule_confirmation_stages(
             market=market,
             original_source=original_source,
@@ -1234,15 +1743,76 @@ class ExactRTI13MSampler:
             original_strict_accepted=original_strict_accepted,
         )
 
+    def _capture_confirmation_quote_batch(
+        self,
+        items: list[tuple[_ConfirmationPending, float]],
+    ) -> list[tuple[_ConfirmationPending, float, dict[str, Any]]]:
+        if len(items) > 1:
+            pool = self._confirmation_quote_executor
+            if pool is not None:
+                futures = [
+                    pool.submit(self._capture_quote, pending.market, capture_at)
+                    for pending, capture_at in items
+                ]
+                return [
+                    (pending, capture_at, dict(future.result()))
+                    for (pending, capture_at), future in zip(items, futures)
+                ]
+            with ThreadPoolExecutor(
+                max_workers=min(8, len(items)),
+                thread_name_prefix="rti-confirm-quote-test",
+            ) as transient_pool:
+                futures = [
+                    transient_pool.submit(
+                        self._capture_quote, pending.market, capture_at
+                    )
+                    for pending, capture_at in items
+                ]
+                return [
+                    (pending, capture_at, dict(future.result()))
+                    for (pending, capture_at), future in zip(items, futures)
+                ]
+        return [
+            (pending, capture_at, self._capture_quote(pending.market, capture_at))
+            for pending, capture_at in items
+        ]
+
     def _tick_confirmations(self, *, realtime: bool, current: float) -> None:
         """Capture all delayed quotes, then paths, then research rows."""
         with self._lock:
             confirmations = list(self._confirmation_pending.values())
 
+        # Start official snapshot requests shortly before the exact boundary.
+        # Their genuine response receipt time is retained; responses received
+        # before target are not eligible and are recaptured at/after target.
+        # This only hides network latency and cannot create future evidence.
+        prefetch_items: list[tuple[_ConfirmationPending, float]] = []
+        for pending in confirmations:
+            if pending.captured_at is not None or pending.prefetched_quote is not None:
+                continue
+            requested_at = time.time() if realtime else current
+            if pending.target_at - 0.75 <= requested_at < pending.target_at:
+                prefetch_items.append((pending, requested_at))
+        if prefetch_items:
+            prefetched = self._capture_confirmation_quote_batch(prefetch_items)
+            usable = 0
+            for pending, _requested_at, quote in prefetched:
+                pending.prefetched_quote = quote
+                usable += int(self._quote_has_executable_book(quote))
+            with self._lock:
+                self._confirmation_quote_prefetch_batches += 1
+                self._confirmation_quote_prefetch_attempts += len(prefetched)
+                self._confirmation_quote_prefetch_usable += usable
+                self._last_confirmation_quote_prefetch_at = time.time()
+
         # Phase C1a: freeze every newly due Kalshi quote before any spot/path
         # call can delay another asset's executable entry evidence.
         newly_captured: list[_ConfirmationPending] = []
         forced_missing: list[tuple[_ConfirmationPending, dict[str, Any], float]] = []
+        due_quotes: list[tuple[_ConfirmationPending, float]] = []
+        captured_quotes: list[
+            tuple[_ConfirmationPending, float, dict[str, Any]]
+        ] = []
         for pending in confirmations:
             if pending.captured_at is not None:
                 continue
@@ -1250,6 +1820,22 @@ class ExactRTI13MSampler:
             if capture_at < pending.target_at:
                 continue
             confirmation_key = self._confirmation_key(pending)
+            prefetched_quote = pending.prefetched_quote
+            prefetched_at = (
+                _num(prefetched_quote.get("captured_at"))
+                if isinstance(prefetched_quote, Mapping)
+                else None
+            )
+            if (
+                isinstance(prefetched_quote, Mapping)
+                and prefetched_at is not None
+                and pending.target_at <= prefetched_at
+                <= pending.target_at + self.max_timing_offset_s
+            ):
+                captured_quotes.append(
+                    (pending, capture_at, dict(prefetched_quote))
+                )
+                continue
             if capture_at - pending.target_at > self.max_timing_offset_s:
                 pending.captured_at = capture_at
                 pending.quote = {
@@ -1280,7 +1866,18 @@ class ExactRTI13MSampler:
                     )
                 forced_missing.append((pending, missing_path, capture_at))
                 continue
-            quote = self._capture_quote(pending.market, capture_at)
+            due_quotes.append((pending, capture_at))
+
+        # A single slow official snapshot must not consume another asset's
+        # exact-time budget.  Kalshi permits the seven read-only book requests
+        # concurrently; every response retains its own immutable receive time.
+        captured_quotes.extend(
+            self._capture_confirmation_quote_batch(due_quotes)
+        )
+
+        for pending, capture_at, quote in captured_quotes:
+            confirmation_key = self._confirmation_key(pending)
+            quote_captured_at = _num(quote.get("captured_at")) or capture_at
             retry_cutoff_s = max(
                 0.0,
                 self.max_timing_offset_s
@@ -1289,7 +1886,7 @@ class ExactRTI13MSampler:
             quote_usable = self._quote_has_executable_book(quote)
             if (
                 not quote_usable
-                and capture_at - pending.target_at < retry_cutoff_s
+                and quote_captured_at - pending.target_at < retry_cutoff_s
             ):
                 with self._lock:
                     self._confirmation_quote_retry_pending[confirmation_key] = (
@@ -1299,7 +1896,7 @@ class ExactRTI13MSampler:
                     )
                     self._confirmation_quote_retry_attempts += 1
                 continue
-            pending.captured_at = capture_at
+            pending.captured_at = quote_captured_at
             pending.quote = quote
             with self._lock:
                 prior_retries = self._confirmation_quote_retry_pending.pop(
@@ -1313,7 +1910,7 @@ class ExactRTI13MSampler:
             newly_captured.append(pending)
             with self._lock:
                 self._confirmation_quote_captures += 1
-                self._last_confirmation_capture_at = capture_at
+                self._last_confirmation_capture_at = quote_captured_at
 
         # Phase C1b: quote timestamps are immutable; now freeze spot context.
         for pending in newly_captured:
@@ -1321,6 +1918,18 @@ class ExactRTI13MSampler:
                 pending,
                 evidence_as_of=pending.captured_at or pending.target_at,
                 confirmation=True,
+            )
+
+        # The frozen V21 stage evidence above always wins scheduling priority.
+        # Only after every asset's existing quote and spot context is immutable
+        # may the independent official REST reservoir receive nonblocking jobs.
+        for pending in newly_captured:
+            self._submit_spot_rest_stage(
+                market=pending.market,
+                stage=pending.policy.interval,
+                target_at=pending.target_at,
+                submitted_at=(time.time() if realtime else current),
+                realtime=realtime,
             )
 
         # Phase C2: read every due RTI path before the first SQLite write.
@@ -1332,7 +1941,17 @@ class ExactRTI13MSampler:
                 forced is pending for forced, _, _ in forced_missing
             ):
                 continue
+            if pending.record_inflight or pending.record_spooled:
+                continue
             path_read_at = time.time() if realtime else current
+            if pending.record_source is not None:
+                if path_read_at - pending.last_record_attempt >= 0.25:
+                    ready.append((
+                        pending,
+                        pending.last_path or {},
+                        pending.evidence_completed_at or path_read_at,
+                    ))
+                continue
             try:
                 path = self._read_confirmation_path(pending, path_read_at)
                 pending.last_path = path
@@ -1365,12 +1984,30 @@ class ExactRTI13MSampler:
         for pending, path, evidence_as_of in ready:
             try:
                 recorded_at = time.time() if realtime else current
-                source = self._build_confirmation_source(
-                    pending,
-                    path,
-                    evidence_as_of=evidence_as_of,
-                    recorded_at=recorded_at,
-                )
+                source = pending.record_source
+                if source is None:
+                    source = self._build_confirmation_source(
+                        pending,
+                        path,
+                        evidence_as_of=evidence_as_of,
+                        recorded_at=recorded_at,
+                    )
+                    pending.record_source = dict(source)
+                # Only real-time collection uses the isolated writer. Tests
+                # with an injected timestamp remain synchronous and exact.
+                if realtime:
+                    if self._enqueue_confirmation_record(
+                        pending, source, queued_at=recorded_at,
+                    ):
+                        continue
+                    with self._lock:
+                        self._confirmation_record_failures += 1
+                        self._last_confirmation_error = (
+                            "delayed_confirmation_durable_spool_unavailable"
+                        )
+                    # Live collection must never fall back to a synchronous
+                    # strategy-ledger write inside the protected window.
+                    continue
                 row_id = self._record_confirmation(source)
                 if row_id is None:
                     with self._lock:
@@ -1430,6 +2067,17 @@ class ExactRTI13MSampler:
             pending.spot_context = self._capture_spot_context(
                 pending,
                 evidence_as_of=pending.captured_at,
+            )
+
+        # Preserve V21 noninterference: submission happens only after all seven
+        # existing spot contexts are frozen and performs no network/database I/O.
+        for pending in newly_captured_primary:
+            self._submit_spot_rest_stage(
+                market=pending.market,
+                stage="13M",
+                target_at=pending.market.decision_time,
+                submitted_at=(time.time() if realtime else current),
+                realtime=realtime,
             )
 
         # Phase 2: read every pending exact path before any row is persisted.
@@ -1512,19 +2160,145 @@ class ExactRTI13MSampler:
             self.tick()
             self._stop.wait(self.poll_seconds)
 
+    def _submit_spot_rest_stage(
+        self,
+        *,
+        market: _Market,
+        stage: str,
+        target_at: float,
+        submitted_at: float,
+        realtime: bool,
+    ) -> bool:
+        submitter = self._spot_rest_submitter
+        if submitter is None:
+            if not realtime:
+                return False
+            try:
+                from q15_upgrade.rti_spot_rest_top_book import (
+                    submit_spot_rest_top_book,
+                )
+
+                submitter = submit_spot_rest_top_book
+            except Exception:  # noqa: BLE001 - reservoir cannot affect V21
+                logger.warning(
+                    "spot REST top-book reservoir import failed", exc_info=True
+                )
+                return False
+        try:
+            return bool(submitter(
+                asset=market.asset,
+                ticker=market.ticker,
+                close_time=market.close_time,
+                stage=stage,
+                target_at=target_at,
+                submitted_at=submitted_at,
+            ))
+        except Exception:  # noqa: BLE001 - research capture must be inert
+            logger.warning(
+                "spot REST top-book reservoir submission failed", exc_info=True
+            )
+            return False
+
     def health(self) -> dict[str, Any]:
         now = time.time()
+        try:
+            from q15_upgrade.rti_spot_rest_top_book import (
+                spot_rest_top_book_health,
+            )
+
+            spot_rest_reservoir = spot_rest_top_book_health()
+        except Exception as exc:  # noqa: BLE001 - exact health remains available
+            spot_rest_reservoir = {
+                "started": False,
+                "record_only": True,
+                "used_by_v21": False,
+                "last_error": f"{type(exc).__name__}: {exc}",
+            }
+        if self._confirmation_spool is not None:
+            try:
+                confirmation_spool = self._confirmation_spool.status()
+            except Exception as exc:  # noqa: BLE001 - health remains available
+                confirmation_spool = {
+                    "pending": None,
+                    "last_error": f"{type(exc).__name__}: {exc}",
+                }
+        else:
+            confirmation_spool = {
+                "pending": self._confirmation_record_queue.qsize(),
+                "last_error": self._confirmation_spool_init_error,
+            }
         with self._lock:
             markets = list(self._markets.values())
             thread_alive = bool(self._thread and self._thread.is_alive())
+            latest_expected_decision_time = (
+                math.floor(
+                    (now - RTI_EXACT_DECISION_PHASE_SECONDS)
+                    / RTI_EXACT_WINDOW_SECONDS
+                ) * RTI_EXACT_WINDOW_SECONDS
+                + RTI_EXACT_DECISION_PHASE_SECONDS
+            )
+            market_by_asset = {market.asset: market for market in markets}
+            overdue_registration_assets = sorted(
+                asset for asset in RTI_EXACT_REQUIRED_ASSETS
+                if (
+                    asset not in market_by_asset
+                    or market_by_asset[asset].decision_time
+                    < latest_expected_decision_time - 1e-6
+                    or market_by_asset[asset].registered_at
+                    > market_by_asset[asset].decision_time + 1e-6
+                )
+            )
+            registration_watchdog_ok = bool(
+                not self.enabled or not overdue_registration_assets
+            )
+            registration_by_asset = {
+                m.asset: {
+                    "ticker": m.ticker,
+                    "close_time": m.close_time,
+                    "decision_time": m.decision_time,
+                    "strike": m.strike,
+                    "registered_at": m.registered_at,
+                    "registration_lead_seconds": round(
+                        m.decision_time - m.registered_at, 3
+                    ),
+                    "registered_before_decision": bool(
+                        m.registered_at <= m.decision_time
+                    ),
+                    "seconds_to_decision": round(m.decision_time - now, 3),
+                }
+                for m in sorted(markets, key=lambda item: item.asset)
+            }
             return {
                 "enabled": self.enabled,
                 "read_only": True,
                 "paper_only": True,
+                "health_generated_at": now,
                 "thread_alive": thread_alive,
                 "poll_seconds": self.poll_seconds,
                 "max_timing_offset_seconds": self.max_timing_offset_s,
                 "registered_assets": sorted(m.asset for m in markets),
+                "registration_by_asset": registration_by_asset,
+                "registration_watchdog_status": (
+                    "DISABLED" if not self.enabled
+                    else "OK" if registration_watchdog_ok
+                    else "STALE_MISSING_OR_LATE"
+                ),
+                "registration_watchdog_ok": registration_watchdog_ok,
+                "latest_expected_decision_time": (
+                    latest_expected_decision_time
+                ),
+                "latest_registered_decision_time": (
+                    max((m.decision_time for m in markets), default=None)
+                ),
+                "overdue_registration_assets": overdue_registration_assets,
+                "registration_identity_conflicts": (
+                    self._registration_identity_conflicts
+                ),
+                "last_registration_identity_conflict": (
+                    dict(self._last_registration_identity_conflict)
+                    if self._last_registration_identity_conflict is not None
+                    else None
+                ),
                 "pending_tickers": sorted(self._pending),
                 "delayed_confirmation_pending_tickers": (
                     self._confirmation_pending_labels()
@@ -1608,6 +2382,23 @@ class ExactRTI13MSampler:
                     "quote_retry_exhausted": (
                         self._confirmation_quote_retry_exhausted
                     ),
+                    "quote_prefetch_lead_seconds": 0.75,
+                    "quote_executor_reuses_connections": True,
+                    "quote_executor_active": bool(
+                        self._confirmation_quote_executor is not None
+                    ),
+                    "quote_prefetch_batches": (
+                        self._confirmation_quote_prefetch_batches
+                    ),
+                    "quote_prefetch_attempts": (
+                        self._confirmation_quote_prefetch_attempts
+                    ),
+                    "quote_prefetch_usable": (
+                        self._confirmation_quote_prefetch_usable
+                    ),
+                    "last_quote_prefetch_at": (
+                        self._last_confirmation_quote_prefetch_at
+                    ),
                     "quote_retry_pending_tickers": sorted(
                         f"{ticker}@{policy_id}"
                         for ticker, policy_id in (
@@ -1615,6 +2406,28 @@ class ExactRTI13MSampler:
                         )
                     ),
                     "decisions_recorded": self._confirmation_decisions_recorded,
+                    "record_queue_depth": (
+                        int(confirmation_spool.get("pending") or 0)
+                        + self._confirmation_record_queue.qsize()
+                    ),
+                    "record_inflight": sum(
+                        1
+                        for pending in self._confirmation_pending.values()
+                        if pending.record_inflight
+                    ),
+                    "record_thread_alive": bool(
+                        self._confirmation_record_thread
+                        and self._confirmation_record_thread.is_alive()
+                    ),
+                    "record_spooled": sum(
+                        1
+                        for pending in self._confirmation_pending.values()
+                        if pending.record_spooled
+                    ),
+                    "record_release_delay_seconds": (
+                        RTI_CONFIRMATION_PERSIST_RELEASE_DELAY_SECONDS
+                    ),
+                    "durable_spool": confirmation_spool,
                     "missed_deadlines": self._confirmation_missed_deadlines,
                     "record_failures": self._confirmation_record_failures,
                     "spot_context_ok": self._confirmation_spot_context_ok,
@@ -1642,6 +2455,7 @@ class ExactRTI13MSampler:
                     "notification_eligible": False,
                     "review_bars": [30, 60, 150],
                 },
+                "spot_rest_top_book_reservoir": spot_rest_reservoir,
                 "last_capture_at": self._last_capture_at,
                 "last_recorded_at": self._last_recorded_at,
                 "last_timing_offset_seconds": self._last_timing_offset_s,

@@ -186,7 +186,11 @@ def _key_file() -> str:
 def load_cdp_key(path: str | None = None) -> tuple[str, str]:
     key_path = Path(path or _key_file()).expanduser()
     env_path = os.environ.get("Q15_COINBASE_ADV_L2_KEY_FILE")
-    if not key_path.exists() and (path is None or (env_path and str(key_path) == str(Path(env_path).expanduser()))):
+    # An explicit environment path is authoritative.  Falling back to a
+    # wildcard Downloads scan when that path is stale can hold the GIL for
+    # tens of seconds on cloud-backed Windows profiles, and silently use a
+    # different credential than the operator configured.
+    if not key_path.exists() and path is None and not env_path:
         fallback = Path(_default_key_file()).expanduser()
         if fallback != key_path and fallback.exists():
             key_path = fallback
@@ -307,6 +311,7 @@ class CoinbaseAdvancedL2Collector:
         self._last_error: dict[str, str] = {}
         self._connected = False
         self._connection_mode = _preferred_connection_mode()
+        self._authenticated_key_loaded = self._connection_mode == "authenticated"
         self._records_written = 0
         self._updates_seen = 0
         self._last_prune_at = 0.0
@@ -345,7 +350,7 @@ class CoinbaseAdvancedL2Collector:
                 "have_ws": _HAVE_WS,
                 "have_coinbase_sdk": _HAVE_COINBASE_SDK,
                 "coinbase_sdk_error": _COINBASE_SDK_ERROR,
-                "authenticated_key_loaded": _has_key_file(),
+                "authenticated_key_loaded": self._authenticated_key_loaded,
                 "connection_mode": self._connection_mode,
                 "key_file": self.key_file,
                 "products": list(self.products),
@@ -807,14 +812,26 @@ def coinbase_adv_l2_health() -> dict[str, Any]:
     now = time.time()
     products = _configured_products()
     db_path = _db_path()
+    if _feed is None:
+        key_file = _key_file()
+        authenticated_key_loaded = _has_key_file()
+        connection_mode = (
+            "authenticated"
+            if _HAVE_COINBASE_SDK and authenticated_key_loaded
+            else "public"
+        )
+    else:
+        key_file = _feed.key_file
+        authenticated_key_loaded = _feed._authenticated_key_loaded
+        connection_mode = _feed._connection_mode
     info = {
         "enabled": _enabled(),
         "have_ws": _HAVE_WS,
         "have_coinbase_sdk": _HAVE_COINBASE_SDK,
         "coinbase_sdk_error": _COINBASE_SDK_ERROR,
-        "authenticated_key_loaded": _has_key_file(),
-        "connection_mode": _preferred_connection_mode(),
-        "key_file": _key_file(),
+        "authenticated_key_loaded": authenticated_key_loaded,
+        "connection_mode": connection_mode,
+        "key_file": key_file,
         "products": products,
         "db_path": db_path,
         "summary_levels": _summary_levels(),

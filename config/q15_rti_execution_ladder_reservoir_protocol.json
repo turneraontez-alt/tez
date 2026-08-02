@@ -1,0 +1,65 @@
+{
+  "protocol_id": "q15-rti-execution-ladder-reservoir-v1",
+  "protocol_status": "FROZEN_BEFORE_FIRST_ELIGIBLE_LADDER_EVIDENCE",
+  "objective": "retain point-in-time displayed Kalshi ask-ladder execution evidence for a future RTI challenger without changing any existing control, feature model, notification, or trade",
+  "prospective_boundary": {
+    "strictly_after_close_time": 1785612600.0,
+    "first_eligible_close_time": 1785613500.0,
+    "historical_backfill_allowed": false,
+    "pre_boundary_rows_receive_credit": false
+  },
+  "capture_contract": {
+    "contracts": 10,
+    "maximum_price_distance_from_best_ask_cents": 2.0,
+    "stages_recorded": ["13M", "12M30S", "12M", "11M30S"],
+    "future_execution_evaluation_stage": "12M",
+    "side": "ORIGINAL_EXACT_13M_RTI_SIDE",
+    "official_sources_allowed": [
+      "kalshi_official_websocket_book",
+      "kalshi_official_rest_orderbook"
+    ],
+    "full_displayed_ladder_required": true,
+    "full_fill_supported_only_when_displayed_quantity_reaches_all_10_contracts": true,
+    "partial_fill_never_treated_as_full": true,
+    "vwap_and_worst_price_null_unless_full_fill_supported": true,
+    "levels_above_best_plus_2c_excluded": true,
+    "midpoint_last_trade_and_synthetic_depth_forbidden": true,
+    "schema_version": "kalshi-execution-ladder-10x2c-v1"
+  },
+  "persisted_selected_side_fields": [
+    "rti_execution_ladder_schema_version",
+    "rti_ladder_depth_within_2c_contracts",
+    "rti_ladder_10_contract_filled_contracts",
+    "rti_ladder_10_contract_full_fill_supported",
+    "rti_ladder_10_contract_vwap_cents",
+    "rti_ladder_10_contract_worst_price_cents",
+    "rti_ladder_10_contract_slippage_cents"
+  ],
+  "usage": {
+    "record_only": true,
+    "used_by_v18": false,
+    "used_by_v19": false,
+    "used_by_v20": false,
+    "used_by_v21": false,
+    "changes_existing_sim_full_fill_supported": false,
+    "changes_existing_execution_scoring": false,
+    "outcome_access_allowed": false,
+    "label_access_allowed": false,
+    "model_fit_allowed": false,
+    "threshold_selection_allowed": false,
+    "paper_artifact_allowed": false,
+    "notifications_allowed": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  },
+  "future_audit_requirements": {
+    "chronological_same_close_cross_asset_folds": true,
+    "separate_btc_and_non_btc_reports": true,
+    "official_fee_and_2c_slippage_adjusted_pnl": true,
+    "compare_top_of_book_only_control": true,
+    "rejected_trade_counterfactuals": true,
+    "untouched_test_required": true,
+    "historical_results_cannot_auto_promote": true,
+    "prospective_paper_review_required": true
+  }
+}

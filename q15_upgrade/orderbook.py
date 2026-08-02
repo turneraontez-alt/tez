@@ -1,9 +1,76 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from .precision import dollars_to_cents
+
+
+EXECUTION_LADDER_SCHEMA_VERSION = "kalshi-execution-ladder-10x2c-v1"
+
+
+def summarize_ask_fill(
+    levels: Sequence[Sequence[float]], *, contracts: float = 10.0,
+    max_slippage_cents: float = 2.0,
+) -> dict:
+    """Summarize a real displayed ask ladder without inventing fill capacity."""
+    normalized = []
+    for level in levels or ():
+        try:
+            price, quantity = float(level[0]), float(level[1])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if (
+            not math.isfinite(price)
+            or not math.isfinite(quantity)
+            or not 0.0 <= price <= 100.0
+            or quantity <= 0.0
+        ):
+            continue
+        normalized.append((price, quantity))
+    normalized.sort(key=lambda row: row[0])
+    requested = max(0.0, float(contracts))
+    limit = max(0.0, float(max_slippage_cents))
+    best = normalized[0][0] if normalized else None
+    eligible = (
+        [] if best is None else [
+            (price, quantity)
+            for price, quantity in normalized
+            if price <= best + limit + 1e-9
+        ]
+    )
+    depth = sum(quantity for _, quantity in eligible)
+    remaining = requested
+    filled = 0.0
+    cost = 0.0
+    worst = None
+    for price, quantity in eligible:
+        take = min(remaining, quantity)
+        if take <= 0.0:
+            continue
+        cost += price * take
+        filled += take
+        remaining -= take
+        worst = price
+        if remaining <= 1e-9:
+            break
+    full = requested > 0.0 and filled + 1e-9 >= requested
+    vwap = cost / filled if full and filled > 0.0 else None
+    return {
+        "schema_version": EXECUTION_LADDER_SCHEMA_VERSION,
+        "requested_contracts": requested,
+        "max_slippage_cents": limit,
+        "best_ask_cents": best,
+        "depth_within_limit_contracts": round(depth, 8),
+        "filled_contracts_within_limit": round(filled, 8),
+        "full_fill_supported": full,
+        "vwap_cents": None if vwap is None else round(vwap, 8),
+        "worst_price_cents": None if not full else worst,
+        "slippage_cents": (
+            None if vwap is None or best is None else round(vwap - best, 8)
+        ),
+    }
 
 
 def _levels(raw_levels) -> List[List[float]]:
@@ -71,6 +138,8 @@ def parse_orderbook(raw):
     yes_ask_qty = yes_ask_levels[0][1] if yes_ask_levels else None
     no_ask = no_ask_levels[0][0] if no_ask_levels else None
     no_ask_qty = no_ask_levels[0][1] if no_ask_levels else None
+    yes_fill_10x2c = summarize_ask_fill(yes_ask_levels)
+    no_fill_10x2c = summarize_ask_fill(no_ask_levels)
 
     spread = None
     if yes_bid is not None and yes_ask is not None:
@@ -97,6 +166,9 @@ def parse_orderbook(raw):
         "no_ask_levels": no_ask_levels,
         "depth_3c_yes": depth_within(yes_ask_levels, yes_ask),
         "depth_3c_no": depth_within(no_ask_levels, no_ask),
+        "execution_ladder_schema_version": EXECUTION_LADDER_SCHEMA_VERSION,
+        "yes_fill_10x2c": yes_fill_10x2c,
+        "no_fill_10x2c": no_fill_10x2c,
     }
 
 

@@ -1,0 +1,91 @@
+{
+  "protocol_id": "q15-rti-spot-rest-top-book-reservoir-v1",
+  "protocol_status": "FROZEN_BEFORE_FIRST_ELIGIBLE_REST_BOOK_EVIDENCE",
+  "final_pre_evidence_amendment": "At zero eligible rows, adversarial lineage review replaced mutable spot_client symbol inheritance with hash-frozen provider, symbol, quote-currency, endpoint, and query-parameter identities; readiness also requires the declared database uniqueness constraint and rejects duplicate asset-stage identities.",
+  "eligible_rows_before_final_lineage_amendment": 0,
+  "objective": "retain newly requested official spot top-of-book evidence at each exact RTI stage for a future challenger without changing V21, any control, notification, or trade",
+  "prospective_boundary": {
+    "strictly_after_close_time": 1785618900.0,
+    "first_eligible_close_time": 1785619800.0,
+    "historical_backfill_allowed": false,
+    "pre_boundary_rows_receive_credit": false
+  },
+  "capture_contract": {
+    "assets": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+    "stages": ["13M", "12M30S", "12M", "11M30S"],
+    "source_identity_by_asset": {
+      "BNB": {"provider": "okx", "symbol": "BNB-USDT", "quote_currency": "USDT"},
+      "BTC": {"provider": "coinbase", "symbol": "BTC-USD", "quote_currency": "USD"},
+      "DOGE": {"provider": "coinbase", "symbol": "DOGE-USD", "quote_currency": "USD"},
+      "ETH": {"provider": "coinbase", "symbol": "ETH-USD", "quote_currency": "USD"},
+      "HYPE": {"provider": "okx", "symbol": "HYPE-USDT", "quote_currency": "USDT"},
+      "SOL": {"provider": "coinbase", "symbol": "SOL-USD", "quote_currency": "USD"},
+      "XRP": {"provider": "coinbase", "symbol": "XRP-USD", "quote_currency": "USD"}
+    },
+    "request_contract_by_provider": {
+      "coinbase": {
+        "method": "GET",
+        "url_template": "https://api.exchange.coinbase.com/products/{symbol}/book",
+        "query": {"level": "1"}
+      },
+      "okx": {
+        "method": "GET",
+        "url_template": "https://www.okx.com/api/v5/market/books",
+        "query": {"instId": "{symbol}", "sz": "1"}
+      }
+    },
+    "depth_scope": "OFFICIAL_TOP_OF_BOOK_LEVEL_1",
+    "request_must_start_at_or_after_target": true,
+    "maximum_request_start_offset_seconds": 2.0,
+    "maximum_response_latency_seconds": 2.0,
+    "maximum_receive_offset_seconds": 4.0,
+    "local_request_and_receive_clock_is_freshness_authority": true,
+    "exchange_book_timestamp_is_mutation_provenance_not_receipt_freshness": true,
+    "positive_two_sided_uncrossed_book_required": true,
+    "schema_version": "official-spot-rest-top-book-v1"
+  },
+  "storage_contract": {
+    "database": "data/q15_rti_spot_rest_top_book_v1.sqlite3",
+    "sqlite_journal_mode": "WAL",
+    "unique_identity": ["ticker", "close_time", "stage"],
+    "canonical_evidence_sha256_required": true,
+    "existing_identity_never_overwritten": true,
+    "outcome_columns_forbidden": true,
+    "failed_requests_are_retained": true
+  },
+  "noninterference": {
+    "submit_is_nonblocking": true,
+    "network_and_database_work_run_outside_exact_sampler_thread": true,
+    "submit_only_after_existing_stage_quote_and_spot_context_are_frozen": true,
+    "used_by_v18": false,
+    "used_by_v19": false,
+    "used_by_v20": false,
+    "used_by_v21": false,
+    "changes_existing_features": false,
+    "changes_existing_decisions": false,
+    "changes_existing_readiness": false
+  },
+  "usage": {
+    "record_only": true,
+    "outcome_access_allowed": false,
+    "label_access_allowed": false,
+    "model_fit_allowed": false,
+    "probability_scoring_allowed": false,
+    "threshold_selection_allowed": false,
+    "paper_artifact_allowed": false,
+    "notifications_allowed": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  },
+  "future_audit_requirements": {
+    "feature_rules_frozen_before_outcome_access": true,
+    "chronological_same_close_cross_asset_folds": true,
+    "separate_btc_and_non_btc_reports": true,
+    "compare_against_frozen_v21_and_frozen_strict_control": true,
+    "official_fee_and_slippage_adjusted_pnl": true,
+    "rejected_trade_counterfactuals": true,
+    "untouched_test_required": true,
+    "historical_results_cannot_auto_promote": true,
+    "prospective_paper_review_required": true
+  }
+}

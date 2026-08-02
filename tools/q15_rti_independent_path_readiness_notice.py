@@ -73,7 +73,7 @@ from tools.q15_rti_independent_path_audit import (
     build_report,
     validate_design,
 )
-from tools.q15_rti_microstructure_freeze import load_feature_rows
+from tools.q15_rti_microstructure_freeze import load_feature_rows_after
 from tools.q15_rti_microstructure_preregister import design_fingerprint
 from tools.q15_rti_v15_design_binding import (
     validate_files as validate_v15_design_binding_files,
@@ -406,7 +406,13 @@ def build_outcome_blind_snapshot(
     scheduled_maintenance = load_scheduled_maintenance(
         scheduled_maintenance_path
     )
-    rows = load_feature_rows(database_path)
+    # The independent-path design forbids pre-freeze credit.  Push its frozen
+    # boundary into the outcome-denied SQL loader; otherwise this periodic
+    # monitor materializes hundreds of thousands of wide historical rows and
+    # can block the exact sampler behind the GIL.
+    rows = load_feature_rows_after(
+        database_path, float(design["prospective_after_close_time"]),
+    )
     report = build_report(rows, design)
     geometry = _geometry_summary(report)
     source_quality = _source_quality_summary(report)

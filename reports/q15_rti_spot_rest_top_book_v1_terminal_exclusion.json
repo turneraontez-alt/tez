@@ -1,0 +1,21 @@
+{
+  "protocol_id": "q15-rti-spot-rest-top-book-reservoir-v1",
+  "protocol_sha256": "291fb660cc05135704b8983f0644ce3253bb9de407bb7feb4d32f36436ee104c",
+  "status": "TERMINAL_EXCLUDED_OUTCOME_BLIND_SOURCE_CLOCK_SEMANTICS",
+  "database": "data/q15_rti_spot_rest_top_book_v1.sqlite3",
+  "close_time": 1785619800.0,
+  "row_count": 28,
+  "status_counts": {"FAILED": 9, "OK": 19},
+  "failure_reason_counts": {"SOURCE_TIMESTAMP_IN_FUTURE": 9},
+  "ordered_evidence_hashes_sha256": "bc27e20a6e2efb0901d8c77f4ad74fec37d6d681a18b7f7f5858f5086528d64b",
+  "reason": "V1 correctly used local request and receipt time as freshness authority but an implementation-only one-second future-source rejection contradicted the protocol's declaration that exchange book time is mutation provenance. Eight OKX rows showed a consistent approximately 1.03 to 1.21 second exchange-versus-host clock lead and one Coinbase row showed 1.16 seconds. The defect was found using only source timestamps and failure codes; no outcomes, labels, predictions, correctness, settlements, P/L, or model scores were read.",
+  "historical_backfill_allowed": false,
+  "rows_receive_v2_credit": false,
+  "outcome_columns_selected": false,
+  "outcome_labels_read": false,
+  "model_fit_performed": false,
+  "threshold_selection_from_outcomes": false,
+  "notification_eligible": false,
+  "real_trading_allowed": false
+}
+

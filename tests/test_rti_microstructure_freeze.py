@@ -1092,6 +1092,12 @@ def test_feature_loader_selects_no_outcome_or_pnl_columns(tmp_path: Path):
     assert json.loads(rows[0]["threshold_json"]) == {"rti_side": "YES"}
     assert not any(key.startswith("__safe_feature_profile_") for key in rows[0])
     assert "threshold_json" not in freeze.FEATURE_SELECT_COLUMNS
+    assert [row["id"] for row in freeze.load_feature_rows_after(
+        database, 1999.9,
+    )] == [1]
+    assert freeze.load_feature_rows_after(database, 2000.0) == []
+    with pytest.raises(ValueError, match="close_boundary_invalid"):
+        freeze.load_feature_rows_after(database, float("nan"))
 
 
 def test_regularized_fit_is_deterministic_and_ood_falls_back_to_market():

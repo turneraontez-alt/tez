@@ -1,0 +1,1226 @@
+{
+  "audit_id": "q15-rti-v19-delayed-development-audit-v1",
+  "automatic_promotion": false,
+  "cohort": "NON_BTC_TRANSFER",
+  "execution_model": {
+    "contracts": 10,
+    "entry": "fresh delayed ask for candidate; original 13m ask for matched control",
+    "fee": "official Kalshi general fee; order rounded up then divided per contract",
+    "slippage_cents_per_contract": 2.0
+  },
+  "historical_credit_allowed": false,
+  "interpretation": "All results are pre-V18 development evidence and non-independent. Any selected rule must be frozen before a silent prospective ledger.",
+  "lineage_diagnostics": {
+    "missing_parent": 342,
+    "original_not_strict": 18850
+  },
+  "maximum_label_close_time": 1785573900.0,
+  "notification_eligible": false,
+  "paper_only": true,
+  "real_trading_allowed": false,
+  "rules": [
+    {
+      "candidate": {
+        "accuracy": 0.42857142857142855,
+        "average_fee_slippage_break_even_rate": 0.6024285714285712,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.5,
+            "correct": 1,
+            "resolved": 2,
+            "ten_contract_net_pnl_dollars": -2.54,
+            "wilson_95_high": 0.9054687942657693,
+            "wilson_95_low": 0.09453120573423071
+          },
+          "DOGE": {
+            "accuracy": 0.5,
+            "correct": 2,
+            "resolved": 4,
+            "ten_contract_net_pnl_dollars": -4.49,
+            "wilson_95_high": 0.8499610108478506,
+            "wilson_95_low": 0.15003898915214947
+          },
+          "ETH": {
+            "accuracy": 0.34782608695652173,
+            "correct": 8,
+            "resolved": 23,
+            "ten_contract_net_pnl_dollars": -57.82,
+            "wilson_95_high": 0.55109664622737,
+            "wilson_95_low": 0.1881127593879773
+          },
+          "HYPE": {
+            "accuracy": 0.5454545454545454,
+            "correct": 6,
+            "resolved": 11,
+            "ten_contract_net_pnl_dollars": -5.13,
+            "wilson_95_high": 0.7872872837754022,
+            "wilson_95_low": 0.28009153740932197
+          },
+          "SOL": {
+            "accuracy": 0.42857142857142855,
+            "correct": 3,
+            "resolved": 7,
+            "ten_contract_net_pnl_dollars": -12.62,
+            "wilson_95_high": 0.7495416354723429,
+            "wilson_95_low": 0.15821985525146973
+          },
+          "XRP": {
+            "accuracy": 0.4444444444444444,
+            "correct": 4,
+            "resolved": 9,
+            "ten_contract_net_pnl_dollars": -14.76,
+            "wilson_95_high": 0.7333487065045069,
+            "wilson_95_low": 0.18877852109766458
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.46153846153846156,
+            "correct": 12,
+            "resolved": 26,
+            "ten_contract_net_pnl_dollars": -37.22,
+            "wilson_95_high": 0.645420612531412,
+            "wilson_95_low": 0.28755853530391223
+          },
+          "YES": {
+            "accuracy": 0.4,
+            "correct": 12,
+            "resolved": 30,
+            "ten_contract_net_pnl_dollars": -60.14,
+            "wilson_95_high": 0.5767963974667752,
+            "wilson_95_low": 0.2459062811680185
+          }
+        },
+        "correct": 24,
+        "resolved": 56,
+        "ten_contract_ev_per_trade_dollars": -1.7385714285714287,
+        "ten_contract_max_drawdown_dollars": 97.36,
+        "ten_contract_net_pnl_dollars": -97.36,
+        "wilson_95_high": 0.5586237926918696,
+        "wilson_95_low": 0.30768962683938234
+      },
+      "candidate_count": 57,
+      "candidate_incremental_pnl_vs_execute_every_matched_parent_dollars": 104.67,
+      "entry_interval": "12M30S",
+      "matched_parent_count": 327,
+      "matched_strict_control": {
+        "accuracy": 0.556923076923077,
+        "average_fee_slippage_break_even_rate": 0.6190861538461538,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6,
+            "correct": 27,
+            "resolved": 45,
+            "ten_contract_net_pnl_dollars": -10.53,
+            "wilson_95_high": 0.7297511343499085,
+            "wilson_95_low": 0.45451854590351387
+          },
+          "ETH": {
+            "accuracy": 0.55,
+            "correct": 33,
+            "resolved": 60,
+            "ten_contract_net_pnl_dollars": -44.8,
+            "wilson_95_high": 0.6690634559324476,
+            "wilson_95_low": 0.4249193588533434
+          },
+          "HYPE": {
+            "accuracy": 0.5487804878048781,
+            "correct": 45,
+            "resolved": 82,
+            "ten_contract_net_pnl_dollars": -56.65,
+            "wilson_95_high": 0.651887299785124,
+            "wilson_95_low": 0.44130776131828087
+          },
+          "SOL": {
+            "accuracy": 0.5441176470588235,
+            "correct": 37,
+            "resolved": 68,
+            "ten_contract_net_pnl_dollars": -46.19,
+            "wilson_95_high": 0.6569511707260847,
+            "wilson_95_low": 0.42656606428685023
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5562130177514792,
+            "correct": 94,
+            "resolved": 169,
+            "ten_contract_net_pnl_dollars": -108.02,
+            "wilson_95_high": 0.629042433672822,
+            "wilson_95_low": 0.4808848958558567
+          },
+          "YES": {
+            "accuracy": 0.5576923076923077,
+            "correct": 87,
+            "resolved": 156,
+            "ten_contract_net_pnl_dollars": -94.01,
+            "wilson_95_high": 0.6333133506051049,
+            "wilson_95_low": 0.4792982342290396
+          }
+        },
+        "correct": 181,
+        "resolved": 325,
+        "ten_contract_ev_per_trade_dollars": -0.6216307692307692,
+        "ten_contract_max_drawdown_dollars": 226.78,
+        "ten_contract_net_pnl_dollars": -202.03,
+        "wilson_95_high": 0.609952054894496,
+        "wilson_95_low": 0.5025641714131329
+      },
+      "name": "FRESH_30_CONTINUATION",
+      "new_quote_required": true,
+      "qualification_rate": 0.1743119266055046,
+      "rejected_count": 270,
+      "rejected_parent_counterfactual": {
+        "accuracy": 0.5836431226765799,
+        "average_fee_slippage_break_even_rate": 0.6181375464684018,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.68,
+            "correct": 17,
+            "resolved": 25,
+            "ten_contract_net_pnl_dollars": 16.48,
+            "wilson_95_high": 0.8279480969309202,
+            "wilson_95_low": 0.4841026927310224
+          },
+          "DOGE": {
+            "accuracy": 0.6097560975609756,
+            "correct": 25,
+            "resolved": 41,
+            "ten_contract_net_pnl_dollars": -5.15,
+            "wilson_95_high": 0.7434385493987647,
+            "wilson_95_low": 0.45726856934123794
+          },
+          "ETH": {
+            "accuracy": 0.6756756756756757,
+            "correct": 25,
+            "resolved": 37,
+            "ten_contract_net_pnl_dollars": 20.73,
+            "wilson_95_high": 0.8036673347185582,
+            "wilson_95_low": 0.514636672419722
+          },
+          "HYPE": {
+            "accuracy": 0.5492957746478874,
+            "correct": 39,
+            "resolved": 71,
+            "ten_contract_net_pnl_dollars": -49.64,
+            "wilson_95_high": 0.659520388251759,
+            "wilson_95_low": 0.4340106587147449
+          },
+          "SOL": {
+            "accuracy": 0.5573770491803278,
+            "correct": 34,
+            "resolved": 61,
+            "ten_contract_net_pnl_dollars": -33.96,
+            "wilson_95_high": 0.6749219447851712,
+            "wilson_95_low": 0.43303367693143874
+          },
+          "XRP": {
+            "accuracy": 0.5,
+            "correct": 17,
+            "resolved": 34,
+            "ten_contract_net_pnl_dollars": -41.25,
+            "wilson_95_high": 0.659306743543175,
+            "wilson_95_low": 0.340693256456825
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5734265734265734,
+            "correct": 82,
+            "resolved": 143,
+            "ten_contract_net_pnl_dollars": -65.56,
+            "wilson_95_high": 0.6515231444769974,
+            "wilson_95_low": 0.49148823778966055
+          },
+          "YES": {
+            "accuracy": 0.5952380952380952,
+            "correct": 75,
+            "resolved": 126,
+            "ten_contract_net_pnl_dollars": -27.23,
+            "wilson_95_high": 0.67689542278283,
+            "wilson_95_low": 0.5079453839824656
+          }
+        },
+        "correct": 157,
+        "resolved": 269,
+        "ten_contract_ev_per_trade_dollars": -0.3449442379182156,
+        "ten_contract_max_drawdown_dollars": 157.6,
+        "ten_contract_net_pnl_dollars": -92.79,
+        "wilson_95_high": 0.6409697304707731,
+        "wilson_95_low": 0.5239612158542614
+      },
+      "require_parent_low_reversal": false,
+      "required_intervals": [
+        "12M30S"
+      ]
+    },
+    {
+      "candidate": {
+        "accuracy": 0.5909090909090909,
+        "average_fee_slippage_break_even_rate": 0.6062500000000001,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": 3.53,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723742
+          },
+          "DOGE": {
+            "accuracy": 0.625,
+            "correct": 5,
+            "resolved": 8,
+            "ten_contract_net_pnl_dollars": 2.11,
+            "wilson_95_high": 0.8631557141764027,
+            "wilson_95_low": 0.3057423946026273
+          },
+          "ETH": {
+            "accuracy": 0.625,
+            "correct": 10,
+            "resolved": 16,
+            "ten_contract_net_pnl_dollars": 3.9,
+            "wilson_95_high": 0.8151876744113636,
+            "wilson_95_low": 0.38641040545502725
+          },
+          "HYPE": {
+            "accuracy": 0.5833333333333334,
+            "correct": 7,
+            "resolved": 12,
+            "ten_contract_net_pnl_dollars": -2.49,
+            "wilson_95_high": 0.8067396863412435,
+            "wilson_95_low": 0.3195113125495498
+          },
+          "SOL": {
+            "accuracy": 0.5,
+            "correct": 1,
+            "resolved": 2,
+            "ten_contract_net_pnl_dollars": -2.35,
+            "wilson_95_high": 0.9054687942657693,
+            "wilson_95_low": 0.09453120573423071
+          },
+          "XRP": {
+            "accuracy": 0.4,
+            "correct": 2,
+            "resolved": 5,
+            "ten_contract_net_pnl_dollars": -11.45,
+            "wilson_95_high": 0.769275718723987,
+            "wilson_95_low": 0.11762077423264786
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5238095238095238,
+            "correct": 11,
+            "resolved": 21,
+            "ten_contract_net_pnl_dollars": -15.37,
+            "wilson_95_high": 0.7165599389846582,
+            "wilson_95_low": 0.32369534582844434
+          },
+          "YES": {
+            "accuracy": 0.6521739130434783,
+            "correct": 15,
+            "resolved": 23,
+            "ten_contract_net_pnl_dollars": 8.62,
+            "wilson_95_high": 0.8118872406120228,
+            "wilson_95_low": 0.44890335377263
+          }
+        },
+        "correct": 26,
+        "resolved": 44,
+        "ten_contract_ev_per_trade_dollars": -0.1534090909090909,
+        "ten_contract_max_drawdown_dollars": 30.66,
+        "ten_contract_net_pnl_dollars": -6.75,
+        "wilson_95_high": 0.7231214437245028,
+        "wilson_95_low": 0.444097537410319
+      },
+      "candidate_count": 44,
+      "candidate_incremental_pnl_vs_execute_every_matched_parent_dollars": 183.03,
+      "entry_interval": "12M",
+      "matched_parent_count": 325,
+      "matched_strict_control": {
+        "accuracy": 0.5603715170278638,
+        "average_fee_slippage_break_even_rate": 0.6191269349845202,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6,
+            "correct": 27,
+            "resolved": 45,
+            "ten_contract_net_pnl_dollars": -10.53,
+            "wilson_95_high": 0.7297511343499085,
+            "wilson_95_low": 0.45451854590351387
+          },
+          "ETH": {
+            "accuracy": 0.559322033898305,
+            "correct": 33,
+            "resolved": 59,
+            "ten_contract_net_pnl_dollars": -38.43,
+            "wilson_95_high": 0.6784978823238791,
+            "wilson_95_low": 0.4328935482915867
+          },
+          "HYPE": {
+            "accuracy": 0.5555555555555556,
+            "correct": 45,
+            "resolved": 81,
+            "ten_contract_net_pnl_dollars": -50.77,
+            "wilson_95_high": 0.6588044749654215,
+            "wilson_95_low": 0.44727573776431023
+          },
+          "SOL": {
+            "accuracy": 0.5441176470588235,
+            "correct": 37,
+            "resolved": 68,
+            "ten_contract_net_pnl_dollars": -46.19,
+            "wilson_95_high": 0.6569511707260847,
+            "wilson_95_low": 0.42656606428685023
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5562130177514792,
+            "correct": 94,
+            "resolved": 169,
+            "ten_contract_net_pnl_dollars": -108.02,
+            "wilson_95_high": 0.629042433672822,
+            "wilson_95_low": 0.4808848958558567
+          },
+          "YES": {
+            "accuracy": 0.564935064935065,
+            "correct": 87,
+            "resolved": 154,
+            "ten_contract_net_pnl_dollars": -81.76,
+            "wilson_95_high": 0.6407125803708292,
+            "wilson_95_low": 0.4859968415353618
+          }
+        },
+        "correct": 181,
+        "resolved": 323,
+        "ten_contract_ev_per_trade_dollars": -0.5875541795665634,
+        "ten_contract_max_drawdown_dollars": 225.51,
+        "ten_contract_net_pnl_dollars": -189.78,
+        "wilson_95_high": 0.6134763179381021,
+        "wilson_95_low": 0.5058475895634719
+      },
+      "name": "FRESH_60_CONTINUATION",
+      "new_quote_required": true,
+      "qualification_rate": 0.13538461538461538,
+      "rejected_count": 281,
+      "rejected_parent_counterfactual": {
+        "accuracy": 0.5555555555555556,
+        "average_fee_slippage_break_even_rate": 0.6192759856630825,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6538461538461539,
+            "correct": 17,
+            "resolved": 26,
+            "ten_contract_net_pnl_dollars": 10.1,
+            "wilson_95_high": 0.8058776967705947,
+            "wilson_95_low": 0.4622057118881082
+          },
+          "DOGE": {
+            "accuracy": 0.5945945945945946,
+            "correct": 22,
+            "resolved": 37,
+            "ten_contract_net_pnl_dollars": -10.35,
+            "wilson_95_high": 0.7365348180798572,
+            "wilson_95_low": 0.4348596473022937
+          },
+          "ETH": {
+            "accuracy": 0.5348837209302325,
+            "correct": 23,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -38.77,
+            "wilson_95_high": 0.6748894229587817,
+            "wilson_95_low": 0.3891564047231397
+          },
+          "HYPE": {
+            "accuracy": 0.5507246376811594,
+            "correct": 38,
+            "resolved": 69,
+            "ten_contract_net_pnl_dollars": -48.19,
+            "wilson_95_high": 0.6623114437075629,
+            "wilson_95_low": 0.4337876750268812
+          },
+          "SOL": {
+            "accuracy": 0.5454545454545454,
+            "correct": 36,
+            "resolved": 66,
+            "ten_contract_net_pnl_dollars": -44.14,
+            "wilson_95_high": 0.6597587450194227,
+            "wilson_95_low": 0.42615011343389175
+          },
+          "XRP": {
+            "accuracy": 0.5,
+            "correct": 19,
+            "resolved": 38,
+            "ten_contract_net_pnl_dollars": -46.43,
+            "wilson_95_high": 0.6515007163560489,
+            "wilson_95_low": 0.34849928364395105
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5608108108108109,
+            "correct": 83,
+            "resolved": 148,
+            "ten_contract_net_pnl_dollars": -89.38,
+            "wilson_95_high": 0.6382254848271458,
+            "wilson_95_low": 0.48031921396461014
+          },
+          "YES": {
+            "accuracy": 0.549618320610687,
+            "correct": 72,
+            "resolved": 131,
+            "ten_contract_net_pnl_dollars": -88.4,
+            "wilson_95_high": 0.632193069667938,
+            "wilson_95_low": 0.4642164479514672
+          }
+        },
+        "correct": 155,
+        "resolved": 279,
+        "ten_contract_ev_per_trade_dollars": -0.6372043010752688,
+        "ten_contract_max_drawdown_dollars": 219.98,
+        "ten_contract_net_pnl_dollars": -177.78,
+        "wilson_95_high": 0.6127153312149091,
+        "wilson_95_low": 0.49688670566205495
+      },
+      "require_parent_low_reversal": false,
+      "required_intervals": [
+        "12M"
+      ]
+    },
+    {
+      "candidate": {
+        "accuracy": 0.5833333333333334,
+        "average_fee_slippage_break_even_rate": 0.6106666666666666,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": 3.83,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723742
+          },
+          "DOGE": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": -6.27,
+            "wilson_95_high": 0.7934506856227626,
+            "wilson_95_low": 0.0
+          },
+          "ETH": {
+            "accuracy": 0.3333333333333333,
+            "correct": 1,
+            "resolved": 3,
+            "ten_contract_net_pnl_dollars": -8.82,
+            "wilson_95_high": 0.7923403991979523,
+            "wilson_95_low": 0.061491944720396215
+          },
+          "HYPE": {
+            "accuracy": 0.6666666666666666,
+            "correct": 2,
+            "resolved": 3,
+            "ten_contract_net_pnl_dollars": 2.37,
+            "wilson_95_high": 0.9385080552796037,
+            "wilson_95_low": 0.20765960080204768
+          },
+          "SOL": {
+            "accuracy": 0.5,
+            "correct": 1,
+            "resolved": 2,
+            "ten_contract_net_pnl_dollars": -2.74,
+            "wilson_95_high": 0.9054687942657693,
+            "wilson_95_low": 0.09453120573423071
+          },
+          "XRP": {
+            "accuracy": 1.0,
+            "correct": 2,
+            "resolved": 2,
+            "ten_contract_net_pnl_dollars": 8.35,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.3423802275066531
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.625,
+            "correct": 5,
+            "resolved": 8,
+            "ten_contract_net_pnl_dollars": 1.11,
+            "wilson_95_high": 0.8631557141764027,
+            "wilson_95_low": 0.3057423946026273
+          },
+          "YES": {
+            "accuracy": 0.5,
+            "correct": 2,
+            "resolved": 4,
+            "ten_contract_net_pnl_dollars": -4.39,
+            "wilson_95_high": 0.8499610108478506,
+            "wilson_95_low": 0.15003898915214947
+          }
+        },
+        "correct": 7,
+        "resolved": 12,
+        "ten_contract_ev_per_trade_dollars": -0.2733333333333333,
+        "ten_contract_max_drawdown_dollars": 27.33,
+        "ten_contract_net_pnl_dollars": -3.28,
+        "wilson_95_high": 0.8067396863412435,
+        "wilson_95_low": 0.3195113125495498
+      },
+      "candidate_count": 12,
+      "candidate_incremental_pnl_vs_execute_every_matched_parent_dollars": 198.75,
+      "entry_interval": "12M30S",
+      "matched_parent_count": 327,
+      "matched_strict_control": {
+        "accuracy": 0.556923076923077,
+        "average_fee_slippage_break_even_rate": 0.6190861538461538,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6,
+            "correct": 27,
+            "resolved": 45,
+            "ten_contract_net_pnl_dollars": -10.53,
+            "wilson_95_high": 0.7297511343499085,
+            "wilson_95_low": 0.45451854590351387
+          },
+          "ETH": {
+            "accuracy": 0.55,
+            "correct": 33,
+            "resolved": 60,
+            "ten_contract_net_pnl_dollars": -44.8,
+            "wilson_95_high": 0.6690634559324476,
+            "wilson_95_low": 0.4249193588533434
+          },
+          "HYPE": {
+            "accuracy": 0.5487804878048781,
+            "correct": 45,
+            "resolved": 82,
+            "ten_contract_net_pnl_dollars": -56.65,
+            "wilson_95_high": 0.651887299785124,
+            "wilson_95_low": 0.44130776131828087
+          },
+          "SOL": {
+            "accuracy": 0.5441176470588235,
+            "correct": 37,
+            "resolved": 68,
+            "ten_contract_net_pnl_dollars": -46.19,
+            "wilson_95_high": 0.6569511707260847,
+            "wilson_95_low": 0.42656606428685023
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5562130177514792,
+            "correct": 94,
+            "resolved": 169,
+            "ten_contract_net_pnl_dollars": -108.02,
+            "wilson_95_high": 0.629042433672822,
+            "wilson_95_low": 0.4808848958558567
+          },
+          "YES": {
+            "accuracy": 0.5576923076923077,
+            "correct": 87,
+            "resolved": 156,
+            "ten_contract_net_pnl_dollars": -94.01,
+            "wilson_95_high": 0.6333133506051049,
+            "wilson_95_low": 0.4792982342290396
+          }
+        },
+        "correct": 181,
+        "resolved": 325,
+        "ten_contract_ev_per_trade_dollars": -0.6216307692307692,
+        "ten_contract_max_drawdown_dollars": 226.78,
+        "ten_contract_net_pnl_dollars": -202.03,
+        "wilson_95_high": 0.609952054894496,
+        "wilson_95_low": 0.5025641714131329
+      },
+      "name": "LOW_REVERSAL_FRESH_30",
+      "new_quote_required": true,
+      "qualification_rate": 0.03669724770642202,
+      "rejected_count": 315,
+      "rejected_parent_counterfactual": {
+        "accuracy": 0.5559105431309904,
+        "average_fee_slippage_break_even_rate": 0.6186485623003196,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6538461538461539,
+            "correct": 17,
+            "resolved": 26,
+            "ten_contract_net_pnl_dollars": 10.01,
+            "wilson_95_high": 0.8058776967705947,
+            "wilson_95_low": 0.4622057118881082
+          },
+          "DOGE": {
+            "accuracy": 0.6136363636363636,
+            "correct": 27,
+            "resolved": 44,
+            "ten_contract_net_pnl_dollars": -4.06,
+            "wilson_95_high": 0.7427879724947443,
+            "wilson_95_low": 0.4662357539237828
+          },
+          "ETH": {
+            "accuracy": 0.5614035087719298,
+            "correct": 32,
+            "resolved": 57,
+            "ten_contract_net_pnl_dollars": -35.69,
+            "wilson_95_high": 0.6822730310020558,
+            "wilson_95_low": 0.4327800945423151
+          },
+          "HYPE": {
+            "accuracy": 0.5443037974683544,
+            "correct": 43,
+            "resolved": 79,
+            "ten_contract_net_pnl_dollars": -57.44,
+            "wilson_95_high": 0.6495154240600666,
+            "wilson_95_low": 0.4349833293376871
+          },
+          "SOL": {
+            "accuracy": 0.5454545454545454,
+            "correct": 36,
+            "resolved": 66,
+            "ten_contract_net_pnl_dollars": -44.24,
+            "wilson_95_high": 0.6597587450194227,
+            "wilson_95_low": 0.42615011343389175
+          },
+          "XRP": {
+            "accuracy": 0.4634146341463415,
+            "correct": 19,
+            "resolved": 41,
+            "ten_contract_net_pnl_dollars": -64.95,
+            "wilson_95_high": 0.6125352873233052,
+            "wilson_95_low": 0.32056233976336046
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5527950310559007,
+            "correct": 89,
+            "resolved": 161,
+            "ten_contract_net_pnl_dollars": -107.55,
+            "wilson_95_high": 0.6274761482826795,
+            "wilson_95_low": 0.47565324720812185
+          },
+          "YES": {
+            "accuracy": 0.5592105263157895,
+            "correct": 85,
+            "resolved": 152,
+            "ten_contract_net_pnl_dollars": -88.82,
+            "wilson_95_high": 0.6357135398101132,
+            "wilson_95_low": 0.47978845905599204
+          }
+        },
+        "correct": 174,
+        "resolved": 313,
+        "ten_contract_ev_per_trade_dollars": -0.6273801916932907,
+        "ten_contract_max_drawdown_dollars": 217.19,
+        "ten_contract_net_pnl_dollars": -196.37,
+        "wilson_95_high": 0.6099466259181756,
+        "wilson_95_low": 0.5005187157396757
+      },
+      "require_parent_low_reversal": true,
+      "required_intervals": [
+        "12M30S"
+      ]
+    },
+    {
+      "candidate": {
+        "accuracy": 0.8333333333333334,
+        "average_fee_slippage_break_even_rate": 0.5858333333333333,
+        "by_asset": {
+          "DOGE": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": -5.48,
+            "wilson_95_high": 0.7934506856227626,
+            "wilson_95_low": 0.0
+          },
+          "ETH": {
+            "accuracy": 1.0,
+            "correct": 2,
+            "resolved": 2,
+            "ten_contract_net_pnl_dollars": 7.56,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.3423802275066531
+          },
+          "HYPE": {
+            "accuracy": 1.0,
+            "correct": 2,
+            "resolved": 2,
+            "ten_contract_net_pnl_dollars": 8.55,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.3423802275066531
+          },
+          "SOL": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": 4.22,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723742
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": 4.82,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723742
+          },
+          "YES": {
+            "accuracy": 0.8,
+            "correct": 4,
+            "resolved": 5,
+            "ten_contract_net_pnl_dollars": 10.03,
+            "wilson_95_high": 0.9637758913675698,
+            "wilson_95_low": 0.37553462976252533
+          }
+        },
+        "correct": 5,
+        "resolved": 6,
+        "ten_contract_ev_per_trade_dollars": 2.475,
+        "ten_contract_max_drawdown_dollars": 5.48,
+        "ten_contract_net_pnl_dollars": 14.85,
+        "wilson_95_high": 0.9699466302516934,
+        "wilson_95_low": 0.4364971778135299
+      },
+      "candidate_count": 6,
+      "candidate_incremental_pnl_vs_execute_every_matched_parent_dollars": 204.63,
+      "entry_interval": "12M",
+      "matched_parent_count": 325,
+      "matched_strict_control": {
+        "accuracy": 0.5603715170278638,
+        "average_fee_slippage_break_even_rate": 0.6191269349845202,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6,
+            "correct": 27,
+            "resolved": 45,
+            "ten_contract_net_pnl_dollars": -10.53,
+            "wilson_95_high": 0.7297511343499085,
+            "wilson_95_low": 0.45451854590351387
+          },
+          "ETH": {
+            "accuracy": 0.559322033898305,
+            "correct": 33,
+            "resolved": 59,
+            "ten_contract_net_pnl_dollars": -38.43,
+            "wilson_95_high": 0.6784978823238791,
+            "wilson_95_low": 0.4328935482915867
+          },
+          "HYPE": {
+            "accuracy": 0.5555555555555556,
+            "correct": 45,
+            "resolved": 81,
+            "ten_contract_net_pnl_dollars": -50.77,
+            "wilson_95_high": 0.6588044749654215,
+            "wilson_95_low": 0.44727573776431023
+          },
+          "SOL": {
+            "accuracy": 0.5441176470588235,
+            "correct": 37,
+            "resolved": 68,
+            "ten_contract_net_pnl_dollars": -46.19,
+            "wilson_95_high": 0.6569511707260847,
+            "wilson_95_low": 0.42656606428685023
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5562130177514792,
+            "correct": 94,
+            "resolved": 169,
+            "ten_contract_net_pnl_dollars": -108.02,
+            "wilson_95_high": 0.629042433672822,
+            "wilson_95_low": 0.4808848958558567
+          },
+          "YES": {
+            "accuracy": 0.564935064935065,
+            "correct": 87,
+            "resolved": 154,
+            "ten_contract_net_pnl_dollars": -81.76,
+            "wilson_95_high": 0.6407125803708292,
+            "wilson_95_low": 0.4859968415353618
+          }
+        },
+        "correct": 181,
+        "resolved": 323,
+        "ten_contract_ev_per_trade_dollars": -0.5875541795665634,
+        "ten_contract_max_drawdown_dollars": 225.51,
+        "ten_contract_net_pnl_dollars": -189.78,
+        "wilson_95_high": 0.6134763179381021,
+        "wilson_95_low": 0.5058475895634719
+      },
+      "name": "LOW_REVERSAL_FRESH_60",
+      "new_quote_required": true,
+      "qualification_rate": 0.018461538461538463,
+      "rejected_count": 319,
+      "rejected_parent_counterfactual": {
+        "accuracy": 0.555205047318612,
+        "average_fee_slippage_break_even_rate": 0.6194416403785489,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6136363636363636,
+            "correct": 27,
+            "resolved": 44,
+            "ten_contract_net_pnl_dollars": -4.55,
+            "wilson_95_high": 0.7427879724947443,
+            "wilson_95_low": 0.4662357539237828
+          },
+          "ETH": {
+            "accuracy": 0.543859649122807,
+            "correct": 31,
+            "resolved": 57,
+            "ten_contract_net_pnl_dollars": -46.38,
+            "wilson_95_high": 0.6662739441690716,
+            "wilson_95_low": 0.4159068597911934
+          },
+          "HYPE": {
+            "accuracy": 0.5443037974683544,
+            "correct": 43,
+            "resolved": 79,
+            "ten_contract_net_pnl_dollars": -58.43,
+            "wilson_95_high": 0.6495154240600666,
+            "wilson_95_low": 0.4349833293376871
+          },
+          "SOL": {
+            "accuracy": 0.5373134328358209,
+            "correct": 36,
+            "resolved": 67,
+            "ten_contract_net_pnl_dollars": -50.41,
+            "wilson_95_high": 0.6514155628050964,
+            "wilson_95_low": 0.4191645760462989
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5535714285714286,
+            "correct": 93,
+            "resolved": 168,
+            "ten_contract_net_pnl_dollars": -111.95,
+            "wilson_95_high": 0.6267105616334916,
+            "wilson_95_low": 0.4780371524718798
+          },
+          "YES": {
+            "accuracy": 0.5570469798657718,
+            "correct": 83,
+            "resolved": 149,
+            "ten_contract_net_pnl_dollars": -91.68,
+            "wilson_95_high": 0.6343765401730813,
+            "wilson_95_low": 0.4768498255732934
+          }
+        },
+        "correct": 176,
+        "resolved": 317,
+        "ten_contract_ev_per_trade_dollars": -0.6423659305993691,
+        "ten_contract_max_drawdown_dollars": 235.04,
+        "ten_contract_net_pnl_dollars": -203.63,
+        "wilson_95_high": 0.6089243683346212,
+        "wilson_95_low": 0.500163777968691
+      },
+      "require_parent_low_reversal": true,
+      "required_intervals": [
+        "12M"
+      ]
+    },
+    {
+      "candidate": {
+        "accuracy": 1.0,
+        "average_fee_slippage_break_even_rate": 0.627,
+        "by_asset": {
+          "HYPE": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": 3.73,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723742
+          }
+        },
+        "by_side": {
+          "YES": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "resolved": 1,
+            "ten_contract_net_pnl_dollars": 3.73,
+            "wilson_95_high": 1.0,
+            "wilson_95_low": 0.20654931437723742
+          }
+        },
+        "correct": 1,
+        "resolved": 1,
+        "ten_contract_ev_per_trade_dollars": 3.73,
+        "ten_contract_max_drawdown_dollars": 0.0,
+        "ten_contract_net_pnl_dollars": 3.73,
+        "wilson_95_high": 1.0,
+        "wilson_95_low": 0.20654931437723742
+      },
+      "candidate_count": 1,
+      "candidate_incremental_pnl_vs_execute_every_matched_parent_dollars": 193.51,
+      "entry_interval": "12M",
+      "matched_parent_count": 325,
+      "matched_strict_control": {
+        "accuracy": 0.5603715170278638,
+        "average_fee_slippage_break_even_rate": 0.6191269349845202,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6,
+            "correct": 27,
+            "resolved": 45,
+            "ten_contract_net_pnl_dollars": -10.53,
+            "wilson_95_high": 0.7297511343499085,
+            "wilson_95_low": 0.45451854590351387
+          },
+          "ETH": {
+            "accuracy": 0.559322033898305,
+            "correct": 33,
+            "resolved": 59,
+            "ten_contract_net_pnl_dollars": -38.43,
+            "wilson_95_high": 0.6784978823238791,
+            "wilson_95_low": 0.4328935482915867
+          },
+          "HYPE": {
+            "accuracy": 0.5555555555555556,
+            "correct": 45,
+            "resolved": 81,
+            "ten_contract_net_pnl_dollars": -50.77,
+            "wilson_95_high": 0.6588044749654215,
+            "wilson_95_low": 0.44727573776431023
+          },
+          "SOL": {
+            "accuracy": 0.5441176470588235,
+            "correct": 37,
+            "resolved": 68,
+            "ten_contract_net_pnl_dollars": -46.19,
+            "wilson_95_high": 0.6569511707260847,
+            "wilson_95_low": 0.42656606428685023
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5562130177514792,
+            "correct": 94,
+            "resolved": 169,
+            "ten_contract_net_pnl_dollars": -108.02,
+            "wilson_95_high": 0.629042433672822,
+            "wilson_95_low": 0.4808848958558567
+          },
+          "YES": {
+            "accuracy": 0.564935064935065,
+            "correct": 87,
+            "resolved": 154,
+            "ten_contract_net_pnl_dollars": -81.76,
+            "wilson_95_high": 0.6407125803708292,
+            "wilson_95_low": 0.4859968415353618
+          }
+        },
+        "correct": 181,
+        "resolved": 323,
+        "ten_contract_ev_per_trade_dollars": -0.5875541795665634,
+        "ten_contract_max_drawdown_dollars": 225.51,
+        "ten_contract_net_pnl_dollars": -189.78,
+        "wilson_95_high": 0.6134763179381021,
+        "wilson_95_low": 0.5058475895634719
+      },
+      "name": "LOW_REVERSAL_FRESH_30_AND_60",
+      "new_quote_required": true,
+      "qualification_rate": 0.003076923076923077,
+      "rejected_count": 324,
+      "rejected_parent_counterfactual": {
+        "accuracy": 0.5590062111801242,
+        "average_fee_slippage_break_even_rate": 0.6191024844720497,
+        "by_asset": {
+          "BNB": {
+            "accuracy": 0.6666666666666666,
+            "correct": 18,
+            "resolved": 27,
+            "ten_contract_net_pnl_dollars": 14.03,
+            "wilson_95_high": 0.8135673850128434,
+            "wilson_95_low": 0.4782476050732008
+          },
+          "DOGE": {
+            "accuracy": 0.6,
+            "correct": 27,
+            "resolved": 45,
+            "ten_contract_net_pnl_dollars": -10.53,
+            "wilson_95_high": 0.7297511343499085,
+            "wilson_95_low": 0.45451854590351387
+          },
+          "ETH": {
+            "accuracy": 0.559322033898305,
+            "correct": 33,
+            "resolved": 59,
+            "ten_contract_net_pnl_dollars": -38.43,
+            "wilson_95_high": 0.6784978823238791,
+            "wilson_95_low": 0.4328935482915867
+          },
+          "HYPE": {
+            "accuracy": 0.55,
+            "correct": 44,
+            "resolved": 80,
+            "ten_contract_net_pnl_dollars": -54.5,
+            "wilson_95_high": 0.6542231081528878,
+            "wilson_95_low": 0.4411950788935596
+          },
+          "SOL": {
+            "accuracy": 0.5441176470588235,
+            "correct": 37,
+            "resolved": 68,
+            "ten_contract_net_pnl_dollars": -46.19,
+            "wilson_95_high": 0.6569511707260847,
+            "wilson_95_low": 0.42656606428685023
+          },
+          "XRP": {
+            "accuracy": 0.4883720930232558,
+            "correct": 21,
+            "resolved": 43,
+            "ten_contract_net_pnl_dollars": -57.89,
+            "wilson_95_high": 0.6324769153055069,
+            "wilson_95_low": 0.3461744754671859
+          }
+        },
+        "by_side": {
+          "NO": {
+            "accuracy": 0.5562130177514792,
+            "correct": 94,
+            "resolved": 169,
+            "ten_contract_net_pnl_dollars": -108.02,
+            "wilson_95_high": 0.629042433672822,
+            "wilson_95_low": 0.4808848958558567
+          },
+          "YES": {
+            "accuracy": 0.5620915032679739,
+            "correct": 86,
+            "resolved": 153,
+            "ten_contract_net_pnl_dollars": -85.49,
+            "wilson_95_high": 0.6382304962805969,
+            "wilson_95_low": 0.4829109426148509
+          }
+        },
+        "correct": 180,
+        "resolved": 322,
+        "ten_contract_ev_per_trade_dollars": -0.6009627329192546,
+        "ten_contract_max_drawdown_dollars": 229.24,
+        "ten_contract_net_pnl_dollars": -193.51,
+        "wilson_95_high": 0.6122250719523545,
+        "wilson_95_low": 0.5043960607222043
+      },
+      "require_parent_low_reversal": true,
+      "required_intervals": [
+        "12M30S",
+        "12M"
+      ]
+    }
+  ],
+  "source_row_identity_sha256": "5de1d8c3991a09309055b7c58b356bc5e2b97f863ab941b10c774e8845bcfabc",
+  "source_rows": 28130,
+  "status": "DEVELOPMENT_ONLY_NO_PROMOTION",
+  "strict_parent_rows": 375,
+  "v18_outcomes_read": false,
+  "v18_prospective_after_close_time": 1785573900.0,
+  "valid_stage_counts": {
+    "11M30S": 314,
+    "12M": 325,
+    "12M30S": 327
+  }
+}

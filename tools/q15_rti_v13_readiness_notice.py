@@ -27,7 +27,7 @@ from q15_upgrade.strategy_bots.telegram import V3Telegram
 from tools.q15_rti_feature_coverage_audit import build_report
 from tools.q15_rti_microstructure_freeze import (
     _feature_runtime,
-    load_feature_rows,
+    load_feature_rows_after,
 )
 from tools.q15_rti_microstructure_feature_audit import soft_input_integrity
 from tools.q15_rti_microstructure_preregister import (
@@ -88,7 +88,13 @@ def build_outcome_blind_snapshot(
         raise ValueError("v13_readiness_design_binding_mismatch")
     # The loader's SQL projection omits official_result, correctness, P/L, and
     # every other outcome field.  The feature runtime rechecks timestamps.
-    feature_rows = load_feature_rows(database_path)
+    # V13 cannot credit any pre-freeze row, so loading the entire wide ledger
+    # only burns memory/GIL time and can delay the exact sampler.  Keep the
+    # SQLite outcome-column authorizer while pushing the frozen boundary into
+    # SQL.
+    feature_rows = load_feature_rows_after(
+        database_path, float(design["prospective_after_close_time"]),
+    )
     coverage = build_report(
         feature_rows, source_schema=str(design.get("source_schema") or ""),
     )

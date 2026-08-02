@@ -1,0 +1,258 @@
+{
+  "contract_id": "q15-rti-v21-disjoint-calibration-and-policy-evaluator-v1",
+  "contract_status": "FROZEN_BEFORE_ANY_V21_LABEL_ACCESS_OR_MODEL_FIT",
+  "frozen_at": "2026-08-01T16:10:00Z",
+  "pre_evidence_implementation_amendment": {
+    "amended_at": "2026-08-01T18:22:00Z",
+    "reason": "before the first V21 eligible close, final adversarial review froze all previously implicit numerical settings and corrected five pre-evidence defects: Platt now fits every feature-complete calibration row and is validated only on disjoint executable policy rows against both the uncalibrated base and Kalshi; the untouched confirmation must beat a fair V20 feature-map ablation whose own hyperparameters are independently selected by the same train-only walk-forward procedure; drawdown is compared per pick rather than as an unnormalized total across unequal trade counts; and the feature lineage contract explicitly measures both observed confirmation sides and rejects side-distance contradictions or reused source identities",
+    "v21_eligible_rows_before_amendment": 0,
+    "outcomes_or_resolution_status_inspected": false,
+    "model_fit_or_probability_scoring_performed": false
+  },
+  "protocol_id": "q15-rti-v21-intraminute-trajectory-prospective-v1",
+  "feature_builder_version": "q15-rti-v21-intraminute-trajectory-features-v2",
+  "feature_count": 76,
+  "feature_names_sha256": "7e49760012a82d82bef6b6442d7c556bba822b702a983e10be184c8cc775dfd8",
+  "dependency_contract": {
+    "python_package": "scikit-learn",
+    "exact_version": "1.9.0",
+    "single_threaded_fit_required": true,
+    "deterministic_random_seed": 1521
+  },
+  "partitions": {
+    "exclusive_earliest_complete_windows": 180,
+    "train": [0, 104],
+    "probability_calibration": [105, 129],
+    "execution_policy_selection": [130, 154],
+    "untouched_test": [155, 179],
+    "same_close_cluster_may_not_cross_partitions": true,
+    "probability_calibration_and_policy_selection_are_disjoint": true,
+    "untouched_test_is_only_independent_final_historical_confirmation": true
+  },
+  "internal_walk_forward_folds": [
+    {"train": [0, 44], "validation": [45, 59]},
+    {"train": [0, 59], "validation": [60, 74]},
+    {"train": [0, 74], "validation": [75, 89]},
+    {"train": [0, 89], "validation": [90, 104]}
+  ],
+  "cohorts": {
+    "separate": ["BTC", "NON_BTC_TRANSFER"],
+    "cross_cohort_training_calibration_selection_or_gate_pooling_forbidden": true
+  },
+  "preprocessing": {
+    "fit_scope": "EACH_TRAINING_FOLD_ONLY",
+    "numeric_center": "MEDIAN",
+    "numeric_scale": "INTERQUARTILE_RANGE",
+    "quantile_method": "linear",
+    "zero_or_nonfinite_scale_replacement": 1.0,
+    "probability_clip": [0.000001, 0.999999],
+    "calibration_policy_or_test_statistics_forbidden": true,
+    "learned_imputation_forbidden": true
+  },
+  "candidate_models": {
+    "NON_BTC_TRANSFER": [
+      {
+        "family": "ELASTIC_NET_LOGISTIC",
+        "solver": "saga",
+        "C_grid": [0.03, 0.1, 0.3, 1.0],
+        "l1_ratio_grid": [0.0, 0.25, 0.5],
+        "class_weight": null,
+        "fit_intercept": true,
+        "tol": 0.000001,
+        "max_iter": 5000
+      },
+      {
+        "family": "HIST_GRADIENT_BOOSTING",
+        "learning_rate_grid": [0.03, 0.07],
+        "max_leaf_nodes_grid": [7, 15],
+        "min_samples_leaf_grid": [15, 30],
+        "l2_regularization_grid": [1.0, 5.0],
+        "max_iter": 200,
+        "max_bins": 255,
+        "early_stopping": false
+      }
+    ],
+    "BTC": [
+      {
+        "family": "RIDGE_LOGISTIC",
+        "solver": "lbfgs",
+        "C_grid": [0.01, 0.03, 0.1, 0.3],
+        "class_weight": null,
+        "fit_intercept": true,
+        "tol": 0.000001,
+        "max_iter": 5000
+      }
+    ]
+  },
+  "model_selection": {
+    "training_rows": "ALL_FEATURE_COMPLETE_ROWS_IN_TRAIN_FOLD",
+    "primary_validation_rows": "ROW_LEVEL_EXECUTABLE_VALIDATION_ROWS_ONLY",
+    "primary_metric": "LOWEST_CLOSE_FOLD_WEIGHTED_LOG_LOSS",
+    "secondary_metrics": [
+      "LOWEST_EXECUTABLE_BRIER_SCORE",
+      "LOWEST_ALL_FEATURE_COMPLETE_LOG_LOSS",
+      "LOWER_MODEL_COMPLEXITY",
+      "LEXICOGRAPHIC_MODEL_ID"
+    ],
+    "minimum_executable_rows_each_validation_fold_non_btc": 20,
+    "minimum_executable_rows_each_validation_fold_btc": 4,
+    "candidate_missing_any_fold_minimum_is_rejected": true,
+    "refit_after_selection": "SELECTED_HYPERPARAMETERS_ON_ALL_105_TRAIN_WINDOWS_ONLY"
+  },
+  "probability_calibration": {
+    "method": "DISJOINT_POLICY_SELECTION_BETWEEN_IDENTITY_AND_L2_REGULARIZED_PLATT_ON_LOGIT",
+    "candidate_methods": ["IDENTITY", "L2_REGULARIZED_PLATT_ON_LOGIT"],
+    "C": 0.1,
+    "solver": "lbfgs",
+    "fit_intercept": true,
+    "tol": 0.00000001,
+    "max_iter": 5000,
+    "fit_windows": [105, 129],
+    "fit_rows": "ALL_FEATURE_COMPLETE_CALIBRATION_ROWS",
+    "minimum_rows_non_btc": 150,
+    "minimum_rows_btc": 25,
+    "single_class_or_nonconvergence": "FAIL_COHORT",
+    "proper_score_gate_population": "DISJOINT_ROW_LEVEL_EXECUTABLE_POLICY_ROWS",
+    "selection_primary_metric": "LOWEST_POLICY_LOG_LOSS",
+    "selection_secondary_metrics": ["LOWEST_POLICY_BRIER_SCORE", "IDENTITY_BEFORE_PLATT_LEXICOGRAPHIC"],
+    "proper_score_gate_requires": [
+      "SELECTED_CALIBRATOR_LOG_LOSS_STRICTLY_BEATS_12M_MARKET",
+      "SELECTED_CALIBRATOR_BRIER_STRICTLY_BEATS_12M_MARKET"
+    ],
+    "in_sample_calibration_scores_are_diagnostic_only": true,
+    "policy_or_test_labels_for_calibrator_fit_forbidden": true,
+    "policy_labels_may_select_but_never_refit_calibrator": true
+  },
+  "execution_policy_selection": {
+    "windows": [130, 154],
+    "entry": "ACTUAL_12M_ASK_PLUS_2_CENTS_PER_CONTRACT_SLIPPAGE",
+    "contracts": 10,
+    "official_general_fee_formula": true,
+    "edge_margin_grid": [0.0, 0.02, 0.04, 0.06],
+    "selection_metric": "HIGHEST_CLOSE_CLUSTER_BOOTSTRAP_20TH_PERCENTILE_FEE_ADJUSTED_EV",
+    "minimum_picks_non_btc": 25,
+    "minimum_picks_btc": 8,
+    "minimum_picks_each_side": 4,
+    "positive_lower_ev_required": true,
+    "probability_calibration_refit_forbidden": true
+  },
+  "bootstrap": {
+    "unit": "COMPLETE_CLOSE_CLUSTER",
+    "resamples": 5000,
+    "random_seed": 1521,
+    "quantile_method": "linear",
+    "percentile_interval": [0.025, 0.975],
+    "policy_lower_percentile": 0.2
+  },
+  "untouched_test": {
+    "windows": [155, 179],
+    "one_shot_only": true,
+    "refit_recalibration_model_choice_margin_choice_or_threshold_change_forbidden": true,
+    "label_population": "ALL_FEATURE_COMPLETE_UNTOUCHED_TEST_ROWS_AFTER_EXCLUSIVE_RESERVATION",
+    "model_probability_metrics_population": "ALL_FEATURE_COMPLETE_COHORT_ROWS",
+    "candidate_trade_population": "ROW_LEVEL_FULL_FILL_SUPPORTED_AND_CALIBRATED_EDGE_AT_OR_ABOVE_FROZEN_SELECTED_MARGIN",
+    "pnl_scored_only_for_row_level_full_fill_supported_picks": true,
+    "nonexecutable_rows_reported_without_trade_or_pnl": true,
+    "all_source_control_population": "ALL_ROW_LEVEL_FULL_FILL_SUPPORTED_COHORT_ROWS",
+    "maximum_drawdown_order": ["CLOSE_TIME_ASCENDING", "ASSET_LEXICOGRAPHIC_ASCENDING", "PARENT_ID_ASCENDING"],
+    "wilson_z": 1.959963984540054,
+    "bootstrap_resamples": 5000,
+    "bootstrap_quantiles": [0.025, 0.975],
+    "bootstrap_policy_lower_quantile": 0.2,
+    "non_btc_random_seed": 152111,
+    "btc_random_seed": 152112,
+    "minimum_picks_non_btc": 25,
+    "minimum_picks_btc": 8,
+    "minimum_picks_each_side": 4,
+    "required_gates": [
+      "FEE_SLIPPAGE_ADJUSTED_PNL_STRICTLY_POSITIVE",
+      "CLOSE_CLUSTER_BOOTSTRAP_20TH_PERCENTILE_MEAN_PNL_STRICTLY_POSITIVE",
+      "WILSON_95_LOWER_STRICTLY_EXCEEDS_AVERAGE_BREAK_EVEN",
+      "ALL_ROW_LOG_LOSS_STRICTLY_BEATS_12M_MARKET",
+      "ALL_ROW_BRIER_STRICTLY_BEATS_12M_MARKET",
+      "ALL_ROW_LOG_LOSS_STRICTLY_BEATS_V20_FEATURE_MAP_ABLATION",
+      "ALL_ROW_BRIER_STRICTLY_BEATS_V20_FEATURE_MAP_ABLATION",
+      "MAXIMUM_DRAWDOWN_PER_PICK_STRICTLY_BELOW_ALL_SOURCE_EXECUTABLE_CONTROL",
+      "FROZEN_TEST_VOLUME_AND_SIDE_MINIMA"
+    ],
+    "required_benchmarks": [
+      "12M_MARKET_SIDE_PROBABILITY",
+      "FROZEN_V20_FEATURE_MAP_ABLATION",
+      "ALL_SOURCE_COMPLETE_12M_SIDE_FOLLOW_CONTROL",
+      "MATCHED_V18",
+      "MATCHED_V19"
+    ],
+    "matched_v18_reporting": "ACCURACY_ONLY_BECAUSE_FROZEN_V18_DID_NOT_REQUIRE_TEN_CONTRACT_DEPTH",
+    "matched_v19_reporting": "TRADE_AND_PNL_ONLY_WHEN_FROZEN_V19_ELIGIBLE_WITH_TEN_CONTRACT_DEPTH"
+  },
+  "v20_feature_map_ablation": {
+    "never_used_for_v21_model_selection_calibration_or_policy_selection": true,
+    "untouched_test_proper_score_benchmark_is_required_gate": true,
+    "feature_count": 52,
+    "feature_names_sha256": "fff635c3dddba73732dc4225622b33b763b55e881f14a4d031278adcf6bfe35d",
+    "feature_indices_zero_based": [0, 51],
+    "model_spec": "INDEPENDENTLY_WALK_FORWARD_SELECTED_FROM_SAME_FROZEN_CANDIDATE_GRID_USING_ONLY_FIRST_52_FEATURES",
+    "same_frozen_candidate_grid_as_v21": true,
+    "selection_uses_only_train_internal_walk_forward": true,
+    "selection_never_uses_calibration_policy_or_test": true,
+    "selected_ablation_spec_may_differ_from_v21": true,
+    "fit_rows": "SAME_ALL_FEATURE_COMPLETE_TRAIN_ROWS",
+    "calibration": "SEPARATE_REGULARIZED_PLATT_ON_ALL_FEATURE_COMPLETE_CALIBRATION_ROWS_WITH_IDENTITY_VERSUS_PLATT_SELECTED_ON_EXECUTABLE_POLICY_ROWS_WITHOUT_REFIT",
+    "test_metric_population": "ALL_FEATURE_COMPLETE_UNTOUCHED_TEST_COHORT_ROWS"
+  },
+  "fee_schedule_verification": {
+    "fresh_at_each_manual_label_stage": true,
+    "outcome_free_series_fee_precondition_before_label_reservation": true,
+    "official_endpoint": "https://external-api.kalshi.com/trade-api/v2/series/{series_ticker}",
+    "series_tickers": ["KXBNB15M", "KXBTC15M", "KXDOGE15M", "KXETH15M", "KXHYPE15M", "KXSOL15M", "KXXRP15M"],
+    "required_fee_type": "quadratic",
+    "required_fee_multiplier": 1,
+    "general_taker_fee_rate": 0.07,
+    "fee_schedule_version": "kalshi-fee-schedule-20260707",
+    "execution_cost_model_version": "rti-quote-plus-slippage-fee-at-fill-20260721-v2",
+    "unavailable_mismatched_or_changed_metadata": "FAIL_CLOSED_BEFORE_LABEL_RESERVATION"
+  },
+  "reporting_subgroups": {
+    "report_only_never_used_for_selection_or_gates": true,
+    "distance_absolute_bps_tiers": [
+      {"name": "PINNED_LT_2", "minimum_inclusive": 0.0, "maximum_exclusive": 2.0},
+      {"name": "NEAR_2_TO_5", "minimum_inclusive": 2.0, "maximum_exclusive": 5.0},
+      {"name": "FAR_GE_5", "minimum_inclusive": 5.0, "maximum_exclusive": null}
+    ],
+    "volatility_raw_bps_tiers": [
+      {"name": "LOW_LT_1", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+      {"name": "MEDIUM_1_TO_3", "minimum_inclusive": 1.0, "maximum_exclusive": 3.0},
+      {"name": "HIGH_GE_3", "minimum_inclusive": 3.0, "maximum_exclusive": null}
+    ],
+    "reversal_risk_probability_tiers": [
+      {"name": "LOW", "minimum_inclusive": 0.75, "maximum_exclusive": null},
+      {"name": "MEDIUM", "minimum_inclusive": 0.60, "maximum_exclusive": 0.75},
+      {"name": "HIGH", "minimum_inclusive": 0.0, "maximum_exclusive": 0.60}
+    ],
+    "settlement_average_risk_absolute_ratio_tiers": [
+      {"name": "HIGH", "minimum_inclusive": 0.0, "maximum_exclusive": 0.5},
+      {"name": "MEDIUM", "minimum_inclusive": 0.5, "maximum_exclusive": 1.5},
+      {"name": "LOW", "minimum_inclusive": 1.5, "maximum_exclusive": null}
+    ],
+    "trajectory_curvature_bps_tiers": [
+      {"name": "HARD_REVERSAL", "minimum_inclusive": null, "maximum_exclusive": -1.0},
+      {"name": "MILD_REVERSAL", "minimum_inclusive": -1.0, "maximum_exclusive": 0.0},
+      {"name": "MILD_CONTINUATION", "minimum_inclusive": 0.0, "maximum_exclusive": 1.0},
+      {"name": "STRONG_CONTINUATION", "minimum_inclusive": 1.0, "maximum_exclusive": null}
+    ]
+  },
+  "safety": {
+    "pretest_label_reservation_population": "ALL_TRAIN_AND_CALIBRATION_ROWS_PLUS_ONLY_ROW_LEVEL_EXECUTABLE_POLICY_ROWS",
+    "nonexecutable_policy_labels_forbidden": true,
+    "untouched_test_labels_forbidden_during_pretest": true,
+    "outcome_access_allowed_now": false,
+    "model_fit_allowed_now": false,
+    "probability_scoring_allowed_now": false,
+    "automatic_command_confirmation_allowed": false,
+    "paper_artifact_allowed_now": false,
+    "notification_allowed_now": false,
+    "telegram_allowed_now": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  }
+}

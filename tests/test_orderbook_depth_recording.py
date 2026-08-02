@@ -1,4 +1,4 @@
-from q15_upgrade.orderbook import parse_orderbook
+from q15_upgrade.orderbook import parse_orderbook, summarize_ask_fill
 from q15_upgrade.runtime import attach_orderbook_levels
 from q15_upgrade.checkpoint_v95 import _spot_depth_quote_fields
 
@@ -17,6 +17,46 @@ def test_attach_orderbook_levels_bridges_depth_aliases():
     assert snap["yes_ask_size"] == 7
     assert snap["yes_ask_depth_contracts"] == 7
     assert snap["no_ask_depth_contracts"] == 12
+
+
+def test_orderbook_records_real_ten_contract_fill_within_two_cents():
+    parsed = parse_orderbook({
+        "yes": [[0.81, 6], [0.80, 2], [0.79, 2]],
+        "no": [[0.40, 6], [0.39, 5], [0.37, 100]],
+    })
+    yes = parsed["yes_fill_10x2c"]
+    no = parsed["no_fill_10x2c"]
+    assert yes["depth_within_limit_contracts"] == 11.0
+    assert yes["full_fill_supported"] is True
+    assert yes["vwap_cents"] == 60.4
+    assert yes["worst_price_cents"] == 61.0
+    assert yes["slippage_cents"] == 0.4
+    assert no["depth_within_limit_contracts"] == 10.0
+    assert no["full_fill_supported"] is True
+    assert no["vwap_cents"] == 19.6
+    assert no["worst_price_cents"] == 21.0
+
+
+def test_orderbook_never_calls_partial_ladder_a_full_fill():
+    parsed = parse_orderbook({
+        "yes": [[0.55, 6]],
+        "no": [[0.44, 4], [0.43, 2]],
+    })
+    yes = parsed["yes_fill_10x2c"]
+    assert yes["depth_within_limit_contracts"] == 6.0
+    assert yes["filled_contracts_within_limit"] == 6.0
+    assert yes["full_fill_supported"] is False
+    assert yes["vwap_cents"] is None
+    assert yes["worst_price_cents"] is None
+    assert yes["slippage_cents"] is None
+
+
+def test_execution_ladder_ignores_malformed_or_nonfinite_levels():
+    summary = summarize_ask_fill([
+        None, [], ["bad", 5], [50, float("nan")], [101, 100], [50, 10]
+    ])
+    assert summary["full_fill_supported"] is True
+    assert summary["vwap_cents"] == 50.0
 
 
 def test_spot_depth_context_is_flattened_for_market_comparison():

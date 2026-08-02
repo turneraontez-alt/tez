@@ -1,0 +1,92 @@
+{
+  "protocol_id": "q15-rti-delayed-feature-reservoir-v1",
+  "protocol_status": "FROZEN_BEFORE_ANY_RESERVOIR_OUTCOME_ACCESS",
+  "frozen_at": "2026-08-01T14:22:00Z",
+  "amendment": "Before any reservoir outcome access, live proof found nine point-in-time defects. Two early windows discarded separately captured WebSocket flow during REST execution fallback; the next used exchange clocks rather than local receipt clocks for spot freshness; the next exposed long SQLite-cadence gaps in the legacy spot-mid path; the next missed its delayed RTI deadline during rollback-journal contention; the first WAL window exposed synchronous optional shadow scoring; the next exposed serial strategy-ledger writes in the exact worker; the next exposed queued-old Coinbase updates; the next proved that even asynchronous same-process ledger writes starved both spot providers; and the first durable-spool window proved that repeated full health-graph requests after 13M could themselves starve the providers before +30s. All affected windows are excluded by moving the prospective boundary forward. Delayed evidence is hash-bound into a separate WAL spool immediately after capture and cannot enter the heavy strategy ledger until 95 seconds after 13M. The spool is restart-durable, idempotent, tamper-detecting, outcome-free, and recovery respects its intervals. Full health reconstruction is now prohibited from 75 seconds before 13M through 100 seconds after it; requests receive the last immutable cached snapshot during the entire evidence/spool-release window. The local restart guard covers the same post-capture interval. The native spot sampler, incremental Coinbase books, independent source-clock gate, persistent quote pool, and optional-shadow deferral remain required. Frozen controls remain unchanged and no historical values are backfilled.",
+  "objective": "retain point-in-time 12-minute Kalshi and spot microstructure already captured by the exact collector so future reversal models can be trained and tested without reconstructing or backfilling evidence",
+  "population": {
+    "assets": ["BNB", "BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"],
+    "record_kind": "RTI_PATH_12M_CONFIRM_PROSPECTIVE",
+    "interval": "12M",
+    "prospective_after_close_time": 1785594600.0,
+    "first_eligible_close_time": 1785595500.0,
+    "all_assets_in_same_close_remain_one_chronological_cluster": true,
+    "historical_backfill_allowed": false
+  },
+  "feature_groups": {
+    "kalshi_book_and_trade_flow": {
+      "horizons_seconds": [5, 15, 30, 60],
+      "window_completeness_flags_retained": true,
+      "official_websocket_history_source_required": true,
+      "websocket_transport_freshness_retained": true,
+      "rest_execution_quote_may_be_paired_with_separately_timestamped_websocket_history": true,
+      "event_and_trade_counts_retained": true,
+      "book_delta_pressure_retained": true,
+      "aggressive_trade_imbalance_retained": true,
+      "taker_volume_retained": true,
+      "best_level_depletion_and_refill_retained": true,
+      "microprice_and_trade_path_dynamics_retained": true
+    },
+    "spot_depth_and_aggressive_flow": {
+      "horizons_seconds": [5, 15, 60],
+      "snapshot_and_trade_ages_retained": true,
+      "local_receive_time_is_freshness_authority": true,
+      "exchange_timestamp_retained_for_provenance": true,
+      "exchange_source_freshness_required_independently_of_local_receipt": true,
+      "queued_old_source_update_fails_closed": true,
+      "incremental_cached_top_of_book_required_for_batch_feed": true,
+      "event_driven_local_observation_path_required": true,
+      "one_second_local_observation_sampler_required": true,
+      "one_second_sampler_runs_in_dedicated_native_thread_required": true,
+      "legacy_control_path_unchanged": true,
+      "depth_and_notional_imbalance_retained": true,
+      "aggressive_buy_sell_quantity_retained": true,
+      "aggressive_buy_sell_notional_retained": true,
+      "net_quantity_and_notional_retained": true,
+      "spot_mid_path_retained": true
+    },
+    "execution_and_lineage": {
+      "official_quote_age_source_retained": true,
+      "official_quote_evidence_source_retained": true,
+      "exact_parent_row_identity_retained": true,
+      "capture_target_and_actual_timestamps_retained": true,
+      "delayed_persistence_isolated_from_exact_scheduler_required": true,
+      "delayed_sources_hash_bound_in_separate_wal_spool_required": true,
+      "strategy_ledger_writes_forbidden_before_95_seconds_after_13m": true,
+      "spool_restart_recovery_and_interval_dedup_required": true,
+      "full_health_graph_blocked_from_75s_before_through_100s_after_13m": true,
+      "local_restart_guard_covers_through_100s_after_13m": true,
+      "bounded_persistent_quote_worker_pool_required": true,
+      "thread_local_read_only_http_connection_reuse_required": true,
+      "complete_new_61_second_rti_path_retained": true,
+      "ten_contract_full_fill_evidence_retained": true
+    }
+  },
+  "usage": {
+    "record_only": true,
+    "used_by_v18": false,
+    "used_by_v19": false,
+    "changes_existing_candidate_eligibility": false,
+    "outcome_blind_coverage_audit_allowed": true,
+    "outcome_access_allowed": false,
+    "model_fit_allowed": false,
+    "threshold_selection_allowed": false,
+    "probability_scoring_allowed": false,
+    "paper_pick_artifact_allowed": false,
+    "notifications_allowed": false,
+    "telegram_allowed": false,
+    "automatic_promotion_allowed": false,
+    "real_trading_allowed": false
+  },
+  "future_evaluation": {
+    "separate_btc_and_non_btc_cohorts": true,
+    "chronological_walk_forward_required": true,
+    "same_close_cross_asset_rows_may_not_cross_folds": true,
+    "untouched_test_required": true,
+    "settlement_labels_may_not_be_opened_by_collection_or_coverage_tools": true,
+    "candidate_rules_must_be_frozen_before_any_reservoir_label_access": true,
+    "historical_or_retrospective_feature_imputation_forbidden": true
+  },
+  "outcome_labels_used_to_create_protocol": false,
+  "prospective_resolution_status_inspected_to_create_protocol": false
+}

@@ -2040,7 +2040,19 @@ def _format_run_cycle_breakdown(timing: Mapping[str, Any], chain_timing: Mapping
         ]
         if record_bits:
             parts.append("record[" + " ".join(record_bits) + "]")
-    for k in ("market_reconcile", "signal_store_reconcile", "other"):
+    overlay_sub = timing.get("research_overlay_sub")
+    if isinstance(overlay_sub, Mapping):
+        overlay_bits = [
+            f"{key}={float(value or 0.0):.2f}s"
+            for key, value in overlay_sub.items()
+            if float(value or 0.0) >= 0.01
+        ]
+        if overlay_bits:
+            parts.append("overlays[" + " ".join(overlay_bits) + "]")
+    for k in (
+        "research_overlays", "market_reconcile",
+        "signal_store_reconcile", "other",
+    ):
         if k in timing:
             parts.append(f"{k}={_g(timing, k):.2f}s")
     return " ".join(parts)
@@ -2788,12 +2800,25 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         self._flip_threshold_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._reconcile_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="q15-v95-reconcile")
         self._reconcile_future: Future[dict[str, Any]] | None = None
+        # Interval research contains restart replay/SQLite work that can take
+        # minutes.  It is record-only and must never stall market discovery or
+        # the independent exact RTI scheduler.  Freeze one point-in-time input
+        # batch and serialize it on a dedicated worker; drop intermediate cycles
+        # while that worker is busy.
+        self._interval_research_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="q15-interval-research"
+        )
+        self._interval_research_future: Future[None] | None = None
+        self._interval_research_enqueued = 0
+        self._interval_research_skipped_busy = 0
+        self._interval_research_failures = 0
         # A distinct ledger instance gives the background settlement worker its
         # own SQLite connection and Python lock.  Sharing ``self.ledger`` here
         # made foreground prediction/timing writes wait tens of seconds behind
         # settlement learning at each 15-minute boundary despite WAL mode.
         self._background_reconcile_ledger = V95Ledger(self.ledger.path)
         atexit.register(self._reconcile_executor.shutdown, wait=False)
+        atexit.register(self._interval_research_executor.shutdown, wait=False)
         # Optional Kalshi client (set by the app) so predictions can be settled
         # directly from official results, not only via the signals table.
         self.kalshi_client = None
@@ -2998,9 +3023,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
             )
             _t["v95_analysis"] = round(time.monotonic() - _t0, 3)
             _t["v95_sub"] = {k: round(v, 3) for k, v in _sub.items()}
-            self._dispatch_research_overlays(
+            _t0 = time.monotonic()
+            overlay_sub = self._dispatch_research_overlays(
                 analyses, canonicals, now, source_snapshots=snapshots,
             )
+            _t["research_overlays"] = round(time.monotonic() - _t0, 3)
+            _t["research_overlay_sub"] = {
+                key: round(value, 3) for key, value in overlay_sub.items()
+            }
             result_events: list[Mapping[str, Any]] = []
             _t0 = time.monotonic()
             result_events = self._harvest_reconcile_job()
@@ -3416,11 +3446,13 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
         canonicals: dict[str, Any],
         now: float,
         source_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> None:
+    ) -> dict[str, float]:
         """Feed the read-only research overlays (pure extraction from run_cycle)."""
+        timings: dict[str, float] = {}
         # Q15 MarketLead prospective evidence collector. It derives synchronized
         # venue/index/Kalshi microstructure evidence into a separate DB. It has
         # no notification, policy, or execution surface.
+        _started = time.monotonic()
         try:
             from q15_upgrade.marketlead.runner import get_runner as _marketlead_runner
             _marketlead = _marketlead_runner()
@@ -3428,11 +3460,14 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _marketlead.observe(analyses=analyses, canonicals=canonicals, now=now)
         except Exception:
             logger.debug("marketlead observe skipped", exc_info=True)
+        finally:
+            timings["marketlead"] = time.monotonic() - _started
         # Read-only Ultoim Build research overlay (default-OFF; SEPARATE DB +
         # Telegram channel; never affects production). Reuses the champion's
         # frozen per-asset analyses (with shadow_signals + flip_risk attached
         # above). observe() only extracts compact fields and enqueues — all
         # ranking/grading/DB/Telegram run on Ultoim's own worker thread.
+        _started = time.monotonic()
         try:
             from q15_upgrade.ultoim.runner import get_runner as _ultoim_runner
             _ur = _ultoim_runner()
@@ -3440,27 +3475,55 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _ur.observe(analyses=analyses, canonicals=canonicals, now=now)
         except Exception:
             logger.debug("ultoim observe skipped", exc_info=True)
+        finally:
+            timings["ultoim"] = time.monotonic() - _started
         # Interval-timing research capture (read-only; default-OFF). Records the
         # frozen analysis at eight marks (15M..7M) into its own ledger for entry/
         # confirmation/defensive-timing study. Never trades, sends, or changes the
         # champion; a failure must not disturb the cycle.
+        _started = time.monotonic()
         try:
-            from q15_upgrade.interval_research.runner import get_runner as _ir_runner
-            _irr = _ir_runner()
-            if _irr is not None:
-                _irr.observe(
-                    analyses=analyses,
-                    canonicals=canonicals,
-                    now=now,
-                    source_snapshots=source_snapshots,
+            future = self._interval_research_future
+            if future is not None and future.done():
+                self._interval_research_future = None
+                try:
+                    future.result()
+                except Exception:
+                    self._interval_research_failures += 1
+                    logger.debug(
+                        "interval-research background observe failed",
+                        exc_info=True,
+                    )
+            if self._interval_research_future is None:
+                # Freeze the point-in-time inputs before returning to the live
+                # loop.  The worker may run later, but it never reads a later
+                # mutable analysis or quote under the older timestamp.
+                frozen_analyses = copy.deepcopy(analyses)
+                frozen_canonicals = copy.deepcopy(canonicals)
+                frozen_sources = copy.deepcopy(source_snapshots or {})
+                self._interval_research_future = (
+                    self._interval_research_executor.submit(
+                        self._run_interval_research_background,
+                        frozen_analyses,
+                        frozen_canonicals,
+                        now,
+                        frozen_sources,
+                    )
                 )
+                self._interval_research_enqueued += 1
+            else:
+                self._interval_research_skipped_busy += 1
         except Exception:
-            logger.debug("interval-research observe skipped", exc_info=True)
+            self._interval_research_failures += 1
+            logger.debug("interval-research enqueue skipped", exc_info=True)
+        finally:
+            timings["interval_research"] = time.monotonic() - _started
         # Read-only Ultoim V2 paper entry-alert overlay (default-OFF; SEPARATE DB
         # + Telegram channel; never affects production). Reuses the champion's
         # frozen per-asset analyses; observe() only extracts compact fields and
         # enqueues — all gating/recording/DB/Telegram run on V2's own worker
         # thread. A V2 failure must never disturb the cycle.
+        _started = time.monotonic()
         try:
             from q15_upgrade.ultoim_v2.runner import get_runner as _ultoim_v2_runner
             _u2r = _ultoim_v2_runner()
@@ -3468,8 +3531,11 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _u2r.observe(analyses=analyses, canonicals=canonicals, now=now)
         except Exception:
             logger.debug("ultoim_v2 observe skipped", exc_info=True)
+        finally:
+            timings["ultoim_v2"] = time.monotonic() - _started
         # High Volatility Flip paper alerts (separate ledger/model; may share
         # the V2 Telegram room by config). It never trades or changes V2.
+        _started = time.monotonic()
         try:
             from q15_upgrade.high_vol_flip.runner import get_runner as _hvf_runner
             _hvf = _hvf_runner()
@@ -3477,6 +3543,28 @@ class CheckpointPolicyV95(CheckpointPolicyV94Unified):
                 _hvf.observe(analyses=analyses, canonicals=canonicals, now=now)
         except Exception:
             logger.debug("high_vol_flip observe skipped", exc_info=True)
+        finally:
+            timings["high_vol_flip"] = time.monotonic() - _started
+        return timings
+
+    @staticmethod
+    def _run_interval_research_background(
+        analyses: Mapping[str, Mapping[str, Any]],
+        canonicals: Mapping[str, Any],
+        now: float,
+        source_snapshots: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """Run optional record-only interval research off the live loop."""
+        from q15_upgrade.interval_research.runner import get_runner as _ir_runner
+
+        runner = _ir_runner()
+        if runner is not None:
+            runner.observe(
+                analyses=analyses,
+                canonicals=canonicals,
+                now=now,
+                source_snapshots=source_snapshots,
+            )
 
     def _deliver_checkpoint_alerts(
         self, checkpoint: str, analyses: dict[str, dict[str, Any]], ranking: list[dict[str, Any]],

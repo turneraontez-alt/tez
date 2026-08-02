@@ -280,15 +280,17 @@ class KalshiWebSocketFeed:
                 ticker,
                 self._book_history_initial_microprice.get(ticker),
             )
+            transport_connected = bool(self._connected)
+            transport_last_message_at = self._last_message_at
         if not book:
             return {"available": False, "reason": "book_missing"}
         book_age = max(0.0, now - float(book.get("updated_at", 0.0)))
-        if book_age > max(0.0, float(max_book_age)):
-            return {
-                "available": False,
-                "reason": "book_stale",
-                "book_age_seconds": book_age,
-            }
+        transport_age = (
+            None
+            if transport_last_message_at is None
+            else max(0.0, now - float(transport_last_message_at))
+        )
+        book_fresh = book_age <= max(0.0, float(max_book_age))
 
         yes = book.get("yes") if isinstance(book.get("yes"), dict) else {}
         no = book.get("no") if isinstance(book.get("no"), dict) else {}
@@ -308,6 +310,20 @@ class KalshiWebSocketFeed:
         no_bid, no_bid_qty = no_best
         yes_ask = None if no_bid is None else 100.0 - no_bid
         no_ask = None if yes_bid is None else 100.0 - yes_bid
+        yes_ask_levels = sorted(
+            ((100.0 - price, qty) for price, qty in no_levels),
+            key=lambda row: row[0],
+        )
+        no_ask_levels = sorted(
+            ((100.0 - price, qty) for price, qty in yes_levels),
+            key=lambda row: row[0],
+        )
+        from q15_upgrade.orderbook import (
+            EXECUTION_LADDER_SCHEMA_VERSION,
+            summarize_ask_fill,
+        )
+        yes_fill_10x2c = summarize_ask_fill(yes_ask_levels)
+        no_fill_10x2c = summarize_ask_fill(no_ask_levels)
         yes_mid = None
         yes_microprice = None
         if yes_bid is not None and yes_ask is not None:
@@ -328,19 +344,37 @@ class KalshiWebSocketFeed:
             and no_ask >= no_bid
         )
         out = {
-            "available": two_sided and non_crossed,
+            # A quiet but continuously observed book can still provide a valid
+            # 5/15/30/60s flow history.  Keep execution freshness separate:
+            # callers must use a new REST snapshot when the cached book itself
+            # has not mutated recently, while the history below remains
+            # available and explicitly transport-stamped.
+            "available": two_sided and non_crossed and book_fresh,
             "reason": (
                 None
-                if two_sided and non_crossed
+                if two_sided and non_crossed and book_fresh
+                else "book_stale" if not book_fresh
                 else "crossed_orderbook" if two_sided else "two_sided_book_missing"
             ),
             "book_age_seconds": book_age,
+            "microstructure_captured_at": now,
+            "microstructure_evidence_source": (
+                "kalshi_official_websocket_history"
+            ),
+            "microstructure_transport_connected": transport_connected,
+            "microstructure_transport_age_seconds": transport_age,
+            "microstructure_book_age_seconds": book_age,
             "yes_bid_cents": yes_bid,
             "yes_ask_cents": yes_ask,
             "no_bid_cents": no_bid,
             "no_ask_cents": no_ask,
             "yes_bid_qty": yes_bid_qty,
             "yes_ask_qty": no_bid_qty,
+            "execution_ladder_schema_version": (
+                EXECUTION_LADDER_SCHEMA_VERSION
+            ),
+            "yes_fill_10x2c": yes_fill_10x2c,
+            "no_fill_10x2c": no_fill_10x2c,
             "yes_mid_cents": yes_mid,
             "yes_microprice_cents": yes_microprice,
             "yes_microprice_edge_cents": (

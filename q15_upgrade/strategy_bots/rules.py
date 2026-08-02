@@ -228,6 +228,34 @@ SPOT_MID_PATH_KEYS = (
     ),
 )
 
+SPOT_FAST_MID_PATH_KEYS = (
+    "spot_fast_mid_path_schema_version",
+    "spot_fast_mid_path_time_basis",
+    "spot_fast_mid_path_captured_at",
+    "spot_fast_mid_history_started_at",
+    "spot_fast_mid_history_seconds",
+    "spot_fast_mid_history_retention_seconds",
+    "spot_fast_mid_record_interval_seconds",
+    *(
+        f"spot_fast_mid_{metric}_{horizon}s"
+        for horizon in (15, 60)
+        for metric in (
+            "window_complete",
+            "path_missing_reason",
+            "path_count",
+            "path_start_at",
+            "path_end_at",
+            "path_max_gap_seconds",
+            "start",
+            "end",
+            "change_bps",
+            "range_bps",
+            "realized_volatility_bps",
+            "trend_efficiency",
+        )
+    ),
+)
+
 RTI_SPOT_LEAD_LAG_KEYS = (
     "rti_spot_lead_lag_schema_version",
     "rti_spot_lead_lag_status",
@@ -382,10 +410,61 @@ SPOT_DEPTH_KEYS = (
     *RTI_CROSS_ASSET_KEYS,
 )
 
+# The delayed collector captures the local spot snapshot and spot-mid path, but
+# does not run the heavier cross-venue/independent-path joins used by the exact
+# 13M parent.  Persist only evidence that genuinely exists at the delayed
+# timestamp; writing hundreds of inapplicable null keys would inflate the live
+# ledger without adding information.
+RTI_DELAYED_SPOT_RESERVOIR_KEYS = (
+    "rti_spot_evidence_as_of",
+    "rti_spot_snapshot_created_at",
+    "rti_spot_snapshot_age_s",
+    "rti_spot_book_age_s",
+    "rti_spot_book_source_at",
+    "rti_spot_book_received_at",
+    "rti_spot_book_source_age_s",
+    "rti_spot_trade_source_at",
+    "rti_spot_trade_received_at",
+    "rti_spot_trade_source_age_s",
+    "spot_depth_status",
+    "spot_depth_missing_reason",
+    "spot_depth_source",
+    "spot_depth_age_seconds",
+    "spot_depth_trade_age_seconds",
+    "spot_depth_best_bid",
+    "spot_depth_best_ask",
+    "spot_depth_mid",
+    "spot_depth_spread_bps",
+    "spot_depth_bid_depth_top",
+    "spot_depth_ask_depth_top",
+    "spot_depth_bid_depth_levels",
+    "spot_depth_ask_depth_levels",
+    "spot_depth_bid_notional_levels",
+    "spot_depth_ask_notional_levels",
+    "spot_depth_imbalance",
+    *(
+        f"spot_depth_trade_{field}_{horizon}s"
+        for horizon in (5, 15, 60)
+        for field in (
+            "buy_qty", "sell_qty", "net_qty",
+            "buy_notional", "sell_notional", "net_notional",
+        )
+    ),
+    "spot_depth_last_trade_price",
+    "spot_depth_last_trade_side",
+    "spot_depth_last_trade_size",
+    *SPOT_MID_PATH_KEYS,
+    *SPOT_FAST_MID_PATH_KEYS,
+)
+
 KALSHI_FLOW_KEYS = (
     "kalshi_microstructure_schema_version",
     "kalshi_microstructure_extension_schema_version",
     "kalshi_microstructure_captured_at",
+    "kalshi_microstructure_evidence_source",
+    "kalshi_microstructure_transport_connected",
+    "kalshi_microstructure_transport_age_seconds",
+    "kalshi_microstructure_book_age_seconds",
     "kalshi_microstructure_time_basis",
     "kalshi_history_count_capped",
     "kalshi_book_event_retention_seconds",
@@ -452,6 +531,19 @@ KALSHI_DEPTH_KEYS = (
     "kalshi_depth_status",
     "kalshi_depth_missing_reason",
     "kalshi_depth_retry_used",
+)
+
+# Outcome-blind execution-capacity evidence captured from the selected side's
+# actual displayed ladder.  These fields are persisted for a separate future
+# reservoir only; no frozen RTI decision reads them.
+RTI_EXECUTION_LADDER_RESERVOIR_KEYS = (
+    "rti_execution_ladder_schema_version",
+    "rti_ladder_depth_within_2c_contracts",
+    "rti_ladder_10_contract_filled_contracts",
+    "rti_ladder_10_contract_full_fill_supported",
+    "rti_ladder_10_contract_vwap_cents",
+    "rti_ladder_10_contract_worst_price_cents",
+    "rti_ladder_10_contract_slippage_cents",
 )
 
 COINBASE_L2_BANDS = (1, 5, 12, 25, 50, 60, 100, 250)
@@ -5064,7 +5156,7 @@ def _rti_delayed_confirmation_decision(
     }
     failures = [key for key, passed in checks.items() if not passed]
     accepted = not failures
-    evidence_keys = (
+    evidence_keys = tuple(dict.fromkeys((
         "rti_confirm_target_at", "rti_confirm_delay_seconds",
         "rti_confirm_quote_captured_at",
         "rti_confirm_evaluated_at", "rti_confirm_recorded_at",
@@ -5079,7 +5171,8 @@ def _rti_delayed_confirmation_decision(
         "rti_confirm_path_missing_seconds",
         "rti_confirm_path_max_receive_age_s",
         "rti_confirm_path_decision_age_s", "rti_index_id",
-        "quote_age_seconds", "quote_age_source", "entry_ask_cents",
+        "quote_age_seconds", "quote_age_source", "quote_evidence_source",
+        "entry_ask_cents",
         "spread_cents", "depth_contracts", "kalshi_depth_status",
         "kalshi_depth_missing_reason", "rti_market_mid_probability",
         "rti_opposite_side", "rti_opposite_ask_cents",
@@ -5087,7 +5180,11 @@ def _rti_delayed_confirmation_decision(
         "spot_depth_status", "spot_depth_missing_reason",
         "rti_spot_snapshot_age_s", "rti_spot_book_age_s",
         "spot_depth_imbalance",
-    )
+        *KALSHI_FLOW_KEYS,
+        *KALSHI_DEPTH_KEYS,
+        *RTI_EXECUTION_LADDER_RESERVOIR_KEYS,
+        *RTI_DELAYED_SPOT_RESERVOIR_KEYS,
+    )))
     evidence = {key: row.get(key) for key in evidence_keys}
     challenger = {
         "name": name,
@@ -5130,6 +5227,11 @@ def _rti_delayed_confirmation_decision(
         "slippage_cents_per_contract": 2.0,
         "fee_schedule_version": RTI_PATH_13M_FEE_SCHEDULE_VERSION,
         "execution_cost_model_version": RTI_EXECUTION_COST_MODEL_VERSION,
+        "delayed_feature_reservoir_version": (
+            "q15-rti-delayed-feature-reservoir-v1"
+        ),
+        "delayed_feature_reservoir_record_only": True,
+        "delayed_feature_reservoir_used_for_decision": False,
         "passed": accepted,
         **evidence,
         "challengers": {
