@@ -19,7 +19,7 @@ def _cfg(**over):
     base = dict(
         enabled=True, dry_run=True, bankroll_cents=1_000_000,
         flat_stake_cents=15000, max_stake_per_pick_cents=30000, conviction_sizing=True,
-        stake_by_interval={}, max_picks_per_window=2, max_per_window_pct=1.0,
+        stake_by_interval={}, stake_ladder_cents=(), max_picks_per_window=2, max_per_window_pct=1.0,
         daily_loss_limit_pct=0.0, daily_loss_limit_cents=0, max_open_positions=6,
         min_price_cents=50, max_price_cents=85, record_orders=False,
     )
@@ -81,6 +81,41 @@ def test_conviction_window_total_is_lead_plus_doubled():
     d2 = decide(_pick(mult=2, ticker="B"), _state(window_count=1, committed=d1.stake_cents), cfg)
     assert (d1.stake_cents, d2.stake_cents) == (15000, 30000)
     assert d1.stake_cents + d2.stake_cents == 45000   # $450 window total
+
+
+# --------------------------------------------------------------------------- #
+# absolute per-window dollar cap (owner: $450 per 15-minute settlement window)
+# --------------------------------------------------------------------------- #
+def test_default_per_window_cap_is_450():
+    # The owner-set hard cap ships on by default at $450 (45000c).
+    assert ExecutorConfig().max_per_window_cents == 45000
+
+
+def test_window_cap_clamps_conviction_total_to_450():
+    # Without the absolute cap the conviction budget would be flat($150) x 2 picks x mult(2) =
+    # $600. The $450 cap is the FINAL clamp, so the extra pick is sized to fill exactly to $450.
+    cfg = _cfg(max_per_window_cents=45000)
+    d1 = decide(_pick(mult=2, ticker="A"), _state(window_count=0, committed=0), cfg)
+    d2 = decide(_pick(mult=2, ticker="B"), _state(window_count=1, committed=d1.stake_cents), cfg)
+    assert d1.stake_cents == 15000                       # lead pick unchanged at $150
+    assert d1.stake_cents + d2.stake_cents == 45000      # window total clamped to the $450 cap
+    # A 3rd pick is refused — the window is already full at the dollar cap.
+    d3 = decide(_pick(mult=2, ticker="C"), _state(window_count=2, committed=45000), cfg)
+    assert not d3.place and d3.reason == "WINDOW_FULL"
+
+
+def test_window_cap_off_allows_full_conviction_budget():
+    # With the absolute cap disabled (0), the per-window budget reverts to flat x picks x mult.
+    cfg = _cfg(max_per_window_cents=0)
+    d1 = decide(_pick(mult=2, ticker="A"), _state(window_count=0, committed=0), cfg)
+    d2 = decide(_pick(mult=2, ticker="B"), _state(window_count=1, committed=d1.stake_cents), cfg)
+    # Lead $150 + doubled extra $300, only bounded by the $300 per-pick cap from _cfg().
+    assert d1.stake_cents + d2.stake_cents == 45000
+    # Lower the per-pick cap so the extra is the binding constraint and the window total exceeds $450.
+    cfg2 = _cfg(max_per_window_cents=0, max_stake_per_pick_cents=60000, flat_stake_cents=30000)
+    e1 = decide(_pick(mult=2, ticker="A", price=60), _state(window_count=0, committed=0), cfg2)
+    e2 = decide(_pick(mult=2, ticker="B", price=60), _state(window_count=1, committed=e1.stake_cents), cfg2)
+    assert e1.stake_cents + e2.stake_cents == 90000      # $300 lead + $600 extra, no $450 clamp
 
 
 # --------------------------------------------------------------------------- #
